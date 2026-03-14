@@ -6,35 +6,39 @@ VICE = x64sc
 SRC_DIR = src
 BUILD_DIR = build
 IP65_BUILD = ip65-build
-IP65_SRC = ip65
+IP65_DIR = ip65
 
 PRG = $(BUILD_DIR)/c64-https.prg
 LABELS = $(BUILD_DIR)/labels.txt
+IP65_BIN = $(IP65_BUILD)/ip65-c64.bin
 
 # ACME sources
 ASM_SRCS = $(wildcard $(SRC_DIR)/*.asm)
 
-.PHONY: all clean run ip65
+.PHONY: all clean run ip65-libs
 
 all: $(PRG)
 
-$(PRG): $(ASM_SRCS) | $(BUILD_DIR)
+$(PRG): $(ASM_SRCS) $(IP65_BIN) | $(BUILD_DIR)
 	cd $(SRC_DIR) && $(ACME) -f cbm -o ../$(PRG) --vicelabels ../$(LABELS) main.asm
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
+# Build ip65 libraries (only if not already built)
+ip65-libs:
+	cd $(IP65_DIR) && $(MAKE) -C ip65 && $(MAKE) -C drivers
+
+# Build ip65 binary blob
+$(IP65_BIN): $(IP65_BUILD)/ip65_stub.s $(IP65_BUILD)/ip65.cfg ip65-libs
+	cd $(IP65_BUILD) && $(CA65) -I ../$(IP65_DIR) ip65_stub.s -o ip65_stub.o
+	cd $(IP65_BUILD) && $(LD65) -C ip65.cfg -o ip65-c64.bin -m ip65-c64.map \
+		ip65_stub.o ../$(IP65_DIR)/ip65/ip65_tcp.lib \
+		../$(IP65_DIR)/drivers/ip65_c64.lib c64.lib
+
 run: $(PRG)
 	$(VICE) -autostart $(PRG)
 
-# ip65 binary blob build (requires cc65 toolchain + ip65 submodule)
-# Uncomment and adjust when ip65 submodule is added:
-# ip65: $(IP65_BUILD)/ip65-c64.bin
-#
-# $(IP65_BUILD)/ip65-c64.bin: $(IP65_SRC)/ip65/*.s $(IP65_SRC)/drivers/*.s
-# 	cd $(IP65_SRC) && make
-# 	# TODO: link ip65_tcp.lib + c64rrnet.lib with custom config
-# 	# $(LD65) -C $(IP65_BUILD)/ip65.cfg -o $@ ...
-
 clean:
 	rm -f $(BUILD_DIR)/c64-https.prg $(BUILD_DIR)/labels.txt
+	rm -f $(IP65_BUILD)/ip65_stub.o $(IP65_BUILD)/ip65-c64.bin $(IP65_BUILD)/ip65-c64.map

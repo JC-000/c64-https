@@ -31,75 +31,96 @@
         ldy #>banner_msg
         jsr print_string
 
-        ; initialize crypto PRNG (SID + CIA entropy)
-        ; jsr drbg_init_entropy  ; TODO: enable when crypto modules are integrated
+        cli                     ; re-enable interrupts
 
-        ; initialize network
+        ; print menu
+        lda #<menu_msg
+        ldy #>menu_msg
+        jsr print_string
+
+        ; enter main loop
+        jmp main_loop
+
+; =============================================================================
+; main_loop - poll network, process TLS, handle user input
+; =============================================================================
+main_loop:
+        ; only poll network if initialized
+        lda net_initialized
+        beq @check_keys
+        jsr net_poll            ; pump ip65 (handles ZP swap)
+
+@check_keys:
+        jsr getin
+        beq main_loop           ; no key pressed
+
+        ; 'I' = initialize network
+        cmp #$49
+        bne @not_i
+        jsr do_net_init
+        jmp main_loop
+@not_i:
+        ; 'G' = HTTPS GET
+        cmp #$47
+        bne @not_g
+        jsr do_https_get
+        jmp main_loop
+@not_g:
+        ; 'Q' = quit
+        cmp #$51
+        bne main_loop
+
+        ; re-enable BASIC ROM
+        lda $01
+        ora #%00000001
+        sta $01
+        rts
+
+; =============================================================================
+; do_net_init - initialize network (menu-driven)
+; =============================================================================
+do_net_init:
+        lda #<init_msg
+        ldy #>init_msg
+        jsr print_string
+
         jsr net_init
-        bcc @net_ok
+        bcc @init_ok
 
         lda #<net_fail_msg
         ldy #>net_fail_msg
         jsr print_string
-        jmp @halt
+        rts
 
-@net_ok:
+@init_ok:
         lda #<net_ok_msg
         ldy #>net_ok_msg
         jsr print_string
 
-        ; obtain IP via DHCP
+        ; DHCP
+        lda #<dhcp_msg
+        ldy #>dhcp_msg
+        jsr print_string
+
         jsr net_dhcp
         bcc @dhcp_ok
 
         lda #<dhcp_fail_msg
         ldy #>dhcp_fail_msg
         jsr print_string
-        jmp @halt
+        rts
 
 @dhcp_ok:
         lda #<dhcp_ok_msg
         ldy #>dhcp_ok_msg
         jsr print_string
-
-        ; display assigned IP
         jsr net_print_ip
 
-        cli                     ; re-enable interrupts
-
-        ; enter main loop
-        jmp main_loop
-
-@halt:
-        cli
-        jmp @halt               ; spin on error
-
-; =============================================================================
-; main_loop - poll network, process TLS, handle user input
-; =============================================================================
-main_loop:
-        jsr net_poll            ; pump ip65 (handles ZP swap)
-
-        ; check for user input
-        jsr getin
-        beq main_loop           ; no key pressed
-
-        ; 'Q' = quit
-        cmp #$51
-        beq @quit
-
-        ; 'G' = HTTPS GET
-        cmp #$47
-        bne main_loop
-        jsr do_https_get
-        jmp main_loop
-
-@quit:
-        ; re-enable BASIC ROM
-        lda $01
-        ora #%00000001
-        sta $01
+        lda #1
+        sta net_initialized
         rts
+
+net_initialized: !byte 0
 
 ; =============================================================================
 ; print_string - print null-terminated string at A(lo)/Y(hi)
@@ -128,12 +149,24 @@ banner_msg:
         !text "RR-NET (CS8900A) ETHERNET"
         !byte $0d, $0d, 0
 
+menu_msg:
+        !text "I=INIT NETWORK  G=HTTPS GET  Q=QUIT"
+        !byte $0d, $0d, 0
+
+init_msg:
+        !text "INITIALIZING NETWORK..."
+        !byte $0d, 0
+
 net_fail_msg:
         !text "NETWORK INIT FAILED"
         !byte $0d, 0
 
 net_ok_msg:
         !text "NETWORK OK"
+        !byte $0d, 0
+
+dhcp_msg:
+        !text "REQUESTING DHCP..."
         !byte $0d, 0
 
 dhcp_fail_msg:

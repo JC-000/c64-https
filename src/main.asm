@@ -30,11 +30,11 @@
 !source "http.asm"
 
 ; =============================================================================
-; ip65 binary blob — built separately with ca65/ld65
-; Uncomment when ip65 build is set up:
-; * = $2000
-; !binary "../ip65-build/ip65-c64.bin"
+; ip65 binary blob — built with ca65/ld65, placed at $2000
+; Jump table at $2000, code $2000-$3B26, BSS at $4000+
 ; =============================================================================
+* = $2000
+!binary "../ip65-build/ip65-c64.bin"
 
 ; =============================================================================
 ; Crypto modules — to be copied and adapted from sibling projects
