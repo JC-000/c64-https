@@ -80,6 +80,18 @@ zp_ptr          = $fb           ; 2 bytes ($FB-$FC)
 zp_temp         = $fd           ; 1 byte
 zp_count        = $fe           ; 1 byte
 
+; --- Quarter-square multiply table (shared by Poly1305 and ECDSA) ---
+sqtab_lo        = $7800         ; 512 bytes: floor(n^2/4) low bytes
+sqtab_hi        = $7a00         ; 512 bytes: floor(n^2/4) high bytes
+
+; --- SID voice 3 setup for noise (entropy collection) ---
+sid_base        = $d400
+sid_v3_freq_lo  = $d40e
+sid_v3_freq_hi  = $d40f
+sid_v3_ctrl     = $d412
+sid_v3_ad       = $d413
+sid_v3_sr       = $d414
+
 ; --- ip65 ZP overlap zone ---
 ; ip65 uses $02-$1B during its execution (cc65 standard: c_sp, sreg,
 ; regsave, ptr1-ptr4, tmp1-tmp4, regbank). These overlap our crypto

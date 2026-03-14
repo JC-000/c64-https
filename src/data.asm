@@ -110,7 +110,82 @@ tls_app_ptr:            !word 0
 tls_app_len:            !word 0
 
 ; =============================================================================
-; Crypto module buffers — will be filled in when crypto sources are integrated
-; (SHA-256 state, HMAC-SHA256, ChaCha20 state, Poly1305 state, ECDH temps)
+; General I/O buffers (used by SHA-256 update)
 ; =============================================================================
-; TODO: import from c64-aes256-ecdsa and c64-wireguard data sections
+input_buffer:           !fill 256, 0    ; general input buffer
+input_length:           !byte 0         ; length of data in input_buffer
+
+; =============================================================================
+; SHA-256 working variables (from c64-aes256-ecdsa)
+; =============================================================================
+sha256_h0:      !fill 4, 0
+sha256_h1:      !fill 4, 0
+sha256_h2:      !fill 4, 0
+sha256_h3:      !fill 4, 0
+sha256_h4:      !fill 4, 0
+sha256_h5:      !fill 4, 0
+sha256_h6:      !fill 4, 0
+sha256_h7:      !fill 4, 0
+
+sha_a:          !fill 4, 0
+sha_b:          !fill 4, 0
+sha_c:          !fill 4, 0
+sha_d:          !fill 4, 0
+sha_e:          !fill 4, 0
+sha_f:          !fill 4, 0
+sha_g:          !fill 4, 0
+sha_h:          !fill 4, 0
+
+sha_temp3:      !fill 4, 0
+sha_t1:         !fill 4, 0
+sha_t2:         !fill 4, 0
+
+sha256_block:   !fill 64, 0
+sha256_w:       !fill 256, 0    ; message schedule (64 words * 4 bytes)
+sha256_hash:    !fill 32, 0     ; final hash output
+sha256_len:     !fill 2, 0      ; message length in bits
+
+; =============================================================================
+; HMAC-DRBG state (from c64-aes256-ecdsa)
+; =============================================================================
+hmac_key:       !fill 32, 0     ; HMAC key / DRBG K state
+hmac_val:       !fill 32, 0     ; DRBG V state
+hmac_opad_block: !fill 64, 0    ; Scratch: K XOR opad
+hmac_data_buf:  !fill 97, 0     ; V(32) + 0x00/0x01(1) + seed(64)
+hmac_data_len:  !byte 0         ; Length of data in hmac_data_buf
+hmac_result:    !fill 32, 0     ; HMAC output
+drbg_seed:      !fill 64, 0     ; Seed material (privkey||hash)
+drbg_seed_len:  !byte 0         ; Length of seed
+drbg_output:    !fill 32, 0     ; Generate output
+drbg_buf_idx:   !byte 32        ; Buffer index (32 = empty, forces first generate)
+
+; =============================================================================
+; ChaCha20 state (from c64-wireguard)
+; =============================================================================
+cc20_state:     !fill 64, 0     ; initial state (16 x 32-bit words)
+cc20_work:      !fill 64, 0     ; working state during block computation
+cc20_keystream: !fill 64, 0     ; generated keystream for XOR
+cc20_key:       !fill 32, 0     ; 256-bit key
+cc20_nonce:     !fill 12, 0     ; 96-bit nonce
+cc20_counter:   !fill 4, 0      ; 32-bit block counter
+
+; =============================================================================
+; Poly1305 state (from c64-wireguard)
+; =============================================================================
+poly_h:         !fill 17, 0     ; 130-bit accumulator
+poly_r:         !fill 16, 0     ; clamped key part r
+poly_s:         !fill 16, 0     ; key part s (added at end)
+poly_product:   !fill 33, 0     ; multiplication scratch (17x16)
+poly1305_tag:   !fill 16, 0     ; output tag
+
+; =============================================================================
+; AEAD state (from c64-wireguard)
+; =============================================================================
+aead_key:       !fill 32, 0
+aead_nonce:     !fill 12, 0
+aead_aad_ptr:   !word 0
+aead_aad_len:   !byte 0
+aead_data_ptr:  !word 0
+aead_data_len:  !byte 0
+aead_tag:       !fill 16, 0
+aead_scratch:   !fill 16, 0     ; Poly1305 padding/length block
