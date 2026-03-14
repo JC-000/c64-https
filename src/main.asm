@@ -30,23 +30,24 @@
 !source "http.asm"
 
 ; =============================================================================
-; ip65 binary blob — built separately with ca65/ld65
-; Uncomment when ip65 build is set up:
-; * = $2000
-; !binary "../ip65-build/ip65-c64.bin"
+; ip65 binary blob — built with ca65/ld65, placed at $2000
+; Jump table at $2000, code $2000-$3B26, BSS at $4000+
 ; =============================================================================
+* = $2000
+!binary "../ip65-build/ip65-c64.bin"
 
 ; =============================================================================
-; Crypto modules — to be copied and adapted from sibling projects
-; * = $4000
-; !source "crypto/chacha20.asm"
-; !source "crypto/poly1305.asm"
-; !source "crypto/aead.asm"
-; !source "crypto/word32.asm"
-; * = $6000
-; !source "crypto/sha256.asm"
-; !source "crypto/hmac_sha256.asm"
-; * = $7000
+; Crypto modules (from c64-wireguard and c64-aes256-ecdsa)
+; =============================================================================
+!source "crypto/word32.asm"
+!source "crypto/chacha20.asm"
+!source "crypto/poly1305.asm"
+!source "crypto/aead.asm"
+!source "crypto/sha256.asm"
+!source "crypto/hmac_drbg.asm"
+
+; =============================================================================
+; ECDSA/ECDH modules — to be added when needed for TLS key exchange
 ; !source "crypto/ecdsa_fp.asm"
 ; !source "crypto/ecdsa_mod.asm"
 ; !source "crypto/ecdsa_curve.asm"

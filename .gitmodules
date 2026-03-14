@@ -1,0 +1,3 @@
+[submodule "ip65"]
+	path = ip65
+	url = https://github.com/cc65/ip65.git

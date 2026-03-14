@@ -97,28 +97,31 @@ The Makefile automatically builds ip65 from the submodule into a flat binary blo
 
 ## Project Status
 
-This project is in early development. Current status:
+Current status (22 KB binary, 406 labels):
 
 - [x] Project structure and build system
-- [ ] ip65 submodule integration and binary blob build
-- [ ] Network wrapper with ZP save/restore
-- [ ] Copy and adapt crypto primitives from sibling projects
-- [ ] HKDF-SHA256 implementation
-- [ ] TLS 1.3 record layer
-- [ ] TLS 1.3 handshake (ClientHello, key exchange, Finished)
+- [x] ip65 submodule integration — 6.8 KB binary blob at $2000 (TCP/UDP/DNS/DHCP/ARP + RR-Net CS8900a)
+- [x] Network wrapper with ZP time-sharing — save/restore $02-$1B around ip65 calls
+- [x] Crypto primitives — ChaCha20, Poly1305, AEAD (from c64-wireguard), SHA-256, HMAC-DRBG (from c64-aes256-ecdsa)
+- [x] HKDF-SHA256 — Extract, Expand, Expand-Label, Derive-Secret (RFC 5869 + TLS 1.3)
+- [ ] TLS 1.3 record layer — encrypt/decrypt with ChaCha20-Poly1305
+- [ ] TLS 1.3 handshake — ClientHello, ServerHello, key exchange, Finished
 - [ ] TLS 1.3 application data encryption/decryption
+- [ ] ECDHE P-256 key exchange (import from c64-aes256-ecdsa)
+- [ ] X.509 certificate parsing and validation
 - [ ] HTTP/1.1 GET request
 - [ ] End-to-end HTTPS GET demo
 
 ## Test Automation
 
-Tests use the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its remote text monitor, the same infrastructure used by c64-aes256-ecdsa and c64-wireguard.
+97 tests across 4 suites, using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its remote text monitor.
 
 ```bash
 pip install -e ../c64-test-harness
-python3 tools/test_net.py          # Network layer tests (requires VICE + virtual RR-Net)
-python3 tools/test_tls.py          # TLS handshake tests
-python3 tools/test_hkdf.py         # HKDF-SHA256 unit tests
+python3 tools/test_net.py           # 56 tests: ip65 integration, ZP save/restore, ring buffer
+python3 tools/test_sha256.py        # 7 tests: NIST vectors, boundary cases, random inputs
+python3 tools/test_crypto.py        # 22 tests: ChaCha20/Poly1305/AEAD RFC 7539 vectors + random
+python3 tools/test_hkdf.py          # 12 tests: RFC 5869 vectors, TLS 1.3 key schedule, random
 ```
 
 ## Related Projects

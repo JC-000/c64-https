@@ -24,32 +24,131 @@
 hkdf_extract:
         ; HKDF-Extract = HMAC-SHA256(key=salt, data=IKM)
         ; If salt is empty, use 32 zero bytes as key.
-        ;
-        ; TODO:
-        ; 1. Copy salt to hmac_key (or zero-fill if empty)
-        ; 2. Copy IKM to hmac_data_buf, set hmac_data_len
-        ; 3. jsr hmac_sha256
-        ; 4. Copy hmac_result to hkdf_prk
+
+        ; Step 1: Set up HMAC key from salt
+        lda hkdf_salt_len
+        beq .extract_zero_salt
+
+        ; Non-empty salt: copy salt_len bytes via indirect addressing
+        lda hkdf_salt_ptr
+        sta zp_ptr
+        lda hkdf_salt_ptr+1
+        sta zp_ptr+1
+        ldy #0
+.extract_copy_salt:
+        cpy hkdf_salt_len
+        beq .extract_zero_rest
+        lda (zp_ptr),y
+        sta hmac_key,y
+        iny
+        bne .extract_copy_salt      ; always branches (salt_len < 256)
+
+        ; Zero-fill remainder of hmac_key (32 - salt_len bytes)
+.extract_zero_rest:
+        cpy #32
+        beq .extract_key_done
+        lda #0
+.extract_zero_loop:
+        sta hmac_key,y
+        iny
+        cpy #32
+        bne .extract_zero_loop
+        beq .extract_key_done       ; always branches
+
+        ; Empty salt: zero-fill all 32 bytes of hmac_key
+.extract_zero_salt:
+        ldx #31
+        lda #0
+.extract_zero_all:
+        sta hmac_key,x
+        dex
+        bpl .extract_zero_all
+
+.extract_key_done:
+        ; Step 2: Copy IKM to hmac_data_buf
+        lda hkdf_ikm_ptr
+        sta zp_ptr
+        lda hkdf_ikm_ptr+1
+        sta zp_ptr+1
+        ldy #0
+        lda hkdf_ikm_len
+        beq .extract_ikm_done
+.extract_copy_ikm:
+        lda (zp_ptr),y
+        sta hmac_data_buf,y
+        iny
+        cpy hkdf_ikm_len
+        bne .extract_copy_ikm
+.extract_ikm_done:
+
+        ; Step 3: Set data length and call HMAC
+        lda hkdf_ikm_len
+        sta hmac_data_len
+        jsr hmac_sha256
+
+        ; Step 4: Copy hmac_result to hkdf_prk
+        ldx #31
+.extract_copy_result:
+        lda hmac_result,x
+        sta hkdf_prk,x
+        dex
+        bpl .extract_copy_result
         rts
 
 ; =============================================================================
 ; hkdf_expand - HKDF-Expand(PRK, info, L) -> OKM
 ; Input: hkdf_prk (32 bytes) = pseudorandom key
-;        hkdf_info_ptr/hkdf_info_len = context info
+;        hkdf_info_buf/hkdf_info_len = info data and length
 ;        hkdf_out_len = desired output length (must be <= 32)
 ; Output: hkdf_okm (up to 32 bytes)
 ; =============================================================================
 hkdf_expand:
         ; Since L <= 32 for TLS 1.3 / SHA-256, we only need T(1):
         ;   T(1) = HMAC-SHA256(PRK, info || 0x01)
-        ;
-        ; TODO:
-        ; 1. Copy PRK to hmac_key
-        ; 2. Copy info to hmac_data_buf
-        ; 3. Append 0x01 byte
-        ; 4. Set hmac_data_len = info_len + 1
-        ; 5. jsr hmac_sha256
-        ; 6. Copy first hkdf_out_len bytes of hmac_result to hkdf_okm
+
+        ; Step 1: Copy hkdf_prk to hmac_key (32 bytes)
+        ldx #31
+.expand_copy_prk:
+        lda hkdf_prk,x
+        sta hmac_key,x
+        dex
+        bpl .expand_copy_prk
+
+        ; Step 2: Copy hkdf_info_len bytes from hkdf_info_buf to hmac_data_buf
+        ldy #0
+        lda hkdf_info_len
+        beq .expand_info_done
+.expand_copy_info:
+        lda hkdf_info_buf,y
+        sta hmac_data_buf,y
+        iny
+        cpy hkdf_info_len
+        bne .expand_copy_info
+.expand_info_done:
+
+        ; Step 3: Append 0x01 byte at end of info
+        lda #$01
+        sta hmac_data_buf,y
+
+        ; Step 4: Set hmac_data_len = hkdf_info_len + 1
+        lda hkdf_info_len
+        clc
+        adc #1
+        sta hmac_data_len
+
+        ; Step 5: Call HMAC-SHA256
+        jsr hmac_sha256
+
+        ; Step 6: Copy first hkdf_out_len bytes of hmac_result to hkdf_okm
+        ldx hkdf_out_len
+        beq .expand_done
+        dex
+.expand_copy_okm:
+        lda hmac_result,x
+        sta hkdf_okm,x
+        dex
+        bpl .expand_copy_okm
+.expand_done:
         rts
 
 ; =============================================================================
@@ -62,21 +161,87 @@ hkdf_expand:
 ; =============================================================================
 hkdf_expand_label:
         ; Build HkdfLabel structure into hkdf_info_buf:
-        ;   uint16 length          (hkdf_out_len, big-endian)
-        ;   opaque label<7..255>   ("tls13 " || label)
-        ;   opaque context<0..255> (context)
+        ;   [0]      = 0x00 (high byte of output length)
+        ;   [1]      = hkdf_out_len (low byte)
+        ;   [2]      = 6 + label_len (label opaque length)
+        ;   [3..8]   = "tls13 " prefix
+        ;   [9..N]   = label bytes
+        ;   [N+1]    = context_len
+        ;   [N+2..M] = context bytes
         ;
-        ; Then call hkdf_expand(PRK, HkdfLabel, length)
-        ;
-        ; TODO:
-        ; 1. hkdf_info_buf[0..1] = hkdf_out_len (big-endian)
-        ; 2. hkdf_info_buf[2] = 6 + label_len (length of "tls13 " + label)
-        ; 3. Copy "tls13 " (6 bytes) + label
-        ; 4. hkdf_info_buf[next] = context_len
-        ; 5. Copy context
-        ; 6. Set hkdf_info_len = total constructed length
-        ; 7. jsr hkdf_expand
-        rts
+        ; Uses X as absolute write index into hkdf_info_buf.
+        ; Uses zp_count as source index for indirect copies.
+
+        ; [0] = 0x00 (high byte of output length)
+        lda #0
+        sta hkdf_info_buf
+
+        ; [1] = hkdf_out_len (low byte)
+        lda hkdf_out_len
+        sta hkdf_info_buf+1
+
+        ; [2] = 6 + hkdf_label_len (label opaque length)
+        lda hkdf_label_len
+        clc
+        adc #6
+        sta hkdf_info_buf+2
+
+        ; [3..8] = "tls13 " prefix (6 bytes)
+        ldy #0
+.elabel_copy_prefix:
+        lda hkdf_tls13_prefix,y
+        sta hkdf_info_buf+3,y
+        iny
+        cpy #6
+        bne .elabel_copy_prefix
+
+        ; X = 9 (next write position, absolute index into hkdf_info_buf)
+        ldx #9
+
+        ; Copy label_len bytes from (hkdf_label_ptr)
+        lda hkdf_label_ptr
+        sta zp_ptr
+        lda hkdf_label_ptr+1
+        sta zp_ptr+1
+        lda hkdf_label_len
+        beq .elabel_label_done
+        ldy #0                      ; source index
+.elabel_copy_label:
+        lda (zp_ptr),y
+        sta hkdf_info_buf,x
+        iny
+        inx
+        cpy hkdf_label_len
+        bne .elabel_copy_label
+.elabel_label_done:
+
+        ; Store context_len at current position
+        lda hkdf_context_len
+        sta hkdf_info_buf,x
+        inx
+
+        ; Copy context_len bytes from (hkdf_context_ptr)
+        lda hkdf_context_ptr
+        sta zp_ptr
+        lda hkdf_context_ptr+1
+        sta zp_ptr+1
+        lda hkdf_context_len
+        beq .elabel_ctx_done
+        ldy #0                      ; source index
+.elabel_copy_ctx:
+        lda (zp_ptr),y
+        sta hkdf_info_buf,x
+        iny
+        inx
+        cpy hkdf_context_len
+        bne .elabel_copy_ctx
+.elabel_ctx_done:
+
+        ; hkdf_info_len = X (total bytes written)
+        stx hkdf_info_len
+
+        ; Fall through to hkdf_expand
+        jmp hkdf_expand
 
 ; =============================================================================
 ; tls_derive_secret - Derive-Secret(Secret, Label, Messages)
