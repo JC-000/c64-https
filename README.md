@@ -97,31 +97,43 @@ The Makefile automatically builds ip65 from the submodule into a flat binary blo
 
 ## Project Status
 
-Current status (22 KB binary, 406 labels):
+Current status (24.8 KB binary, 487 labels):
 
 - [x] Project structure and build system
 - [x] ip65 submodule integration — 6.8 KB binary blob at $2000 (TCP/UDP/DNS/DHCP/ARP + RR-Net CS8900a)
 - [x] Network wrapper with ZP time-sharing — save/restore $02-$1B around ip65 calls
-- [x] Crypto primitives — ChaCha20, Poly1305, AEAD (from c64-wireguard), SHA-256, HMAC-DRBG (from c64-aes256-ecdsa)
+- [x] Crypto primitives — ChaCha20, Poly1305, AEAD (from c64-wireguard), SHA-256, HMAC-DRBG (from c64-aes256-ecdsa), x25519/fe25519 (from c64-wireguard)
 - [x] HKDF-SHA256 — Extract, Expand, Expand-Label, Derive-Secret (RFC 5869 + TLS 1.3)
-- [ ] TLS 1.3 record layer — encrypt/decrypt with ChaCha20-Poly1305
-- [ ] TLS 1.3 handshake — ClientHello, ServerHello, key exchange, Finished
-- [ ] TLS 1.3 application data encryption/decryption
-- [ ] ECDHE P-256 key exchange (import from c64-aes256-ecdsa)
+- [x] TLS 1.3 record layer — encrypt/decrypt with ChaCha20-Poly1305, nonce construction, sequence numbers
+- [x] TLS 1.3 handshake — ClientHello builder (x25519 key_share, SNI), ServerHello parser, streaming transcript hash
+- [x] TLS 1.3 key schedule — early/handshake/master secrets, traffic key derivation, Finished MAC (RFC 8446 §7.1)
+- [x] ECDHE x25519 key exchange — generate keypair, compute shared secret
+- [ ] TLS 1.3 key schedule integration testing (blocked by VICE crash on long computations — see known issues)
 - [ ] X.509 certificate parsing and validation
 - [ ] HTTP/1.1 GET request
 - [ ] End-to-end HTTPS GET demo
 
+### Known Issues
+
+- **VICE 3.9 crashes** on long continuous computations (~15+ consecutive `sha256_process_block` calls). The TLS key schedule chains 9 HKDF calls (~63 SHA-256 blocks), exceeding this threshold. Individual calls produce correct RFC 8448 values. Workaround: break key schedule into stages for testing. Real C64 hardware is unaffected.
+
 ## Test Automation
 
-97 tests across 4 suites, using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its remote text monitor.
+113 tests across 5 suites, using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its remote text monitor. All tests log VICE PID and port for multi-agent safety.
 
 ```bash
 pip install -e ../c64-test-harness
-python3 tools/test_net.py           # 56 tests: ip65 integration, ZP save/restore, ring buffer
+
+# Run all suites in parallel (5 VICE instances, ~2.5 min wall time)
+python3 tools/run_all_tests.py --workers 5
+
+# Individual suites
+python3 tools/test_net.py           # 55 tests: ip65 integration, ZP save/restore, ring buffer
 python3 tools/test_sha256.py        # 7 tests: NIST vectors, boundary cases, random inputs
 python3 tools/test_crypto.py        # 22 tests: ChaCha20/Poly1305/AEAD RFC 7539 vectors + random
 python3 tools/test_hkdf.py          # 12 tests: RFC 5869 vectors, TLS 1.3 key schedule, random
+python3 tools/test_tls_record.py    # 17 tests: nonce, seq increment, encrypt/decrypt, roundtrips
+python3 tools/test_tls_handshake.py # 10+ tests: transcript hash, ClientHello, ServerHello parse
 ```
 
 ## Related Projects
