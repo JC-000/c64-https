@@ -23,9 +23,11 @@
 !source "tls_record.asm"
 !source "tls_record_io.asm"
 !source "tls_handshake.asm"
+!source "tls_transcript.asm"
 
-; --- HKDF key derivation ---
+; --- HKDF key derivation + key schedule ---
 !source "hkdf.asm"
+!source "tls_keyschedule.asm"
 
 ; --- HTTP/1.1 client ---
 !source "http.asm"
@@ -46,14 +48,11 @@
 !source "crypto/aead.asm"
 !source "crypto/sha256.asm"
 !source "crypto/hmac_drbg.asm"
+!source "crypto/fe25519.asm"
+!source "crypto/x25519.asm"
 
-; =============================================================================
-; ECDSA/ECDH modules — to be added when needed for TLS key exchange
-; !source "crypto/ecdsa_fp.asm"
-; !source "crypto/ecdsa_mod.asm"
-; !source "crypto/ecdsa_curve.asm"
-; !source "crypto/ecdsa_points.asm"
-; =============================================================================
+; --- TLS ECDH wrapper (x25519-based key exchange) ---
+!source "tls_ecdh.asm"
 
 ; --- mutable data buffers (must come after all code) ---
 !source "data.asm"

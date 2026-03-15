@@ -152,23 +152,12 @@ tls_recv_server_hello:
         clc
         rts
 
-tls_derive_handshake_keys:
-        ; TODO: ECDHE shared secret -> HKDF-Expand-Label -> handshake keys
-        clc
-        rts
+; tls_derive_handshake_keys — in tls_keyschedule.asm
+; tls_derive_traffic_keys — in tls_keyschedule.asm
+; tls_verify_finished — in tls_keyschedule.asm
 
 tls_recv_encrypted:
         ; TODO: read encrypted handshake message, decrypt, dispatch by type
-        clc
-        rts
-
-tls_verify_finished:
-        ; TODO: verify server Finished MAC against transcript hash
-        clc
-        rts
-
-tls_derive_traffic_keys:
-        ; TODO: HKDF-Expand-Label with handshake secret -> app traffic keys
         clc
         rts
 
