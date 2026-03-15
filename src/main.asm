@@ -21,6 +21,7 @@
 ; --- TLS 1.3 engine ---
 !source "tls13.asm"
 !source "tls_record.asm"
+!source "tls_record_io.asm"
 !source "tls_handshake.asm"
 
 ; --- HKDF key derivation ---

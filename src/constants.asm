@@ -64,6 +64,11 @@ poly_j          = $1b           ; 1 byte
 poly_carry      = $1c           ; 1 byte
 poly_tmp        = $1d           ; 1 byte
 
+; --- TLS record layer ---
+tls_rec_ptr     = $1e           ; 2 bytes ($1E-$1F) — pointer to record data
+tls_rec_idx     = $20           ; 1 byte — index during record read/write
+tls_direction   = $21           ; 1 byte — 0=write, 1=read (key/IV/seq select)
+
 ; --- ECDSA / bignum field arithmetic ---
 fp_src1         = $22           ; 2 bytes ($22-$23)
 fp_src2         = $24           ; 2 bytes ($24-$25)
