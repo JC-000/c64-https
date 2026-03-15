@@ -775,6 +775,7 @@ def main():
         if not vice.wait_for_monitor(timeout=30.0):
             print("FATAL: Could not connect to VICE monitor")
             sys.exit(1)
+        print(f"  VICE PID={vice.pid}, port={config.port}")
 
         transport = ViceTransport(port=config.port)
 
