@@ -108,18 +108,18 @@ Current status (24.8 KB binary, 487 labels):
 - [x] TLS 1.3 handshake — ClientHello builder (x25519 key_share, SNI), ServerHello parser, streaming transcript hash
 - [x] TLS 1.3 key schedule — early/handshake/master secrets, traffic key derivation, Finished MAC (RFC 8446 §7.1)
 - [x] ECDHE x25519 key exchange — generate keypair, compute shared secret
-- [ ] TLS 1.3 key schedule integration testing (blocked by VICE crash on long computations — see known issues)
+- [x] TLS 1.3 key schedule integration testing — all 9 HKDF steps verified against RFC 8448 + Finished MAC
 - [ ] X.509 certificate parsing and validation
 - [ ] HTTP/1.1 GET request
 - [ ] End-to-end HTTPS GET demo
 
 ### Known Issues
 
-- **VICE 3.9 crashes** on long continuous computations (~15+ consecutive `sha256_process_block` calls). The TLS key schedule chains 9 HKDF calls (~63 SHA-256 blocks), exceeding this threshold. Individual calls produce correct RFC 8448 values. Workaround: break key schedule into stages for testing. Real C64 hardware is unaffected.
+- **VICE 3.9 crashes** on 5+ chained HMAC-SHA256 calls within a single continuous execution (confirmed with proper test harness port allocation — not port contention). Workaround: test key schedule step-by-step via individual jsr() calls. All 9 steps produce correct RFC 8448 values. Real C64 hardware is unaffected.
 
 ## Test Automation
 
-113 tests across 5 suites, using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its remote text monitor. All tests log VICE PID and port for multi-agent safety.
+134 tests across 5 suites + 2 diagnostic suites, using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its remote text monitor. All tests log VICE PID and port for multi-agent safety.
 
 ```bash
 pip install -e ../c64-test-harness
@@ -133,7 +133,8 @@ python3 tools/test_sha256.py        # 7 tests: NIST vectors, boundary cases, ran
 python3 tools/test_crypto.py        # 22 tests: ChaCha20/Poly1305/AEAD RFC 7539 vectors + random
 python3 tools/test_hkdf.py          # 12 tests: RFC 5869 vectors, TLS 1.3 key schedule, random
 python3 tools/test_tls_record.py    # 17 tests: nonce, seq increment, encrypt/decrypt, roundtrips
-python3 tools/test_tls_handshake.py # 10+ tests: transcript hash, ClientHello, ServerHello parse
+python3 tools/test_tls_handshake.py # 21 tests: transcript hash, ClientHello, ServerHello, key schedule (RFC 8448), Finished MAC
+python3 tools/test_keyschedule_steps.py # 9 tests: key schedule step-by-step (RFC 8448 vectors)
 ```
 
 ## Related Projects
