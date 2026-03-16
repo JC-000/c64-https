@@ -27,6 +27,7 @@ bg_color        = $d021
 sid_osc3        = $d41b         ; SID oscillator 3 output
 cia1_ta_lo      = $dc04         ; CIA1 timer A low
 cia1_ta_hi      = $dc05         ; CIA1 timer A high
+cia1_cra        = $dc0e         ; CIA1 control register A
 
 ; =============================================================================
 ; Zero page assignments — time-shared with ip65 ($02-$1B)

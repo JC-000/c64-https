@@ -37,10 +37,21 @@ tls_connect:
         sta tls_state
 
         ; generate client random (32 bytes)
-        ; jsr drbg_fill_bytes   ; TODO: fill tls_client_random
+        lda #<tls_client_random
+        sta zp_ptr
+        lda #>tls_client_random
+        sta zp_ptr+1
+        lda #32
+        jsr drbg_fill_bytes
 
-        ; generate ECDHE keypair
-        ; jsr tls_generate_ecdhe_keypair  ; TODO
+        ; generate ECDHE keypair (random private key + compute public key)
+        lda #<tls_ecdhe_privkey
+        sta zp_ptr
+        lda #>tls_ecdhe_privkey
+        sta zp_ptr+1
+        lda #32
+        jsr drbg_fill_bytes
+        jsr tls_ecdh_generate_keypair
 
         ; --- send ClientHello ---
         lda #TLS_STATE_CLIENT_HELLO
