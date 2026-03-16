@@ -123,7 +123,7 @@ def main():
 
         # Wait for all instances to boot
         for i, inst in enumerate(instances):
-            grid = wait_for_text(inst.transport, "Q=QUIT", timeout=60.0)
+            grid = wait_for_text(inst.transport, "Q=QUIT", timeout=120.0)
             if grid is None:
                 print(f"  Worker {i}: FATAL - menu did not appear")
                 sys.exit(1)

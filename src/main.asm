@@ -54,6 +54,27 @@
 !source "crypto/fe25519.asm"
 !source "crypto/x25519.asm"
 
+; --- ECDSA P-256 (for certificate verification) ---
+!source "crypto/ecdsa_fp.asm"
+!source "crypto/ecdsa_mod.asm"
+!source "crypto/ecdsa_curve.asm"
+!source "crypto/ecdsa_points.asm"
+
+; --- ECDSA P-384 (for CA certificate verification) ---
+!source "crypto/ecdsa_fp_384.asm"
+!source "crypto/ecdsa_mod_384.asm"
+!source "crypto/ecdsa_curve_384.asm"
+!source "crypto/ecdsa_points_384.asm"
+
+; --- ECDSA signature verification (P-256 + P-384) ---
+!source "crypto/ecdsa_verify.asm"
+
+; --- DER/ASN.1 decoder for X.509 certificates ---
+!source "der_decode.asm"
+
+; --- TLS certificate + CertificateVerify handling ---
+!source "tls_cert.asm"
+
 ; --- TLS ECDH wrapper (x25519-based key exchange) ---
 !source "tls_ecdh.asm"
 

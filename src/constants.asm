@@ -70,6 +70,18 @@ tls_rec_ptr     = $1e           ; 2 bytes ($1E-$1F) — pointer to record data
 tls_rec_idx     = $20           ; 1 byte — index during record read/write
 tls_direction   = $21           ; 1 byte — 0=write, 1=read (key/IV/seq select)
 
+; --- ECDSA P-256/P-384 bignum arithmetic (from c64-aes256-ecdsa) ---
+; These overlap with x25519 at $39-$3A but never run simultaneously.
+fp_src1         = $22           ; 2 bytes ($22-$23) — operand 1 pointer
+fp_src2         = $24           ; 2 bytes ($24-$25) — operand 2 pointer
+fp_dst          = $26           ; 2 bytes ($26-$27) — destination pointer
+fp_misc         = $28           ; 2 bytes ($28-$29) — modulus pointer
+fp_carry        = $2a           ; 1 byte
+fp_loop         = $2b           ; 1 byte
+fp_mul_i        = $39           ; 1 byte (shares with x25_byte_idx — OK, never simultaneous)
+fp_mul_j        = $3a           ; 1 byte (shares with x25_bit_mask — OK)
+ec_scalar_ptr   = $3b           ; 2 bytes ($3B-$3C) — scalar for point multiply
+
 ; --- fe25519 field arithmetic (relocated from wireguard $1E-$29) ---
 fe_src1         = $2c           ; 2 bytes ($2C-$2D) — operand 1 pointer
 fe_src2         = $2e           ; 2 bytes ($2E-$2F) — operand 2 pointer
