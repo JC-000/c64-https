@@ -25,6 +25,9 @@
 !source "tls_handshake.asm"
 !source "tls_transcript.asm"
 
+; --- entropy initialization ---
+!source "entropy.asm"
+
 ; --- HKDF key derivation + key schedule ---
 !source "hkdf.asm"
 !source "tls_keyschedule.asm"

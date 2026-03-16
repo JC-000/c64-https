@@ -33,6 +33,10 @@
 
         cli                     ; re-enable interrupts
 
+        ; initialize hardware entropy sources and seed DRBG
+        jsr entropy_init
+        jsr drbg_init_entropy
+
         ; print menu
         lda #<menu_msg
         ldy #>menu_msg
