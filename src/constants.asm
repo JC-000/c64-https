@@ -69,16 +69,20 @@ tls_rec_ptr     = $1e           ; 2 bytes ($1E-$1F) — pointer to record data
 tls_rec_idx     = $20           ; 1 byte — index during record read/write
 tls_direction   = $21           ; 1 byte — 0=write, 1=read (key/IV/seq select)
 
-; --- ECDSA / bignum field arithmetic ---
-fp_src1         = $22           ; 2 bytes ($22-$23)
-fp_src2         = $24           ; 2 bytes ($24-$25)
-fp_dst          = $26           ; 2 bytes ($26-$27)
-fp_misc         = $28           ; 2 bytes ($28-$29) modulus pointer
-fp_carry        = $2a           ; 1 byte
-fp_loop         = $2b           ; 1 byte
-fp_mul_i        = $39           ; 1 byte
-fp_mul_j        = $3a           ; 1 byte
-ec_scalar_ptr   = $3b           ; 2 bytes ($3B-$3C)
+; --- fe25519 field arithmetic (relocated from wireguard $1E-$29) ---
+fe_src1         = $2c           ; 2 bytes ($2C-$2D) — operand 1 pointer
+fe_src2         = $2e           ; 2 bytes ($2E-$2F) — operand 2 pointer
+fe_dst          = $30           ; 2 bytes ($30-$31) — destination pointer
+fe_carry        = $32           ; 1 byte
+fe_loop         = $33           ; 1 byte
+fe_mul_i        = $34           ; 1 byte
+fe_mul_j        = $35           ; 1 byte
+; $36-$37 reserved (fe25519 uses fe_tmp1..4 as 32-byte data labels)
+
+; --- x25519 state (relocated from wireguard $2A-$2D) ---
+x25_prev_bit    = $38           ; 1 byte — previous k_t for swap
+x25_byte_idx    = $39           ; 1 byte — byte index in scalar
+x25_bit_mask    = $3a           ; 1 byte — current bit mask
 
 ; --- General pointers (shared, save/restore around ip65) ---
 zp_ptr          = $fb           ; 2 bytes ($FB-$FC)
@@ -167,8 +171,9 @@ TLS_HS_FINISHED         = 20
 ; cipher suite
 TLS_CHACHA20_POLY1305_SHA256 = $1303
 
-; named group
+; named groups
 TLS_GROUP_SECP256R1     = $0017
+TLS_GROUP_X25519        = $001d
 
 ; signature algorithm
 TLS_SIG_ECDSA_SECP256R1_SHA256 = $0403

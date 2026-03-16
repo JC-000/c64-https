@@ -23,8 +23,8 @@ tls_server_random:      !fill 32, 0     ; server random (32 bytes)
 
 ; ECDHE key exchange
 tls_ecdhe_privkey:      !fill 32, 0     ; our ephemeral private key
-tls_ecdhe_pubkey:       !fill 65, 0     ; our ephemeral public key (uncompressed)
-tls_server_pubkey:      !fill 65, 0     ; server's ephemeral public key
+tls_ecdhe_pubkey:       !fill 32, 0     ; our ephemeral public key (x25519, 32 bytes)
+tls_server_pubkey:      !fill 32, 0     ; server's ephemeral public key (x25519, 32 bytes)
 tls_shared_secret:      !fill 32, 0     ; ECDHE shared secret (x-coordinate)
 
 ; Transcript hash (running SHA-256 state)
@@ -189,3 +189,37 @@ aead_data_ptr:  !word 0
 aead_data_len:  !byte 0
 aead_tag:       !fill 16, 0
 aead_scratch:   !fill 16, 0     ; Poly1305 padding/length block
+
+; =============================================================================
+; fe25519 field arithmetic (from c64-wireguard)
+; =============================================================================
+fe_wide:        !fill 64, 0     ; 512-bit product from multiply
+fe_tmp1:        !fill 32, 0     ; temporary field element 1
+fe_tmp2:        !fill 32, 0     ; temporary field element 2
+fe_tmp3:        !fill 32, 0     ; temporary field element 3
+fe_tmp4:        !fill 32, 0     ; temporary field element 4
+
+; p = 2^255 - 19 in little-endian
+fe_p:
+        !byte $ed
+        !fill 30, $ff
+        !byte $7f
+
+; =============================================================================
+; X25519 state (from c64-wireguard)
+; =============================================================================
+x25_scalar:     !fill 32, 0     ; clamped scalar
+x25_u:          !fill 32, 0     ; input u-coordinate
+x25_result:     !fill 32, 0     ; output u-coordinate
+x25_x2:         !fill 32, 0     ; Montgomery ladder state
+x25_z2:         !fill 32, 0
+x25_x3:         !fill 32, 0
+x25_z3:         !fill 32, 0
+x25_a:          !fill 32, 0     ; ladder temporaries
+x25_b:          !fill 32, 0
+x25_da:         !fill 32, 0
+x25_cb:         !fill 32, 0
+x25_e:          !fill 32, 0
+x25_basepoint:
+        !byte 9
+        !fill 31, 0
