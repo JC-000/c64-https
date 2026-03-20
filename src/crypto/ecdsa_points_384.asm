@@ -714,9 +714,10 @@ ec_point_add_384:
         rts
 
 ; =============================================================================
-; ec_scalar_mul_384: ec_p3_384 = k * G
+; ec_scalar_mul_384: ec_p3_384 = k * ec_p2_384
 ; k is a 48-byte scalar pointed to by ec_scalar_ptr (ZP $3b).
-; Uses double-and-add with the base point G (affine).
+; ec_p2_384 must be set by caller to the affine point (X,Y) to multiply.
+; Uses double-and-add with ec_p2_384 (affine).
 ; Result in ec_p3_384 (Jacobian).
 ; =============================================================================
 ec_scalar_mul_384:
@@ -727,17 +728,7 @@ ec_scalar_mul_384:
         dey
         bpl @clr
 
-        ; Load G into ec_p2_384 (affine)
-        ldy #47
-@cgx:   lda ec_gx_384,y
-        sta ec_p2_384,y
-        dey
-        bpl @cgx
-        ldy #47
-@cgy:   lda ec_gy_384,y
-        sta ec_p2_384+48,y
-        dey
-        bpl @cgy
+        ; Caller must set ec_p2_384 before calling
 
         ; Process 384 bits of k, MSB first
         lda #0
@@ -879,5 +870,17 @@ ec_jacobian_to_affine_384:
         lda #>ec_affine_y_384
         sta fp_dst+1
         jsr ec_mulp_384         ; affine_y = Y*Z^(-3)
+
+        ; Copy affine result back to ec_p3_384
+        ldy #47
+@cpx:   lda ec_affine_x_384,y
+        sta ec_p3_384,y
+        dey
+        bpl @cpx
+        ldy #47
+@cpy2:  lda ec_affine_y_384,y
+        sta ec_p3_384+48,y
+        dey
+        bpl @cpy2
 
         rts

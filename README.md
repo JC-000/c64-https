@@ -110,7 +110,8 @@ Current status (24.8 KB binary, 487 labels):
 - [x] ECDHE x25519 key exchange — generate keypair, compute shared secret
 - [x] TLS 1.3 key schedule integration testing — all 9 HKDF steps verified against RFC 8448 + Finished MAC
 - [x] Entropy/DRBG initialization — SID voice 3 noise + CIA timer seeding at boot, DRBG fills for TLS random values
-- [ ] X.509 certificate parsing and validation
+- [x] X.509 certificate parsing — DER parser extracts TBS, public key, signature (r,s), curve ID for P-256 and P-384
+- [x] ECDSA signature verification — P-256 and P-384, full verify (s⁻¹, scalar mul, point add, Jacobian→affine)
 - [ ] HTTP/1.1 GET request
 - [ ] End-to-end HTTPS GET demo
 
@@ -120,7 +121,7 @@ Current status (24.8 KB binary, 487 labels):
 
 ## Test Automation
 
-141 tests across 6 suites + 2 diagnostic suites, using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its remote text monitor. All tests log VICE PID and port for multi-agent safety.
+152 tests across 7 suites + 2 diagnostic suites, using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its remote text monitor. All tests log VICE PID and port for multi-agent safety.
 
 ```bash
 pip install -e ../c64-test-harness
@@ -134,6 +135,7 @@ python3 tools/test_sha256.py        # 7 tests: NIST vectors, boundary cases, ran
 python3 tools/test_crypto.py        # 22 tests: ChaCha20/Poly1305/AEAD RFC 7539 vectors + random
 python3 tools/test_hkdf.py          # 12 tests: RFC 5869 vectors, TLS 1.3 key schedule, random
 python3 tools/test_tls_record.py    # 17 tests: nonce, seq increment, encrypt/decrypt, roundtrips
+python3 tools/test_x509.py          # 11 tests: DER parse P-256/P-384, ECDSA verify (valid+tampered+boundary)
 python3 tools/test_tls_handshake.py # 21 tests: transcript hash, ClientHello, ServerHello, key schedule (RFC 8448), Finished MAC
 python3 tools/test_keyschedule_steps.py # 9 tests: key schedule step-by-step (RFC 8448 vectors)
 python3 tools/test_entropy.py          # 7 tests: SID/CIA hardware init, DRBG seeding, output quality

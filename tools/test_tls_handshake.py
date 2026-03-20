@@ -24,8 +24,7 @@ import time
 from c64_test_harness import (
     Labels,
     ViceConfig,
-    ViceProcess,
-    ViceTransport,
+    ViceInstanceManager,
     read_bytes,
     write_bytes,
     jsr,
@@ -1275,27 +1274,27 @@ def main():
 
     # Launch VICE
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
-    print(f"\n=== Starting VICE (port {config.port}) ===")
+    print(f"\n=== Starting VICE ===")
 
-    with ViceProcess(config) as vice:
-        if not vice.wait_for_monitor(timeout=30.0):
-            print("FATAL: Could not connect to VICE monitor")
-            sys.exit(1)
-        print(f"  VICE PID={vice.pid}, port={config.port}")
-
-        transport = ViceTransport(port=config.port)
+    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+        inst = mgr.acquire()
+        transport = inst.transport
+        print(f"VICE PID={inst.pid}, port={inst.port}")
 
         # Wait for main menu
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0)
+        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
+        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
         print("  Main menu ready")
 
         # Run tests
         print(f"\n=== TLS 1.3 Handshake Tests ===")
         passed, failed = run_tests(transport, labels, seed)
+
+        mgr.release(inst)
 
     # Summary
     total = passed + failed

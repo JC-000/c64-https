@@ -35,6 +35,11 @@
 ; Curve dispatch
 ; =============================================================================
 ecdsa_verify:
+        ; Ensure BASIC ROM is banked out — ECDSA data buffers live at $A000+
+        lda $01
+        and #%11111110          ; clear LORAM (bit 0) -> BASIC ROM off
+        sta $01
+
         lda ecdsa_curve_id
         bne @p384
         jmp ecdsa_verify_256
@@ -168,39 +173,30 @@ ecdsa_verify_256:
 
         ; ---------------------------------------------------------------
         ; Step 5a: Compute u1 * G
-        ; Load generator G into ec_p1 as Jacobian point (X=Gx, Y=Gy, Z=1)
+        ; Load generator G into ec_p2 (affine base point for scalar mul)
         ; ---------------------------------------------------------------
 
-        ; ec_p1.X = ec_gx
+        ; ec_p2.X = ec_gx
         lda #<ec_gx
         sta fp_src1
         lda #>ec_gx
         sta fp_src1+1
-        lda #<ec_p1
+        lda #<ec_p2
         sta fp_dst
-        lda #>ec_p1
+        lda #>ec_p2
         sta fp_dst+1
         jsr fp_copy
 
-        ; ec_p1.Y = ec_gy
+        ; ec_p2.Y = ec_gy
         lda #<ec_gy
         sta fp_src1
         lda #>ec_gy
         sta fp_src1+1
-        lda #<(ec_p1+32)
+        lda #<(ec_p2+32)
         sta fp_dst
-        lda #>(ec_p1+32)
+        lda #>(ec_p2+32)
         sta fp_dst+1
         jsr fp_copy
-
-        ; ec_p1.Z = 1
-        lda #<(ec_p1+64)
-        sta fp_dst
-        lda #>(ec_p1+64)
-        sta fp_dst+1
-        jsr fp_zero
-        lda #1
-        sta ec_p1+64+31             ; Z = 1 (big-endian, lsb at end)
 
         ; Set scalar pointer to u1
         lda #<ev_u1
@@ -221,39 +217,30 @@ ecdsa_verify_256:
 
         ; ---------------------------------------------------------------
         ; Step 5b: Compute u2 * Q
-        ; Load public key Q into ec_p1 as Jacobian (X=Qx, Y=Qy, Z=1)
+        ; Load public key Q into ec_p2 (affine base point for scalar mul)
         ; ---------------------------------------------------------------
 
-        ; ec_p1.X = ecdsa_pubkey_x
+        ; ec_p2.X = ecdsa_pubkey_x
         lda #<ecdsa_pubkey_x
         sta fp_src1
         lda #>ecdsa_pubkey_x
         sta fp_src1+1
-        lda #<ec_p1
+        lda #<ec_p2
         sta fp_dst
-        lda #>ec_p1
+        lda #>ec_p2
         sta fp_dst+1
         jsr fp_copy
 
-        ; ec_p1.Y = ecdsa_pubkey_y
+        ; ec_p2.Y = ecdsa_pubkey_y
         lda #<ecdsa_pubkey_y
         sta fp_src1
         lda #>ecdsa_pubkey_y
         sta fp_src1+1
-        lda #<(ec_p1+32)
+        lda #<(ec_p2+32)
         sta fp_dst
-        lda #>(ec_p1+32)
+        lda #>(ec_p2+32)
         sta fp_dst+1
         jsr fp_copy
-
-        ; ec_p1.Z = 1
-        lda #<(ec_p1+64)
-        sta fp_dst
-        lda #>(ec_p1+64)
-        sta fp_dst+1
-        jsr fp_zero
-        lda #1
-        sta ec_p1+64+31
 
         ; Set scalar pointer to u2
         lda #<ev_u2
@@ -500,39 +487,31 @@ ecdsa_verify_384:
 
         ; ---------------------------------------------------------------
         ; Step 5a: Compute u1 * G (P-384 generator)
-        ; Load G into ec_p1_384 as Jacobian (X=Gx, Y=Gy, Z=1)
+        ; Load G into ec_p2_384 as affine point (X=Gx, Y=Gy)
+        ; ec_scalar_mul_384 initializes ec_p1_384 internally
         ; ---------------------------------------------------------------
 
-        ; ec_p1_384.X = ec_gx_384
+        ; ec_p2_384.X = ec_gx_384
         lda #<ec_gx_384
         sta fp_src1
         lda #>ec_gx_384
         sta fp_src1+1
-        lda #<ec_p1_384
+        lda #<ec_p2_384
         sta fp_dst
-        lda #>ec_p1_384
+        lda #>ec_p2_384
         sta fp_dst+1
         jsr fp_copy_384
 
-        ; ec_p1_384.Y = ec_gy_384
+        ; ec_p2_384.Y = ec_gy_384
         lda #<ec_gy_384
         sta fp_src1
         lda #>ec_gy_384
         sta fp_src1+1
-        lda #<(ec_p1_384+48)
+        lda #<(ec_p2_384+48)
         sta fp_dst
-        lda #>(ec_p1_384+48)
+        lda #>(ec_p2_384+48)
         sta fp_dst+1
         jsr fp_copy_384
-
-        ; ec_p1_384.Z = 1
-        lda #<(ec_p1_384+96)
-        sta fp_dst
-        lda #>(ec_p1_384+96)
-        sta fp_dst+1
-        jsr fp_zero_384
-        lda #1
-        sta ec_p1_384+96+47         ; Z = 1 (big-endian, lsb at end)
 
         ; Set scalar pointer to u1
         lda #<ev_u1_384
@@ -554,38 +533,30 @@ ecdsa_verify_384:
 
         ; ---------------------------------------------------------------
         ; Step 5b: Compute u2 * Q (P-384 public key)
+        ; ec_scalar_mul_384 initializes ec_p1_384 internally
         ; ---------------------------------------------------------------
 
-        ; ec_p1_384.X = ecdsa_pubkey_x
+        ; ec_p2_384.X = ecdsa_pubkey_x
         lda #<ecdsa_pubkey_x
         sta fp_src1
         lda #>ecdsa_pubkey_x
         sta fp_src1+1
-        lda #<ec_p1_384
+        lda #<ec_p2_384
         sta fp_dst
-        lda #>ec_p1_384
+        lda #>ec_p2_384
         sta fp_dst+1
         jsr fp_copy_384
 
-        ; ec_p1_384.Y = ecdsa_pubkey_y
+        ; ec_p2_384.Y = ecdsa_pubkey_y
         lda #<ecdsa_pubkey_y
         sta fp_src1
         lda #>ecdsa_pubkey_y
         sta fp_src1+1
-        lda #<(ec_p1_384+48)
+        lda #<(ec_p2_384+48)
         sta fp_dst
-        lda #>(ec_p1_384+48)
+        lda #>(ec_p2_384+48)
         sta fp_dst+1
         jsr fp_copy_384
-
-        ; ec_p1_384.Z = 1
-        lda #<(ec_p1_384+96)
-        sta fp_dst
-        lda #>(ec_p1_384+96)
-        sta fp_dst+1
-        jsr fp_zero_384
-        lda #1
-        sta ec_p1_384+96+47
 
         ; Set scalar pointer to u2
         lda #<ev_u2_384
@@ -864,30 +835,5 @@ ecdsa_parse_der_sig:
         rts
 
 ; =============================================================================
-; Inline data
+; Data buffers are in data.asm (moved there to avoid $7800-$7BFF sqtab region)
 ; =============================================================================
-
-; --- Verification parameters ---
-ecdsa_curve_id:    !byte 0          ; 0=P-256, 1=P-384
-ecdsa_hash:        !fill 48, 0      ; message hash (32 for P-256, 48 for P-384)
-ecdsa_hash_len:    !byte 32         ; hash length
-ecdsa_sig_r:       !fill 48, 0      ; signature r component
-ecdsa_sig_s:       !fill 48, 0      ; signature s component
-ecdsa_sig_len:     !byte 32         ; component length (32 or 48)
-ecdsa_pubkey_x:    !fill 48, 0      ; public key Q.x
-ecdsa_pubkey_y:    !fill 48, 0      ; public key Q.y
-ecdsa_verify_tmp:  !fill 48, 0      ; temporary for w
-
-; --- P-256 working buffers ---
-ev_u1:             !fill 32, 0      ; u1 = z * w mod n
-ev_u2:             !fill 32, 0      ; u2 = r * w mod n
-ev_point_save:     !fill 96, 0      ; saved Jacobian point (u1*G)
-
-; --- P-384 working buffers ---
-ev_u1_384:         !fill 48, 0      ; u1 = z * w mod n (P-384)
-ev_u2_384:         !fill 48, 0      ; u2 = r * w mod n (P-384)
-ev_point_save_384: !fill 144, 0     ; saved Jacobian point (u1*G, P-384)
-
-; --- DER parsing temporaries ---
-ev_der_int_len:    !byte 0          ; current INTEGER length
-ev_der_copy_cnt:   !byte 0          ; copy counter

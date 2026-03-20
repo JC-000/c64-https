@@ -713,9 +713,10 @@ ec_point_add:
         rts
 
 ; =============================================================================
-; ec_scalar_mul: ec_p3 = k * G
+; ec_scalar_mul: ec_p3 = k * BasePoint
 ; k is a 32-byte scalar pointed to by ec_scalar_ptr.
-; Uses double-and-add with the base point G (affine).
+; Uses double-and-add with the base point in ec_p2 (affine).
+; Caller must load the affine base point into ec_p2 before calling.
 ; Result in ec_p3 (Jacobian).
 ; =============================================================================
 ec_scalar_mul:
@@ -725,18 +726,6 @@ ec_scalar_mul:
 @clr:   sta ec_p1,y
         dey
         bpl @clr
-
-        ; Load G into ec_p2 (affine)
-        ldy #31
-@cgx:   lda ec_gx,y
-        sta ec_p2,y
-        dey
-        bpl @cgx
-        ldy #31
-@cgy:   lda ec_gy,y
-        sta ec_p2+32,y
-        dey
-        bpl @cgy
 
         ; Process 256 bits of k, MSB first
         lda #0
@@ -878,5 +867,17 @@ ec_jacobian_to_affine:
         lda #>ec_affine_y
         sta fp_dst+1
         jsr ec_mulp             ; affine_y = Y*Z^(-3)
+
+        ; Copy affine result back to ec_p3
+        ldy #31
+@cpx:   lda ec_affine_x,y
+        sta ec_p3,y
+        dey
+        bpl @cpx
+        ldy #31
+@cpy2:  lda ec_affine_y,y
+        sta ec_p3+32,y
+        dey
+        bpl @cpy2
 
         rts

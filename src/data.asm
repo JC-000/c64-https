@@ -223,3 +223,33 @@ x25_e:          !fill 32, 0
 x25_basepoint:
         !byte 9
         !fill 31, 0
+
+; =============================================================================
+; ECDSA signature verification (moved from ecdsa_verify.asm to avoid
+; $7800-$7BFF sqtab memory collision)
+; =============================================================================
+
+; --- Verification parameters ---
+ecdsa_curve_id:    !byte 0          ; 0=P-256, 1=P-384
+ecdsa_hash:        !fill 48, 0      ; message hash (32 for P-256, 48 for P-384)
+ecdsa_hash_len:    !byte 32         ; hash length
+ecdsa_sig_r:       !fill 48, 0      ; signature r component
+ecdsa_sig_s:       !fill 48, 0      ; signature s component
+ecdsa_sig_len:     !byte 32         ; component length (32 or 48)
+ecdsa_pubkey_x:    !fill 48, 0      ; public key Q.x
+ecdsa_pubkey_y:    !fill 48, 0      ; public key Q.y
+ecdsa_verify_tmp:  !fill 48, 0      ; temporary for w
+
+; --- P-256 working buffers ---
+ev_u1:             !fill 32, 0      ; u1 = z * w mod n
+ev_u2:             !fill 32, 0      ; u2 = r * w mod n
+ev_point_save:     !fill 96, 0      ; saved Jacobian point (u1*G)
+
+; --- P-384 working buffers ---
+ev_u1_384:         !fill 48, 0      ; u1 = z * w mod n (P-384)
+ev_u2_384:         !fill 48, 0      ; u2 = r * w mod n (P-384)
+ev_point_save_384: !fill 144, 0     ; saved Jacobian point (u1*G, P-384)
+
+; --- DER parsing temporaries ---
+ev_der_int_len:    !byte 0          ; current INTEGER length
+ev_der_copy_cnt:   !byte 0          ; copy counter

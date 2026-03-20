@@ -18,8 +18,7 @@ import time
 from c64_test_harness import (
     Labels,
     ViceConfig,
-    ViceProcess,
-    ViceTransport,
+    ViceInstanceManager,
     read_bytes,
     write_bytes,
     set_breakpoint,
@@ -87,21 +86,19 @@ def main():
 
     for n in range(1, 11):
         config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
-        with ViceProcess(config) as vice:
-            if not vice.wait_for_monitor(timeout=30):
-                print(f"  N={n}: FAIL - could not connect to VICE monitor")
-                results.append((n, False, 0.0, False))
-                continue
-            print(f"  N={n}: VICE PID={vice.pid}, port={config.port}")
-
-            transport = ViceTransport(port=config.port)
+        with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+            inst = mgr.acquire()
+            transport = inst.transport
+            print(f"  N={n}: VICE PID={inst.pid}, port={inst.port}")
 
             # Wait for program menu
-            grid = wait_for_text(transport, "Q=QUIT", timeout=60)
+            grid = wait_for_text(transport, "Q=QUIT", timeout=60, verbose=False)
             if grid is None:
                 print(f"  N={n}: FAIL - main menu did not appear")
-                results.append((n, False, 0.0, vice.is_running()))
+                results.append((n, False, 0.0, True))
+                mgr.release(inst)
                 continue
+            write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
             hmac_addr = labels["hmac_sha256"]
 
@@ -130,13 +127,14 @@ def main():
                 results.append((n, True, elapsed, True))
             except Exception as e:
                 elapsed = time.time() - t0
-                alive = vice.is_running()
                 print(f"  N={n}: exception after {elapsed:.1f}s: {e}")
                 try:
                     delete_breakpoint(transport, bp_id)
                 except Exception:
                     pass
-                results.append((n, False, elapsed, alive))
+                results.append((n, False, elapsed, True))
+
+            mgr.release(inst)
 
         # Brief stagger before next VICE launch
         time.sleep(0.1)

@@ -66,6 +66,11 @@
 !source "crypto/ecdsa_curve_384.asm"
 !source "crypto/ecdsa_points_384.asm"
 
+; --- Skip past quarter-square multiply table region ($7800-$7BFF) ---
+; The sqtab_lo/sqtab_hi tables are runtime-generated at $7800-$7BFF.
+; ECDSA P-384 code pushes past $7800, so we jump to $7C00.
+* = $7C00
+
 ; --- ECDSA signature verification (P-256 + P-384) ---
 !source "crypto/ecdsa_verify.asm"
 
