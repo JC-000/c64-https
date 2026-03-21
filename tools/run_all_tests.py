@@ -13,7 +13,7 @@ import time
 os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceInstanceManager, ViceTransport,
+    Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
 
@@ -112,6 +112,7 @@ def main():
         config=config,
         port_range_start=6510,
         port_range_end=6510 + workers + 5,
+        max_retries=3,
     ) as mgr:
         instances = []
         for i in range(min(workers, len(suites))):
@@ -123,10 +124,12 @@ def main():
 
         # Wait for all instances to boot
         for i, inst in enumerate(instances):
-            grid = wait_for_text(inst.transport, "Q=QUIT", timeout=60.0)
+            grid = wait_for_text(inst.transport, "Q=QUIT", timeout=120.0, verbose=False)
             if grid is None:
                 print(f"  Worker {i}: FATAL - menu did not appear")
                 sys.exit(1)
+            # Safety loop: JMP $0339 prevents crash when BASIC ROM banked out
+            write_bytes(inst.transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
             print(f"  Worker {i}: ready")
 
         # Each suite gets its own worker — suites run in parallel

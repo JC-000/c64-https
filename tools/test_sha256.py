@@ -22,8 +22,7 @@ import time
 from c64_test_harness import (
     Labels,
     ViceConfig,
-    ViceProcess,
-    ViceTransport,
+    ViceInstanceManager,
     read_bytes,
     write_bytes,
     jsr,
@@ -334,26 +333,27 @@ def main():
         sound=False,
     )
 
-    with ViceProcess(config) as vice:
-        if not vice.wait_for_monitor(timeout=30.0):
-            print("FATAL: Could not connect to VICE monitor")
-            sys.exit(1)
-        print(f"  VICE PID={vice.pid}, port={config.port}")
-
-        transport = ViceTransport(port=config.port)
+    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+        inst = mgr.acquire()
+        transport = inst.transport
+        print(f"  VICE PID={inst.pid}, port={inst.port}")
 
         # Wait for main menu (needed for program to finish initialization)
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0)
+        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
         print("  Main menu ready")
 
+        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
+
         # Run tests
         print(f"\n=== SHA-256 Direct Tests ({iterations} iterations) ===")
 
         passed, failed = run_tests(transport, labels, iterations, verbose)
+
+        mgr.release(inst)
 
     # Summary
     total = passed + failed
