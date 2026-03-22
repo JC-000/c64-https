@@ -22,6 +22,11 @@ net_init:
         php                     ; save carry result
         jsr net_restore_zp
         plp                     ; restore carry
+        bcs @init_fail
+        ; resolve variable table pointers for TCP callback SMC
+        jsr net_init_cb_addrs
+        clc
+@init_fail:
         rts
 
 ; =============================================================================
@@ -232,22 +237,103 @@ net_recv_byte:
 ; ip65's ZP ($02-$1B) is active. DO NOT touch crypto state.
 ; Copies incoming data to tcp_recv_buf ring buffer.
 ;
-; ip65 sets:
-;   tcp_inbound_data_ptr (at address read from variable table)
-;   tcp_inbound_data_length (at address read from variable table)
-;
-; Since we know the direct addresses from the link map, we use those.
+; ip65 sets tcp_inbound_data_ptr and tcp_inbound_data_length before calling.
+; net_init_cb_addrs resolves the variable table pointers and patches the
+; SMC instructions below so we can read those ip65 variables using absolute
+; addressing (no ZP indirection needed).
 ; =============================================================================
 net_tcp_recv_cb:
-        ; We can't use indirect ZP pointers here easily since ip65 owns ZP.
-        ; Instead, use self-modifying code to copy from the data pointer.
-        ;
-        ; For now, a simplified version using absolute addressing:
-        ; The actual inbound data pointers are ip65 internal addresses
-        ; that we'd need to dereference. This requires careful implementation
-        ; once we have ip65 running end-to-end.
-        ;
-        ; TODO: implement full ring buffer copy when testing with real network
+        ; --- Read inbound data length (16-bit) ---
+cb_load_len_lo:
+        lda $ffff               ; SMC: patched to addr of tcp_inbound_data_length
+        sta cb_remaining
+cb_load_len_hi:
+        lda $ffff               ; SMC: patched to addr of tcp_inbound_data_length+1
+        sta cb_remaining+1
+        ; if length == 0, nothing to copy
+        ora cb_remaining
+        beq cb_done
+
+        ; --- Read inbound data pointer (16-bit), patch copy source ---
+cb_load_ptr_lo:
+        lda $ffff               ; SMC: patched to addr of tcp_inbound_data_ptr
+        sta cb_copy_byte+1      ; patch low byte of LDA abs,x source
+cb_load_ptr_hi:
+        lda $ffff               ; SMC: patched to addr of tcp_inbound_data_ptr+1
+        sta cb_copy_byte+2      ; patch high byte of LDA abs,x source
+
+        ; Copy loop: X = source index, Y = ring buffer tail
+        ldx #0
+        ldy tcp_recv_tail
+cb_loop:
+        ; Check 16-bit remaining count
+        lda cb_remaining
+        ora cb_remaining+1
+        beq cb_done
+
+cb_copy_byte:
+        lda $ffff,x             ; SMC: patched to ip65 inbound data base address
+        sta tcp_recv_buf,y
+        iny                     ; tail wraps at 256 (8-bit)
+        inx
+
+        ; decrement 16-bit remaining
+        lda cb_remaining
+        sec
+        sbc #1
+        sta cb_remaining
+        bcs cb_loop
+        dec cb_remaining+1
+        jmp cb_loop
+
+cb_done:
+        sty tcp_recv_tail       ; store updated tail
+        rts
+
+cb_remaining: !word 0           ; bytes remaining to copy (callback-local)
+
+; =============================================================================
+; net_init_cb_addrs - resolve ip65 variable table pointers for TCP callback
+;
+; The variable table entries (ip65_vt_tcp_in_ptr, ip65_vt_tcp_in_len) each
+; hold a 2-byte address pointing to ip65's internal variable. We read those
+; addresses and patch the SMC operands in net_tcp_recv_cb.
+;
+; Must be called after ip65 binary is loaded (during net_init or before
+; first TCP connection). Safe to call with ZP available (not in callback).
+; =============================================================================
+net_init_cb_addrs:
+        ; --- Resolve tcp_inbound_data_ptr address ---
+        ; ip65_vt_tcp_in_ptr contains address-of ip65's tcp_inbound_data_ptr
+        lda ip65_vt_tcp_in_ptr      ; low byte of addr
+        sta cb_load_ptr_lo+1        ; patch SMC operand
+        lda ip65_vt_tcp_in_ptr+1    ; high byte of addr
+        sta cb_load_ptr_lo+2
+
+        ; ptr+1 is at addr+1
+        lda ip65_vt_tcp_in_ptr
+        clc
+        adc #1
+        sta cb_load_ptr_hi+1
+        lda ip65_vt_tcp_in_ptr+1
+        adc #0
+        sta cb_load_ptr_hi+2
+
+        ; --- Resolve tcp_inbound_data_length address ---
+        lda ip65_vt_tcp_in_len
+        sta cb_load_len_lo+1
+        lda ip65_vt_tcp_in_len+1
+        sta cb_load_len_lo+2
+
+        ; len+1 is at addr+1
+        lda ip65_vt_tcp_in_len
+        clc
+        adc #1
+        sta cb_load_len_hi+1
+        lda ip65_vt_tcp_in_len+1
+        adc #0
+        sta cb_load_len_hi+2
+
         rts
 
 ; =============================================================================

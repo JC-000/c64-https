@@ -103,6 +103,12 @@ http_req_len:           !word 0
 http_resp_buf:          !fill 512, 0    ; HTTP response body buffer
 http_resp_len:          !word 0
 
+; HTTP parser state
+http_parse_state:       !byte 0         ; 0=status line, 1=headers, 2=body
+http_hdr_match:         !byte 0         ; consecutive \r\n\r\n match count
+http_line_idx:          !byte 0         ; index into status line buffer
+http_line_buf:          !fill 32, 0     ; status line accumulator
+
 ; =============================================================================
 ; Application data pointers (for tls_send)
 ; =============================================================================

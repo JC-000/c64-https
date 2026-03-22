@@ -58,30 +58,392 @@ http_get:
 ; http_build_get - construct HTTP/1.1 GET request in http_req_buf
 ; Input: http_host_ptr/len, http_path_ptr/len
 ; Output: http_req_buf contains request, http_req_len = length
+; Clobbers: A, X, Y, zp_ptr, zp_count
 ; =============================================================================
 http_build_get:
-        ; Build:
-        ;   GET <path> HTTP/1.1\r\n
-        ;   Host: <hostname>\r\n
-        ;   Connection: close\r\n
-        ;   \r\n
-        ;
-        ; TODO: implement string concatenation into http_req_buf
+        ; Initialise write cursor
+        lda #0
+        sta http_bg_idx
+
+        ; --- "GET " (4 bytes) ---
+        ldx #0
+@cv_loop:
+        lda http_get_verb,x
+        stx http_bg_src          ; save source index
+        ldx http_bg_idx
+        sta http_req_buf,x
+        inc http_bg_idx
+        ldx http_bg_src
+        inx
+        cpx #4
+        bne @cv_loop
+
+        ; --- path (variable length, from pointer) ---
+        lda http_path_ptr
+        sta zp_ptr
+        lda http_path_ptr+1
+        sta zp_ptr+1
+        lda http_path_len
+        sta zp_count
+        jsr @copy_indirect
+
+        ; --- " HTTP/1.1\r\n" (11 bytes) ---
+        ldx #0
+@cv_ver:
+        lda http_version,x
+        stx http_bg_src
+        ldx http_bg_idx
+        sta http_req_buf,x
+        inc http_bg_idx
+        ldx http_bg_src
+        inx
+        cpx #11
+        bne @cv_ver
+
+        ; --- "Host: " (6 bytes) ---
+        ldx #0
+@cv_host_hdr:
+        lda http_host_hdr,x
+        stx http_bg_src
+        ldx http_bg_idx
+        sta http_req_buf,x
+        inc http_bg_idx
+        ldx http_bg_src
+        inx
+        cpx #6
+        bne @cv_host_hdr
+
+        ; --- hostname (variable length, from pointer) ---
+        lda http_host_ptr
+        sta zp_ptr
+        lda http_host_ptr+1
+        sta zp_ptr+1
+        lda http_host_len
+        sta zp_count
+        jsr @copy_indirect
+
+        ; --- \r\n after Host value (2 bytes) ---
+        ldx #0
+@cv_crlf1:
+        lda http_crlf,x
+        stx http_bg_src
+        ldx http_bg_idx
+        sta http_req_buf,x
+        inc http_bg_idx
+        ldx http_bg_src
+        inx
+        cpx #2
+        bne @cv_crlf1
+
+        ; --- "Connection: close\r\n" (19 bytes) ---
+        ldx #0
+@cv_conn:
+        lda http_conn_hdr,x
+        stx http_bg_src
+        ldx http_bg_idx
+        sta http_req_buf,x
+        inc http_bg_idx
+        ldx http_bg_src
+        inx
+        cpx #19
+        bne @cv_conn
+
+        ; --- final \r\n (2 bytes) ---
+        ldx #0
+@cv_crlf2:
+        lda http_crlf,x
+        stx http_bg_src
+        ldx http_bg_idx
+        sta http_req_buf,x
+        inc http_bg_idx
+        ldx http_bg_src
+        inx
+        cpx #2
+        bne @cv_crlf2
+
+        ; --- store total length ---
+        lda http_bg_idx
+        sta http_req_len
+        lda #0
+        sta http_req_len+1
+        rts
+
+; -----------------------------------------------------------------------------
+; @copy_indirect - copy zp_count bytes from (zp_ptr) into http_req_buf
+;   at offset http_bg_idx.  Advances http_bg_idx.
+;   Clobbers: A, X, Y
+; -----------------------------------------------------------------------------
+@copy_indirect:
+        ldy #0
+@ci_loop:
+        cpy zp_count
+        beq @ci_done
+        lda (zp_ptr),y
+        ldx http_bg_idx
+        sta http_req_buf,x
+        inc http_bg_idx
+        iny
+        jmp @ci_loop
+@ci_done:
         rts
 
 ; =============================================================================
-; http_recv_response - receive and parse HTTP response
-; Output: http_status = status code (e.g., 200)
+; http_recv_response - receive and parse HTTP response (polling-based)
+;
+; Call repeatedly while C=1.  Returns C=0 when complete.
+;
+; State machine:
+;   0 - reading status line
+;   1 - skipping headers (looking for \r\n\r\n)
+;   2 - reading body into http_resp_buf
+;
+; Output: http_status  = numeric status code (e.g. 200)
 ;         http_resp_buf = response body
 ;         http_resp_len = body length
+;         C=0 complete, C=1 not done yet
 ; =============================================================================
 http_recv_response:
-        ; TODO:
-        ; 1. Read status line: "HTTP/1.1 200 OK\r\n"
-        ; 2. Parse status code
-        ; 3. Read headers until empty line (\r\n\r\n)
-        ; 4. Check Content-Length or read until connection close
-        ; 5. Read body into http_resp_buf
+        lda http_parse_state
+        cmp #0
+        beq @state_status
+        cmp #1
+        beq @jmp_headers
+        jmp @state_body
+@jmp_headers:
+        jmp @state_headers
+
+; ----- state 0: accumulate status line until \n -----
+@state_status:
+        jsr net_recv_byte
+        bcc @status_have_data
+        jmp @not_done           ; no data yet, try again later
+@status_have_data:
+        cmp #$0a                ; \n ?
+        beq @parse_status_line
+        ; accumulate into line buffer
+        ldx http_line_idx
+        cpx #31                 ; guard overflow
+        bcs @state_status       ; drop bytes if line too long
+        sta http_line_buf,x
+        inc http_line_idx
+        jmp @state_status       ; keep reading this call
+
+@parse_status_line:
+        ; Status line: "HTTP/1.1 200 OK\r\n"
+        ; Digits at offsets 9, 10, 11
+        ; Convert 3 ASCII digits to a 16-bit number in http_status
+        ;   status = (d0-'0')*100 + (d1-'0')*10 + (d2-'0')
+        lda http_line_buf+9     ; hundreds digit
+        sec
+        sbc #$30
+        sta http_status+1       ; temp: hundreds
+        ; multiply by 100: x*100 = x*64 + x*32 + x*4
+        ; simpler: use a loop or lookup.  Use successive addition.
+        tax
+        lda #0
+        sta http_status
+        sta http_status+1
+@mul100:
+        cpx #0
+        beq @add_tens
+        clc
+        lda http_status
+        adc #100
+        sta http_status
+        lda http_status+1
+        adc #0
+        sta http_status+1
+        dex
+        jmp @mul100
+
+@add_tens:
+        lda http_line_buf+10    ; tens digit
+        sec
+        sbc #$30
+        tax
+@mul10:
+        cpx #0
+        beq @add_ones
+        clc
+        lda http_status
+        adc #10
+        sta http_status
+        lda http_status+1
+        adc #0
+        sta http_status+1
+        dex
+        jmp @mul10
+
+@add_ones:
+        lda http_line_buf+11    ; ones digit
+        sec
+        sbc #$30
+        clc
+        adc http_status
+        sta http_status
+        lda http_status+1
+        adc #0
+        sta http_status+1
+
+        ; advance to state 1 (skip headers)
+        lda #1
+        sta http_parse_state
+        lda #0
+        sta http_hdr_match
+        jmp @not_done
+
+; ----- state 1: skip headers until \r\n\r\n -----
+@state_headers:
+        jsr net_recv_byte
+        bcs @not_done
+        ; We track a match index into the pattern \r\n\r\n
+        ; Pattern bytes: $0d, $0a, $0d, $0a
+        ldx http_hdr_match
+        cpx #0
+        bne @hm_check1
+        ; expecting $0d
+        cmp #$0d
+        bne @hm_reset
+        inc http_hdr_match
+        jmp @state_headers
+@hm_check1:
+        cpx #1
+        bne @hm_check2
+        cmp #$0a
+        bne @hm_reset
+        inc http_hdr_match
+        jmp @state_headers
+@hm_check2:
+        cpx #2
+        bne @hm_check3
+        cmp #$0d
+        bne @hm_reset
+        inc http_hdr_match
+        jmp @state_headers
+@hm_check3:
+        ; idx == 3, expecting $0a
+        cmp #$0a
+        bne @hm_reset
+        ; matched full \r\n\r\n -> body starts
+        lda #2
+        sta http_parse_state
+        lda #0
+        sta http_resp_len
+        sta http_resp_len+1
+        jmp @not_done
+
+@hm_reset:
+        lda #0
+        sta http_hdr_match
+        jmp @state_headers
+
+; ----- state 2: read body bytes -----
+@state_body:
+        jsr net_recv_byte
+        bcs @done               ; no more data -> complete
+        ; store byte using zp_ptr = http_resp_buf + http_resp_len
+        pha                     ; save received byte
+        clc
+        lda #<http_resp_buf
+        adc http_resp_len
+        sta zp_ptr
+        lda #>http_resp_buf
+        adc http_resp_len+1
+        sta zp_ptr+1
+        pla                     ; restore byte
+        ldy #0
+        sta (zp_ptr),y
+        ; increment 16-bit length
+        inc http_resp_len
+        bne @body_check_full
+        inc http_resp_len+1
+@body_check_full:
+        ; check if buffer full (512 bytes = $0200)
+        lda http_resp_len+1
+        cmp #$02
+        bcs @done               ; high byte >= 2 means >= 512
+        jmp @state_body         ; keep reading
+
+@not_done:
+        sec
+        rts
+@done:
+        clc
+        rts
+
+; =============================================================================
+; http_get_plain - perform a plain HTTP (no TLS) GET request
+; Input: http_host_ptr/http_host_len = hostname
+;        http_path_ptr/http_path_len = path
+;        http_port = port (typically 80)
+; Output: C=0 success (response in http_resp_buf), C=1 failure
+; =============================================================================
+http_get_plain:
+        ; --- 1. DNS resolve hostname ---
+        lda http_host_ptr
+        ldx http_host_ptr+1
+        jsr net_dns_resolve
+        bcs @plain_error
+
+        ; --- 2. Set TCP destination IP ---
+        lda #<ip65_dns_ip_addr
+        ldx #>ip65_dns_ip_addr
+        jsr net_set_tcp_dest
+
+        ; --- 3. TCP connect on http_port ---
+        lda http_port
+        ldx http_port+1
+        jsr net_tcp_connect
+        bcs @plain_error
+
+        ; --- 4. Build GET request ---
+        jsr http_build_get
+
+        ; --- 5. Send request ---
+        lda http_req_len
+        sta net_send_len
+        lda http_req_len+1
+        sta net_send_len+1
+        lda #<http_req_buf
+        ldx #>http_req_buf
+        jsr net_tcp_send
+        bcs @plain_close_err
+
+        ; --- 6. Initialise response parser ---
+        lda #0
+        sta http_parse_state
+        sta http_line_idx
+        sta http_hdr_match
+        sta http_resp_len
+        sta http_resp_len+1
+
+        ; --- 7. Poll + parse loop (with timeout) ---
+        lda #0
+        sta @poll_timeout
+        sta @poll_timeout+1
+@plain_poll:
+        jsr net_poll
+        jsr http_recv_response
+        bcc @plain_done         ; C=0 means complete
+        ; reset timeout on any progress (data was consumed)
+        inc @poll_timeout
+        bne @plain_poll
+        inc @poll_timeout+1
+        bne @plain_poll
+        ; timeout: accept whatever we got so far
+@plain_done:
+
+        ; --- 8. Close TCP ---
+        jsr net_tcp_close
+        clc
+        rts
+
+@poll_timeout: !word 0
+
+@plain_close_err:
+        jsr net_tcp_close
+@plain_error:
+        sec
         rts
 
 ; =============================================================================
@@ -97,3 +459,9 @@ http_conn_hdr:
         !text "Connection: close", $0d, $0a
 http_crlf:
         !byte $0d, $0a
+
+; =============================================================================
+; Module-local data (build_get temporaries only; parser state is in data.asm)
+; =============================================================================
+http_bg_idx:            !byte 0         ; build_get write cursor
+http_bg_src:            !byte 0         ; build_get source index temp
