@@ -18,15 +18,14 @@ import struct
 import subprocess
 import sys
 import time
-
 from c64_test_harness import (
     Labels,
     ViceConfig,
     ViceInstanceManager,
+    ScreenGrid,
     read_bytes,
     write_bytes,
     jsr,
-    wait_for_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -59,18 +58,6 @@ NIST_ABC_HASH = bytes.fromhex(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def robust_jsr(transport, addr, timeout=10.0, retries=3):
-    """jsr() wrapper with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
-
-
 def generate_random_string(min_len, max_len):
     """Generate a random string of safe characters with random length."""
     length = random.randint(min_len, max_len)
@@ -84,9 +71,9 @@ def sha256_direct(transport, labels, message):
     """
     write_bytes(transport, labels["input_buffer"], message)
     write_bytes(transport, labels["input_length"], bytes([len(message)]))
-    robust_jsr(transport, labels["sha256_init"], timeout=5.0)
-    robust_jsr(transport, labels["sha256_update"], timeout=10.0)
-    robust_jsr(transport, labels["sha256_final"], timeout=5.0)
+    jsr(transport, labels["sha256_init"], timeout=5.0)
+    jsr(transport, labels["sha256_update"], timeout=10.0)
+    jsr(transport, labels["sha256_final"], timeout=5.0)
     return read_bytes(transport, labels["sha256_hash"], 32)
 
 
@@ -99,7 +86,7 @@ def test_sha256_init(transport, labels):
     print("\n--- Init Verification ---")
 
     try:
-        robust_jsr(transport, labels["sha256_init"], timeout=5.0)
+        jsr(transport, labels["sha256_init"], timeout=5.0)
     except Exception as e:
         print(f"  FAIL: jsr(sha256_init) raised {e}")
         return False
@@ -139,13 +126,13 @@ def test_sha256_process_block(transport, labels):
         write_bytes(transport, labels["sha256_block"], bytes(block))
 
         # Initialize hash state
-        robust_jsr(transport, labels["sha256_init"], timeout=5.0)
+        jsr(transport, labels["sha256_init"], timeout=5.0)
 
         # Call process_block directly
-        robust_jsr(transport, labels["sha256_process_block"], timeout=10.0)
+        jsr(transport, labels["sha256_process_block"], timeout=10.0)
 
         # Finalize (copy H0-H7 to sha256_hash)
-        robust_jsr(transport, labels["sha256_final"], timeout=5.0)
+        jsr(transport, labels["sha256_final"], timeout=5.0)
     except Exception as e:
         print(f"  FAIL: jsr() raised {e}")
         return False
@@ -170,9 +157,9 @@ def test_sha256_empty(transport, labels):
 
     try:
         write_bytes(transport, labels["input_length"], bytes([0]))
-        robust_jsr(transport, labels["sha256_init"], timeout=5.0)
-        robust_jsr(transport, labels["sha256_update"], timeout=10.0)
-        robust_jsr(transport, labels["sha256_final"], timeout=5.0)
+        jsr(transport, labels["sha256_init"], timeout=5.0)
+        jsr(transport, labels["sha256_update"], timeout=10.0)
+        jsr(transport, labels["sha256_final"], timeout=5.0)
     except Exception as e:
         print(f"  FAIL: jsr() raised {e}")
         return False
@@ -333,20 +320,26 @@ def main():
         sound=False,
     )
 
-    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
-        # Wait for main menu (needed for program to finish initialization)
+        # Wait for main menu (binary monitor: resume CPU between screen polls)
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = None
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            g = ScreenGrid.from_transport(transport)
+            if "Q=QUIT" in g.continuous_text().upper():
+                grid = g
+                break
+            transport.resume()
+            time.sleep(1.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
         print("  Main menu ready")
-
-        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
         # Run tests
         print(f"\n=== SHA-256 Direct Tests ({iterations} iterations) ===")

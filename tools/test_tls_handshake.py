@@ -19,12 +19,14 @@ import random
 import struct
 import subprocess
 import sys
-import time
+
+import time as _time
 
 from c64_test_harness import (
     Labels,
     ViceConfig,
     ViceInstanceManager,
+    ScreenGrid,
     read_bytes,
     write_bytes,
     jsr,
@@ -32,7 +34,6 @@ from c64_test_harness import (
     delete_breakpoint,
     goto,
     wait_for_pc,
-    wait_for_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -155,18 +156,6 @@ def derive_secret_ref(secret, label, transcript_hash):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def robust_jsr(transport, addr, timeout=120.0, retries=3):
-    """jsr() wrapper with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.5)
-                continue
-            raise
-
-
 SCRATCH_ADDR = 0x0334
 CARRY_RESULT = 0x033F  # 1 byte: 0=carry clear, 1=carry set
 
@@ -239,8 +228,8 @@ def c64_hkdf_extract(transport, labels, salt, ikm):
                 [ikm_addr & 0xFF, ikm_addr >> 8])
     write_bytes(transport, labels["hkdf_ikm_len"], [len(ikm)])
 
-    robust_jsr(transport, labels["hkdf_extract"], timeout=120.0)
-    return bytes(read_bytes(transport, labels["hkdf_prk"], 32))
+    jsr(transport, labels["hkdf_extract"], timeout=120.0)
+    return read_bytes(transport, labels["hkdf_prk"], 32)
 
 
 def c64_hkdf_expand_label(transport, labels, secret, label, context, length):
@@ -262,8 +251,8 @@ def c64_hkdf_expand_label(transport, labels, secret, label, context, length):
 
     write_bytes(transport, labels["hkdf_out_len"], [length])
 
-    robust_jsr(transport, labels["hkdf_expand_label"], timeout=120.0)
-    return bytes(read_bytes(transport, labels["hkdf_okm"], length))
+    jsr(transport, labels["hkdf_expand_label"], timeout=120.0)
+    return read_bytes(transport, labels["hkdf_okm"], length)
 
 
 # ---------------------------------------------------------------------------
@@ -294,17 +283,17 @@ def test_transcript_hash(transport, labels, rng):
         write_bytes(transport, ZP_PTR,
                     [input_buf & 0xFF, (input_buf >> 8) & 0xFF])
         write_bytes(transport, ZP_COUNT, [len(data)])
-        robust_jsr(transport, transcript_update, timeout=120.0)
+        jsr(transport, transcript_update, timeout=120.0)
 
     def get_hash():
         """Call tls_transcript_hash and read 32-byte result."""
-        robust_jsr(transport, transcript_hash, timeout=120.0)
-        return bytes(read_bytes(transport, transcript_out, 32))
+        jsr(transport, transcript_hash, timeout=120.0)
+        return read_bytes(transport, transcript_out, 32)
 
     # --- Test 1a: Init + hash empty -> SHA-256("") ---
     print("\n  [1a] Transcript: init + hash empty -> SHA-256(\"\")")
     try:
-        robust_jsr(transport, transcript_init, timeout=60.0)
+        jsr(transport, transcript_init, timeout=60.0)
         result = get_hash()
         if result == EMPTY_HASH:
             passed += 1
@@ -321,7 +310,7 @@ def test_transcript_hash(transport, labels, rng):
     print("  [1b] Transcript: feed \"abc\" (3 bytes)")
     expected = hashlib.sha256(b"abc").digest()
     try:
-        robust_jsr(transport, transcript_init, timeout=60.0)
+        jsr(transport, transcript_init, timeout=60.0)
         feed_chunk(b"abc")
         result = get_hash()
         if result == expected:
@@ -340,7 +329,7 @@ def test_transcript_hash(transport, labels, rng):
     data = bytes(rng.getrandbits(8) for _ in range(100))
     expected = hashlib.sha256(data).digest()
     try:
-        robust_jsr(transport, transcript_init, timeout=60.0)
+        jsr(transport, transcript_init, timeout=60.0)
         feed_chunk(data[:60])
         feed_chunk(data[60:])
         result = get_hash()
@@ -360,7 +349,7 @@ def test_transcript_hash(transport, labels, rng):
     data = bytes(rng.getrandbits(8) for _ in range(200))
     expected = hashlib.sha256(data).digest()
     try:
-        robust_jsr(transport, transcript_init, timeout=60.0)
+        jsr(transport, transcript_init, timeout=60.0)
         feed_chunk(data[:80])
         feed_chunk(data[80:150])
         feed_chunk(data[150:])
@@ -408,7 +397,7 @@ def test_client_hello(transport, labels, rng):
     write_bytes(transport, labels["tls_ecdhe_pubkey"], pubkey)
 
     try:
-        robust_jsr(transport, build_ch, timeout=120.0)
+        jsr(transport, build_ch, timeout=120.0)
     except Exception as e:
         print(f"\n  ClientHello build failed: {e}")
         return 0, 3  # all 3 tests fail
@@ -423,7 +412,7 @@ def test_client_hello(transport, labels, rng):
         return 0, 0
 
     # Read the handshake message
-    msg = bytes(read_bytes(transport, hs_buf, min(msg_len, 256)))
+    msg = read_bytes(transport, hs_buf, min(msg_len, 256))
 
     # --- Test 2a: Handshake type and version ---
     print("\n  [2a] ClientHello: handshake type and legacy version")
@@ -631,7 +620,7 @@ def test_server_hello_parse(transport, labels, rng):
                 [len(hs_msg) & 0xFF, (len(hs_msg) >> 8) & 0xFF])
 
     try:
-        regs = robust_jsr(transport, parse_sh, timeout=120.0)
+        regs = jsr(transport, parse_sh, timeout=120.0)
 
         # Check carry flag (C=0 means success)
         carry = 0
@@ -640,9 +629,9 @@ def test_server_hello_parse(transport, labels, rng):
 
         if carry == 0:
             # Verify server_random was extracted
-            got_random = bytes(read_bytes(transport, labels["tls_server_random"], 32))
+            got_random = read_bytes(transport, labels["tls_server_random"], 32)
             # Verify server pubkey was extracted
-            got_pubkey = bytes(read_bytes(transport, labels["tls_server_pubkey"], 32))
+            got_pubkey = read_bytes(transport, labels["tls_server_pubkey"], 32)
 
             random_ok = (got_random == server_random)
             pubkey_ok = (got_pubkey == server_pubkey)
@@ -663,7 +652,7 @@ def test_server_hello_parse(transport, labels, rng):
         else:
             # Parser returned error but it might be a stub
             # Check if the implementation is a stub (just clc; rts)
-            code = bytes(read_bytes(transport, parse_sh, 2))
+            code = read_bytes(transport, parse_sh, 2)
             if code == bytes([0x18, 0x60]):  # CLC; RTS
                 print("       SKIP: tls_parse_server_hello is a stub (clc; rts)")
                 return 0, 0
@@ -674,7 +663,7 @@ def test_server_hello_parse(transport, labels, rng):
         print(f"       FAIL: {e}")
 
     # Check if this is a stub before running error tests
-    code = bytes(read_bytes(transport, parse_sh, 3))
+    code = read_bytes(transport, parse_sh, 3)
     if code[:2] == bytes([0x18, 0x60]):  # CLC; RTS
         print("  SKIP: remaining ServerHello tests (stub implementation)")
         return 0, 0
@@ -772,8 +761,8 @@ def test_key_schedule_steps(transport, labels):
         write_bytes(transport, labels["hkdf_ikm_ptr"],
                     [ikm_addr & 0xFF, ikm_addr >> 8])
         write_bytes(transport, labels["hkdf_ikm_len"], [len(ikm_data)])
-        robust_jsr(transport, labels["hkdf_extract"], timeout=30)
-        return bytes(read_bytes(transport, labels["hkdf_prk"], 32))
+        jsr(transport, labels["hkdf_extract"], timeout=30)
+        return read_bytes(transport, labels["hkdf_prk"], 32)
 
     def do_expand_label(prk, label_addr, label_len, ctx_addr, ctx_len, out_len):
         write_bytes(transport, labels["hkdf_prk"], prk)
@@ -784,8 +773,8 @@ def test_key_schedule_steps(transport, labels):
                     [ctx_addr & 0xFF, ctx_addr >> 8])
         write_bytes(transport, labels["hkdf_context_len"], [ctx_len])
         write_bytes(transport, labels["hkdf_out_len"], [out_len])
-        robust_jsr(transport, labels["hkdf_expand_label"], timeout=30)
-        return bytes(read_bytes(transport, labels["hkdf_okm"], out_len))
+        jsr(transport, labels["hkdf_expand_label"], timeout=30)
+        return read_bytes(transport, labels["hkdf_okm"], out_len)
 
     def do_derive_secret(prk, label_addr, label_len, transcript):
         write_bytes(transport, labels["hkdf_prk"], prk)
@@ -793,8 +782,8 @@ def test_key_schedule_steps(transport, labels):
         write_bytes(transport, labels["hkdf_label_ptr"],
                     [label_addr & 0xFF, label_addr >> 8])
         write_bytes(transport, labels["hkdf_label_len"], [label_len])
-        robust_jsr(transport, labels["tls_derive_secret"], timeout=30)
-        return bytes(read_bytes(transport, labels["hkdf_okm"], 32))
+        jsr(transport, labels["tls_derive_secret"], timeout=30)
+        return read_bytes(transport, labels["hkdf_okm"], 32)
 
     def check(name, got, expected):
         nonlocal passed, failed
@@ -884,7 +873,7 @@ def test_key_schedule(transport, labels):
     derive_hs = labels["tls_derive_handshake_keys"]
 
     # Check if this is a stub (clc; rts)
-    code = bytes(read_bytes(transport, derive_hs, 2))
+    code = read_bytes(transport, derive_hs, 2)
     if code == bytes([0x18, 0x60]):
         print("\n  SKIP: tls_derive_handshake_keys is a stub (clc; rts)")
         return 0, 0
@@ -897,14 +886,14 @@ def test_key_schedule(transport, labels):
           "(this may take several minutes)...")
 
     try:
-        robust_jsr(transport, derive_hs, timeout=600.0)
+        jsr(transport, derive_hs, timeout=600.0)
     except Exception as e:
         print(f"\n  FAIL: tls_derive_handshake_keys raised {e}")
         return 0, 5
 
     # --- Test 4a: Early secret ---
     print("  [4a] Key schedule: early_secret")
-    got_early = bytes(read_bytes(transport, labels["tls_early_secret"], 32))
+    got_early = read_bytes(transport, labels["tls_early_secret"], 32)
     if got_early == EARLY_SECRET:
         passed += 1
         print(f"       PASS: {got_early[:8].hex()}...")
@@ -915,7 +904,7 @@ def test_key_schedule(transport, labels):
 
     # --- Test 4b: Handshake secret ---
     print("  [4b] Key schedule: handshake_secret")
-    got_hs = bytes(read_bytes(transport, labels["tls_handshake_secret"], 32))
+    got_hs = read_bytes(transport, labels["tls_handshake_secret"], 32)
     if got_hs == HANDSHAKE_SECRET:
         passed += 1
         print(f"       PASS: {got_hs[:8].hex()}...")
@@ -929,7 +918,7 @@ def test_key_schedule(transport, labels):
     print("  [4c] Key schedule: client handshake write key")
     expected_client_key = hkdf_expand_label_ref(
         CLIENT_HS_TRAFFIC_SECRET, b"key", b"", 32)
-    got_client_key = bytes(read_bytes(transport, labels["tls_hs_write_key"], 32))
+    got_client_key = read_bytes(transport, labels["tls_hs_write_key"], 32)
     if got_client_key == expected_client_key:
         passed += 1
         print(f"       PASS: {got_client_key[:8].hex()}...")
@@ -942,7 +931,7 @@ def test_key_schedule(transport, labels):
     print("  [4d] Key schedule: client handshake write IV")
     expected_client_iv = hkdf_expand_label_ref(
         CLIENT_HS_TRAFFIC_SECRET, b"iv", b"", 12)
-    got_client_iv = bytes(read_bytes(transport, labels["tls_hs_write_iv"], 12))
+    got_client_iv = read_bytes(transport, labels["tls_hs_write_iv"], 12)
     if got_client_iv == expected_client_iv:
         passed += 1
         print(f"       PASS: {got_client_iv.hex()}")
@@ -955,7 +944,7 @@ def test_key_schedule(transport, labels):
     print("  [4e] Key schedule: server handshake read key")
     expected_server_key = hkdf_expand_label_ref(
         SERVER_HS_TRAFFIC_SECRET, b"key", b"", 32)
-    got_server_key = bytes(read_bytes(transport, labels["tls_hs_read_key"], 32))
+    got_server_key = read_bytes(transport, labels["tls_hs_read_key"], 32)
     if got_server_key == expected_server_key:
         passed += 1
         print(f"       PASS: {got_server_key[:8].hex()}...")
@@ -996,13 +985,13 @@ def test_finished_mac(transport, labels):
 
     # If tls_verify_finished is a stub, test via HKDF primitives instead
     if has_verify:
-        code = bytes(read_bytes(transport, labels["tls_verify_finished"], 2))
+        code = read_bytes(transport, labels["tls_verify_finished"], 2)
         if code == bytes([0x18, 0x60]):
             print("  NOTE: tls_verify_finished is a stub")
             has_verify = False
 
     if has_compute:
-        code = bytes(read_bytes(transport, labels["tls_compute_finished"], 2))
+        code = read_bytes(transport, labels["tls_compute_finished"], 2)
         if code == bytes([0x18, 0x60]):
             print("  NOTE: tls_compute_finished is a stub")
             has_compute = False
@@ -1084,14 +1073,14 @@ def test_finished_mac(transport, labels):
         write_bytes(transport, labels["hkdf_prk"], SERVER_HS_TRAFFIC_SECRET)
         write_bytes(transport, labels["tls_transcript"], TRANSCRIPT_CH_SH)
 
-        robust_jsr(transport, compute_addr, timeout=120.0)
+        jsr(transport, compute_addr, timeout=120.0)
 
         # Read verify_data from tls_verify_data buffer
         vd_addr = labels.address("tls_verify_data")
         if vd_addr:
-            got_verify = bytes(read_bytes(transport, vd_addr, 32))
+            got_verify = read_bytes(transport, vd_addr, 32)
         else:
-            got_verify = bytes(read_bytes(transport, labels["hkdf_okm"], 32))
+            got_verify = read_bytes(transport, labels["hkdf_okm"], 32)
 
         # Compute expected: HMAC(finished_key, transcript_hash)
         # finished_key = HKDF-Expand-Label(traffic_secret, "finished", "", 32)
@@ -1116,12 +1105,12 @@ def test_finished_mac(transport, labels):
     try:
         write_bytes(transport, labels["hkdf_prk"], CLIENT_HS_TRAFFIC_SECRET)
         write_bytes(transport, labels["tls_transcript"], TRANSCRIPT_CH_SH)
-        robust_jsr(transport, compute_addr, timeout=120.0)
+        jsr(transport, compute_addr, timeout=120.0)
         vd_addr = labels.address("tls_verify_data")
         if vd_addr:
-            got_verify = bytes(read_bytes(transport, vd_addr, 32))
+            got_verify = read_bytes(transport, vd_addr, 32)
         else:
-            got_verify = bytes(read_bytes(transport, labels["hkdf_okm"], 32))
+            got_verify = read_bytes(transport, labels["hkdf_okm"], 32)
         client_fk = hkdf_expand_label_ref(
             CLIENT_HS_TRAFFIC_SECRET, b"finished", b"", 32)
         expected = hmac.new(
@@ -1152,7 +1141,7 @@ def run_tests(transport, labels, seed):
 
     # Initialize sqtab (required for any Poly1305 in AEAD paths)
     print("\n  Initializing sqtab...")
-    robust_jsr(transport, labels["sqtab_init"], timeout=60.0)
+    jsr(transport, labels["sqtab_init"], timeout=60.0)
     print("  sqtab ready")
 
     test_groups = [
@@ -1276,18 +1265,25 @@ def main():
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
     print(f"\n=== Starting VICE ===")
 
-    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"VICE PID={inst.pid}, port={inst.port}")
 
-        # Wait for main menu
+        # Wait for main menu (binary monitor: resume CPU between polls)
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = None
+        deadline = _time.monotonic() + 60.0
+        while _time.monotonic() < deadline:
+            g = ScreenGrid.from_transport(transport)
+            if "Q=QUIT" in g.continuous_text().upper():
+                grid = g
+                break
+            transport.resume()
+            _time.sleep(1.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
-        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
         print("  Main menu ready")
 
         # Run tests

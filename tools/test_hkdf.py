@@ -21,17 +21,17 @@ import random
 import struct
 import subprocess
 import sys
-import time
 
 from c64_test_harness import (
     Labels,
     ViceConfig,
     ViceInstanceManager,
+    ScreenGrid,
     read_bytes,
     write_bytes,
     jsr,
-    wait_for_text,
 )
+import time
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -84,18 +84,6 @@ def hkdf_expand_label_ref(secret, label, context, length):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def robust_jsr(transport, addr, timeout=60.0, retries=3):
-    """jsr() wrapper with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
-
-
 def c64_hkdf_extract(transport, labels, salt, ikm):
     """Call hkdf_extract on C64, return 32-byte PRK."""
     salt_addr = labels["input_buffer"]
@@ -111,8 +99,8 @@ def c64_hkdf_extract(transport, labels, salt, ikm):
                 [ikm_addr & 0xFF, ikm_addr >> 8])
     write_bytes(transport, labels["hkdf_ikm_len"], [len(ikm)])
 
-    robust_jsr(transport, labels["hkdf_extract"], timeout=60.0)
-    return bytes(read_bytes(transport, labels["hkdf_prk"], 32))
+    jsr(transport, labels["hkdf_extract"], timeout=60.0)
+    return read_bytes(transport, labels["hkdf_prk"], 32)
 
 
 def c64_hkdf_expand(transport, labels, prk, info, length):
@@ -123,8 +111,8 @@ def c64_hkdf_expand(transport, labels, prk, info, length):
     write_bytes(transport, labels["hkdf_info_len"], [len(info)])
     write_bytes(transport, labels["hkdf_out_len"], [length])
 
-    robust_jsr(transport, labels["hkdf_expand"], timeout=60.0)
-    return bytes(read_bytes(transport, labels["hkdf_okm"], length))
+    jsr(transport, labels["hkdf_expand"], timeout=60.0)
+    return read_bytes(transport, labels["hkdf_okm"], length)
 
 
 def c64_hkdf_expand_label(transport, labels, secret, label, context, length):
@@ -146,8 +134,8 @@ def c64_hkdf_expand_label(transport, labels, secret, label, context, length):
 
     write_bytes(transport, labels["hkdf_out_len"], [length])
 
-    robust_jsr(transport, labels["hkdf_expand_label"], timeout=60.0)
-    return bytes(read_bytes(transport, labels["hkdf_okm"], length))
+    jsr(transport, labels["hkdf_expand_label"], timeout=60.0)
+    return read_bytes(transport, labels["hkdf_okm"], length)
 
 
 # ---------------------------------------------------------------------------
@@ -480,21 +468,26 @@ def main():
         sound=False,
     )
 
-    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
-        # Wait for main menu
+        # Wait for main menu (binary monitor: resume CPU between polls)
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = None
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            g = ScreenGrid.from_transport(transport)
+            if "Q=QUIT" in g.continuous_text().upper():
+                grid = g
+                break
+            transport.resume()
+            time.sleep(1.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
         print("  Main menu ready")
-
-        # Safety loop to prevent runaway execution
-        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
         # Run tests
         print("\n=== HKDF-SHA256 Tests (12 total) ===")

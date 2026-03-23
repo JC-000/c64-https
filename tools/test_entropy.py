@@ -6,7 +6,7 @@ drbg_init_entropy collects non-zero seed data, and that DRBG output
 is non-degenerate (non-zero, non-repeating).
 
 Usage:
-    python3 tools/test_entropy.py [--verbose]
+    python3 tools/test_entropy.py [--verbose] [--seed <int>]
 
 Requires: Python 3.10+, c64_test_harness, VICE x64sc
 """
@@ -20,6 +20,7 @@ from c64_test_harness import (
     Labels,
     ViceConfig,
     ViceInstanceManager,
+    ScreenGrid,
     read_bytes,
     write_bytes,
     jsr,
@@ -27,7 +28,6 @@ from c64_test_harness import (
     delete_breakpoint,
     goto,
     wait_for_pc,
-    wait_for_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -58,18 +58,6 @@ VERBOSE = False
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def robust_jsr(transport, addr, timeout=60.0, retries=3):
-    """jsr() wrapper with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
-
 
 def jsr_with_a(transport, addr, a_value, timeout=120.0):
     """Call a subroutine with the A register set to a_value.
@@ -102,7 +90,7 @@ def jsr_fill_bytes(transport, labels, dest_addr, count):
     drbg_fill_bytes with the byte count in the A register.
     """
     # Set up zp_ptr ($FB-$FC) with destination address (little-endian)
-    write_bytes(transport, 0xFB, [dest_addr & 0xFF, (dest_addr >> 8) & 0xFF])
+    write_bytes(transport, 0xFB, bytes([dest_addr & 0xFF, (dest_addr >> 8) & 0xFF]))
     # Call drbg_fill_bytes with A = count
     jsr_with_a(transport, labels["drbg_fill_bytes"], count)
 
@@ -154,13 +142,11 @@ def test_drbg_seed_nonzero(transport, labels):
     print("\n--- Test 3: DRBG seed not all zeros ---")
 
     seed = read_bytes(transport, labels["drbg_seed"], 32)
-    seed_bytes = bytes(seed)
-
-    if any(b != 0 for b in seed_bytes):
-        nonzero = sum(1 for b in seed_bytes if b != 0)
+    if any(b != 0 for b in seed):
+        nonzero = sum(1 for b in seed if b != 0)
         print(f"  PASS: drbg_seed has {nonzero}/32 non-zero bytes")
         if VERBOSE:
-            print(f"    Seed: {seed_bytes.hex()}")
+            print(f"    Seed: {seed.hex()}")
         return True
     else:
         print(f"  FAIL: drbg_seed is all zeros (no entropy collected)")
@@ -178,7 +164,7 @@ def test_drbg_fill_nonzero(transport, labels):
     dest = labels["input_buffer"]
 
     # Clear destination first to ensure we detect actual output
-    write_bytes(transport, dest, [0x00] * 32)
+    write_bytes(transport, dest, b'\x00' * 32)
 
     try:
         jsr_fill_bytes(transport, labels, dest, 32)
@@ -186,7 +172,7 @@ def test_drbg_fill_nonzero(transport, labels):
         print(f"  FAIL: jsr() raised {e}")
         return False
 
-    output = bytes(read_bytes(transport, dest, 32))
+    output = read_bytes(transport, dest, 32)
 
     if any(b != 0 for b in output):
         nonzero = sum(1 for b in output if b != 0)
@@ -212,11 +198,11 @@ def test_drbg_fill_differs(transport, labels):
     try:
         # First fill
         jsr_fill_bytes(transport, labels, dest, 32)
-        output1 = bytes(read_bytes(transport, dest, 32))
+        output1 = read_bytes(transport, dest, 32)
 
         # Second fill
         jsr_fill_bytes(transport, labels, dest, 32)
-        output2 = bytes(read_bytes(transport, dest, 32))
+        output2 = read_bytes(transport, dest, 32)
     except Exception as e:
         print(f"  FAIL: jsr() raised {e}")
         return False
@@ -272,12 +258,12 @@ def test_reseed_differs(transport, labels, original_seed):
     print("\n--- Test 7: Re-seed produces different seed ---")
 
     try:
-        robust_jsr(transport, labels["drbg_init_entropy"], timeout=60.0)
+        jsr(transport, labels["drbg_init_entropy"], timeout=60.0)
     except Exception as e:
         print(f"  FAIL: jsr(drbg_init_entropy) raised {e}")
         return False
 
-    new_seed = bytes(read_bytes(transport, labels["drbg_seed"], 32))
+    new_seed = read_bytes(transport, labels["drbg_seed"], 32)
 
     if new_seed != original_seed:
         # Count differing bytes
@@ -316,7 +302,7 @@ def run_tests(transport, labels):
     tally(test_cia1_timer_running(transport))
 
     # Test 3: DRBG seed not all zeros — save for test 7
-    original_seed = bytes(read_bytes(transport, labels["drbg_seed"], 32))
+    original_seed = read_bytes(transport, labels["drbg_seed"], 32)
     seed_ok = any(b != 0 for b in original_seed)
     nonzero = sum(1 for b in original_seed if b != 0)
     print(f"\n--- Test 3: DRBG seed not all zeros ---")
@@ -355,6 +341,16 @@ def main():
     if "--verbose" in sys.argv:
         VERBOSE = True
 
+    # Parse --seed <value> for deterministic VICE runs
+    # NOTE: ViceConfig should natively support a `seed` parameter so callers
+    # don't have to smuggle it through extra_args.  File a feature request
+    # against c64-test-harness for v0.5.0.
+    vice_seed = None
+    if "--seed" in sys.argv:
+        idx = sys.argv.index("--seed")
+        if idx + 1 < len(sys.argv):
+            vice_seed = sys.argv[idx + 1]
+
     # Build
     print("=== Building ===")
     subprocess.run(["make", "clean"], capture_output=True)
@@ -378,28 +374,35 @@ def main():
 
     # Start VICE
     print("\n=== Starting VICE ===")
+    extra = ["-seed", vice_seed] if vice_seed else []
     config = ViceConfig(
         prg_path=PRG_PATH,
         warp=True,
         ntsc=True,
         sound=False,
+        extra_args=extra,
     )
 
-    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
-        # Wait for main menu (entropy_init + drbg_init_entropy run at startup)
+        # Wait for main menu (binary monitor: resume CPU between screen polls)
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = None
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            g = ScreenGrid.from_transport(transport)
+            if "Q=QUIT" in g.continuous_text().upper():
+                grid = g
+                break
+            transport.resume()
+            time.sleep(1.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
         print("  Main menu ready (DRBG already seeded at startup)")
-
-        # Safety loop to prevent runaway execution
-        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
         # Run tests
         print(f"\n=== Entropy/DRBG Tests (7 total) ===")

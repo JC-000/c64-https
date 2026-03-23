@@ -17,16 +17,17 @@ import os
 import struct
 import subprocess
 import sys
+
 import time
 
 from c64_test_harness import (
     Labels,
     ViceConfig,
     ViceInstanceManager,
+    ScreenGrid,
     read_bytes,
     write_bytes,
     jsr,
-    wait_for_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -123,34 +124,22 @@ def hkdf_expand_label_ref(secret, label, context, length):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def robust_jsr(transport, addr, timeout=60.0, retries=3):
-    """jsr() wrapper with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
-
-
 def c64_hkdf_extract(transport, labels, salt, ikm):
     """Call hkdf_extract on C64 with given salt and IKM, return 32-byte PRK."""
     salt_addr = labels["input_buffer"]
     write_bytes(transport, salt_addr, salt)
     write_bytes(transport, labels["hkdf_salt_ptr"],
-                [salt_addr & 0xFF, salt_addr >> 8])
-    write_bytes(transport, labels["hkdf_salt_len"], [len(salt)])
+                bytes([salt_addr & 0xFF, salt_addr >> 8]))
+    write_bytes(transport, labels["hkdf_salt_len"], bytes([len(salt)]))
 
     ikm_addr = salt_addr + len(salt)
     write_bytes(transport, ikm_addr, ikm)
     write_bytes(transport, labels["hkdf_ikm_ptr"],
-                [ikm_addr & 0xFF, ikm_addr >> 8])
-    write_bytes(transport, labels["hkdf_ikm_len"], [len(ikm)])
+                bytes([ikm_addr & 0xFF, ikm_addr >> 8]))
+    write_bytes(transport, labels["hkdf_ikm_len"], bytes([len(ikm)]))
 
-    robust_jsr(transport, labels["hkdf_extract"], timeout=60.0)
-    return bytes(read_bytes(transport, labels["hkdf_prk"], 32))
+    jsr(transport, labels["hkdf_extract"], timeout=60.0)
+    return read_bytes(transport, labels["hkdf_prk"], 32)
 
 
 def c64_hkdf_expand_label(transport, labels, secret, label, context, length):
@@ -160,20 +149,20 @@ def c64_hkdf_expand_label(transport, labels, secret, label, context, length):
     label_addr = labels["input_buffer"]
     write_bytes(transport, label_addr, label)
     write_bytes(transport, labels["hkdf_label_ptr"],
-                [label_addr & 0xFF, label_addr >> 8])
-    write_bytes(transport, labels["hkdf_label_len"], [len(label)])
+                bytes([label_addr & 0xFF, label_addr >> 8]))
+    write_bytes(transport, labels["hkdf_label_len"], bytes([len(label)]))
 
     ctx_addr = label_addr + len(label)
     if context:
         write_bytes(transport, ctx_addr, context)
     write_bytes(transport, labels["hkdf_context_ptr"],
-                [ctx_addr & 0xFF, ctx_addr >> 8])
-    write_bytes(transport, labels["hkdf_context_len"], [len(context)])
+                bytes([ctx_addr & 0xFF, ctx_addr >> 8]))
+    write_bytes(transport, labels["hkdf_context_len"], bytes([len(context)]))
 
-    write_bytes(transport, labels["hkdf_out_len"], [length])
+    write_bytes(transport, labels["hkdf_out_len"], bytes([length]))
 
-    robust_jsr(transport, labels["hkdf_expand_label"], timeout=60.0)
-    return bytes(read_bytes(transport, labels["hkdf_okm"], length))
+    jsr(transport, labels["hkdf_expand_label"], timeout=60.0)
+    return read_bytes(transport, labels["hkdf_okm"], length)
 
 
 def c64_derive_secret(transport, labels, secret, label_addr, label_len, transcript):
@@ -186,11 +175,11 @@ def c64_derive_secret(transport, labels, secret, label_addr, label_len, transcri
     write_bytes(transport, labels["tls_transcript"], transcript)
 
     write_bytes(transport, labels["hkdf_label_ptr"],
-                [label_addr & 0xFF, label_addr >> 8])
-    write_bytes(transport, labels["hkdf_label_len"], [label_len])
+                bytes([label_addr & 0xFF, label_addr >> 8]))
+    write_bytes(transport, labels["hkdf_label_len"], bytes([label_len]))
 
-    robust_jsr(transport, labels["tls_derive_secret"], timeout=60.0)
-    return bytes(read_bytes(transport, labels["hkdf_okm"], 32))
+    jsr(transport, labels["tls_derive_secret"], timeout=60.0)
+    return read_bytes(transport, labels["hkdf_okm"], 32)
 
 
 def check_result(step_name, expected, got):
@@ -401,21 +390,26 @@ def main():
         sound=False,
     )
 
-    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
-        # Wait for main menu
+        # Wait for main menu (binary monitor: resume CPU between polls)
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = None
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            g = ScreenGrid.from_transport(transport)
+            if "Q=QUIT" in g.continuous_text().upper():
+                grid = g
+                break
+            transport.resume()
+            time.sleep(1.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
         print("  Main menu ready")
-
-        # Safety loop to prevent runaway execution
-        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
         # Run all 9 steps
         print("\n=== Key Schedule Steps (9 total) ===")
