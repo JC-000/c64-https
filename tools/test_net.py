@@ -14,27 +14,14 @@ import struct
 import subprocess
 import sys
 import time
-
 from c64_test_harness import (
-    Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    Labels, ViceConfig, ViceInstanceManager, ScreenGrid,
+    read_bytes, write_bytes, jsr,
 )
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
-
-
-def robust_jsr(transport, addr, timeout=10.0, retries=3):
-    """jsr() wrapper with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
 
 
 def test_build_integrity(labels):
@@ -79,7 +66,7 @@ def test_ip65_jump_table(transport):
     for i, name in enumerate(names):
         offset = i * 3
         opcode = data[offset]
-        addr = struct.unpack_from("<H", bytes(data), offset + 1)[0]
+        addr = struct.unpack_from("<H", data, offset + 1)[0]
         if opcode == 0x4C and 0x2000 <= addr <= 0x3FFF:
             passed += 1
         else:
@@ -89,7 +76,7 @@ def test_ip65_jump_table(transport):
     # Verify variable table follows (11 entries * 2 bytes)
     vdata = read_bytes(transport, 0x2021, 22)
     for i in range(11):
-        addr = struct.unpack_from("<H", bytes(vdata), i * 2)[0]
+        addr = struct.unpack_from("<H", vdata, i * 2)[0]
         if 0x2000 <= addr <= 0x5FFF:
             passed += 1
         else:
@@ -129,7 +116,7 @@ def test_zp_save_restore(transport, labels):
     for trial in range(10):
         pattern = [random.randint(0, 255) for _ in range(26)]
         write_bytes(transport, save_buf, pattern)
-        robust_jsr(transport, restore_zp)
+        jsr(transport, restore_zp)
         # CPU paused at breakpoint — read ZP before BRK handler clobbers it
         restored = read_bytes(transport, 0x02, 26)
         diff = [(i, pattern[i], restored[i])
@@ -169,7 +156,7 @@ def test_recv_ring_buffer(transport, labels):
     # Test 1: Empty buffer — head == tail
     write_bytes(transport, recv_head, [0])
     write_bytes(transport, recv_tail, [0])
-    robust_jsr(transport, recv_ready)
+    jsr(transport, recv_ready)
     # After jsr, we can read the processor status from the stack or check carry
     # Actually, let's test net_recv_byte which returns C=1 when empty
     # We can check the carry flag indirectly by reading the status register
@@ -184,7 +171,7 @@ def test_recv_ring_buffer(transport, labels):
     # Read bytes one at a time via net_recv_byte
     read_back = []
     for i in range(5):
-        robust_jsr(transport, recv_byte)
+        jsr(transport, recv_byte)
         # After net_recv_byte, A register has the byte and head is incremented
         # We can read tcp_recv_head to verify it advanced
         head_val = read_bytes(transport, recv_head, 1)
@@ -213,7 +200,7 @@ def test_recv_ring_buffer(transport, labels):
 
     # Read 5 bytes, verifying head wraps from 253 -> 0 -> 2
     for i in range(5):
-        robust_jsr(transport, recv_byte)
+        jsr(transport, recv_byte)
 
     head_val = read_bytes(transport, recv_head, 1)
     if head_val[0] == 2:
@@ -246,12 +233,12 @@ def test_ip65_init_without_hardware(transport, labels):
     restore_zp = labels.address("net_restore_zp")
     pattern = [random.randint(0, 255) for _ in range(26)]
     write_bytes(transport, save_buf, pattern)
-    robust_jsr(transport, restore_zp)
+    jsr(transport, restore_zp)
     # ZP now has our pattern (CPU paused at breakpoint)
 
     # Call net_init — saves ZP, calls ip65_init (fails), restores ZP
     try:
-        robust_jsr(transport, net_init, timeout=15.0)
+        jsr(transport, net_init, timeout=15.0)
         print("  PASS: net_init returned without crash (expected failure, no hardware)")
         passed += 1
     except Exception as e:
@@ -343,7 +330,7 @@ def test_tcp_recv_callback(transport, labels):
     write_bytes(transport, recv_tail, [0])
 
     # Call the callback
-    robust_jsr(transport, recv_cb)
+    jsr(transport, recv_cb)
 
     # Verify tail advanced to 16
     tail_val = read_bytes(transport, recv_tail, 1)
@@ -356,7 +343,7 @@ def test_tcp_recv_callback(transport, labels):
 
     # Verify data in ring buffer matches
     buf_data = read_bytes(transport, recv_buf, 16)
-    if list(buf_data) == test_data:
+    if buf_data == bytes(test_data):
         print(f"  PASS: ring buffer contains correct 16 bytes")
         passed += 1
     else:
@@ -371,7 +358,7 @@ def test_tcp_recv_callback(transport, labels):
     write_bytes(transport, 0xC000, test_data2)
     write_bytes(transport, 0xC102, [8, 0])  # len = 8
 
-    robust_jsr(transport, recv_cb)
+    jsr(transport, recv_cb)
 
     tail_val = read_bytes(transport, recv_tail, 1)
     if tail_val[0] == 24:
@@ -382,7 +369,7 @@ def test_tcp_recv_callback(transport, labels):
         failed += 1
 
     buf_data2 = read_bytes(transport, recv_buf + 16, 8)
-    if list(buf_data2) == test_data2:
+    if buf_data2 == bytes(test_data2):
         print(f"  PASS: second batch correct in ring buffer")
         passed += 1
     else:
@@ -422,7 +409,7 @@ def run_tests(transport, labels, verbose=False):
     print("\n--- jsr() Smoke Test ---")
     try:
         save_zp = labels.address("net_save_zp")
-        robust_jsr(transport, save_zp)
+        jsr(transport, save_zp)
         print("  PASS: jsr(net_save_zp) returned OK")
         total_passed += 1
     except Exception as e:
@@ -489,19 +476,25 @@ def main():
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
     print("\n=== Starting VICE ===")
 
-    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
-        # Wait for menu to appear
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        # Wait for menu to appear (binary monitor: resume CPU between polls)
+        grid = None
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            g = ScreenGrid.from_transport(transport)
+            if "Q=QUIT" in g.continuous_text().upper():
+                grid = g
+                break
+            transport.resume()
+            time.sleep(1.0)
         if grid is None:
             print("  FATAL: Program menu did not appear")
             sys.exit(1)
         print("  Program started OK")
-
-        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
         passed, failed = run_tests(transport, labels, verbose)
 

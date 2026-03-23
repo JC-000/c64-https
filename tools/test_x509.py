@@ -30,11 +30,11 @@ from c64_test_harness import (
     Labels,
     ViceConfig,
     ViceInstanceManager,
+    ScreenGrid,
     read_bytes,
     write_bytes,
     jsr,
-    set_register,
-    wait_for_text,
+    goto,
 )
 
 # ---------------------------------------------------------------------------
@@ -88,18 +88,6 @@ CV_LABELS = [
 # Helpers
 # ---------------------------------------------------------------------------
 
-def robust_jsr(transport, addr, timeout=10.0, retries=3, poll_interval=0.2):
-    """jsr() wrapper with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout, poll_interval=poll_interval)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
-
-
 def jsr_with_carry(transport, addr, timeout=120.0, poll_interval=0.5):
     """Call subroutine and capture carry flag using flag-based polling.
 
@@ -142,8 +130,8 @@ def jsr_with_carry(transport, addr, timeout=120.0, poll_interval=0.5):
     write_bytes(transport, CARRY_TRAMPOLINE, trampoline)
     write_bytes(transport, CARRY_FLAG_ADDR, bytes([0x00]))
 
-    # Start execution (set_register closes connection → CPU auto-resumes)
-    set_register(transport, "PC", CARRY_TRAMPOLINE)
+    # Start execution: set PC and resume CPU
+    goto(transport, CARRY_TRAMPOLINE)
 
     # Poll flag until completion
     deadline = time.monotonic() + timeout
@@ -156,6 +144,8 @@ def jsr_with_carry(transport, addr, timeout=120.0, poll_interval=0.5):
             flag = read_bytes(transport, CARRY_FLAG_ADDR, 1)
             if flag[0] == 0xFF:
                 break
+            # Binary monitor: resume CPU after memory read paused it
+            transport.resume()
         except Exception:
             # Transient connection error — retry
             continue
@@ -183,7 +173,7 @@ def check_labels(labels, label_list):
 
 def write_u16_le(transport, addr, value):
     """Write a 16-bit little-endian value."""
-    write_bytes(transport, addr, [value & 0xFF, (value >> 8) & 0xFF])
+    write_bytes(transport, addr, bytes([value & 0xFF, (value >> 8) & 0xFF]))
 
 
 def generate_p256_cert():
@@ -311,7 +301,7 @@ def test_der_parser_p256(transport, labels):
     # --- Test 2: Public key extracted correctly ---
     print("  [1b] DER parse P-256: public key extracted (64 bytes)")
     try:
-        c64_pubkey = bytes(read_bytes(transport, labels["cert_pubkey"], 64))
+        c64_pubkey = read_bytes(transport, labels["cert_pubkey"], 64)
         if c64_pubkey == expected_pubkey:
             passed += 1
             print(f"       PASS: pubkey matches ({c64_pubkey[:8].hex()}...)")
@@ -338,7 +328,7 @@ def test_der_parser_p256(transport, labels):
         tbs_len = tbs_len_bytes[0] + tbs_len_bytes[1] * 256
 
         # Read the TBS region from C64 memory
-        c64_tbs = bytes(read_bytes(transport, tbs_ptr, tbs_len))
+        c64_tbs = read_bytes(transport, tbs_ptr, tbs_len)
 
         if c64_tbs == expected_tbs:
             passed += 1
@@ -357,8 +347,8 @@ def test_der_parser_p256(transport, labels):
     # --- Test 4: Signature extracted ---
     print("  [1d] DER parse P-256: signature r,s extracted")
     try:
-        c64_r = bytes(read_bytes(transport, labels["cert_sig_r"], 32))
-        c64_s = bytes(read_bytes(transport, labels["cert_sig_s"], 32))
+        c64_r = read_bytes(transport, labels["cert_sig_r"], 32)
+        c64_s = read_bytes(transport, labels["cert_sig_s"], 32)
 
         r_ok = (c64_r == expected_r)
         s_ok = (c64_s == expected_s)
@@ -444,7 +434,7 @@ def test_der_parser_p384(transport, labels):
     # --- Test 2: Public key extracted (96 bytes) ---
     print("  [2b] DER parse P-384: public key extracted (96 bytes)")
     try:
-        c64_pubkey = bytes(read_bytes(transport, labels["cert_pubkey"], 96))
+        c64_pubkey = read_bytes(transport, labels["cert_pubkey"], 96)
         if c64_pubkey == expected_pubkey:
             passed += 1
             print(f"       PASS: pubkey matches ({c64_pubkey[:8].hex()}...)")
@@ -491,7 +481,7 @@ def setup_ecdsa_verify(transport, labels, msg_hash, r_bytes, s_bytes,
 
     Does NOT call sqtab_init — that must be done once before any ECDSA tests.
     """
-    write_bytes(transport, labels["ecdsa_curve_id"], [curve_id])
+    write_bytes(transport, labels["ecdsa_curve_id"], bytes([curve_id]))
     write_bytes(transport, labels["ecdsa_hash"], msg_hash)
     write_bytes(transport, labels["ecdsa_sig_r"], r_bytes)
     write_bytes(transport, labels["ecdsa_sig_s"], s_bytes)
@@ -582,11 +572,11 @@ def test_ecdsa_verify_p256(transport, labels):
             print(f"       FAIL: ecdsa_verify returned C=1 (invalid) [{elapsed:.0f}s]")
             # Dump input buffers for debugging
             print(f"       Dumping input buffers from C64 memory:")
-            c64_hash = bytes(read_bytes(transport, labels["ecdsa_hash"], 32))
-            c64_r = bytes(read_bytes(transport, labels["ecdsa_sig_r"], 32))
-            c64_s = bytes(read_bytes(transport, labels["ecdsa_sig_s"], 32))
-            c64_qx = bytes(read_bytes(transport, labels["ecdsa_pubkey_x"], 32))
-            c64_qy = bytes(read_bytes(transport, labels["ecdsa_pubkey_y"], 32))
+            c64_hash = read_bytes(transport, labels["ecdsa_hash"], 32)
+            c64_r = read_bytes(transport, labels["ecdsa_sig_r"], 32)
+            c64_s = read_bytes(transport, labels["ecdsa_sig_s"], 32)
+            c64_qx = read_bytes(transport, labels["ecdsa_pubkey_x"], 32)
+            c64_qy = read_bytes(transport, labels["ecdsa_pubkey_y"], 32)
             c64_cid = read_bytes(transport, labels["ecdsa_curve_id"], 1)[0]
             print(f"         curve_id: {c64_cid}")
             print(f"         hash:  {c64_hash.hex()}")
@@ -678,7 +668,7 @@ def run_tests(transport, labels):
         print(f"  Initializing sqtab (quarter-square multiply tables)...")
         print(f"{'='*60}")
         try:
-            robust_jsr(transport, labels["sqtab_init"], timeout=60.0)
+            jsr(transport, labels["sqtab_init"], timeout=60.0)
             print("  sqtab_init OK")
         except Exception as e:
             print(f"  sqtab_init FAILED: {e}")
@@ -775,23 +765,27 @@ def main():
     # Launch VICE via ViceInstanceManager (safe port allocation)
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
-    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"\n=== Starting VICE ===")
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
-        # Wait for main menu
+        # Wait for main menu (binary monitor: resume CPU between polls)
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = None
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            g = ScreenGrid.from_transport(transport)
+            if "Q=QUIT" in g.continuous_text().upper():
+                grid = g
+                break
+            transport.resume()
+            time.sleep(1.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
         print("  Main menu ready")
-
-        # Write JMP-self safety loop to prevent crashes when BASIC ROM
-        # is banked out and CPU resumes after breakpoint deletion
-        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
         # Run tests
         print(f"\n=== X.509 / ECDSA Verify Tests ===")

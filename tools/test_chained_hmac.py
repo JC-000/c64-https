@@ -19,13 +19,13 @@ from c64_test_harness import (
     Labels,
     ViceConfig,
     ViceInstanceManager,
+    ScreenGrid,
     read_bytes,
     write_bytes,
     set_breakpoint,
     delete_breakpoint,
     goto,
     wait_for_pc,
-    wait_for_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -86,20 +86,26 @@ def main():
 
     for n in range(1, 11):
         config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
-        with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+        with ViceInstanceManager(config=config) as mgr:
             inst = mgr.acquire()
             transport = inst.transport
             print(f"  N={n}: VICE PID={inst.pid}, port={inst.port}")
 
-            # Wait for program menu
-            grid = wait_for_text(transport, "Q=QUIT", timeout=60, verbose=False)
+            # Wait for program menu (binary monitor: resume CPU between polls)
+            grid = None
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                g = ScreenGrid.from_transport(transport)
+                if "Q=QUIT" in g.continuous_text().upper():
+                    grid = g
+                    break
+                transport.resume()
+                time.sleep(1.0)
             if grid is None:
                 print(f"  N={n}: FAIL - main menu did not appear")
                 results.append((n, False, 0.0, True))
                 mgr.release(inst)
                 continue
-            write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
-
             hmac_addr = labels["hmac_sha256"]
 
             # Set up HMAC inputs: 32-byte key, 32-byte data, data_len=32

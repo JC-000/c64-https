@@ -16,58 +16,13 @@ import sys
 import time
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, jsr_poll, wait_for_text,
-    set_register,
+    Labels, ViceConfig, ViceInstanceManager, ScreenGrid,
+    read_bytes, write_bytes, jsr,
 )
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
-
-
-def robust_jsr(transport, addr, timeout=10.0, retries=3):
-    """jsr() wrapper with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.3)
-                continue
-            raise
-
-
-def run_parser_to_completion(transport, recv_response_addr, scratch=0xC200, timeout=30.0):
-    """Call http_recv_response in a loop until C=0, using jsr_poll for reliability.
-
-    Writes a 6502 trampoline at scratch that loops internally:
-        @loop:  JSR http_recv_response
-                BCS @loop          ; C=1 = not done, loop
-                RTS                ; C=0 = complete
-
-    Uses jsr_poll (flag-based polling) so VICE doesn't crash from rapid
-    breakpoint-based jsr calls.  jsr_poll's own scratch space is placed
-    at scratch+0x100 to avoid all conflicts.
-
-    Returns True if parser completed, raises TimeoutError on timeout.
-    """
-    lo = recv_response_addr & 0xFF
-    hi = (recv_response_addr >> 8) & 0xFF
-    # @loop: JSR recv_response (3) / BCS @loop (2) / RTS (1)
-    trampoline = bytes([
-        0x20, lo, hi,   # JSR http_recv_response
-        0xB0, 0xFB,     # BCS @loop (-5, back to offset 0)
-        0x60,           # RTS
-    ])
-    write_bytes(transport, scratch, trampoline)
-    # Place jsr_poll's 17-byte scratch space well away from all conflicts:
-    # - Not at $0334 (overlaps NMI patch at $0339)
-    # - Not at scratch (our loop trampoline)
-    jsr_poll_scratch = scratch + 0x100  # e.g., $C300
-    jsr_poll(transport, scratch, timeout=timeout,
-             scratch_addr=jsr_poll_scratch, poll_interval=0.3)
-    return True
 
 
 def test_build_get_labels(labels):
@@ -125,7 +80,7 @@ def test_build_get_basic(transport, labels):
     write_bytes(transport, path_len, [len(path)])
 
     # Call http_build_get
-    robust_jsr(transport, build_get)
+    jsr(transport, build_get)
 
     # Read the resulting request length
     req_len_bytes = read_bytes(transport, req_len, 2)
@@ -142,11 +97,11 @@ def test_build_get_basic(transport, labels):
     # Build expected output by reading the actual constant bytes from VICE
     # This avoids any PETSCII/ASCII confusion — we compare against what
     # the assembler actually produced.
-    verb_bytes = bytes(read_bytes(transport, get_verb_addr, 4))       # "GET "
-    ver_bytes = bytes(read_bytes(transport, version_addr, 11))        # " HTTP/1.1\r\n"
-    hosthdr_bytes = bytes(read_bytes(transport, host_hdr_addr, 6))    # "Host: "
-    conn_bytes = bytes(read_bytes(transport, conn_hdr_addr, 19))      # "Connection: close\r\n"
-    crlf_bytes = bytes(read_bytes(transport, crlf_addr, 2))           # \r\n
+    verb_bytes = read_bytes(transport, get_verb_addr, 4)       # "GET "
+    ver_bytes = read_bytes(transport, version_addr, 11)        # " HTTP/1.1\r\n"
+    hosthdr_bytes = read_bytes(transport, host_hdr_addr, 6)    # "Host: "
+    conn_bytes = read_bytes(transport, conn_hdr_addr, 19)      # "Connection: close\r\n"
+    crlf_bytes = read_bytes(transport, crlf_addr, 2)           # \r\n
 
     # The hostname and path are written by us in raw bytes, so they stay as-is.
     expected = (
@@ -171,7 +126,7 @@ def test_build_get_basic(transport, labels):
         failed += 1
 
     # Read the request buffer and compare byte-by-byte
-    actual_data = bytes(read_bytes(transport, req_buf, actual_len))
+    actual_data = read_bytes(transport, req_buf, actual_len)
     if actual_data == expected:
         print(f"  PASS: request content matches expected bytes")
         passed += 1
@@ -217,14 +172,25 @@ def _reset_parser(transport, labels):
 def _run_parser_loop(transport, labels, timeout=30.0):
     """Run http_recv_response in a loop until complete (C=0).
 
-    Uses run_parser_to_completion which builds a 6502 loop trampoline
-    and executes it via flag-based polling for reliability.
+    Writes a 6502 trampoline at $C200 that calls http_recv_response
+    in a loop (JSR recv / BCS loop / RTS), then executes it with a
+    single jsr() call. The entire parser loop runs on the C64 side.
 
     Returns True if parser completed, False on timeout.
     """
     recv_response = labels.address("http_recv_response")
+    lo = recv_response & 0xFF
+    hi = (recv_response >> 8) & 0xFF
+    # @loop: JSR http_recv_response (3) / BCS @loop (2) / RTS (1)
+    trampoline = bytes([
+        0x20, lo, hi,   # JSR http_recv_response
+        0xB0, 0xFB,     # BCS @loop (-5, back to offset 0)
+        0x60,           # RTS
+    ])
+    write_bytes(transport, 0xC200, trampoline)
     try:
-        return run_parser_to_completion(transport, recv_response, timeout=timeout)
+        jsr(transport, 0xC200, timeout=timeout)
+        return True
     except TimeoutError:
         return False
 
@@ -284,7 +250,7 @@ def test_recv_response_basic(transport, labels):
         print(f"  FAIL: http_resp_len = {resp_len}, expected 5")
         failed += 1
 
-    resp_body = bytes(read_bytes(transport, labels.address("http_resp_buf"), resp_len))
+    resp_body = read_bytes(transport, labels.address("http_resp_buf"), resp_len)
     if resp_body == b"Hello":
         print(f"  PASS: response body = 'Hello'")
         passed += 1
@@ -377,7 +343,7 @@ def test_recv_response_with_body(transport, labels):
         failed += 1
 
     # Verify body content byte-by-byte
-    resp_body = bytes(read_bytes(transport, labels.address("http_resp_buf"), resp_len))
+    resp_body = read_bytes(transport, labels.address("http_resp_buf"), resp_len)
     if resp_body == body:
         print(f"  PASS: response body matches all {len(body)} bytes")
         passed += 1
@@ -416,7 +382,7 @@ def run_tests(transport, labels, verbose=False):
     print("\n--- jsr() Smoke Test ---")
     try:
         save_zp = labels.address("net_save_zp")
-        robust_jsr(transport, save_zp)
+        jsr(transport, save_zp)
         print("  PASS: jsr(net_save_zp) returned OK")
         total_passed += 1
     except Exception as e:
@@ -483,19 +449,25 @@ def main():
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
     print("\n=== Starting VICE ===")
 
-    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
-        # Wait for menu to appear
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        # Wait for menu to appear (binary monitor: resume CPU between polls)
+        grid = None
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            g = ScreenGrid.from_transport(transport)
+            if "Q=QUIT" in g.continuous_text().upper():
+                grid = g
+                break
+            transport.resume()
+            time.sleep(1.0)
         if grid is None:
             print("  FATAL: Program menu did not appear")
             sys.exit(1)
         print("  Program started OK")
-
-        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
         passed, failed = run_tests(transport, labels, verbose)
 

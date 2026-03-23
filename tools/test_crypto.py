@@ -15,10 +15,9 @@ import struct
 import subprocess
 import sys
 import time
-
 from c64_test_harness import (
-    Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    Labels, ViceConfig, ViceInstanceManager, ScreenGrid,
+    read_bytes, write_bytes, jsr,
 )
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -26,18 +25,6 @@ PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
-
-
-def robust_jsr(transport, addr, timeout=30.0, retries=3):
-    """jsr() with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.5)
-                continue
-            raise
 
 
 # ============================================================================
@@ -188,12 +175,12 @@ def c64_chacha20_init(transport, labels, key, nonce, counter=0):
     write_bytes(transport, labels["cc20_nonce"], nonce)
     write_bytes(transport, labels["cc20_counter"],
                 counter.to_bytes(4, 'little'))
-    robust_jsr(transport, labels["chacha20_init"])
+    jsr(transport, labels["chacha20_init"])
 
 
 def c64_chacha20_block(transport, labels):
     """Generate one ChaCha20 keystream block. Returns 64 bytes."""
-    robust_jsr(transport, labels["chacha20_block"], timeout=120.0)
+    jsr(transport, labels["chacha20_block"], timeout=120.0)
     return read_bytes(transport, labels["cc20_keystream"], 64)
 
 
@@ -205,7 +192,7 @@ def c64_chacha20_encrypt(transport, labels, key, nonce, data, counter=1):
     write_bytes(transport, labels["cc20_data_ptr"],
                 bytes([buf & 0xFF, buf >> 8]))
     write_bytes(transport, labels["cc20_remain"], bytes([len(data)]))
-    robust_jsr(transport, labels["chacha20_encrypt"], timeout=180.0)
+    jsr(transport, labels["chacha20_encrypt"], timeout=180.0)
     return read_bytes(transport, buf, len(data))
 
 
@@ -213,7 +200,7 @@ def c64_poly1305_mac(transport, labels, key, message):
     """Full Poly1305 MAC on C64: init, update, final."""
     write_bytes(transport, labels["poly_r"], key[:16])
     write_bytes(transport, labels["poly_s"], key[16:])
-    robust_jsr(transport, labels["poly1305_init"], timeout=60.0)
+    jsr(transport, labels["poly1305_init"], timeout=60.0)
 
     if len(message) > 0:
         buf = labels["input_buffer"]
@@ -221,9 +208,9 @@ def c64_poly1305_mac(transport, labels, key, message):
         write_bytes(transport, labels["zp_ptr"],
                     bytes([buf & 0xFF, buf >> 8]))
         write_bytes(transport, labels["cc20_remain"], bytes([len(message)]))
-        robust_jsr(transport, labels["poly1305_update"], timeout=120.0)
+        jsr(transport, labels["poly1305_update"], timeout=120.0)
 
-    robust_jsr(transport, labels["poly1305_final"], timeout=30.0)
+    jsr(transport, labels["poly1305_final"], timeout=30.0)
     return read_bytes(transport, labels["poly1305_tag"], 16)
 
 
@@ -248,7 +235,7 @@ def c64_aead_encrypt(transport, labels, key, nonce, aad, plaintext):
                 bytes([pt_buf & 0xFF, pt_buf >> 8]))
     write_bytes(transport, labels["aead_data_len"], bytes([len(plaintext)]))
 
-    robust_jsr(transport, labels["aead_encrypt"], timeout=300.0)
+    jsr(transport, labels["aead_encrypt"], timeout=300.0)
 
     ct = read_bytes(transport, pt_buf, len(plaintext))
     tag = read_bytes(transport, labels["poly1305_tag"], 16)
@@ -279,7 +266,7 @@ def c64_aead_decrypt(transport, labels, key, nonce, aad, ciphertext, tag):
     # Write expected tag
     write_bytes(transport, labels["aead_tag"], tag)
 
-    robust_jsr(transport, labels["aead_decrypt"], timeout=300.0)
+    jsr(transport, labels["aead_decrypt"], timeout=300.0)
 
     pt = read_bytes(transport, ct_buf, len(ciphertext))
     return pt, True
@@ -294,7 +281,7 @@ def test_sqtab_init(transport, labels):
     passed = 0
     failed = 0
 
-    robust_jsr(transport, labels["sqtab_init"], timeout=60.0)
+    jsr(transport, labels["sqtab_init"], timeout=60.0)
 
     # The quarter-square table: sqtab_lo/hi at $7800/$7A00
     # sqtab[n] = floor(n^2 / 4) for n = 0..511
@@ -460,7 +447,7 @@ def test_poly1305_mac_rfc(transport, labels):
     failed = 0
 
     # Ensure sqtab is initialized before Poly1305
-    robust_jsr(transport, labels["sqtab_init"], timeout=60.0)
+    jsr(transport, labels["sqtab_init"], timeout=60.0)
 
     # RFC 7539 Section 2.5.2
     key = bytes([
@@ -502,7 +489,7 @@ def test_aead_encrypt_rfc(transport, labels):
     failed = 0
 
     # Ensure sqtab is initialized
-    robust_jsr(transport, labels["sqtab_init"], timeout=60.0)
+    jsr(transport, labels["sqtab_init"], timeout=60.0)
 
     # RFC 7539 Section 2.8.2
     key = bytes([
@@ -585,7 +572,7 @@ def test_aead_decrypt_roundtrip(transport, labels, rng):
     failed = 0
 
     # Ensure sqtab is initialized
-    robust_jsr(transport, labels["sqtab_init"], timeout=60.0)
+    jsr(transport, labels["sqtab_init"], timeout=60.0)
 
     key = bytes(rng.randint(0, 255) for _ in range(32))
     nonce = bytes(rng.randint(0, 255) for _ in range(12))
@@ -630,7 +617,7 @@ def test_aead_random(transport, labels, rng, count=5):
     failed = 0
 
     # Ensure sqtab is initialized
-    robust_jsr(transport, labels["sqtab_init"], timeout=60.0)
+    jsr(transport, labels["sqtab_init"], timeout=60.0)
 
     for i in range(count):
         key = bytes(rng.randint(0, 255) for _ in range(32))
@@ -771,17 +758,24 @@ def main():
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
     print("\n=== Starting VICE ===")
 
-    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"VICE PID={inst.pid}, port={inst.port}")
 
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        # Binary monitor: resume CPU between screen polls
+        grid = None
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            g = ScreenGrid.from_transport(transport)
+            if "Q=QUIT" in g.continuous_text().upper():
+                grid = g
+                break
+            transport.resume()
+            time.sleep(1.0)
         if grid is None:
             print("FATAL: Program menu did not appear")
             sys.exit(1)
-
-        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
         print("  VICE ready, running tests...")
 

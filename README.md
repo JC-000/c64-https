@@ -117,11 +117,11 @@ Current status (24.8 KB binary, 487 labels):
 
 ### Known Issues
 
-- **VICE 3.9 crashes** on 5+ chained HMAC-SHA256 calls within a single continuous execution (confirmed with proper test harness port allocation — not port contention). Workaround: test key schedule step-by-step via individual jsr() calls. All 9 steps produce correct RFC 8448 values. Real C64 hardware is unaffected.
+- **VICE 3.9** previously appeared to crash on chained HMAC-SHA256 calls, but this was caused by hardcoded port numbers bypassing the test harness port allocator. With proper `ViceInstanceManager` usage (no hardcoded ports), all N=1..10 chained calls succeed reliably.
 
 ## Test Automation
 
-152 tests across 7 suites + 2 diagnostic suites, using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its remote text monitor. All tests log VICE PID and port for multi-agent safety.
+193 tests across 9 suites + 2 diagnostic suites, using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its binary monitor protocol. All tests log VICE PID and port for multi-agent safety.
 
 ```bash
 pip install -e ../c64-test-harness
@@ -130,7 +130,7 @@ pip install -e ../c64-test-harness
 python3 tools/run_all_tests.py --workers 5
 
 # Individual suites
-python3 tools/test_net.py           # 55 tests: ip65 integration, ZP save/restore, ring buffer
+python3 tools/test_net.py           # 60 tests: ip65 integration, ZP save/restore, ring buffer, TCP recv callback
 python3 tools/test_sha256.py        # 7 tests: NIST vectors, boundary cases, random inputs
 python3 tools/test_crypto.py        # 22 tests: ChaCha20/Poly1305/AEAD RFC 7539 vectors + random
 python3 tools/test_hkdf.py          # 12 tests: RFC 5869 vectors, TLS 1.3 key schedule, random
@@ -139,6 +139,7 @@ python3 tools/test_x509.py          # 11 tests: DER parse P-256/P-384, ECDSA ver
 python3 tools/test_tls_handshake.py # 21 tests: transcript hash, ClientHello, ServerHello, key schedule (RFC 8448), Finished MAC
 python3 tools/test_keyschedule_steps.py # 9 tests: key schedule step-by-step (RFC 8448 vectors)
 python3 tools/test_entropy.py          # 7 tests: SID/CIA hardware init, DRBG seeding, output quality
+python3 tools/test_chained_hmac.py    # 10 tests: chained HMAC-SHA256 stability (N=1..10)
 ```
 
 ## Related Projects

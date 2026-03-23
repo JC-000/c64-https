@@ -13,8 +13,8 @@ import time
 os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceInstanceManager,
-    read_bytes, write_bytes, jsr, wait_for_text,
+    Labels, ViceConfig, ViceInstanceManager, ScreenGrid,
+    read_bytes, write_bytes, jsr,
 )
 
 PRG_PATH = os.path.join("build", "c64-https.prg")
@@ -108,12 +108,7 @@ def main():
 
     print(f"\n=== Starting {workers} VICE instances (staggered 100ms) ===")
 
-    with ViceInstanceManager(
-        config=config,
-        port_range_start=6510,
-        port_range_end=6510 + workers + 5,
-        max_retries=3,
-    ) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         instances = []
         for i in range(min(workers, len(suites))):
             inst = mgr.acquire()
@@ -122,9 +117,17 @@ def main():
             if i < workers - 1:
                 time.sleep(0.1)  # 100ms stagger per PATTERNS.md
 
-        # Wait for all instances to boot
+        # Wait for all instances to boot (binary monitor: resume CPU between polls)
         for i, inst in enumerate(instances):
-            grid = wait_for_text(inst.transport, "Q=QUIT", timeout=120.0, verbose=False)
+            grid = None
+            deadline = time.monotonic() + 120.0
+            while time.monotonic() < deadline:
+                g = ScreenGrid.from_transport(inst.transport)
+                if "Q=QUIT" in g.continuous_text().upper():
+                    grid = g
+                    break
+                inst.transport.resume()
+                time.sleep(1.0)
             if grid is None:
                 print(f"  Worker {i}: FATAL - menu did not appear")
                 sys.exit(1)

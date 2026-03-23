@@ -16,23 +16,23 @@ import random
 import struct
 import subprocess
 import sys
-import time
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+import time
 
 from c64_test_harness import (
     Labels,
     ViceConfig,
     ViceInstanceManager,
+    ScreenGrid,
     read_bytes,
     write_bytes,
     jsr,
-    set_register,
     set_breakpoint,
     delete_breakpoint,
     goto,
     wait_for_pc,
-    wait_for_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -118,18 +118,6 @@ def tls_record_decrypt_ref(key, iv, seq_num, header, ciphertext_and_tag):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def robust_jsr(transport, addr, timeout=120.0, retries=3):
-    """jsr() wrapper with retry for transient VICE connection failures."""
-    for attempt in range(retries):
-        try:
-            return jsr(transport, addr, timeout=timeout)
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(0.5)
-                continue
-            raise
-
-
 def jsr_with_a(transport, addr, a_value, timeout=120.0):
     """Call a subroutine with the A register set to a_value.
 
@@ -185,7 +173,7 @@ def test_nonce_construction(transport, labels):
 
     try:
         jsr_with_a(transport, labels["tls_build_nonce"], 0)  # A=0 -> write
-        result = bytes(read_bytes(transport, labels["tls_nonce"], 12))
+        result = read_bytes(transport, labels["tls_nonce"], 12)
         expected = build_tls_nonce(iv, seq)
         if result == expected:
             passed += 1
@@ -209,7 +197,7 @@ def test_nonce_construction(transport, labels):
 
     try:
         jsr_with_a(transport, labels["tls_build_nonce"], 0)
-        result = bytes(read_bytes(transport, labels["tls_nonce"], 12))
+        result = read_bytes(transport, labels["tls_nonce"], 12)
         expected = build_tls_nonce(iv, seq)
         if result == expected:
             passed += 1
@@ -232,7 +220,7 @@ def test_nonce_construction(transport, labels):
 
     try:
         jsr_with_a(transport, labels["tls_build_nonce"], 1)  # A=1 -> read
-        result = bytes(read_bytes(transport, labels["tls_nonce"], 12))
+        result = read_bytes(transport, labels["tls_nonce"], 12)
         expected = build_tls_nonce(iv_read, seq_read)
         if result == expected:
             passed += 1
@@ -285,8 +273,8 @@ def test_seq_increment(transport, labels):
                     [scratch_buf & 0xFF, (scratch_buf >> 8) & 0xFF])
 
         try:
-            robust_jsr(transport, seq_inc_addr, timeout=30.0)
-            result = bytes(read_bytes(transport, scratch_buf, 8))
+            jsr(transport, seq_inc_addr, timeout=30.0)
+            result = read_bytes(transport, scratch_buf, 8)
 
             if result == seq_after:
                 passed += 1
@@ -328,8 +316,8 @@ def read_encrypt_result(transport, labels):
     """Read the encrypted record from C64 after tls_record_encrypt."""
     enc_len_bytes = read_bytes(transport, labels["tls_rec_len"], 2)
     enc_len = enc_len_bytes[0] + enc_len_bytes[1] * 256
-    payload = bytes(read_bytes(transport, labels["tls_rec_buf"], enc_len))
-    header = bytes(read_bytes(transport, labels["tls_rec_header"], 5))
+    payload = read_bytes(transport, labels["tls_rec_buf"], enc_len)
+    header = read_bytes(transport, labels["tls_rec_header"], 5)
     return header, payload
 
 
@@ -378,7 +366,7 @@ def test_record_encrypt(transport, labels, rng):
                       TLS_STATE_SERVER_HELLO, plaintext, content_type)
 
         try:
-            robust_jsr(transport, labels["tls_record_encrypt"], timeout=120.0)
+            jsr(transport, labels["tls_record_encrypt"], timeout=120.0)
             header, payload = read_encrypt_result(transport, labels)
 
             # payload should be ciphertext + tag
@@ -455,12 +443,12 @@ def test_record_decrypt(transport, labels, rng):
                   TLS_STATE_SERVER_HELLO, ref_header, ciphertext_and_tag)
 
     try:
-        robust_jsr(transport, labels["tls_record_decrypt"], timeout=120.0)
+        jsr(transport, labels["tls_record_decrypt"], timeout=120.0)
 
         # Read decrypted plaintext length
         dec_len_bytes = read_bytes(transport, labels["tls_rec_len"], 2)
         dec_len = dec_len_bytes[0] + dec_len_bytes[1] * 256
-        dec_data = bytes(read_bytes(transport, labels["tls_rec_buf"], dec_len))
+        dec_data = read_bytes(transport, labels["tls_rec_buf"], dec_len)
         dec_type = read_bytes(transport, labels["tls_rec_type"], 1)[0]
 
         if dec_data == plaintext and dec_type == content_type:
@@ -498,7 +486,7 @@ def test_record_decrypt(transport, labels, rng):
                   TLS_STATE_SERVER_HELLO, ref_header, tampered_payload)
 
     try:
-        regs = robust_jsr(transport, labels["tls_record_decrypt"],
+        regs = jsr(transport, labels["tls_record_decrypt"],
                           timeout=120.0)
 
         # Expect carry flag set (C=1) indicating AEAD failure
@@ -514,8 +502,8 @@ def test_record_decrypt(transport, labels, rng):
                       "for tampered data)")
         else:
             # If we can't read P, check if tag comparison area differs
-            c64_tag = bytes(read_bytes(transport, labels["poly1305_tag"], 16))
-            aead_tag = bytes(read_bytes(transport, labels["aead_tag"], 16))
+            c64_tag = read_bytes(transport, labels["poly1305_tag"], 16)
+            aead_tag = read_bytes(transport, labels["aead_tag"], 16)
             if c64_tag != aead_tag:
                 passed += 1
                 print("       PASS: tags differ (tamper detected)")
@@ -543,11 +531,11 @@ def test_record_decrypt(transport, labels, rng):
                   TLS_STATE_CONNECTED, ref_header, ciphertext_and_tag)
 
     try:
-        robust_jsr(transport, labels["tls_record_decrypt"], timeout=120.0)
+        jsr(transport, labels["tls_record_decrypt"], timeout=120.0)
 
         dec_len_bytes = read_bytes(transport, labels["tls_rec_len"], 2)
         dec_len = dec_len_bytes[0] + dec_len_bytes[1] * 256
-        dec_data = bytes(read_bytes(transport, labels["tls_rec_buf"], dec_len))
+        dec_data = read_bytes(transport, labels["tls_rec_buf"], dec_len)
         dec_type = read_bytes(transport, labels["tls_rec_type"], 1)[0]
 
         if dec_data == plaintext and dec_type == content_type:
@@ -607,7 +595,7 @@ def test_roundtrip(transport, labels, rng):
                       plaintext, content_type)
 
         try:
-            robust_jsr(transport, labels["tls_record_encrypt"], timeout=120.0)
+            jsr(transport, labels["tls_record_encrypt"], timeout=120.0)
             header, payload = read_encrypt_result(transport, labels)
         except Exception as e:
             failed += 1
@@ -645,7 +633,7 @@ def test_roundtrip(transport, labels, rng):
                     [enc_len & 0xFF, (enc_len >> 8) & 0xFF])
 
         try:
-            robust_jsr(transport, labels["tls_record_decrypt"], timeout=120.0)
+            jsr(transport, labels["tls_record_decrypt"], timeout=120.0)
         except Exception as e:
             failed += 1
             print(f"       FAIL decrypt: {e}")
@@ -653,7 +641,7 @@ def test_roundtrip(transport, labels, rng):
 
         dec_len_bytes = read_bytes(transport, labels["tls_rec_len"], 2)
         dec_len = dec_len_bytes[0] + dec_len_bytes[1] * 256
-        dec_data = bytes(read_bytes(transport, labels["tls_rec_buf"], dec_len))
+        dec_data = read_bytes(transport, labels["tls_rec_buf"], dec_len)
         dec_type = read_bytes(transport, labels["tls_rec_type"], 1)[0]
 
         if dec_data == plaintext and dec_type == content_type:
@@ -685,7 +673,7 @@ def run_tests(transport, labels, seed):
 
     # Initialize sqtab (required for Poly1305 multiply)
     print("\n  Initializing sqtab...")
-    robust_jsr(transport, labels["sqtab_init"], timeout=60.0)
+    jsr(transport, labels["sqtab_init"], timeout=60.0)
     print("  sqtab ready")
 
     test_groups = [
@@ -782,18 +770,25 @@ def main():
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
     print(f"\n=== Starting VICE ===")
 
-    with ViceInstanceManager(config=config, port_range_start=6510, port_range_end=6530, max_retries=3) as mgr:
+    with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"VICE PID={inst.pid}, port={inst.port}")
 
-        # Wait for main menu
+        # Wait for main menu (binary monitor: resume CPU between polls)
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = None
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            g = ScreenGrid.from_transport(transport)
+            if "Q=QUIT" in g.continuous_text().upper():
+                grid = g
+                break
+            transport.resume()
+            time.sleep(1.0)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)
-        write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
         print("  Main menu ready")
 
         # Run tests
