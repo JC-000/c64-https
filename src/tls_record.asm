@@ -484,14 +484,10 @@ tls_record_write:
         rts
 
 @send_header:
-        ; TODO: send 5-byte header via net_tcp_send
-        clc
-        rts
-
 @send_payload:
-        ; TODO: send payload via net_tcp_send
 @send:
-        clc
+        ; send header + payload via tls_record_io
+        jsr tls_send_record
         rts
 
 @fail:
@@ -504,12 +500,9 @@ tls_record_write:
 ;         C=1 incomplete/error
 ; =============================================================================
 tls_record_read:
-        ; TODO:
-        ; 1. Read 5-byte header from net_recv_byte
-        ; 2. Validate: version == 0x0303, length <= TLS_RECORD_MAX + 256
-        ; 3. Read 'length' bytes of payload into tls_rec_buf
-        ; 4. If encrypted, decrypt and strip inner content type
-        clc
+        ; Delegates to tls_recv_record (tls_record_io.asm) which handles
+        ; header parsing, validation, and payload buffering.
+        jsr tls_recv_record
         rts
 
 ; =============================================================================

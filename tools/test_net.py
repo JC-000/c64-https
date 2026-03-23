@@ -282,6 +282,116 @@ def test_ip65_init_without_hardware(transport, labels):
     return passed, failed
 
 
+def test_tcp_recv_callback(transport, labels):
+    """Test net_tcp_recv_cb by manually patching SMC addresses and simulating data.
+
+    We place fake 'inbound data' at $C000 and fake length/ptr variables at $C100,
+    patch the callback's SMC instructions to point to $C100, then call the callback
+    and verify data appears in the ring buffer.
+    """
+    passed = 0
+    failed = 0
+
+    recv_cb = labels.address("net_tcp_recv_cb")
+    recv_buf = labels.address("tcp_recv_buf")
+    recv_head = labels.address("tcp_recv_head")
+    recv_tail = labels.address("tcp_recv_tail")
+
+    # SMC label addresses — these are the LDA instructions we need to patch
+    cb_load_len_lo = labels.address("cb_load_len_lo")
+    cb_load_ptr_lo = labels.address("cb_load_ptr_lo")
+
+    if None in (recv_cb, recv_buf, recv_head, recv_tail, cb_load_len_lo, cb_load_ptr_lo):
+        print("  FAIL: required callback labels not found")
+        return 0, 1
+
+    # Layout in $C000-$C1FF:
+    #   $C000-$C00F: 16 bytes of test data
+    #   $C100-$C101: fake tcp_inbound_data_ptr (points to $C000)
+    #   $C102-$C103: fake tcp_inbound_data_length (16, little-endian)
+    test_data = [0x41 + i for i in range(16)]  # 'A', 'B', ..., 'P'
+    write_bytes(transport, 0xC000, test_data)
+
+    # Fake ip65 variables: ptr=$C000, len=16
+    write_bytes(transport, 0xC100, [0x00, 0xC0])  # ptr = $C000
+    write_bytes(transport, 0xC102, [16, 0])        # len = 16
+
+    # Patch the callback SMC instructions to point to our fake variables.
+    # Each cb_load_* is a 3-byte "LDA abs" instruction. We patch bytes +1, +2.
+    # cb_load_len_lo+1,+2 -> $C102 (len low byte addr)
+    # cb_load_len_lo is the first SMC, cb_load_len_hi is 5 bytes later
+    # cb_load_ptr_lo, cb_load_ptr_hi follow similarly
+    #
+    # SMC layout in net_tcp_recv_cb:
+    #   cb_load_len_lo:  LDA $ffff  (3 bytes)  -> operand = addr of len_lo
+    #   STA ...          (3 bytes)
+    #   cb_load_len_hi:  LDA $ffff  (3 bytes)  -> operand = addr of len_hi
+    #
+    # We patch by writing to the operand bytes (+1, +2 after the label)
+    write_bytes(transport, cb_load_len_lo + 1, [0x02, 0xC1])  # len at $C102
+
+    cb_load_len_hi = labels.address("cb_load_len_hi")
+    write_bytes(transport, cb_load_len_hi + 1, [0x03, 0xC1])  # len+1 at $C103
+
+    write_bytes(transport, cb_load_ptr_lo + 1, [0x00, 0xC1])  # ptr at $C100
+
+    cb_load_ptr_hi = labels.address("cb_load_ptr_hi")
+    write_bytes(transport, cb_load_ptr_hi + 1, [0x01, 0xC1])  # ptr+1 at $C101
+
+    # Reset ring buffer
+    write_bytes(transport, recv_head, [0])
+    write_bytes(transport, recv_tail, [0])
+
+    # Call the callback
+    robust_jsr(transport, recv_cb)
+
+    # Verify tail advanced to 16
+    tail_val = read_bytes(transport, recv_tail, 1)
+    if tail_val[0] == 16:
+        print(f"  PASS: recv_tail = {tail_val[0]} after 16-byte callback")
+        passed += 1
+    else:
+        print(f"  FAIL: recv_tail = {tail_val[0]}, expected 16")
+        failed += 1
+
+    # Verify data in ring buffer matches
+    buf_data = read_bytes(transport, recv_buf, 16)
+    if list(buf_data) == test_data:
+        print(f"  PASS: ring buffer contains correct 16 bytes")
+        passed += 1
+    else:
+        print(f"  FAIL: ring buffer mismatch")
+        for i in range(16):
+            if buf_data[i] != test_data[i]:
+                print(f"    offset {i}: got ${buf_data[i]:02X}, expected ${test_data[i]:02X}")
+        failed += 1
+
+    # Test 2: call again with more data, verify tail advances and wraps
+    test_data2 = [0x61 + i for i in range(8)]  # 'a', 'b', ..., 'h'
+    write_bytes(transport, 0xC000, test_data2)
+    write_bytes(transport, 0xC102, [8, 0])  # len = 8
+
+    robust_jsr(transport, recv_cb)
+
+    tail_val = read_bytes(transport, recv_tail, 1)
+    if tail_val[0] == 24:
+        print(f"  PASS: recv_tail = {tail_val[0]} after second 8-byte callback")
+        passed += 1
+    else:
+        print(f"  FAIL: recv_tail = {tail_val[0]}, expected 24")
+        failed += 1
+
+    buf_data2 = read_bytes(transport, recv_buf + 16, 8)
+    if list(buf_data2) == test_data2:
+        print(f"  PASS: second batch correct in ring buffer")
+        passed += 1
+    else:
+        print(f"  FAIL: second batch mismatch")
+        failed += 1
+
+    return passed, failed
+
+
 def run_tests(transport, labels, verbose=False):
     total_passed = 0
     total_failed = 0
@@ -327,6 +437,11 @@ def run_tests(transport, labels, verbose=False):
 
     print("\n--- Receive Ring Buffer ---")
     p, f = test_recv_ring_buffer(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- TCP Receive Callback ---")
+    p, f = test_tcp_recv_callback(transport, labels)
     total_passed += p
     total_failed += f
 

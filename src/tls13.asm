@@ -124,9 +124,29 @@ tls_connect:
 ; Requires: tls_state == TLS_STATE_CONNECTED
 ; =============================================================================
 tls_send:
-        ; wrap in TLS record, encrypt with traffic key, send via TCP
-        ; jsr tls_record_encrypt        ; TODO
-        ; jsr net_tcp_send              ; TODO
+        ; copy app data from tls_app_ptr to tls_rec_buf
+        lda tls_app_ptr
+        sta zp_ptr
+        lda tls_app_ptr+1
+        sta zp_ptr+1
+        lda tls_app_len
+        sta tls_rec_len
+        lda tls_app_len+1
+        sta tls_rec_len+1
+        ; copy bytes
+        ldy #0
+@copy:
+        cpy tls_app_len
+        beq @copy_done
+        lda (zp_ptr),y
+        sta tls_rec_buf,y
+        iny
+        bne @copy
+@copy_done:
+        ; set inner content type and send encrypted
+        lda #TLS_CT_APPLICATION
+        sta tls_rec_type
+        jsr tls_record_send_encrypted
         rts
 
 ; =============================================================================
@@ -135,9 +155,26 @@ tls_send:
 ; Output: C=0 success (data in tls_app_buf), C=1 no data or error
 ; =============================================================================
 tls_recv:
-        ; read TLS record from TCP buffer, decrypt, return plaintext
-        ; jsr tls_record_read           ; TODO
-        ; jsr tls_record_decrypt        ; TODO
+        jsr net_poll
+        jsr tls_record_recv_and_decrypt
+        bcs @recv_fail
+        ; verify it's application data
+        lda tls_rec_type
+        cmp #TLS_CT_APPLICATION
+        bne @recv_fail
+        ; set tls_app_ptr to tls_rec_buf, tls_app_len to tls_rec_len
+        lda #<tls_rec_buf
+        sta tls_app_ptr
+        lda #>tls_rec_buf
+        sta tls_app_ptr+1
+        lda tls_rec_len
+        sta tls_app_len
+        lda tls_rec_len+1
+        sta tls_app_len+1
+        clc
+        rts
+@recv_fail:
+        sec
         rts
 
 ; =============================================================================
@@ -151,28 +188,233 @@ tls_close:
         rts
 
 ; =============================================================================
-; Stub routines — to be implemented
+; tls_send_client_hello - build and send ClientHello, init transcript
+; Output: C=0 success, C=1 send failure
 ; =============================================================================
 tls_send_client_hello:
-        ; TODO: build ClientHello with extensions, send as TLS record
+        ; initialize transcript hash
+        jsr tls_transcript_init
+
+        ; build ClientHello into tls_hs_buf, sets tls_hs_len
+        jsr tls_build_client_hello
+
+        ; copy tls_hs_buf to tls_rec_buf (tls_hs_len bytes)
+        ldy #0
+@ch_copy:
+        cpy tls_hs_len
+        beq @ch_copy_done
+        lda tls_hs_buf,y
+        sta tls_rec_buf,y
+        iny
+        bne @ch_copy
+@ch_copy_done:
+        ; set record length
+        lda tls_hs_len
+        sta tls_rec_len
+        lda tls_hs_len+1
+        sta tls_rec_len+1
+
+        ; send as plaintext handshake record
+        lda #TLS_CT_HANDSHAKE
+        jsr tls_record_send_plaintext
+        bcs @ch_fail
+
+        ; update transcript with ClientHello
+        lda #<tls_hs_buf
+        sta zp_ptr
+        lda #>tls_hs_buf
+        sta zp_ptr+1
+        lda tls_hs_len
+        sta zp_count
+        jsr tls_transcript_update
+
         clc
+        rts
+@ch_fail:
+        sec
         rts
 
+; =============================================================================
+; tls_recv_server_hello - receive and parse ServerHello, update transcript
+; Output: C=0 success, C=1 timeout or parse error
+; =============================================================================
 tls_recv_server_hello:
-        ; TODO: parse ServerHello, extract key_share, server random
+        lda #0
+        sta @sh_timeout
+        sta @sh_timeout+1
+@sh_wait:
+        jsr net_poll
+        jsr tls_record_recv_and_decrypt
+        bcc @sh_got_record
+        inc @sh_timeout
+        bne @sh_wait
+        inc @sh_timeout+1
+        bne @sh_wait
+        ; timeout
+        sec
+        rts
+@sh_got_record:
+        ; verify content type is handshake
+        lda tls_rec_type
+        cmp #TLS_CT_HANDSHAKE
+        bne @sh_error
+
+        ; copy tls_rec_buf to tls_hs_buf (tls_rec_len bytes)
+        ldy #0
+@sh_copy:
+        cpy tls_rec_len
+        beq @sh_copy_done
+        lda tls_rec_buf,y
+        sta tls_hs_buf,y
+        iny
+        bne @sh_copy
+@sh_copy_done:
+        lda tls_rec_len
+        sta tls_hs_len
+        lda tls_rec_len+1
+        sta tls_hs_len+1
+
+        ; parse ServerHello
+        jsr tls_parse_server_hello
+        bcs @sh_error
+
+        ; update transcript with ServerHello
+        lda #<tls_hs_buf
+        sta zp_ptr
+        lda #>tls_hs_buf
+        sta zp_ptr+1
+        lda tls_hs_len
+        sta zp_count
+        jsr tls_transcript_update
+
         clc
         rts
+@sh_error:
+        sec
+        rts
+@sh_timeout: !word 0
 
 ; tls_derive_handshake_keys — in tls_keyschedule.asm
 ; tls_derive_traffic_keys — in tls_keyschedule.asm
 ; tls_verify_finished — in tls_keyschedule.asm
 
+; =============================================================================
+; tls_recv_encrypted - receive encrypted handshake msg, decrypt, dispatch
+; Output: C=0 success, C=1 timeout/error
+; =============================================================================
 tls_recv_encrypted:
-        ; TODO: read encrypted handshake message, decrypt, dispatch by type
+        lda #0
+        sta @enc_timeout
+        sta @enc_timeout+1
+@enc_wait:
+        jsr net_poll
+        jsr tls_record_recv_and_decrypt
+        bcc @enc_got_record
+        inc @enc_timeout
+        bne @enc_wait
+        inc @enc_timeout+1
+        bne @enc_wait
+        ; timeout
+        sec
+        rts
+@enc_got_record:
+        ; verify inner content type is handshake
+        lda tls_rec_type
+        cmp #TLS_CT_HANDSHAKE
+        bne @enc_error
+
+        ; copy tls_rec_buf to tls_hs_buf
+        ldy #0
+@enc_copy:
+        cpy tls_rec_len
+        beq @enc_copy_done
+        lda tls_rec_buf,y
+        sta tls_hs_buf,y
+        iny
+        bne @enc_copy
+@enc_copy_done:
+        lda tls_rec_len
+        sta tls_hs_len
+        lda tls_rec_len+1
+        sta tls_hs_len+1
+
+        ; update transcript with the handshake message
+        lda #<tls_hs_buf
+        sta zp_ptr
+        lda #>tls_hs_buf
+        sta zp_ptr+1
+        lda tls_hs_len
+        sta zp_count
+        jsr tls_transcript_update
+
+        ; dispatch based on handshake type (first byte of tls_hs_buf)
+        lda tls_hs_buf
+        cmp #TLS_HS_ENCRYPTED_EXT
+        beq @enc_ok                     ; accept, nothing to extract for MVP
+        cmp #TLS_HS_CERTIFICATE
+        beq @enc_cert
+        cmp #TLS_HS_CERT_VERIFY
+        beq @enc_cert_verify
+        cmp #TLS_HS_FINISHED
+        beq @enc_ok                     ; accept, verified later by tls_verify_finished
+        ; unknown handshake type for current state
+        bne @enc_error
+
+@enc_cert:
+        jsr tls_handle_certificate
+        bcs @enc_error
         clc
         rts
 
-tls_send_finished:
-        ; TODO: compute client Finished MAC, encrypt, send
+@enc_cert_verify:
+        jsr tls_handle_cert_verify
+        bcs @enc_error
         clc
+        rts
+
+@enc_ok:
+        clc
+        rts
+@enc_error:
+        sec
+        rts
+@enc_timeout: !word 0
+
+; =============================================================================
+; tls_send_finished - compute client Finished, encrypt, send
+; Output: C=0 success, C=1 failure
+; =============================================================================
+tls_send_finished:
+        ; compute client Finished verify_data into tls_hs_buf, sets tls_hs_len
+        jsr tls_compute_finished
+
+        ; update transcript with the finished message
+        lda #<tls_hs_buf
+        sta zp_ptr
+        lda #>tls_hs_buf
+        sta zp_ptr+1
+        lda tls_hs_len
+        sta zp_count
+        jsr tls_transcript_update
+
+        ; copy tls_hs_buf to tls_rec_buf
+        ldy #0
+@fin_copy:
+        cpy tls_hs_len
+        beq @fin_copy_done
+        lda tls_hs_buf,y
+        sta tls_rec_buf,y
+        iny
+        bne @fin_copy
+@fin_copy_done:
+        ; set record length and inner content type
+        lda tls_hs_len
+        sta tls_rec_len
+        lda tls_hs_len+1
+        sta tls_rec_len+1
+        lda #TLS_CT_HANDSHAKE
+        sta tls_rec_type
+
+        ; encrypt and send
+        jsr tls_record_send_encrypted
         rts

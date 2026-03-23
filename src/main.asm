@@ -32,15 +32,15 @@
 !source "hkdf.asm"
 !source "tls_keyschedule.asm"
 
-; --- HTTP/1.1 client ---
-!source "http.asm"
-
 ; =============================================================================
 ; ip65 binary blob — built with ca65/ld65, placed at $2000
 ; Jump table at $2000, code $2000-$3B26, BSS at $4000+
 ; =============================================================================
 * = $2000
 !binary "../ip65-build/ip65-c64.bin"
+
+; --- HTTP/1.1 client (placed after ip65 to avoid code overlap at $2000) ---
+!source "http.asm"
 
 ; =============================================================================
 ; Crypto modules (from c64-wireguard and c64-aes256-ecdsa)

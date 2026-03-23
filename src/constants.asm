@@ -224,5 +224,5 @@ TLS_ALERT_FATAL         = 2
 ; Buffer sizes
 ; =============================================================================
 TLS_RECORD_MAX          = 512   ; negotiated via max_fragment_length
-TCP_RECV_BUF_SIZE       = 1024  ; ring buffer for ip65 callback data
+TCP_RECV_BUF_SIZE       = 256   ; ring buffer for ip65 callback data (8-bit wrap)
 HTTP_BUF_SIZE           = 256   ; HTTP request/response line buffer
