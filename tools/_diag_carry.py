@@ -4,8 +4,8 @@ import time, sys, os
 os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceInstanceManager, ScreenGrid,
-    read_bytes, write_bytes, goto, jsr,
+    Labels, ViceConfig, ViceInstanceManager,
+    read_bytes, write_bytes, goto, jsr, wait_for_text,
 )
 
 import subprocess
@@ -86,16 +86,7 @@ with ViceInstanceManager(config=config) as mgr:
     t = inst.transport
     print(f"VICE PID={inst.pid}, port={inst.port}", flush=True)
 
-    # Binary monitor: resume CPU between screen polls
-    grid = None
-    deadline = time.monotonic() + 180.0
-    while time.monotonic() < deadline:
-        g = ScreenGrid.from_transport(t)
-        if "Q=QUIT" in g.continuous_text().upper():
-            grid = g
-            break
-        t.resume()
-        time.sleep(1.0)
+    grid = wait_for_text(t, "Q=QUIT", timeout=180.0, verbose=False)
     if grid is None:
         print("FATAL: menu not found")
         sys.exit(1)

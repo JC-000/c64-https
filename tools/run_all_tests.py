@@ -13,8 +13,8 @@ import time
 os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from c64_test_harness import (
-    Labels, ViceConfig, ViceInstanceManager, ScreenGrid,
-    read_bytes, write_bytes, jsr,
+    Labels, ViceConfig, ViceInstanceManager,
+    read_bytes, write_bytes, jsr, wait_for_text,
 )
 
 PRG_PATH = os.path.join("build", "c64-https.prg")
@@ -119,15 +119,7 @@ def main():
 
         # Wait for all instances to boot (binary monitor: resume CPU between polls)
         for i, inst in enumerate(instances):
-            grid = None
-            deadline = time.monotonic() + 120.0
-            while time.monotonic() < deadline:
-                g = ScreenGrid.from_transport(inst.transport)
-                if "Q=QUIT" in g.continuous_text().upper():
-                    grid = g
-                    break
-                inst.transport.resume()
-                time.sleep(1.0)
+            grid = wait_for_text(inst.transport, "Q=QUIT", timeout=120.0, verbose=False)
             if grid is None:
                 print(f"  Worker {i}: FATAL - menu did not appear")
                 sys.exit(1)

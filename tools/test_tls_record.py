@@ -19,13 +19,10 @@ import sys
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-import time
-
 from c64_test_harness import (
     Labels,
     ViceConfig,
     ViceInstanceManager,
-    ScreenGrid,
     read_bytes,
     write_bytes,
     jsr,
@@ -33,6 +30,7 @@ from c64_test_harness import (
     delete_breakpoint,
     goto,
     wait_for_pc,
+    wait_for_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -777,15 +775,7 @@ def main():
 
         # Wait for main menu (binary monitor: resume CPU between polls)
         print("  Waiting for main menu...")
-        grid = None
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline:
-            g = ScreenGrid.from_transport(transport)
-            if "Q=QUIT" in g.continuous_text().upper():
-                grid = g
-                break
-            transport.resume()
-            time.sleep(1.0)
+        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

@@ -13,10 +13,9 @@ import random
 import struct
 import subprocess
 import sys
-import time
 from c64_test_harness import (
-    Labels, ViceConfig, ViceInstanceManager, ScreenGrid,
-    read_bytes, write_bytes, jsr,
+    Labels, ViceConfig, ViceInstanceManager,
+    read_bytes, write_bytes, jsr, wait_for_text,
 )
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -481,16 +480,8 @@ def main():
         transport = inst.transport
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
-        # Wait for menu to appear (binary monitor: resume CPU between polls)
-        grid = None
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline:
-            g = ScreenGrid.from_transport(transport)
-            if "Q=QUIT" in g.continuous_text().upper():
-                grid = g
-                break
-            transport.resume()
-            time.sleep(1.0)
+        # Wait for menu to appear
+        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
         if grid is None:
             print("  FATAL: Program menu did not appear")
             sys.exit(1)

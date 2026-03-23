@@ -19,13 +19,13 @@ from c64_test_harness import (
     Labels,
     ViceConfig,
     ViceInstanceManager,
-    ScreenGrid,
     read_bytes,
     write_bytes,
     set_breakpoint,
     delete_breakpoint,
     goto,
     wait_for_pc,
+    wait_for_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -91,16 +91,8 @@ def main():
             transport = inst.transport
             print(f"  N={n}: VICE PID={inst.pid}, port={inst.port}")
 
-            # Wait for program menu (binary monitor: resume CPU between polls)
-            grid = None
-            deadline = time.time() + 60
-            while time.time() < deadline:
-                g = ScreenGrid.from_transport(transport)
-                if "Q=QUIT" in g.continuous_text().upper():
-                    grid = g
-                    break
-                transport.resume()
-                time.sleep(1.0)
+            # Wait for program menu
+            grid = wait_for_text(transport, "Q=QUIT", timeout=60, verbose=False)
             if grid is None:
                 print(f"  N={n}: FAIL - main menu did not appear")
                 results.append((n, False, 0.0, True))
