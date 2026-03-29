@@ -2,13 +2,15 @@
 """Run all c64-https test suites in parallel using ViceInstanceManager.
 
 Usage:
-    python3 tools/run_all_tests.py [--workers N]
+    python3 tools/run_all_tests.py [--workers N] [--seed S] [--skip-slow]
 """
 
 import os
+import random
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -35,48 +37,26 @@ def build():
     return Labels.from_file(LABELS_PATH)
 
 
-def run_test_suite(name, transport, labels, port, pid):
+def run_test_suite(name, transport, labels, seed):
     """Run a single test suite, return (name, passed, failed, duration)."""
+    # Ensure CPU is running before each suite (previous suite leaves it paused
+    # after jsr() returns at a breakpoint)
+    transport.resume()
     start = time.time()
     passed = failed = 0
 
     try:
         if name == "net":
-            from test_net import test_build_integrity, test_ip65_jump_table
-            from test_net import test_zp_save_restore, test_recv_ring_buffer
-            from test_net import test_ip65_init_without_hardware
-
-            p, f = test_build_integrity(labels)
-            passed += p; failed += f
-            p, f = test_ip65_jump_table(transport)
-            passed += p; failed += f
-            p, f = test_zp_save_restore(transport, labels)
-            passed += p; failed += f
-            p, f = test_recv_ring_buffer(transport, labels)
-            passed += p; failed += f
-            p, f = test_ip65_init_without_hardware(transport, labels)
-            passed += p; failed += f
+            from test_net import run_tests as net_run
+            passed, failed = net_run(transport, labels)
 
         elif name == "sha256":
             from test_sha256 import run_tests as sha256_run
             passed, failed = sha256_run(transport, labels, iterations=5)
 
         elif name == "crypto":
-            from test_crypto import (test_sqtab_init, test_chacha20_block_rfc,
-                test_chacha20_encrypt_rfc, test_poly1305_mac_rfc,
-                test_aead_encrypt_rfc, test_aead_decrypt_roundtrip,
-                test_aead_random)
-            import random
-            rng = random.Random(42)
-            for fn in [test_sqtab_init, test_chacha20_block_rfc,
-                       test_chacha20_encrypt_rfc, test_poly1305_mac_rfc,
-                       test_aead_encrypt_rfc]:
-                p, f = fn(transport, labels)
-                passed += p; failed += f
-            p, f = test_aead_decrypt_roundtrip(transport, labels, rng)
-            passed += p; failed += f
-            p, f = test_aead_random(transport, labels, rng)
-            passed += p; failed += f
+            from test_crypto import run_tests as crypto_run
+            passed, failed = crypto_run(transport, labels, seed=seed)
 
         elif name == "hkdf":
             from test_hkdf import run_tests as hkdf_run
@@ -84,10 +64,32 @@ def run_test_suite(name, transport, labels, port, pid):
 
         elif name == "tls_record":
             from test_tls_record import run_tests as record_run
-            passed, failed = record_run(transport, labels, seed=42)
+            passed, failed = record_run(transport, labels, seed=seed)
+
+        elif name == "tls_handshake":
+            from test_tls_handshake import run_tests as handshake_run
+            passed, failed = handshake_run(transport, labels, seed=seed)
+
+        elif name == "keyschedule":
+            from test_keyschedule_steps import run_tests as ks_run
+            passed, failed = ks_run(transport, labels)
+
+        elif name == "entropy":
+            from test_entropy import run_tests as entropy_run
+            passed, failed = entropy_run(transport, labels)
+
+        elif name == "http":
+            from test_http import run_tests as http_run
+            passed, failed = http_run(transport, labels)
+
+        elif name == "x509":
+            from test_x509 import run_tests as x509_run
+            passed, failed = x509_run(transport, labels)
 
     except Exception as e:
+        import traceback
         print(f"  [{name}] EXCEPTION: {e}")
+        traceback.print_exc()
         failed += 1
 
     duration = time.time() - start
@@ -95,64 +97,66 @@ def run_test_suite(name, transport, labels, port, pid):
 
 
 def main():
-    workers = 3
-    for i, arg in enumerate(sys.argv[1:]):
-        if arg == "--workers":
-            workers = int(sys.argv[i + 2])
+    workers = 4
+    seed = random.randint(0, 2**32 - 1)
+    skip_slow = False
+
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--workers":
+            workers = int(args[i + 1])
+            i += 2
+        elif args[i] == "--seed":
+            seed = int(args[i + 1])
+            i += 2
+        elif args[i] == "--skip-slow":
+            skip_slow = True
+            i += 1
+        else:
+            i += 1
+
+    print(f"Random seed: {seed} (reproduce with --seed {seed})")
 
     labels = build()
 
-    suites = ["net", "sha256", "crypto", "hkdf", "tls_record"]
+    # x509 is by far the slowest (~5 min for ECDSA verify), so start it first.
+    # Entropy uses manual breakpoints sensitive to CPU state, so start it early
+    # on a fresh worker. Remaining fast suites fill in around them.
+    suites = ["entropy", "net", "sha256", "crypto", "hkdf",
+              "keyschedule", "http", "tls_record", "tls_handshake"]
+    if not skip_slow:
+        suites.insert(0, "x509")
 
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    num_instances = min(workers, len(suites))
 
-    print(f"\n=== Starting {workers} VICE instances (staggered 100ms) ===")
+    print(f"\n=== Launching {len(suites)} suites across "
+          f"{num_instances} concurrent VICE instances ===")
 
-    with ViceInstanceManager(config=config) as mgr:
-        instances = []
-        for i in range(min(workers, len(suites))):
-            inst = mgr.acquire()
-            print(f"  Worker {i}: VICE PID={inst.pid}, port={inst.port}")
-            instances.append(inst)
-            if i < workers - 1:
-                time.sleep(0.1)  # 100ms stagger per PATTERNS.md
-
-        # Wait for all instances to boot (binary monitor: resume CPU between polls)
-        for i, inst in enumerate(instances):
-            grid = wait_for_text(inst.transport, "Q=QUIT", timeout=120.0, verbose=False)
+    def run_suite_in_own_instance(mgr, suite_name):
+        """Acquire a fresh VICE instance, run one suite, release."""
+        inst = mgr.acquire()
+        try:
+            grid = wait_for_text(inst.transport, "Q=QUIT", timeout=120.0,
+                                 verbose=False)
             if grid is None:
-                print(f"  Worker {i}: FATAL - menu did not appear")
-                sys.exit(1)
+                return suite_name, 0, 1, 0.0
             # Safety loop: JMP $0339 prevents crash when BASIC ROM banked out
             write_bytes(inst.transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
-            print(f"  Worker {i}: ready")
 
-        # Each suite gets its own worker — suites run in parallel
-        # If more suites than workers, extra suites wait for a free worker
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+            return run_test_suite(suite_name, inst.transport, labels, seed)
+        finally:
+            mgr.release(inst)
 
-        def worker_fn(suite_name, inst):
-            return run_test_suite(suite_name, inst.transport, labels,
-                                 inst.port, inst.pid)
+    results = []
 
-        results = []
-        print(f"\n=== Running {len(suites)} test suites across "
-              f"{len(instances)} workers ===\n")
-
-        # Map suites to workers 1:1 (first batch), then reuse freed workers
-        with ThreadPoolExecutor(max_workers=len(instances)) as pool:
-            futures = {}
-            inst_queue = list(instances)
-            pending_suites = list(suites)
-            active = {}
-
-            # Submit up to N suites (one per worker)
-            while pending_suites and inst_queue:
-                suite = pending_suites.pop(0)
-                inst = inst_queue.pop(0)
-                fut = pool.submit(worker_fn, suite, inst)
-                futures[fut] = suite
-                active[fut] = inst
+    with ViceInstanceManager(config=config) as mgr:
+        with ThreadPoolExecutor(max_workers=num_instances) as pool:
+            futures = {
+                pool.submit(run_suite_in_own_instance, mgr, suite): suite
+                for suite in suites
+            }
 
             for fut in as_completed(futures):
                 name, passed, failed, duration = fut.result()
@@ -160,18 +164,6 @@ def main():
                 results.append((name, passed, failed, duration))
                 print(f"  [{status}] {name}: {passed}/{passed+failed} "
                       f"({duration:.1f}s)")
-
-                # Return this worker's instance and submit next suite
-                freed_inst = active.pop(fut)
-                if pending_suites:
-                    suite = pending_suites.pop(0)
-                    new_fut = pool.submit(worker_fn, suite, freed_inst)
-                    futures[new_fut] = suite
-                    active[new_fut] = freed_inst
-
-        # Release instances
-        for inst in instances:
-            mgr.release(inst)
 
     # Summary
     total_passed = sum(r[1] for r in results)
@@ -183,7 +175,7 @@ def main():
           f"{total_failed} failed")
     for name, passed, failed, duration in sorted(results):
         status = "OK" if failed == 0 else "FAIL"
-        print(f"  {status:4s} {name:15s} {passed:3d}/{passed+failed:3d} "
+        print(f"  {status:4s} {name:20s} {passed:3d}/{passed+failed:3d} "
               f"({duration:.1f}s)")
     print(f"{'='*60}")
 
