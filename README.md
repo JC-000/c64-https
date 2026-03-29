@@ -121,13 +121,15 @@ Current status (24.8 KB binary, 487 labels):
 
 ## Test Automation
 
-193 tests across 9 suites + 2 diagnostic suites, using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its binary monitor protocol. All tests log VICE PID and port for multi-agent safety.
+193 tests across 10 suites (+ 1 standalone diagnostic), using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its binary monitor protocol. The parallel runner allocates a fresh VICE instance per suite to avoid state contamination. All tests log VICE PID and port for multi-agent safety.
 
 ```bash
 pip install -e ../c64-test-harness
 
-# Run all suites in parallel (5 VICE instances, ~2.5 min wall time)
-python3 tools/run_all_tests.py --workers 5
+# Run all 10 suites in parallel (one VICE instance per suite, ~5 min with ECDSA)
+python3 tools/run_all_tests.py
+python3 tools/run_all_tests.py --skip-slow   # Skip x509/ECDSA (~5s wall time)
+python3 tools/run_all_tests.py --workers 6   # Limit concurrent VICE instances
 
 # Individual suites
 python3 tools/test_net.py           # 60 tests: ip65 integration, ZP save/restore, ring buffer, TCP recv callback
@@ -139,7 +141,8 @@ python3 tools/test_x509.py          # 11 tests: DER parse P-256/P-384, ECDSA ver
 python3 tools/test_tls_handshake.py # 21 tests: transcript hash, ClientHello, ServerHello, key schedule (RFC 8448), Finished MAC
 python3 tools/test_keyschedule_steps.py # 9 tests: key schedule step-by-step (RFC 8448 vectors)
 python3 tools/test_entropy.py          # 7 tests: SID/CIA hardware init, DRBG seeding, output quality
-python3 tools/test_chained_hmac.py    # 10 tests: chained HMAC-SHA256 stability (N=1..10)
+python3 tools/test_http.py            # 27 tests: HTTP/1.1 GET builder, response parser, status codes
+python3 tools/test_chained_hmac.py    # 10 tests: chained HMAC-SHA256 stability (N=1..10, standalone)
 ```
 
 ## Related Projects
