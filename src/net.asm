@@ -57,7 +57,13 @@ net_poll:
 ; Output: C=0 success (IP in ip65_dns_ip_addr), C=1 failure
 ; =============================================================================
 net_dns_resolve:
+        pha                     ; save A (hostname lo) across ZP save
+        txa
+        pha                     ; save X (hostname hi) across ZP save
         jsr net_save_zp
+        pla
+        tax                     ; restore X
+        pla                     ; restore A
         jsr ip65_dns_set_host   ; AX = hostname pointer
         jsr ip65_dns_resolve
         php
@@ -94,7 +100,13 @@ net_tcp_connect:
 ; Input: A/X = pointer to 4-byte IP address
 ; =============================================================================
 net_set_tcp_dest:
+        pha                     ; save A (IP ptr lo) across ZP save
+        txa
+        pha                     ; save X (IP ptr hi) across ZP save
         jsr net_save_zp
+        pla
+        tax                     ; restore X
+        pla                     ; restore A
         jsr ip65_set_tcp_dest   ; AX = pointer to 4-byte IP
         jsr net_restore_zp
         rts
