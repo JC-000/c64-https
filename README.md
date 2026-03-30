@@ -112,7 +112,7 @@ Current status (24.8 KB binary, 487 labels):
 - [x] Entropy/DRBG initialization — SID voice 3 noise + CIA timer seeding at boot, DRBG fills for TLS random values
 - [x] X.509 certificate parsing — DER parser extracts TBS, public key, signature (r,s), curve ID for P-256 and P-384
 - [x] ECDSA signature verification — P-256 and P-384, full verify (s⁻¹, scalar mul, point add, Jacobian→affine)
-- [ ] HTTP/1.1 GET request
+- [x] HTTP/1.1 GET request — build GET, parse response (status + headers + body), plain HTTP end-to-end
 - [ ] End-to-end HTTPS GET demo
 
 ### Known Issues
@@ -143,6 +143,10 @@ python3 tools/test_keyschedule_steps.py # 9 tests: key schedule step-by-step (RF
 python3 tools/test_entropy.py          # 7 tests: SID/CIA hardware init, DRBG seeding, output quality
 python3 tools/test_http.py            # 27 tests: HTTP/1.1 GET builder, response parser, status codes
 python3 tools/test_chained_hmac.py    # 10 tests: chained HMAC-SHA256 stability (N=1..10, standalone)
+
+# Integration tests (require tap-c64 interface, dnsmasq; see scripts/setup-tap-networking.sh in c64-test-harness)
+python3 tools/test_dns.py             # 4 tests: DNS resolution via ip65 over TAP (known host, second host, unknown host)
+python3 tools/test_http_integration.py # 5 tests: end-to-end plain HTTP GET over TAP (DNS + TCP + request/response)
 ```
 
 ## Related Projects
