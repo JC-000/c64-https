@@ -35,7 +35,7 @@ Target: **TLS_CHACHA20_POLY1305_SHA256** (0x1303)
 
 - **AEAD:** ChaCha20-Poly1305 (from [c64-wireguard](../c64-wireguard))
 - **Hash:** SHA-256 (from [c64-aes256-ecdsa](../c64-aes256-ecdsa))
-- **Key exchange:** ECDHE with secp256r1 / P-256 (from c64-aes256-ecdsa)
+- **Key exchange:** ECDHE with X25519 (optimized: REU DMA multiply, self-mod code, ~3.6 min/op)
 - **Key derivation:** HKDF-SHA256 (new, built from HMAC-SHA256)
 - **PRNG:** HMAC-DRBG seeded from SID+CIA entropy (from c64-aes256-ecdsa)
 
@@ -47,7 +47,8 @@ The crypto modules and ip65 overlap on zero page $02-$1B. Rather than relocating
 $02-$03   Shared tmp (save/restore around ip65 calls)
 $04-$09   word32 pointers (ChaCha20)
 $0A-$12   SHA-256 accumulators
-$14-$1D   ChaCha20 + Poly1305 vars
+$14-$17   mult66 pointers (fe25519) / ChaCha20 vars (time-shared)
+$18-$1D   ChaCha20 + Poly1305 vars
 $22-$3C   ECDSA bignum / field arithmetic
 $FB-$FE   General pointers (save/restore around ip65 calls)
 ```
@@ -68,8 +69,10 @@ $4000-$5FFF  Crypto: ChaCha20, Poly1305, AEAD (~8 KB)
 $6000-$6FFF  Crypto: SHA-256, HMAC-SHA256, HKDF (~4 KB)
 $7000-$77FF  Crypto: ECDSA/ECDH P-256 (~2 KB)
 $7800-$7BFF  Quarter-square multiply table (1 KB, runtime-generated)
-$7C00-$9FFF  Data buffers: TLS state, record buffers (~9 KB)
-$A000-$BFFF  BASIC ROM (banked out for RAM if needed)
+$7C00-$8DFF  Code: ECDSA verify, DER decode, TLS cert, ECDH (~4.5 KB)
+$8E00-$93FF  Optimization tables: REU DMA, sqtab2, mul38 (~1.5 KB, below ROM)
+$9400-$BFFF  Data buffers: TLS state, crypto state, record buffers (~11 KB)
+              ($A000-$BFFF under BASIC ROM, banked out at boot)
 $C000-$CFFF  Free RAM (4 KB, overflow buffers)
 $DE00-$DE0F  RR-Net CS8900a I/O registers (directly accessed by ip65)
 ```
@@ -97,12 +100,13 @@ The Makefile automatically builds ip65 from the submodule into a flat binary blo
 
 ## Project Status
 
-Current status (24.8 KB binary, 487 labels):
+Current status (40 KB binary, 537 labels):
 
 - [x] Project structure and build system
 - [x] ip65 submodule integration — 6.8 KB binary blob at $2000 (TCP/UDP/DNS/DHCP/ARP + RR-Net CS8900a)
 - [x] Network wrapper with ZP time-sharing — save/restore $02-$1B around ip65 calls
-- [x] Crypto primitives — ChaCha20, Poly1305, AEAD (from c64-wireguard), SHA-256, HMAC-DRBG (from c64-aes256-ecdsa), x25519/fe25519 (from c64-wireguard)
+- [x] Crypto primitives — ChaCha20, Poly1305, AEAD (from c64-wireguard), SHA-256, HMAC-DRBG (from c64-aes256-ecdsa)
+- [x] Optimized X25519/fe25519 — REU DMA multiply tables, mult66 quarter-square, self-mod code, 4x-unrolled cswap (~30% faster, 12,782 jiffies / 3.6 min per keygen)
 - [x] HKDF-SHA256 — Extract, Expand, Expand-Label, Derive-Secret (RFC 5869 + TLS 1.3)
 - [x] TLS 1.3 record layer — encrypt/decrypt with ChaCha20-Poly1305, nonce construction, sequence numbers
 - [x] TLS 1.3 handshake — ClientHello builder (x25519 key_share, SNI), ServerHello parser, streaming transcript hash
@@ -121,12 +125,12 @@ Current status (24.8 KB binary, 487 labels):
 
 ## Test Automation
 
-193 tests across 10 suites (+ 1 standalone diagnostic), using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its binary monitor protocol. The parallel runner allocates a fresh VICE instance per suite to avoid state contamination. All tests log VICE PID and port for multi-agent safety.
+253 tests across 11 suites (+ 1 standalone diagnostic), using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its binary monitor protocol. The parallel runner allocates a fresh VICE instance per suite (with REU support for x25519) to avoid state contamination. All tests log VICE PID and port for multi-agent safety.
 
 ```bash
 pip install -e ../c64-test-harness
 
-# Run all 10 suites in parallel (one VICE instance per suite, ~5 min with ECDSA)
+# Run all 11 suites in parallel (one VICE instance per suite, ~5 min with ECDSA)
 python3 tools/run_all_tests.py
 python3 tools/run_all_tests.py --skip-slow   # Skip x509/ECDSA (~5s wall time)
 python3 tools/run_all_tests.py --workers 6   # Limit concurrent VICE instances
@@ -142,7 +146,11 @@ python3 tools/test_tls_handshake.py # 21 tests: transcript hash, ClientHello, Se
 python3 tools/test_keyschedule_steps.py # 9 tests: key schedule step-by-step (RFC 8448 vectors)
 python3 tools/test_entropy.py          # 7 tests: SID/CIA hardware init, DRBG seeding, output quality
 python3 tools/test_http.py            # 27 tests: HTTP/1.1 GET builder, response parser, status codes
+python3 tools/test_x25519.py          # 71 tests: fe25519 field ops, x25519_clamp, scalarmult (--slow for RFC 7748 vectors)
 python3 tools/test_chained_hmac.py    # 10 tests: chained HMAC-SHA256 stability (N=1..10, standalone)
+
+# Benchmark
+python3 tools/bench_x25519.py         # X25519 key generation (~3.6 min C64 time, ~8s warp)
 
 # Integration tests (require tap-c64 interface, dnsmasq; see scripts/setup-tap-networking.sh in c64-test-harness)
 python3 tools/test_dns.py             # 4 tests: DNS resolution via ip65 over TAP (known host, second host, unknown host)

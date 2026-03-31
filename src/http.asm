@@ -16,43 +16,139 @@
 ; Output: C=0 success (response in http_resp_buf), C=1 failure
 ; =============================================================================
 http_get:
-        ; 1. DNS resolve hostname
-        ; jsr net_dns_resolve
-        ; bcs @error
+        ; --- 1. DNS resolve hostname ---
+        lda http_host_ptr
+        ldx http_host_ptr+1
+        jsr net_dns_resolve
+        bcc @dns_ok
+        jmp @error
+@dns_ok:
 
-        ; 2. TCP connect to resolved IP on port 443
-        ; jsr net_tcp_connect
-        ; bcs @error
+        ; --- 2. Set TCP destination IP ---
+        lda #<ip65_dns_ip_addr
+        ldx #>ip65_dns_ip_addr
+        jsr net_set_tcp_dest
 
-        ; 3. TLS handshake
-        ; jsr tls_connect
-        ; bcs @error
+        ; --- 3. TCP connect on http_port ---
+        lda http_port
+        ldx http_port+1
+        jsr net_tcp_connect
+        bcc @tcp_ok
+        jmp @error
+@tcp_ok:
 
-        ; 4. Build GET request
+        ; --- 4. Copy hostname to tls_hostname for SNI ---
+        lda http_host_ptr
+        sta zp_ptr
+        lda http_host_ptr+1
+        sta zp_ptr+1
+        ldy #0
+@copy_host:
+        cpy http_host_len
+        beq @copy_host_done
+        lda (zp_ptr),y
+        sta tls_hostname,y
+        iny
+        bne @copy_host          ; always branches (hostname < 256)
+@copy_host_done:
+        lda #0
+        sta tls_hostname,y      ; null-terminate
+        sty tls_hostname_len
+
+        ; --- 5. TLS handshake ---
+        jsr tls_connect
+        bcc @tls_ok
+        jmp @tls_error
+@tls_ok:
+
+        ; --- 6. Build HTTP GET request ---
         jsr http_build_get
-        ; bcs @error
 
-        ; 5. Send via TLS
-        ; lda #<http_req_buf
-        ; ldx #>http_req_buf
-        ; ... set length ...
-        ; jsr tls_send
-        ; bcs @error
+        ; --- 7. Send request via TLS ---
+        lda #<http_req_buf
+        sta tls_app_ptr
+        lda #>http_req_buf
+        sta tls_app_ptr+1
+        lda http_req_len
+        sta tls_app_len
+        lda http_req_len+1
+        sta tls_app_len+1
+        jsr tls_send
+        bcs @close_error
 
-        ; 6. Receive response via TLS
-        ; jsr http_recv_response
-        ; bcs @error
+        ; --- 8. Receive response via TLS ---
+        ; Initialise parser state
+        lda #0
+        sta http_parse_state
+        sta http_line_idx
+        sta http_hdr_match
+        sta http_resp_len
+        sta http_resp_len+1
 
-        ; 7. Close TLS + TCP
-        ; jsr tls_close
+        ; Poll + receive loop
+        lda #0
+        sta @recv_timeout
+        sta @recv_timeout+1
+@recv_loop:
+        jsr net_poll
+        jsr tls_recv
+        bcs @recv_no_data
 
+        ; Got decrypted data in tls_app_ptr / tls_app_len
+        ; Copy tls_app_ptr to ZP for indirect addressing
+        lda tls_app_ptr
+        sta zp_ptr
+        lda tls_app_ptr+1
+        sta zp_ptr+1
+
+        ; Feed decrypted bytes into the TCP ring buffer
+        ldy #0
+@feed_loop:
+        cpy tls_app_len         ; low byte only (TLS records < 256)
+        beq @feed_done
+        lda (zp_ptr),y
+        ldx tcp_recv_tail
+        sta tcp_recv_buf,x
+        inx
+        stx tcp_recv_tail
+        iny
+        bne @feed_loop          ; always branches
+@feed_done:
+        ; Parse from ring buffer
+        jsr http_recv_response
+        bcc @recv_complete      ; C=0 means parsing complete
+        ; Reset timeout counter on progress
+        lda #0
+        sta @recv_timeout
+        sta @recv_timeout+1
+        jmp @recv_loop
+
+@recv_no_data:
+        inc @recv_timeout
+        bne @recv_loop
+        inc @recv_timeout+1
+        bne @recv_loop
+        ; Timeout — accept whatever we have
+
+@recv_complete:
+        jsr tls_close
+        jsr net_tcp_close
         clc
         rts
 
-; @error:
-;         jsr tls_close
-;         sec
-;         rts
+@recv_timeout: !word 0
+
+@tls_error:
+        jsr net_tcp_close
+@error:
+        sec
+        rts
+
+@close_error:
+        jsr tls_close
+        jsr net_tcp_close
+        sec
+        rts
 
 ; =============================================================================
 ; http_build_get - construct HTTP/1.1 GET request in http_req_buf

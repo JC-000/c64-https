@@ -52,12 +52,16 @@ sha_temp1       = $0a           ; 4 bytes ($0A-$0D)
 sha_temp2       = $0e           ; 4 bytes ($0E-$11)
 sha256_round    = $12           ; 1 byte
 
-; --- ChaCha20 state ---
+; --- ChaCha20 state / mult66 pointers (time-shared: fe25519 and ChaCha20 never run simultaneously) ---
 cc20_round      = $14           ; 1 byte
 cc20_qr_idx     = $15           ; 1 byte
 cc20_data_ptr   = $16           ; 2 bytes ($16-$17)
 cc20_remain     = $18           ; 1 byte (also poly1305_update counter)
 cc20_buf_pos    = $19           ; 1 byte
+
+; --- mult66 indirect-indexed multiply pointers (time-shared with ChaCha20) ---
+lmul0           = $14           ; 2 bytes ($14-$15) — sqtab lookup pointer
+lmul1           = $16           ; 2 bytes ($16-$17) — sqtab_hi lookup pointer
 
 ; --- Poly1305 state ---
 poly_i          = $1a           ; 1 byte
@@ -105,6 +109,18 @@ zp_count        = $fe           ; 1 byte
 ; --- Quarter-square multiply table (shared by Poly1305 and ECDSA) ---
 sqtab_lo        = $7800         ; 512 bytes: floor(n^2/4) low bytes
 sqtab_hi        = $7a00         ; 512 bytes: floor(n^2/4) high bytes
+
+; --- REU (Ram Expansion Unit) registers ---
+reu_status      = $df00         ; status register
+reu_command     = $df01         ; command register
+reu_c64_lo      = $df02         ; C64 base address low
+reu_c64_hi      = $df03         ; C64 base address high
+reu_reu_lo      = $df04         ; REU base address low
+reu_reu_hi      = $df05         ; REU base address high
+reu_reu_bank    = $df06         ; REU bank
+reu_len_lo      = $df07         ; transfer length low
+reu_len_hi      = $df08         ; transfer length high
+reu_addr_ctrl   = $df0a         ; address control
 
 ; --- SID voice 3 setup for noise (entropy collection) ---
 sid_base        = $d400
