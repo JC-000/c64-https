@@ -8,6 +8,45 @@
 zp_save_buf:    !fill 26, 0     ; saves $02-$1B during ip65 calls
 
 ; =============================================================================
+; fe25519/x25519 optimization tables — MUST live below $A000 to avoid
+; BASIC ROM shadow.  REU DMA and CPU reads need direct RAM access.
+; Placed here (early in data section) to guarantee addresses < $A000.
+; =============================================================================
+
+; --- REU DMA target buffers (page-aligned for LDA abs,Y without penalty) ---
+        !align 255, 0          ; align to next page boundary
+mul_dma_lo:
+        !fill 256, 0           ; DMA target: lo bytes of a*b for current a
+mul_dma_hi:
+        !fill 256, 0           ; DMA target: hi bytes of a*b for current a
+
+; --- mult66 second quarter-square table ---
+sqtab2_lo:
+        !byte 0
+        !for i, 1, 255 {
+                !byte <(((256-i)*(256-i))/4 - 1)
+        }
+
+sqtab2_hi:
+        !byte 0
+        !for i, 1, 255 {
+                !byte >(((256-i)*(256-i))/4 - 1)
+        }
+
+; --- mul_by_38 lookup tables ---
+mul38_lo_tab:
+        !byte 0
+        !for i, 1, 255 {
+                !byte <(i * 38)
+        }
+
+mul38_hi_tab:
+        !byte 0
+        !for i, 1, 255 {
+                !byte >(i * 38)
+        }
+
+; =============================================================================
 ; Network layer buffers
 ; =============================================================================
 tcp_recv_buf:   !fill 256, 0    ; TCP receive ring buffer (256 bytes, wraps)
@@ -229,6 +268,12 @@ x25_e:          !fill 32, 0
 x25_basepoint:
         !byte 9
         !fill 31, 0
+
+; --- fe_mul optimization buffers (from c64-x25519 optimizations) ---
+mul_cached_a:
+        !byte 0                ; cached src1[i] for inlined multiply
+mul_src2_buf:
+        !fill 32, 0           ; absolute copy of src2 for fast indexed access
 
 ; =============================================================================
 ; ECDSA signature verification (moved from ecdsa_verify.asm to avoid

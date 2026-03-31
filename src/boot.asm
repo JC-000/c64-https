@@ -37,10 +37,27 @@
         jsr entropy_init
         jsr drbg_init_entropy
 
+        ; build quarter-square multiply table (needed by Poly1305, fe25519, ECDSA)
+        jsr sqtab_init
+
+        ; pre-compute REU multiply rows (depends on sqtab being populated)
+        ; Ensure BASIC ROM is off — data buffers and REU DMA targets live at $A000+
+        lda $01
+        and #%11111110
+        sta $01
+        jsr reu_mul_init
+
         ; print menu
         lda #<menu_msg
         ldy #>menu_msg
         jsr print_string
+
+        ; Ensure BASIC ROM stays off for all runtime operation.
+        ; Data buffers (fe_wide, x25_*, ECDSA) live at $A000-$BFFF.
+        ; The C64 writes to RAM under ROM, but reads hit ROM unless banked out.
+        lda $01
+        and #%11111110
+        sta $01
 
         ; enter main loop
         jmp main_loop
@@ -487,6 +504,129 @@ failed_msg:
 done_msg:
         !text "CONNECTION CLOSED"
         !byte $0d, 0
+
+; =============================================================================
+; REU multiply table initialization (from c64-x25519 optimizations)
+; =============================================================================
+
+; =============================================================================
+; reu_mul_init - Generate 256 full multiplication rows and stash in REU
+;
+; For each a = 0..255, computes a*b for b = 0..255 and stashes:
+;   256 lo bytes at REU offset a*512
+;   256 hi bytes at REU offset a*512+256
+;
+; Uses mul_dma_lo/mul_dma_hi as staging buffers.
+; Uses mul_8x8 (requires sqtab to be initialized first).
+; Clobbers: A, X, Y
+; =============================================================================
+reu_mul_init:
+        lda #0
+        sta reu_init_a         ; outer counter (multiplier a)
+
+@outer:
+        ; For current a, compute a*b for all b=0..255
+        lda #0
+        sta reu_init_b         ; inner counter (multiplicand b)
+
+@inner:
+        lda reu_init_a
+        ldx reu_init_b
+        jsr mul_8x8            ; poly_prod_lo/hi = a * b
+
+        ldx reu_init_b
+        lda poly_prod_lo
+        sta mul_dma_lo,x
+        lda poly_prod_hi
+        sta mul_dma_hi,x
+
+        inc reu_init_b
+        bne @inner             ; loop b = 0..255
+
+        ; Stash lo table (256 bytes) to REU at offset a*512
+        lda #<mul_dma_lo
+        sta reu_c64_lo
+        lda #>mul_dma_lo
+        sta reu_c64_hi
+        lda #0
+        sta reu_reu_lo         ; REU offset low = 0
+        lda reu_init_a
+        asl                    ; A = a * 2 (high byte of offset)
+        sta reu_reu_hi
+        lda #0
+        adc #0                 ; carry into bank if a >= 128
+        sta reu_reu_bank
+        lda #0
+        sta reu_len_lo
+        lda #1
+        sta reu_len_hi         ; length = 256
+        lda #0
+        sta reu_addr_ctrl      ; both addresses increment
+        lda #%10110000         ; execute + autoload + STASH (C64->REU)
+        sta reu_command
+
+        ; Stash hi table (256 bytes) to REU at offset a*512+256
+        lda #<mul_dma_hi
+        sta reu_c64_lo
+        lda #>mul_dma_hi
+        sta reu_c64_hi
+        lda #0
+        sta reu_reu_lo
+        lda reu_init_a
+        asl                    ; a*2 (carry = bit 7 of a)
+        lda #0
+        adc #0                 ; bank = a >> 7
+        sta reu_reu_bank
+        lda reu_init_a
+        asl                    ; a*2
+        ora #1                 ; +1 for hi page (a*2 is even, so OR works)
+        sta reu_reu_hi
+        lda #0
+        sta reu_len_lo
+        lda #1
+        sta reu_len_hi         ; length = 256
+        lda #0
+        sta reu_addr_ctrl
+        lda #%10110000         ; execute + autoload + STASH
+        sta reu_command
+
+        inc reu_init_a
+        beq @init_done         ; if wrapped to 0, done
+        jmp @outer
+@init_done:
+        ; Pre-configure constant REU registers for fetch routine
+        lda #<mul_dma_lo
+        sta reu_c64_lo
+        lda #>mul_dma_lo
+        sta reu_c64_hi
+        lda #0
+        sta reu_reu_lo
+        sta reu_len_lo
+        sta reu_addr_ctrl
+        lda #2
+        sta reu_len_hi         ; length high = 2 (512 bytes)
+        rts
+
+reu_init_a:     !byte 0
+reu_init_b:     !byte 0
+
+; =============================================================================
+; reu_fetch_mul_row - DMA a multiplication table row from REU to C64
+;
+; Input: mul_cached_a = multiplier value (0-255)
+; Fetches 512 bytes: 256 lo bytes to mul_dma_lo, 256 hi bytes to mul_dma_hi
+; Clobbers: A
+; =============================================================================
+reu_fetch_mul_row:
+        lda mul_cached_a
+        asl                    ; A = multiplier * 2, carry = bit 7
+        sta reu_reu_hi
+        lda #0
+        adc #0                 ; bank = carry from shift
+        sta reu_reu_bank
+        lda #%10110001         ; execute + autoload + FETCH (REU->C64)
+        sta reu_command
+        rts
 
 ; =============================================================================
 ; hostname and path data

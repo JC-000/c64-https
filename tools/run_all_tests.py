@@ -86,6 +86,10 @@ def run_test_suite(name, transport, labels, seed):
             from test_x509 import run_tests as x509_run
             passed, failed = x509_run(transport, labels)
 
+        elif name == "x25519":
+            from test_x25519 import run_tests as x25519_run
+            passed, failed = x25519_run(transport, labels, seed=seed)
+
     except Exception as e:
         import traceback
         print(f"  [{name}] EXCEPTION: {e}")
@@ -124,11 +128,13 @@ def main():
     # Entropy uses manual breakpoints sensitive to CPU state, so start it early
     # on a fresh worker. Remaining fast suites fill in around them.
     suites = ["entropy", "net", "sha256", "crypto", "hkdf",
-              "keyschedule", "http", "tls_record", "tls_handshake"]
+              "keyschedule", "http", "tls_record", "tls_handshake",
+              "x25519"]
     if not skip_slow:
         suites.insert(0, "x509")
 
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
+                        extra_args=["-reu", "-reusize", "512"])
     num_instances = min(workers, len(suites))
 
     print(f"\n=== Launching {len(suites)} suites across "
