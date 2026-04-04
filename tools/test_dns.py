@@ -13,14 +13,15 @@ Usage:
 """
 
 import os
-import shutil
 import subprocess
 import sys
-import time
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from net_test_env import NetworkTestEnv, skip_if_no_network
 
 # ip65_dns_ip_addr: 4 bytes storing the resolved IP address
 IP65_DNS_IP_ADDR = 0x4073
@@ -29,64 +30,6 @@ IP65_DNS_IP_ADDR = 0x4073
 HOSTNAME_ADDR = 0xC000
 TRAMPOLINE_ADDR = 0xC100
 CARRY_RESULT_ADDR = 0xC0F0
-
-
-# ---------------------------------------------------------------------------
-# Skip checks
-# ---------------------------------------------------------------------------
-
-def check_prerequisites():
-    """Return True if all prerequisites are met, else print skip and return False."""
-    if not os.path.exists("/sys/class/net/tap-c64"):
-        print("SKIP: tap-c64 interface not found")
-        return False
-    if shutil.which("x64sc") is None:
-        print("SKIP: x64sc not on PATH")
-        return False
-    if shutil.which("dnsmasq") is None:
-        print("SKIP: dnsmasq not on PATH")
-        return False
-    if shutil.which("sudo") is None:
-        print("SKIP: sudo not on PATH (needed for dnsmasq)")
-        return False
-    return True
-
-
-# ---------------------------------------------------------------------------
-# dnsmasq helper
-# ---------------------------------------------------------------------------
-
-def start_dnsmasq():
-    """Start dnsmasq providing DHCP and DNS on tap-c64. Returns Popen.
-
-    dnsmasq needs root for port 53, so we launch it via sudo.
-    """
-    cmd = [
-        "sudo", "dnsmasq",
-        "--no-daemon",
-        "--interface=tap-c64",
-        "--bind-interfaces",
-        "--listen-address=10.0.65.1",
-        "--dhcp-range=10.0.65.2,10.0.65.10,255.255.255.0,5m",
-        "--address=/c64test.local/10.0.65.1",
-        "--address=/second.local/10.0.65.1",
-        "--dhcp-option=6,10.0.65.1",
-        "--log-queries",
-        "--no-resolv",
-    ]
-    print(f"  dnsmasq cmd: {' '.join(cmd)}")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    # Give it a moment to bind
-    time.sleep(0.5)
-    if proc.poll() is not None:
-        _, stderr = proc.communicate()
-        raise RuntimeError(f"dnsmasq failed to start: {stderr.decode()}")
-    print(f"  dnsmasq PID={proc.pid}")
-    return proc
 
 
 # ---------------------------------------------------------------------------
@@ -164,11 +107,10 @@ def do_dns_resolve(transport, write_bytes, read_bytes, jsr_fn,
 def main():
     os.chdir(PROJECT_ROOT)
 
-    if not check_prerequisites():
+    if skip_if_no_network():
         sys.exit(0)
 
     # Late imports -- only needed if prerequisites are met
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from c64_test_harness import (
         Labels, ViceConfig, ViceInstanceManager,
         read_bytes, write_bytes, jsr, wait_for_text,
@@ -176,161 +118,140 @@ def main():
 
     passed = 0
     failed = 0
-    dnsmasq_proc = None
     mgr = None
     inst = None
 
-    try:
-        # ---- 1. Build --------------------------------------------------------
-        print("\n=== Building ===")
-        result = subprocess.run(["make"], capture_output=True, text=True,
-                                cwd=PROJECT_ROOT)
-        if result.returncode != 0:
-            print(f"  Build failed:\n{result.stderr}")
-            sys.exit(1)
-        print("  Build OK")
+    with NetworkTestEnv(
+        dns_records={"c64test.local": "10.0.65.1", "second.local": "10.0.65.1"},
+        setup_tap=False,
+    ) as env:
+        try:
+            # ---- 1. Build --------------------------------------------------------
+            print("\n=== Building ===")
+            result = subprocess.run(["make"], capture_output=True, text=True,
+                                    cwd=PROJECT_ROOT)
+            if result.returncode != 0:
+                print(f"  Build failed:\n{result.stderr}")
+                sys.exit(1)
+            print("  Build OK")
 
-        labels = Labels.from_file(LABELS_PATH)
-        print(f"  Labels loaded, {len(labels)} symbols")
+            labels = Labels.from_file(LABELS_PATH)
+            print(f"  Labels loaded, {len(labels)} symbols")
 
-        # ---- Test: test_dns_labels -------------------------------------------
-        print("\n=== test_dns_labels ===")
-        dns_resolve_addr = labels.address("net_dns_resolve")
-        if dns_resolve_addr is not None:
-            print(f"  PASS: net_dns_resolve found @ ${dns_resolve_addr:04X}")
-            passed += 1
-        else:
-            print("  FAIL: net_dns_resolve label not found")
+            # ---- Test: test_dns_labels -------------------------------------------
+            print("\n=== test_dns_labels ===")
+            dns_resolve_addr = labels.address("net_dns_resolve")
+            if dns_resolve_addr is not None:
+                print(f"  PASS: net_dns_resolve found @ ${dns_resolve_addr:04X}")
+                passed += 1
+            else:
+                print("  FAIL: net_dns_resolve label not found")
+                failed += 1
+                raise RuntimeError("Required label net_dns_resolve not found")
+
+            # ---- 2. Launch VICE --------------------------------------------------
+            print("\n=== Starting VICE ===")
+            config = ViceConfig(
+                prg_path=PRG_PATH,
+                warp=False,  # warp causes timing issues with ethernet
+                ntsc=True,
+                sound=False,
+                ethernet=True,
+                ethernet_mode="rrnet",
+                ethernet_driver="tuntap",
+                ethernet_interface="tap-c64",
+            )
+
+            mgr = ViceInstanceManager(config=config)
+            inst = mgr.acquire()
+            transport = inst.transport
+            print(f"  VICE PID={inst.pid}, port={inst.port}")
+
+            # ---- 3. Wait for boot menu ------------------------------------------
+            print("\n=== Waiting for boot menu ===")
+            grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+            if grid is None:
+                print("  FATAL: Program menu did not appear")
+                failed += 1
+                raise RuntimeError("Boot menu timeout")
+            print("  Boot menu appeared")
+
+            # ---- 4. Network init (DHCP) -----------------------------------------
+            print("\n=== Network init (pressing I for init) ===")
+            transport.resume()  # CPU paused after wait_for_text screen read
+            transport.inject_keys([0x49])  # 'I'
+
+            grid = wait_for_text(transport, "DHCP OK", timeout=60.0, verbose=False)
+            if grid is None:
+                print("  FAIL: DHCP did not complete within 60 seconds")
+                failed += 1
+                raise RuntimeError("DHCP timeout")
+            print("  DHCP OK")
+
+            # ---- Test: test_dns_resolve_known_host -------------------------------
+            print("\n=== test_dns_resolve_known_host ===")
+            carry, ip = do_dns_resolve(
+                transport, write_bytes, read_bytes, jsr,
+                "c64test.local", dns_resolve_addr,
+            )
+            expected_ip = [10, 0, 65, 1]
+            if carry == 0 and list(ip) == expected_ip:
+                print(f"  PASS: resolved c64test.local -> {'.'.join(str(b) for b in ip)}"
+                      f", carry=0")
+                passed += 1
+            else:
+                print(f"  FAIL: c64test.local -> {list(ip)}, carry={carry}"
+                      f" (expected {expected_ip}, carry=0)")
+                failed += 1
+
+            # ---- Test: test_dns_resolve_second_host ------------------------------
+            print("\n=== test_dns_resolve_second_host ===")
+            carry, ip = do_dns_resolve(
+                transport, write_bytes, read_bytes, jsr,
+                "second.local", dns_resolve_addr,
+            )
+            if carry == 0 and list(ip) == expected_ip:
+                print(f"  PASS: resolved second.local -> {'.'.join(str(b) for b in ip)}"
+                      f", carry=0")
+                passed += 1
+            else:
+                print(f"  FAIL: second.local -> {list(ip)}, carry={carry}"
+                      f" (expected {expected_ip}, carry=0)")
+                failed += 1
+
+            # ---- Test: test_dns_resolve_unknown_host -----------------------------
+            print("\n=== test_dns_resolve_unknown_host ===")
+            carry, ip = do_dns_resolve(
+                transport, write_bytes, read_bytes, jsr,
+                "nonexistent.invalid", dns_resolve_addr,
+            )
+            if carry == 1:
+                print(f"  PASS: nonexistent.invalid -> carry=1 (failure, as expected)")
+                passed += 1
+            else:
+                print(f"  FAIL: nonexistent.invalid -> carry={carry}, ip={list(ip)}"
+                      f" (expected carry=1)")
+                failed += 1
+
+        except RuntimeError as e:
+            print(f"\n  Test aborted: {e}")
+        except Exception as e:
+            print(f"\n  Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
             failed += 1
-            raise RuntimeError("Required label net_dns_resolve not found")
+        finally:
+            # ---- Teardown (VICE only -- dnsmasq handled by NetworkTestEnv) -------
+            print("\n=== Teardown ===")
 
-        # ---- 2. Start dnsmasq ------------------------------------------------
-        print("\n=== Starting dnsmasq ===")
-        dnsmasq_proc = start_dnsmasq()
-
-        # ---- 3. Launch VICE --------------------------------------------------
-        print("\n=== Starting VICE ===")
-        config = ViceConfig(
-            prg_path=PRG_PATH,
-            warp=False,  # warp causes timing issues with ethernet
-            ntsc=True,
-            sound=False,
-            ethernet=True,
-            ethernet_mode="rrnet",
-            ethernet_driver="tuntap",
-            ethernet_interface="tap-c64",
-        )
-
-        mgr = ViceInstanceManager(config=config)
-        inst = mgr.acquire()
-        transport = inst.transport
-        print(f"  VICE PID={inst.pid}, port={inst.port}")
-
-        # ---- 4. Wait for boot menu ------------------------------------------
-        print("\n=== Waiting for boot menu ===")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
-        if grid is None:
-            print("  FATAL: Program menu did not appear")
-            failed += 1
-            raise RuntimeError("Boot menu timeout")
-        print("  Boot menu appeared")
-
-        # ---- 5. Network init (DHCP) -----------------------------------------
-        print("\n=== Network init (pressing I for init) ===")
-        transport.resume()  # CPU paused after wait_for_text screen read
-        transport.inject_keys([0x49])  # 'I'
-
-        grid = wait_for_text(transport, "DHCP OK", timeout=60.0, verbose=False)
-        if grid is None:
-            print("  FAIL: DHCP did not complete within 60 seconds")
-            if dnsmasq_proc:
-                dnsmasq_proc.terminate()
-                _, stderr = dnsmasq_proc.communicate(timeout=5)
-                print(f"  dnsmasq stderr:\n{stderr.decode()}")
-                dnsmasq_proc = None
-            failed += 1
-            raise RuntimeError("DHCP timeout")
-        print("  DHCP OK")
-
-        # ---- Test: test_dns_resolve_known_host -------------------------------
-        print("\n=== test_dns_resolve_known_host ===")
-        carry, ip = do_dns_resolve(
-            transport, write_bytes, read_bytes, jsr,
-            "c64test.local", dns_resolve_addr,
-        )
-        expected_ip = [10, 0, 65, 1]
-        if carry == 0 and list(ip) == expected_ip:
-            print(f"  PASS: resolved c64test.local -> {'.'.join(str(b) for b in ip)}"
-                  f", carry=0")
-            passed += 1
-        else:
-            print(f"  FAIL: c64test.local -> {list(ip)}, carry={carry}"
-                  f" (expected {expected_ip}, carry=0)")
-            failed += 1
-
-        # ---- Test: test_dns_resolve_second_host ------------------------------
-        print("\n=== test_dns_resolve_second_host ===")
-        carry, ip = do_dns_resolve(
-            transport, write_bytes, read_bytes, jsr,
-            "second.local", dns_resolve_addr,
-        )
-        if carry == 0 and list(ip) == expected_ip:
-            print(f"  PASS: resolved second.local -> {'.'.join(str(b) for b in ip)}"
-                  f", carry=0")
-            passed += 1
-        else:
-            print(f"  FAIL: second.local -> {list(ip)}, carry={carry}"
-                  f" (expected {expected_ip}, carry=0)")
-            failed += 1
-
-        # ---- Test: test_dns_resolve_unknown_host -----------------------------
-        print("\n=== test_dns_resolve_unknown_host ===")
-        carry, ip = do_dns_resolve(
-            transport, write_bytes, read_bytes, jsr,
-            "nonexistent.invalid", dns_resolve_addr,
-        )
-        if carry == 1:
-            print(f"  PASS: nonexistent.invalid -> carry=1 (failure, as expected)")
-            passed += 1
-        else:
-            print(f"  FAIL: nonexistent.invalid -> carry={carry}, ip={list(ip)}"
-                  f" (expected carry=1)")
-            failed += 1
-
-    except RuntimeError as e:
-        print(f"\n  Test aborted: {e}")
-    except Exception as e:
-        print(f"\n  Unexpected error: {e}")
-        import traceback
-        traceback.print_exc()
-        failed += 1
-    finally:
-        # ---- Teardown --------------------------------------------------------
-        print("\n=== Teardown ===")
-
-        if mgr is not None:
-            try:
-                if inst is not None:
-                    mgr.release(inst)
-                mgr.shutdown()
-                print("  VICE released")
-            except Exception as e:
-                print(f"  VICE cleanup error: {e}")
-
-        if dnsmasq_proc is not None:
-            try:
-                dnsmasq_proc.terminate()
+            if mgr is not None:
                 try:
-                    _, stderr = dnsmasq_proc.communicate(timeout=5)
-                    print(f"  dnsmasq stopped (exit={dnsmasq_proc.returncode})")
-                    if failed > 0:
-                        print(f"  dnsmasq stderr:\n{stderr.decode()}")
-                except subprocess.TimeoutExpired:
-                    dnsmasq_proc.kill()
-                    dnsmasq_proc.wait()
-                    print("  dnsmasq killed (did not terminate cleanly)")
-            except Exception as e:
-                print(f"  dnsmasq cleanup error: {e}")
+                    if inst is not None:
+                        mgr.release(inst)
+                    mgr.shutdown()
+                    print("  VICE released")
+                except Exception as e:
+                    print(f"  VICE cleanup error: {e}")
 
     # ---- Summary -------------------------------------------------------------
     total = passed + failed
