@@ -155,7 +155,36 @@ python3 tools/bench_x25519.py         # X25519 key generation (~3.6 min C64 time
 # Integration tests (require tap-c64 interface, dnsmasq; see scripts/setup-tap-networking.sh in c64-test-harness)
 python3 tools/test_dns.py             # 4 tests: DNS resolution via ip65 over TAP (known host, second host, unknown host)
 python3 tools/test_http_integration.py # 5 tests: end-to-end plain HTTP GET over TAP (DNS + TCP + request/response)
+
+# End-to-end bridge tests (require br-c64 bridge, RR-Net; see below)
+sudo PYTHONPATH=tools python3 tests/test_phase1_dhcp.py   # DHCP over RR-Net bridge
+sudo PYTHONPATH=tools python3 tests/test_phase2_http.py   # Plain HTTP GET over bridge
 ```
+
+### End-to-End Bridge Tests
+
+Full end-to-end tests that drive the real c64-https binary in VICE over a Linux bridge with RR-Net ethernet (the same pattern used by [`c64-test-harness` bridge networking](../c64-test-harness/docs/bridge_networking.md)). VICE runs at **normal speed** (warp breaks RR-Net DHCP), so these tests need generous timeouts (~90-120s per phase).
+
+**Setup:**
+
+```bash
+# Create the bridge, TAP interfaces, and start dnsmasq (DHCP + DNS)
+sudo ./scripts/setup-bridge-tap.sh
+
+# Tear down (also handles stale VICE processes, legacy tap-c64, vicerc files)
+sudo ./scripts/cleanup-bridge-tap.sh
+```
+
+The setup script creates `br-c64` with `tap-c64-0`/`tap-c64-1`, assigns `10.0.65.1/24` to the bridge, and starts dnsmasq providing DHCP (pool 10.0.65.50-150) with DNS overrides (`zimmers.net` and `apple.com` → `10.0.65.1`). The `BridgeEnv` context manager in `tools/https_e2e/env.py` wraps both scripts for use in tests.
+
+**Library:** `tools/https_e2e/` exposes a reusable public API:
+
+| Module | Public API |
+|--------|-----------|
+| `env.py` | `BridgeEnv` (context manager), `check_prerequisites()` |
+| `vice_on_bridge.py` | `launch_vice_on_bridge()` → `ViceHandle`, `shutdown_vice()` |
+| `c64_menu.py` | `press_key()`, `wait_for_screen_text()`, `get_screen_text()` |
+| `http_listener.py` | `start_http_listener()` → `HttpListenerHandle`, `stop_http_listener()` |
 
 ## Related Projects
 
