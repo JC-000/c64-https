@@ -112,6 +112,8 @@ tls_connect:
         rts
 
 @error:
+        lda tls_state           ; preserve last attempted state
+        sta tls_last_state
         lda #TLS_STATE_ERROR
         sta tls_state
         sec
@@ -239,10 +241,18 @@ tls_send_client_hello:
 ; Output: C=0 success, C=1 timeout or parse error
 ; =============================================================================
 tls_recv_server_hello:
+        lda #$01
+        sta tls_recv_progress
         lda #0
         sta @sh_timeout
         sta @sh_timeout+1
+        sta tls_recv_poll_count
+        sta tls_recv_poll_count+1
 @sh_wait:
+        inc tls_recv_poll_count
+        bne +
+        inc tls_recv_poll_count+1
++
         jsr net_poll
         jsr tls_record_recv_and_decrypt
         bcc @sh_got_record
@@ -254,10 +264,14 @@ tls_recv_server_hello:
         sec
         rts
 @sh_got_record:
+        lda #$02
+        sta tls_recv_progress
         ; verify content type is handshake
         lda tls_rec_type
         cmp #TLS_CT_HANDSHAKE
         bne @sh_error
+        lda #$03
+        sta tls_recv_progress
 
         ; copy tls_rec_buf to tls_hs_buf (tls_rec_len bytes)
         ldy #0
@@ -273,10 +287,18 @@ tls_recv_server_hello:
         sta tls_hs_len
         lda tls_rec_len+1
         sta tls_hs_len+1
+        lda #$04
+        sta tls_recv_progress
 
         ; parse ServerHello
         jsr tls_parse_server_hello
         bcs @sh_error
+        lda #$05
+        sta tls_recv_progress
+
+        ; compute ECDH shared secret now that tls_server_pubkey is populated
+        jsr tls_ecdh_compute_shared
+        clc
 
         ; update transcript with ServerHello
         lda #<tls_hs_buf

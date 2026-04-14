@@ -12,9 +12,7 @@
 ; Identity: a*b = floor((a+b)^2/4) - floor((a-b)^2/4)
 ; =============================================================================
 
-; Quarter-square table addresses (page-aligned for speed)
-sqtab_lo        = $7800         ; 512 bytes: low bytes of floor(n^2/4)
-sqtab_hi        = $7a00         ; 512 bytes: high bytes of floor(n^2/4)
+; sqtab_lo/sqtab_hi now defined as labels in data.asm — moved out of $7800 to free code space
 
 ; =============================================================================
 ; poly1305_init - Initialize Poly1305 state

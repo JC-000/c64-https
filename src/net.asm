@@ -274,6 +274,16 @@ cb_load_ptr_hi:
         lda $ffff               ; SMC: patched to addr of tcp_inbound_data_ptr+1
         sta cb_copy_byte+2      ; patch high byte of LDA abs,x source
 
+        ; Clamp cb_remaining to 255 bytes max per callback to prevent
+        ; 8-bit X-index wrap which would re-read source byte 0 onwards
+        ; and overwrite previously-copied ring bytes.
+        lda cb_remaining+1
+        beq +
+        lda #255
+        sta cb_remaining
+        lda #0
+        sta cb_remaining+1
++
         ; Copy loop: X = source index, Y = ring buffer tail
         ldx #0
         ldy tcp_recv_tail

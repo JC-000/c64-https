@@ -240,11 +240,11 @@ do_https_get:
         jsr print_string
 
         ; --- set HTTP host/path/port ---
-        lda #<http_host_apple
+        lda #<http_host_foo
         sta http_host_ptr
-        lda #>http_host_apple
+        lda #>http_host_foo
         sta http_host_ptr+1
-        lda #http_host_apple_len
+        lda #http_host_foo_len
         sta http_host_len
 
         lda #<http_path_root
@@ -262,7 +262,7 @@ do_https_get:
         ; --- copy hostname into tls_hostname for SNI ---
         ldx #0
 @copy_host:
-        lda http_host_apple,x
+        lda http_host_foo,x
         beq @copy_done
         sta tls_hostname,x
         inx
@@ -274,8 +274,8 @@ do_https_get:
         stx tls_hostname_len
 
         ; --- DNS resolve ---
-        lda #<http_host_apple
-        ldx #>http_host_apple
+        lda #<http_host_foo
+        ldx #>http_host_foo
         jsr net_dns_resolve
         bcc @dns_ok
 
@@ -458,7 +458,7 @@ http_get_msg:
         !byte $0d, 0
 
 https_get_msg:
-        !text "HTTPS GET WWW.APPLE.COM..."
+        !text "HTTPS GET WWW.FOO.BAR..."
         !byte $0d, 0
 
 dns_fail_msg:
@@ -636,10 +636,10 @@ http_host_zimmers:
         !byte 0
 http_host_zimmers_len = 15
 
-http_host_apple:
-        !text "www.apple.com"
+http_host_foo:
+        !text "www.foo.bar"
         !byte 0
-http_host_apple_len = 13
+http_host_foo_len = 11
 
 http_path_root:
         !text "/"

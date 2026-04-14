@@ -44,7 +44,9 @@ ecdsa_verify:
         bne @p384
         jmp ecdsa_verify_256
 @p384:
-        jmp ecdsa_verify_384
+        ; TODO: restore P-384 dispatch — see project memory project_p384_stubbed.md
+        sec
+        rts
 
 ; =============================================================================
 ; ecdsa_verify_256 - P-256 signature verification
@@ -364,303 +366,9 @@ ecdsa_verify_256:
 ; ecdsa_verify_384 - P-384 signature verification
 ; =============================================================================
 ecdsa_verify_384:
-        ; ---------------------------------------------------------------
-        ; Step 1: Validate r and s are in [1, n-1]
-        ; ---------------------------------------------------------------
-
-        ; Check r != 0
-        lda #<ecdsa_sig_r
-        sta fp_src1
-        lda #>ecdsa_sig_r
-        sta fp_src1+1
-        jsr fp_is_zero_384
-        beq @384_invalid            ; r == 0 -> invalid
-
-        ; Check r < n
-        lda #<ecdsa_sig_r
-        sta fp_src1
-        lda #>ecdsa_sig_r
-        sta fp_src1+1
-        lda #<ec_n_384
-        sta fp_src2
-        lda #>ec_n_384
-        sta fp_src2+1
-        jsr fp_cmp_384
-        bcs @384_invalid            ; r >= n -> invalid
-
-        ; Check s != 0
-        lda #<ecdsa_sig_s
-        sta fp_src1
-        lda #>ecdsa_sig_s
-        sta fp_src1+1
-        jsr fp_is_zero_384
-        beq @384_invalid            ; s == 0 -> invalid
-
-        ; Check s < n
-        lda #<ecdsa_sig_s
-        sta fp_src1
-        lda #>ecdsa_sig_s
-        sta fp_src1+1
-        lda #<ec_n_384
-        sta fp_src2
-        lda #>ec_n_384
-        sta fp_src2+1
-        jsr fp_cmp_384
-        bcs @384_invalid            ; s >= n -> invalid
-        jmp @384_step2
-
-@384_invalid:
-        sec
-        rts
-
-        ; ---------------------------------------------------------------
-        ; Step 2: w = s^(-1) mod n
-        ; ---------------------------------------------------------------
-@384_step2:
-        jsr ec_set_modn_384        ; fp_misc = ec_n_384
-        lda #<ecdsa_sig_s
-        sta fp_src1
-        lda #>ecdsa_sig_s
-        sta fp_src1+1
-        jsr fp_mod_inv_384         ; fp_r0_384 = s^(-1) mod n
-
-        ; Copy w = fp_r0_384 -> ecdsa_verify_tmp
-        lda #<fp_r0_384
-        sta fp_src1
-        lda #>fp_r0_384
-        sta fp_src1+1
-        lda #<ecdsa_verify_tmp
-        sta fp_dst
-        lda #>ecdsa_verify_tmp
-        sta fp_dst+1
-        jsr fp_copy_384            ; ecdsa_verify_tmp = w (48 bytes)
-
-        ; ---------------------------------------------------------------
-        ; Step 3: u1 = z * w mod n
-        ; ---------------------------------------------------------------
-        jsr ec_set_modn_384
-        lda #<ecdsa_hash
-        sta fp_src1
-        lda #>ecdsa_hash
-        sta fp_src1+1
-        lda #<ecdsa_verify_tmp
-        sta fp_src2
-        lda #>ecdsa_verify_tmp
-        sta fp_src2+1
-        jsr fp_mod_mul_384         ; fp_r0_384 = z * w mod n
-
-        ; Copy u1 to ev_u1_384
-        lda #<fp_r0_384
-        sta fp_src1
-        lda #>fp_r0_384
-        sta fp_src1+1
-        lda #<ev_u1_384
-        sta fp_dst
-        lda #>ev_u1_384
-        sta fp_dst+1
-        jsr fp_copy_384
-
-        ; ---------------------------------------------------------------
-        ; Step 4: u2 = r * w mod n
-        ; ---------------------------------------------------------------
-        jsr ec_set_modn_384
-        lda #<ecdsa_sig_r
-        sta fp_src1
-        lda #>ecdsa_sig_r
-        sta fp_src1+1
-        lda #<ecdsa_verify_tmp
-        sta fp_src2
-        lda #>ecdsa_verify_tmp
-        sta fp_src2+1
-        jsr fp_mod_mul_384         ; fp_r0_384 = r * w mod n
-
-        ; Copy u2 to ev_u2_384
-        lda #<fp_r0_384
-        sta fp_src1
-        lda #>fp_r0_384
-        sta fp_src1+1
-        lda #<ev_u2_384
-        sta fp_dst
-        lda #>ev_u2_384
-        sta fp_dst+1
-        jsr fp_copy_384
-
-        ; ---------------------------------------------------------------
-        ; Step 5a: Compute u1 * G (P-384 generator)
-        ; Load G into ec_p2_384 as affine point (X=Gx, Y=Gy)
-        ; ec_scalar_mul_384 initializes ec_p1_384 internally
-        ; ---------------------------------------------------------------
-
-        ; ec_p2_384.X = ec_gx_384
-        lda #<ec_gx_384
-        sta fp_src1
-        lda #>ec_gx_384
-        sta fp_src1+1
-        lda #<ec_p2_384
-        sta fp_dst
-        lda #>ec_p2_384
-        sta fp_dst+1
-        jsr fp_copy_384
-
-        ; ec_p2_384.Y = ec_gy_384
-        lda #<ec_gy_384
-        sta fp_src1
-        lda #>ec_gy_384
-        sta fp_src1+1
-        lda #<(ec_p2_384+48)
-        sta fp_dst
-        lda #>(ec_p2_384+48)
-        sta fp_dst+1
-        jsr fp_copy_384
-
-        ; Set scalar pointer to u1
-        lda #<ev_u1_384
-        sta ec_scalar_ptr
-        lda #>ev_u1_384
-        sta ec_scalar_ptr+1
-
-        ; ec_p3_384 = u1 * G
-        jsr ec_scalar_mul_384
-
-        ; Save u1*G result from ec_p3_384 to ev_point_save_384 (144 bytes)
-        ldx #0
-@save_384_lp:
-        lda ec_p3_384,x
-        sta ev_point_save_384,x
-        inx
-        cpx #144
-        bne @save_384_lp
-
-        ; ---------------------------------------------------------------
-        ; Step 5b: Compute u2 * Q (P-384 public key)
-        ; ec_scalar_mul_384 initializes ec_p1_384 internally
-        ; ---------------------------------------------------------------
-
-        ; ec_p2_384.X = ecdsa_pubkey_x
-        lda #<ecdsa_pubkey_x
-        sta fp_src1
-        lda #>ecdsa_pubkey_x
-        sta fp_src1+1
-        lda #<ec_p2_384
-        sta fp_dst
-        lda #>ec_p2_384
-        sta fp_dst+1
-        jsr fp_copy_384
-
-        ; ec_p2_384.Y = ecdsa_pubkey_y
-        lda #<ecdsa_pubkey_y
-        sta fp_src1
-        lda #>ecdsa_pubkey_y
-        sta fp_src1+1
-        lda #<(ec_p2_384+48)
-        sta fp_dst
-        lda #>(ec_p2_384+48)
-        sta fp_dst+1
-        jsr fp_copy_384
-
-        ; Set scalar pointer to u2
-        lda #<ev_u2_384
-        sta ec_scalar_ptr
-        lda #>ev_u2_384
-        sta ec_scalar_ptr+1
-
-        ; ec_p3_384 = u2 * Q
-        jsr ec_scalar_mul_384
-
-        ; ---------------------------------------------------------------
-        ; Step 5c: R = u1*G + u2*Q (point addition)
-        ; ---------------------------------------------------------------
-
-        ; Copy u1*G from save into ec_p1_384
-        ldx #0
-@restore_384_lp:
-        lda ev_point_save_384,x
-        sta ec_p1_384,x
-        inx
-        cpx #144
-        bne @restore_384_lp
-
-        ; Convert u2*Q (ec_p3_384) to affine, load into ec_p2_384
-        jsr ec_jacobian_to_affine_384
-
-        ldx #47
-@copy_384_u2q_x:
-        lda ec_p3_384,x
-        sta ec_p2_384,x
-        dex
-        bpl @copy_384_u2q_x
-
-        ldx #47
-@copy_384_u2q_y:
-        lda ec_p3_384+48,x
-        sta ec_p2_384+48,x
-        dex
-        bpl @copy_384_u2q_y
-
-        ; ec_p3_384 = ec_p1_384 + ec_p2_384
-        jsr ec_point_add_384
-
-        ; ---------------------------------------------------------------
-        ; Step 6: Convert R to affine
-        ; ---------------------------------------------------------------
-        jsr ec_jacobian_to_affine_384
-
-        ; ---------------------------------------------------------------
-        ; Step 7: Check R.x mod n == r
-        ; Compare R.x (in ec_p3_384) with n_384
-        ; ---------------------------------------------------------------
-        lda #<ec_p3_384
-        sta fp_src1
-        lda #>ec_p3_384
-        sta fp_src1+1
-        lda #<ec_n_384
-        sta fp_src2
-        lda #>ec_n_384
-        sta fp_src2+1
-        jsr fp_cmp_384
-        bcc @384_no_reduce          ; R.x < n, no reduction needed
-
-        ; R.x >= n: compute R.x - n -> ev_u1_384 (reuse buffer)
-        lda #<ec_p3_384
-        sta fp_src1
-        lda #>ec_p3_384
-        sta fp_src1+1
-        lda #<ec_n_384
-        sta fp_src2
-        lda #>ec_n_384
-        sta fp_src2+1
-        lda #<ev_u1_384
-        sta fp_dst
-        lda #>ev_u1_384
-        sta fp_dst+1
-        jsr fp_sub_384
-
-        ; Compare ev_u1_384 with r
-        lda #<ev_u1_384
-        sta fp_src1
-        lda #>ev_u1_384
-        sta fp_src1+1
-        jmp @384_final_cmp
-
-@384_no_reduce:
-        lda #<ec_p3_384
-        sta fp_src1
-        lda #>ec_p3_384
-        sta fp_src1+1
-
-@384_final_cmp:
-        lda #<ecdsa_sig_r
-        sta fp_src2
-        lda #>ecdsa_sig_r
-        sta fp_src2+1
-        jsr fp_cmp_384
-        bne @384_mismatch
-
-        ; R.x mod n == r -> signature valid
-        clc
-        rts
-
-@384_mismatch:
+        ; STUBBED — see project_p384_stubbed.md
+        ; Full P-384 verify body removed to save space; dispatch in ecdsa_verify
+        ; returns error for non-P-256 curves before reaching this label.
         sec
         rts
 
@@ -717,7 +425,7 @@ ecdsa_parse_der_sig:
         jsr fp_zero
         jmp @parse_r
 @clr_r_384:
-        jsr fp_zero_384
+        jsr fp_zero            ; STUBBED — dead code for P-256 only
 
 @parse_r:
         ; Handle leading zero padding: if int_len > sig_len, skip leading 0x00
@@ -785,7 +493,7 @@ ecdsa_parse_der_sig:
         jsr fp_zero
         jmp @parse_s
 @clr_s_384:
-        jsr fp_zero_384
+        jsr fp_zero            ; STUBBED — dead code for P-256 only
 
 @parse_s:
         ; Handle leading zero padding

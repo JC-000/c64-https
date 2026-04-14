@@ -45,10 +45,17 @@
 ; =============================================================================
 ; Crypto modules (from c64-wireguard and c64-aes256-ecdsa)
 ; =============================================================================
+
+; Relocate all crypto (word32 through ecdsa) out of ip65 BSS window ($4000-$5FFF).
+; ip65's DHCP output_buffer at $4CED clobbers any code linked in that range.
+; This puts word32/chacha/poly/aead + sha256/hmac/drbg + fe25519/x25519 +
+; ecdsa P-256 + ecdsa_verify/der/tls_cert/tls_ecdh all contiguously at $6000+.
+* = $6000
 !source "crypto/word32.asm"
 !source "crypto/chacha20.asm"
 !source "crypto/poly1305.asm"
 !source "crypto/aead.asm"
+
 !source "crypto/sha256.asm"
 !source "crypto/hmac_drbg.asm"
 !source "crypto/fe25519.asm"
@@ -61,15 +68,10 @@
 !source "crypto/ecdsa_points.asm"
 
 ; --- ECDSA P-384 (for CA certificate verification) ---
-!source "crypto/ecdsa_fp_384.asm"
-!source "crypto/ecdsa_mod_384.asm"
-!source "crypto/ecdsa_curve_384.asm"
-!source "crypto/ecdsa_points_384.asm"
-
-; --- Skip past quarter-square multiply table region ($7800-$7BFF) ---
-; The sqtab_lo/sqtab_hi tables are runtime-generated at $7800-$7BFF.
-; ECDSA P-384 code pushes past $7800, so we jump to $7C00.
-* = $7C00
+; !source "crypto/ecdsa_fp_384.asm"     ; STUBBED — see project_p384_stubbed.md
+; !source "crypto/ecdsa_mod_384.asm"    ; STUBBED — see project_p384_stubbed.md
+; !source "crypto/ecdsa_curve_384.asm"  ; STUBBED — see project_p384_stubbed.md
+; !source "crypto/ecdsa_points_384.asm" ; STUBBED — see project_p384_stubbed.md
 
 ; --- ECDSA signature verification (P-256 + P-384) ---
 !source "crypto/ecdsa_verify.asm"

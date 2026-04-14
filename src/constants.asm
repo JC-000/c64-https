@@ -107,8 +107,7 @@ zp_temp         = $fd           ; 1 byte
 zp_count        = $fe           ; 1 byte
 
 ; --- Quarter-square multiply table (shared by Poly1305 and ECDSA) ---
-sqtab_lo        = $7800         ; 512 bytes: floor(n^2/4) low bytes
-sqtab_hi        = $7a00         ; 512 bytes: floor(n^2/4) high bytes
+; sqtab_lo/sqtab_hi now defined as labels in data.asm — moved out of $7800 to free code space
 
 ; --- REU (Ram Expansion Unit) registers ---
 reu_status      = $df00         ; status register

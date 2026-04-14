@@ -16,6 +16,7 @@ from .env import BridgeEnv, check_prerequisites
 from .vice_on_bridge import launch_vice_on_bridge, shutdown_vice
 from .c64_menu import press_key, wait_for_screen_text, get_screen_text
 from .http_listener import start_http_listener, stop_http_listener
+from .https_listener import start_https_listener, stop_https_listener
 
 __all__ = [
     "BridgeEnv",
@@ -27,4 +28,6 @@ __all__ = [
     "get_screen_text",
     "start_http_listener",
     "stop_http_listener",
+    "start_https_listener",
+    "stop_https_listener",
 ]
