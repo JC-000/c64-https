@@ -62,6 +62,10 @@ tcp_recv_head:  !word 0         ; read position (16-bit, masked with TCP_RECV_MA
 tcp_recv_tail:  !word 0         ; write position (updated by ip65 callback, 16-bit)
 tcp_recv_overflow: !byte 0      ; set to 1 by callback if ring fills up
 
+; Diagnostic counters — incremented by net_poll at entry and return
+net_poll_entry_count:   !word 0
+net_poll_return_count:  !word 0
+
 ; =============================================================================
 ; TLS state
 ; =============================================================================

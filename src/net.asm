@@ -46,9 +46,17 @@ net_dhcp:
 ; Must be called frequently from main loop.
 ; =============================================================================
 net_poll:
+        inc net_poll_entry_count
+        bne @np_skip1
+        inc net_poll_entry_count+1
+@np_skip1:
         jsr net_save_zp
         jsr ip65_process
         jsr net_restore_zp
+        inc net_poll_return_count
+        bne @np_skip2
+        inc net_poll_return_count+1
+@np_skip2:
         rts
 
 ; =============================================================================

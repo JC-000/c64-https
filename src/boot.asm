@@ -485,6 +485,23 @@ tls_ok_msg:
         !text "TLS HANDSHAKE OK"
         !byte $0d, 0
 
+; TLS state transition markers (debug)
+ch_sent_msg:    !text "CH", $0d, 0
+sh_recv_msg:    !text "SH", $0d, 0
+hk1_msg:        !text "HK1", $0d, 0
+keys_ok_msg:    !text "KEYS", $0d, 0
+ee_recv_msg:    !text "EE", $0d, 0
+cert_recv_msg:  !text "CERT", $0d, 0
+cv_recv_msg:    !text "CV", $0d, 0
+fin_recv_msg:   !text "FIN", $0d, 0
+cfin_sent_msg:  !text "CFIN", $0d, 0
+enc1_msg:       !text "ENC1", $0d, 0
+rx_msg:         !text "RX", $0d, 0
+got_msg:        !text "GOT", $0d, 0
+got2_msg:       !text "GOT2", $0d, 0
+dec_msg:        !text "DEC", $0d, 0
+proc_msg:       !text "PROC", $0d, 0
+
 send_fail_msg:
         !text "TLS SEND FAILED"
         !byte $0d, 0

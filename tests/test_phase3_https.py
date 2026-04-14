@@ -48,10 +48,25 @@ FAIL_NEEDLES = (
     "TLS SEND FAILED",
 )
 # Progress needles we use to report how far we got on failure.
+# Ordered roughly by expected appearance; _last_progress_seen picks the
+# one with the latest rfind index on screen.
 PROGRESS_NEEDLES = (
     "HTTPS GET",
     "DNS OK",
     "TCP CONNECTED",
+    "CH",
+    "SH",
+    "KEYS",
+    "ENC1",
+    "RX",
+    "GOT",
+    "DEC",
+    "PROC",
+    "EE",
+    "CERT",
+    "CV",
+    "FIN",
+    "CFIN",
     "TLS HANDSHAKE OK",
     "REQUEST SENT",
     "CONNECTION CLOSED",
@@ -121,12 +136,30 @@ def _label_addr(name: str):
 
 def _dump_diagnostics(transport=None) -> None:
     """Print dnsmasq log and host-side connectivity checks for post-mortem."""
+    diag_log_path = "/tmp/c64-https-phase3-diag.log"
+    try:
+        diag_log = open(diag_log_path, "a", buffering=1)  # line-buffered
+        _ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        diag_log.write(f"\n=== diagnostic dump at {_ts} ===\n")
+        diag_log.flush()
+    except Exception:
+        diag_log = None
+
+    def _emit(line: str) -> None:
+        print(line, flush=True)
+        if diag_log is not None:
+            try:
+                diag_log.write(line + "\n")
+                diag_log.flush()
+            except Exception:
+                pass
+
     dnsmasq_log = "/tmp/c64-https-dnsmasq.log"
     if os.path.isfile(dnsmasq_log):
-        print(f"\n--- tail of {dnsmasq_log} ---")
+        _emit(f"\n--- tail of {dnsmasq_log} ---")
         with open(dnsmasq_log, "rb") as f:
             data = f.read()[-4000:]
-        print(data.decode("utf-8", errors="replace"))
+        _emit(data.decode("utf-8", errors="replace"))
 
     # Host-side DNS check
     try:
@@ -134,9 +167,9 @@ def _dump_diagnostics(transport=None) -> None:
             ["dig", "+short", "@10.0.65.1", "www.foo.bar"],
             capture_output=True, text=True, timeout=5,
         )
-        print(f"\n  dig @10.0.65.1 www.foo.bar -> {r.stdout.strip()}")
+        _emit(f"\n  dig @10.0.65.1 www.foo.bar -> {r.stdout.strip()}")
     except Exception as e:
-        print(f"  dig check failed: {e}")
+        _emit(f"  dig check failed: {e}")
 
     # Host-side HTTPS check (self-signed, so disable verification).
     try:
@@ -148,19 +181,69 @@ def _dump_diagnostics(transport=None) -> None:
         resp = urllib.request.urlopen(
             "https://10.0.65.1:443/", timeout=3, context=ctx
         )
-        print(f"  HTTPS from host: {resp.status} {resp.read()[:100]}")
+        _emit(f"  HTTPS from host: {resp.status} {resp.read()[:100]}")
     except Exception as e:
-        print(f"  HTTPS from host failed: {e}")
+        _emit(f"  HTTPS from host failed: {e}")
 
     # ip65 error code from C64 memory
     if transport is not None:
+        # Force-load labels so the PC/stack lookups below have data.
+        _label_addr("tls_state")
+        # CPU registers -- PC tells us where the 6502 is currently stuck.
+        try:
+            transport.resume()
+            regs = transport.read_registers()
+            pc = regs.get("PC", 0)
+            sp = regs.get("SP", 0)
+            a = regs.get("A", 0)
+            x = regs.get("X", 0)
+            y = regs.get("Y", 0)
+            _emit(f"  CPU PC=${pc:04X}  SP=${sp:02X}  A=${a:02X} X=${x:02X} Y=${y:02X}")
+            # Find nearest label <= PC
+            nearest_name = None
+            nearest_addr = -1
+            for name, addr in _LABELS_CACHE.items() if _LABELS_CACHE else []:
+                if addr <= pc and addr > nearest_addr:
+                    nearest_addr = addr
+                    nearest_name = name
+            if nearest_name is not None:
+                _emit(f"  nearest label <= PC: {nearest_name} @ ${nearest_addr:04X} (PC+${pc-nearest_addr:X})")
+        except Exception as e:
+            _emit(f"  read_registers failed: {e}")
+
+        # Top of stack: return address chain from JSRs.
+        # 6502 SP indexes into $0100-$01FF; stack grows downward.
+        # Bytes ABOVE current SP (i.e. $0100+SP+1 .. $01FF) are live.
+        try:
+            transport.resume()
+            stack = transport.read_memory(0x01F0, 16)
+            _emit(f"  stack $01F0-$01FF = {' '.join(f'{b:02X}' for b in stack)}")
+            # Parse as little-endian return-address pairs (each JSR pushes hi, lo
+            # where the saved addr = actual_return - 1).
+            _emit("  possible return-address pairs (addr+1 = instruction after JSR):")
+            for i in range(0, 16, 2):
+                lo = stack[i]
+                hi = stack[i + 1]
+                ret = ((hi << 8) | lo) + 1
+                # Find nearest label <= ret
+                near_n = None
+                near_a = -1
+                for name, addr in _LABELS_CACHE.items() if _LABELS_CACHE else []:
+                    if addr <= ret and addr > near_a:
+                        near_a = addr
+                        near_n = name
+                tag = f"{near_n}+${ret-near_a:X}" if near_n else "?"
+                _emit(f"    $01{0xF0+i:02X}: lo=${lo:02X} hi=${hi:02X} -> ${ret:04X} ({tag})")
+        except Exception as e:
+            _emit(f"  stack read failed: {e}")
+
         try:
             transport.resume()
             err_addr = _label_addr("ip65_error") or 0x4CEA
             err_data = transport.read_memory(err_addr, 1)
-            print(f"  ip65_error @ ${err_addr:04X} = 0x{err_data[0]:02X}")
+            _emit(f"  ip65_error @ ${err_addr:04X} = 0x{err_data[0]:02X}")
         except Exception as e:
-            print(f"  ip65_error read failed: {e}")
+            _emit(f"  ip65_error read failed: {e}")
 
         state_names = {
             0x00: "IDLE", 0x01: "CLIENT_HELLO", 0x02: "SERVER_HELLO",
@@ -175,11 +258,11 @@ def _dump_diagnostics(transport=None) -> None:
             if ts_addr is not None:
                 tls_state = transport.read_memory(ts_addr, 1)[0]
                 name = state_names.get(tls_state, "UNKNOWN")
-                print(f"  tls_state @ ${ts_addr:04X} = ${tls_state:02X} ({name})")
+                _emit(f"  tls_state @ ${ts_addr:04X} = ${tls_state:02X} ({name})")
             else:
-                print("  tls_state: label missing")
+                _emit("  tls_state: label missing")
         except Exception as e:
-            print(f"  tls_state read failed: {e}")
+            _emit(f"  tls_state read failed: {e}")
 
         # Last attempted TLS state (preserved before error handler overwrote tls_state)
         try:
@@ -188,11 +271,11 @@ def _dump_diagnostics(transport=None) -> None:
             if tls_addr is not None:
                 last = transport.read_memory(tls_addr, 1)[0]
                 last_name = state_names.get(last, "UNKNOWN")
-                print(f"  tls_last_state @ ${tls_addr:04X} = ${last:02X} ({last_name})")
+                _emit(f"  tls_last_state @ ${tls_addr:04X} = ${last:02X} ({last_name})")
             else:
-                print("  tls_last_state: label missing")
+                _emit("  tls_last_state: label missing")
         except Exception as e:
-            print(f"  tls_last_state read failed: {e}")
+            _emit(f"  tls_last_state read failed: {e}")
 
         # Most recent TLS record buffer head
         try:
@@ -200,16 +283,16 @@ def _dump_diagnostics(transport=None) -> None:
             buf_addr = _label_addr("tls_rec_buf")
             if buf_addr is not None:
                 rec = transport.read_memory(buf_addr, 256)
-                print(f"  tls_rec_buf @ ${buf_addr:04X} = ({len(rec)} bytes)")
+                _emit(f"  tls_rec_buf @ ${buf_addr:04X} = ({len(rec)} bytes)")
                 for i in range(0, len(rec), 16):
                     line = rec[i:i+16]
                     hex_part = " ".join(f"{b:02X}" for b in line)
                     ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in line)
-                    print(f"    +${i:02X}  {hex_part:<47}  {ascii_part}")
+                    _emit(f"    +${i:02X}  {hex_part:<47}  {ascii_part}")
             else:
-                print("  tls_rec_buf: label missing")
+                _emit("  tls_rec_buf: label missing")
         except Exception as e:
-            print(f"  tls_rec_buf read failed: {e}")
+            _emit(f"  tls_rec_buf read failed: {e}")
 
         # Raw ip65 TCP receive ring — what ip65 actually delivered
         try:
@@ -217,16 +300,16 @@ def _dump_diagnostics(transport=None) -> None:
             ring_addr = _label_addr("tcp_recv_buf")
             if ring_addr is not None:
                 ring = transport.read_memory(ring_addr, 256)
-                print(f"  tcp_recv_buf @ ${ring_addr:04X} = ({len(ring)} bytes)")
+                _emit(f"  tcp_recv_buf @ ${ring_addr:04X} = ({len(ring)} bytes)")
                 for i in range(0, len(ring), 16):
                     line = ring[i:i+16]
                     hex_part = " ".join(f"{b:02X}" for b in line)
                     ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in line)
-                    print(f"    +${i:02X}  {hex_part:<47}  {ascii_part}")
+                    _emit(f"    +${i:02X}  {hex_part:<47}  {ascii_part}")
             else:
-                print("  tcp_recv_buf: label missing")
+                _emit("  tcp_recv_buf: label missing")
         except Exception as e:
-            print(f"  tcp_recv_buf read failed: {e}")
+            _emit(f"  tcp_recv_buf read failed: {e}")
 
         # Parser input: tls_hs_buf (stable copy made during record reception)
         try:
@@ -234,16 +317,16 @@ def _dump_diagnostics(transport=None) -> None:
             hs_addr = _label_addr("tls_hs_buf")
             if hs_addr is not None:
                 hs = transport.read_memory(hs_addr, 128)
-                print(f"  tls_hs_buf @ ${hs_addr:04X} = ({len(hs)} bytes)")
+                _emit(f"  tls_hs_buf @ ${hs_addr:04X} = ({len(hs)} bytes)")
                 for i in range(0, len(hs), 16):
                     line = hs[i:i+16]
                     hex_part = " ".join(f"{b:02X}" for b in line)
                     ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in line)
-                    print(f"    +${i:02X}  {hex_part:<47}  {ascii_part}")
+                    _emit(f"    +${i:02X}  {hex_part:<47}  {ascii_part}")
             else:
-                print("  tls_hs_buf: label missing")
+                _emit("  tls_hs_buf: label missing")
         except Exception as e:
-            print(f"  tls_hs_buf read failed: {e}")
+            _emit(f"  tls_hs_buf read failed: {e}")
 
         # tls_rec_header raw 5-byte buffer (state-machine target)
         try:
@@ -251,11 +334,11 @@ def _dump_diagnostics(transport=None) -> None:
             hdr_addr = _label_addr("tls_rec_header")
             if hdr_addr is not None:
                 hdr = transport.read_memory(hdr_addr, 5)
-                print(f"  tls_rec_header @ ${hdr_addr:04X} = {' '.join(f'{b:02X}' for b in hdr)}")
+                _emit(f"  tls_rec_header @ ${hdr_addr:04X} = {' '.join(f'{b:02X}' for b in hdr)}")
             else:
-                print("  tls_rec_header: label missing")
+                _emit("  tls_rec_header: label missing")
         except Exception as e:
-            print(f"  tls_rec_header read failed: {e}")
+            _emit(f"  tls_rec_header read failed: {e}")
 
         # tls_recv_state and tls_recv_count (16-bit) — dynamic addrs
         try:
@@ -264,12 +347,12 @@ def _dump_diagnostics(transport=None) -> None:
             rc_addr = _label_addr("tls_recv_count")
             if rs_addr is not None:
                 rs_v = transport.read_memory(rs_addr, 1)[0]
-                print(f"  tls_recv_state @ ${rs_addr:04X} = ${rs_v:02X}")
+                _emit(f"  tls_recv_state @ ${rs_addr:04X} = ${rs_v:02X}")
             if rc_addr is not None:
                 rc_b = transport.read_memory(rc_addr, 2)
-                print(f"  tls_recv_count @ ${rc_addr:04X} = ${rc_b[1]:02X}{rc_b[0]:02X}")
+                _emit(f"  tls_recv_count @ ${rc_addr:04X} = ${rc_b[1]:02X}{rc_b[0]:02X}")
         except Exception as e:
-            print(f"  tls_recv_state read failed: {e}")
+            _emit(f"  tls_recv_state read failed: {e}")
 
         # Single-byte diagnostic labels (dynamic; skip silently if missing)
         for lbl_name in ("tls_hs_len", "tls_rec_len", "tls_rec_type"):
@@ -282,9 +365,9 @@ def _dump_diagnostics(transport=None) -> None:
                 n = 1 if lbl_name == "tls_rec_type" else 2
                 b = transport.read_memory(addr, n)
                 if n == 1:
-                    print(f"  {lbl_name} @ ${addr:04X} = ${b[0]:02X}")
+                    _emit(f"  {lbl_name} @ ${addr:04X} = ${b[0]:02X}")
                 else:
-                    print(f"  {lbl_name} @ ${addr:04X} = ${b[1]:02X}{b[0]:02X}")
+                    _emit(f"  {lbl_name} @ ${addr:04X} = ${b[1]:02X}{b[0]:02X}")
             except Exception:
                 pass
 
@@ -295,9 +378,9 @@ def _dump_diagnostics(transport=None) -> None:
             prog_addr = _label_addr("tls_recv_progress")
             if prog_addr is not None:
                 pv = transport.read_memory(prog_addr, 1)[0]
-                print(f"  tls_recv_progress @ ${prog_addr:04X} = ${pv:02X}")
+                _emit(f"  tls_recv_progress @ ${prog_addr:04X} = ${pv:02X}")
         except Exception as e:
-            print(f"  tls_recv_progress read failed: {e}")
+            _emit(f"  tls_recv_progress read failed: {e}")
 
         # tls_recv_sub_progress — granular progress within tls_record_recv_and_decrypt
         sub_state_names = {
@@ -319,9 +402,9 @@ def _dump_diagnostics(transport=None) -> None:
             if sub_addr is not None:
                 sv = transport.read_memory(sub_addr, 1)[0]
                 name = sub_state_names.get(sv, "UNKNOWN")
-                print(f"  tls_recv_sub_progress @ ${sub_addr:04X} = ${sv:02X} ({name})")
+                _emit(f"  tls_recv_sub_progress @ ${sub_addr:04X} = ${sv:02X} ({name})")
         except Exception as e:
-            print(f"  tls_recv_sub_progress read failed: {e}")
+            _emit(f"  tls_recv_sub_progress read failed: {e}")
 
         # tls_recv_poll_count — how many times @sh_wait looped
         try:
@@ -330,33 +413,45 @@ def _dump_diagnostics(transport=None) -> None:
             if pc_addr is not None:
                 pcb = transport.read_memory(pc_addr, 2)
                 pc = pcb[0] | (pcb[1] << 8)
-                print(f"  tls_recv_poll_count @ ${pc_addr:04X} = {pc} (${pcb[1]:02X}{pcb[0]:02X})")
+                _emit(f"  tls_recv_poll_count @ ${pc_addr:04X} = {pc} (${pcb[1]:02X}{pcb[0]:02X})")
         except Exception as e:
-            print(f"  tls_recv_poll_count read failed: {e}")
+            _emit(f"  tls_recv_poll_count read failed: {e}")
 
         # TCP receive ring buffer head/tail — tells us if ip65 wrote data
-        # that TLS never drained.
+        # that TLS never drained. Both are 16-bit little-endian words.
         try:
             transport.resume()
             head_addr = _label_addr("tcp_recv_head")
             tail_addr = _label_addr("tcp_recv_tail")
+            ovf_addr = _label_addr("tcp_recv_overflow")
             if head_addr is not None and tail_addr is not None:
-                head = transport.read_memory(head_addr, 1)[0]
-                tail = transport.read_memory(tail_addr, 1)[0]
-                avail = (tail - head) & 0xFF
-                print(f"  tcp_recv_head @ ${head_addr:04X} = ${head:02X}")
-                print(f"  tcp_recv_tail @ ${tail_addr:04X} = ${tail:02X}")
-                print(f"  tcp ring available = {avail} bytes")
+                hb = transport.read_memory(head_addr, 2)
+                tb = transport.read_memory(tail_addr, 2)
+                head = hb[0] | (hb[1] << 8)
+                tail = tb[0] | (tb[1] << 8)
+                avail = (tail - head) & 0xFFFF
+                _emit(f"  tcp_recv_head @ ${head_addr:04X} = ${head:04X}")
+                _emit(f"  tcp_recv_tail @ ${tail_addr:04X} = ${tail:04X}")
+                _emit(f"  tcp ring available = {avail} bytes")
+                if ovf_addr is not None:
+                    ov = transport.read_memory(ovf_addr, 1)[0]
+                    _emit(f"  tcp_recv_overflow @ ${ovf_addr:04X} = ${ov:02X}")
                 if avail > 0:
-                    # dump first 32 bytes of ring starting at head
+                    # dump first 48 bytes of ring starting at head (mod 4096)
                     buf_addr = _label_addr("tcp_recv_buf")
                     if buf_addr is not None:
-                        ring = transport.read_memory(buf_addr, 256)
+                        ring = transport.read_memory(buf_addr, 4096)
                         n = min(avail, 48)
-                        line_hex = " ".join(f"{ring[(head + i) & 0xFF]:02X}" for i in range(n))
-                        print(f"  ring[head..head+{n}] = {line_hex}")
+                        line_hex = " ".join(f"{ring[(head + i) & 0xFFF]:02X}" for i in range(n))
+                        _emit(f"  ring[head..head+{n}] = {line_hex}")
         except Exception as e:
-            print(f"  tcp ring read failed: {e}")
+            _emit(f"  tcp ring read failed: {e}")
+
+    if diag_log is not None:
+        try:
+            diag_log.close()
+        except Exception:
+            pass
 
 
 def main() -> int:
@@ -471,7 +566,46 @@ def main() -> int:
                     # Heartbeat log so the test shows forward motion.
                     if time.monotonic() >= next_heartbeat:
                         remaining = int(deadline - time.monotonic())
-                        print(f"  [heartbeat] last seen: {last_progress}  ({remaining}s left)")
+                        # Sample ip65/TCP ring and net_poll counters so we
+                        # can tell "slow progress" from "dead stuck".
+                        hb_head = hb_tail = hb_pin = hb_pout = None
+                        try:
+                            transport.resume()
+                            head_addr = _label_addr("tcp_recv_head")
+                            tail_addr = _label_addr("tcp_recv_tail")
+                            pin_addr = _label_addr("net_poll_entry_count")
+                            pout_addr = _label_addr("net_poll_return_count")
+                            if head_addr is not None:
+                                b = transport.read_memory(head_addr, 2)
+                                hb_head = b[0] | (b[1] << 8)
+                            if tail_addr is not None:
+                                b = transport.read_memory(tail_addr, 2)
+                                hb_tail = b[0] | (b[1] << 8)
+                            if pin_addr is not None:
+                                b = transport.read_memory(pin_addr, 2)
+                                hb_pin = b[0] | (b[1] << 8)
+                            if pout_addr is not None:
+                                b = transport.read_memory(pout_addr, 2)
+                                hb_pout = b[0] | (b[1] << 8)
+                        except Exception as _hb_exc:
+                            print(f"    (heartbeat sample failed: {_hb_exc})")
+                        hb_extra = (
+                            f" head=${hb_head:04X}" if hb_head is not None else ""
+                        ) + (
+                            f" tail=${hb_tail:04X}" if hb_tail is not None else ""
+                        ) + (
+                            f" poll_in={hb_pin}" if hb_pin is not None else ""
+                        ) + (
+                            f" poll_out={hb_pout}" if hb_pout is not None else ""
+                        )
+                        print(f"  [heartbeat] last seen: {last_progress}  ({remaining}s left){hb_extra}")
+                        # Also dump the 10 lines from idx_get onward so we
+                        # can see fine-grained markers like ENC1/RX/GOT.
+                        tail_lines = final[idx_get:].splitlines()[:12]
+                        for tl in tail_lines:
+                            tl_stripped = tl.rstrip()
+                            if tl_stripped:
+                                print(f"    | {tl_stripped}")
                         next_heartbeat = time.monotonic() + 30.0
                     elif last_progress != last_log_progress:
                         print(f"  progress: {last_progress}")
