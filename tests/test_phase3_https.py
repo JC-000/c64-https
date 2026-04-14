@@ -63,8 +63,8 @@ MENU_TIMEOUT = 90.0
 DHCP_TIMEOUT = 90.0
 # TLS handshake dominates: X25519 keygen ~3.6 min PLUS X25519 shared secret
 # ~3.6 min PLUS HKDF (many HMAC-SHA256) ~2 min PLUS ECDSA P-256 verify ~2 min.
-# Budget 15 minutes total.
-HTTPS_TIMEOUT = 900.0
+# Budget 30 minutes total to cover full handshake + app data round-trip.
+HTTPS_TIMEOUT = 1800.0
 
 
 def _skip(reason: str) -> int:

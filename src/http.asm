@@ -74,7 +74,9 @@ http_get:
         lda http_req_len+1
         sta tls_app_len+1
         jsr tls_send
-        bcs @close_error
+        bcc +
+        jmp @close_error
++
 
         ; --- 8. Receive response via TLS ---
         ; Initialise parser state
@@ -101,18 +103,36 @@ http_get:
         lda tls_app_ptr+1
         sta zp_ptr+1
 
-        ; Feed decrypted bytes into the TCP ring buffer
+        ; Feed decrypted bytes into the TCP ring buffer.
+        ; Ring is 1024 bytes with 16-bit masked head/tail. We compute the
+        ; destination absolute address per-byte via SMC on @feed_store.
         ldy #0
 @feed_loop:
         cpy tls_app_len         ; low byte only (TLS records < 256)
         beq @feed_done
         lda (zp_ptr),y
-        ldx tcp_recv_tail
-        sta tcp_recv_buf,x
-        inx
-        stx tcp_recv_tail
+        pha
+        ; dest = tcp_recv_buf + tail
+        clc
+        lda tcp_recv_tail+0
+        adc #<tcp_recv_buf
+        sta @feed_store+1
+        lda tcp_recv_tail+1
+        adc #>tcp_recv_buf
+        sta @feed_store+2
+        pla
+@feed_store:
+        sta $ffff               ; SMC: patched above
+        ; tail = (tail + 1) & TCP_RECV_MASK
+        inc tcp_recv_tail+0
+        bne @feed_mask
+        inc tcp_recv_tail+1
+@feed_mask:
+        lda tcp_recv_tail+1
+        and #>TCP_RECV_MASK
+        sta tcp_recv_tail+1
         iny
-        bne @feed_loop          ; always branches
+        bne @feed_loop          ; always branches (tls_app_len < 256)
 @feed_done:
         ; Parse from ring buffer
         jsr http_recv_response

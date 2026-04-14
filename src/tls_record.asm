@@ -266,11 +266,11 @@ tls_record_encrypt:
         lda #>tls_rec_buf
         sta aead_data_ptr+1
 
-        ; aead_data_len = AEAD plaintext length
-        ; Note: aead_data_len is 1 byte, so max 255. For records >255 bytes
-        ; this would need extension. For now, store low byte.
+        ; aead_data_len = AEAD plaintext length (16-bit)
         lda tls_enc_aead_len
         sta aead_data_len
+        lda tls_enc_aead_len+1
+        sta aead_data_len+1
 
         ; --- 6. Encrypt ---
         jsr aead_encrypt
@@ -387,9 +387,11 @@ tls_record_decrypt:
         lda #>tls_rec_buf
         sta aead_data_ptr+1
 
-        ; aead_data_len = ciphertext_len (low byte)
+        ; aead_data_len = ciphertext_len (16-bit)
         lda tls_enc_aead_len
         sta aead_data_len
+        lda tls_enc_aead_len+1
+        sta aead_data_len+1
 
         ; --- 5. Decrypt and verify ---
         jsr aead_decrypt

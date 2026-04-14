@@ -55,9 +55,12 @@ sqtab_hi:   !fill 512, 0
 ; =============================================================================
 ; Network layer buffers
 ; =============================================================================
-tcp_recv_buf:   !fill 256, 0    ; TCP receive ring buffer (256 bytes, wraps)
-tcp_recv_head:  !byte 0         ; read position
-tcp_recv_tail:  !byte 0         ; write position (updated by ip65 callback)
+; NOTE: tcp_recv_buf itself is an equate in constants.asm pointing at $C000
+; (4KB always-RAM region between BASIC ROM shadow and I/O). The buffer does
+; not occupy any .prg bytes here.
+tcp_recv_head:  !word 0         ; read position (16-bit, masked with TCP_RECV_MASK)
+tcp_recv_tail:  !word 0         ; write position (updated by ip65 callback, 16-bit)
+tcp_recv_overflow: !byte 0      ; set to 1 by callback if ring fills up
 
 ; =============================================================================
 ; TLS state
@@ -241,9 +244,11 @@ aead_nonce:     !fill 12, 0
 aead_aad_ptr:   !word 0
 aead_aad_len:   !byte 0
 aead_data_ptr:  !word 0
-aead_data_len:  !byte 0
+aead_data_len:  !word 0         ; data length (16-bit; TLS records can be up to ~4KB)
 aead_tag:       !fill 16, 0
 aead_scratch:   !fill 16, 0     ; Poly1305 padding/length block
+cc20_remain_hi: !byte 0         ; high byte of 16-bit ChaCha20/Poly1305 length counter
+                                ; (low byte lives in ZP at cc20_remain = $18)
 
 ; =============================================================================
 ; fe25519 field arithmetic (from c64-wireguard)
