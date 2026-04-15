@@ -722,15 +722,18 @@ def main():
     random.seed(seed)
     print(f"Random seed: {seed} (reproduce with --seed {seed})")
 
-    # Build
-    print("\n=== Building ===")
-    subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
-    result = subprocess.run(["make"], capture_output=True, text=True,
-                            cwd=PROJECT_ROOT)
-    if result.returncode != 0:
-        print(f"Build failed:\n{result.stderr}")
-        sys.exit(1)
-    print(f"  Build OK: {PRG_PATH}")
+    # Build (skippable via C64_SKIP_BUILD=1 when a caller has already built)
+    if os.environ.get("C64_SKIP_BUILD"):
+        print("\n=== Building (skipped: C64_SKIP_BUILD set) ===")
+    else:
+        print("\n=== Building ===")
+        subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
+        result = subprocess.run(["make"], capture_output=True, text=True,
+                                cwd=PROJECT_ROOT)
+        if result.returncode != 0:
+            print(f"Build failed:\n{result.stderr}")
+            sys.exit(1)
+        print(f"  Build OK: {PRG_PATH}")
 
     if not os.path.exists(PRG_PATH):
         print(f"FATAL: {PRG_PATH} not found")
