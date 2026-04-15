@@ -1,5 +1,5 @@
-; =============================================================================
-; net.asm - ip65 network wrapper with zero page time-sharing
+; src/net/ip65/net.s — ip65/RR-Net networking backend
+; Converted from ACME to ca65 in Phase 3 Batch D.
 ;
 ; All ip65 calls go through this wrapper. Before each call:
 ;   1. Save crypto ZP ($02-$1B) to zp_save_buf
@@ -9,7 +9,40 @@
 ; The ip65 TCP callback fires DURING ip65_process, while ip65's ZP is active.
 ; The callback must NOT touch crypto state — it only copies received data
 ; into tcp_recv_buf (a ring buffer) for later processing by the TLS layer.
-; =============================================================================
+;
+; The d973531 fix (clamp cb_remaining to 255 per callback invocation) is
+; preserved verbatim. The ZP $02-$1B save/restore around every ip65 call
+; is load-bearing — do not remove.
+
+.include "constants.inc"
+.include "ip65_symbols.inc"
+
+; --- Public ABI (what the rest of the firmware imports) ---
+; Names match the legacy ACME entry points; net_abi.inc-style renames
+; (net_dhcp_acquire, net_tcp_set_recv_cb, etc.) are deferred to Phase 7.
+.export net_init
+.export net_dhcp
+.export net_poll
+.export net_dns_resolve
+.export net_tcp_connect
+.export net_set_tcp_dest
+.export net_tcp_send
+.export net_tcp_close
+.export net_print_ip
+.export net_recv_ready
+.export net_recv_byte
+.export net_send_len
+.export net_tcp_recv_cb
+
+; --- BSS imports from data.s ---
+.import zp_save_buf
+.import tcp_recv_head
+.import tcp_recv_tail
+.import tcp_recv_overflow
+.import net_poll_entry_count
+.import net_poll_return_count
+
+.segment "CODE"
 
 ; =============================================================================
 ; net_init - initialize ip65 + ethernet (RR-Net CS8900a)
@@ -219,7 +252,7 @@ net_print_ip:
         ora #$30
         jsr chrout
         rts
-@pb_val: !byte 0
+@pb_val: .byte 0
 
 ; =============================================================================
 ; net_recv_ready - check if data is available in receive ring buffer
@@ -293,6 +326,9 @@ net_recv_byte:
 ; net_init_cb_addrs resolves the variable table pointers and patches the
 ; SMC instructions below so we can read those ip65 variables using absolute
 ; addressing (no ZP indirection needed).
+;
+; d973531 fix (preserved): cb_remaining is clamped to 255 bytes per callback
+; invocation so the 8-bit X index cannot wrap and re-read the inbound buffer.
 ; =============================================================================
 net_tcp_recv_cb:
         ; --- Read inbound data length (16-bit) ---
@@ -304,10 +340,9 @@ cb_load_len_hi:
         sta cb_remaining+1
         ; if length == 0, nothing to copy
         ora cb_remaining
-        bne +
+        bne :+
         jmp cb_done
-+
-
+:
         ; --- Read inbound data pointer (16-bit), patch copy source ---
 cb_load_ptr_lo:
         lda $ffff               ; SMC: patched to addr of tcp_inbound_data_ptr
@@ -318,24 +353,23 @@ cb_load_ptr_hi:
 
         ; Clamp cb_remaining to 255 bytes max per callback to prevent
         ; 8-bit X-index wrap which would re-read source byte 0 onwards
-        ; and overwrite previously-copied ring bytes.
+        ; and overwrite previously-copied ring bytes. (d973531)
         lda cb_remaining+1
-        beq +
+        beq :+
         lda #255
         sta cb_remaining
         lda #0
         sta cb_remaining+1
-+
+:
         ; Copy loop: X = source index; ring store uses SMC on cb_store
         ldx #0
 cb_loop:
         ; Check 16-bit remaining count
         lda cb_remaining
         ora cb_remaining+1
-        bne +
+        bne :+
         jmp cb_done
-+
-
+:
         ; --- Overflow check: if ((tail+1) & $3FF) == head, ring is full ---
         lda tcp_recv_tail+0
         clc
@@ -391,10 +425,10 @@ cb_store:
 cb_done:
         rts
 
-cb_next_lo: !byte 0             ; scratch: (tail+1) & mask, low
-cb_next_hi: !byte 0             ; scratch: (tail+1) & mask, high
+cb_next_lo: .byte 0             ; scratch: (tail+1) & mask, low
+cb_next_hi: .byte 0             ; scratch: (tail+1) & mask, high
 
-cb_remaining: !word 0           ; bytes remaining to copy (callback-local)
+cb_remaining: .word 0           ; bytes remaining to copy (callback-local)
 
 ; =============================================================================
 ; net_init_cb_addrs - resolve ip65 variable table pointers for TCP callback
@@ -445,22 +479,22 @@ net_init_cb_addrs:
 ; =============================================================================
 net_save_zp:
         ldx #ip65_zp_size - 1
--       lda ip65_zp_start,x
+:       lda ip65_zp_start,x
         sta zp_save_buf,x
         dex
-        bpl -
+        bpl :-
         rts
 
 net_restore_zp:
         ldx #ip65_zp_size - 1
--       lda zp_save_buf,x
+:       lda zp_save_buf,x
         sta ip65_zp_start,x
         dex
-        bpl -
+        bpl :-
         rts
 
 ; =============================================================================
 ; net module data
 ; =============================================================================
-net_send_ptr:   !word 0         ; pointer for tcp_send wrapper
-net_send_len:   !word 0         ; length for tcp_send wrapper
+net_send_ptr:   .word 0         ; pointer for tcp_send wrapper
+net_send_len:   .word 0         ; length for tcp_send wrapper

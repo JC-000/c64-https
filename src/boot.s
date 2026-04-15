@@ -1,20 +1,145 @@
-; =============================================================================
-; boot.asm - BASIC stub and startup
-; =============================================================================
+; boot.s — Startup, BASIC stub, screen output, phase 3 orchestration
+; Converted from ACME to ca65 in Phase 3 Batch D.
 
-* = $0801
+        .include "constants.inc"
 
+        ; ---- exports: entry + print helpers ----
+        .export start
+        .export main_loop
+        .export print_string
+        .export print_null_terminated
+        .export print_resp_body
+
+        ; ---- exports: REU multiply table routines ----
+        .export reu_mul_init
+        .export reu_fetch_mul_row
+
+        ; ---- exports: menu handlers ----
+        .export do_net_init
+        .export do_http_get
+        .export do_https_get
+
+        ; ---- exports: banner / menu / status strings ----
+        .export banner_msg
+        .export menu_msg
+        .export init_msg
+        .export net_fail_msg
+        .export net_ok_msg
+        .export dhcp_msg
+        .export dhcp_fail_msg
+        .export dhcp_ok_msg
+        .export no_net_msg
+        .export http_get_msg
+        .export https_get_msg
+        .export dns_fail_msg
+        .export dns_ok_msg
+        .export tcp_fail_msg
+        .export tcp_ok_msg
+        .export tls_fail_msg
+        .export tls_ok_msg
+        .export send_fail_msg
+        .export send_ok_msg
+        .export ok_msg
+        .export failed_msg
+        .export done_msg
+
+        ; ---- exports: 15 TLS state transition markers (used by tls13.s) ----
+        .export ch_sent_msg
+        .export sh_recv_msg
+        .export hk1_msg
+        .export keys_ok_msg
+        .export ee_recv_msg
+        .export cert_recv_msg
+        .export cv_recv_msg
+        .export fin_recv_msg
+        .export cfin_sent_msg
+        .export enc1_msg
+        .export rx_msg
+        .export got_msg
+        .export got2_msg
+        .export dec_msg
+        .export proc_msg
+
+        ; ---- exports: hostnames / path data ----
+        .export http_host_zimmers
+        .export http_host_zimmers_len
+        .export http_host_foo
+        .export http_host_foo_len
+        .export http_path_root
+
+        ; ---- exports: local BSS ----
+        .export net_initialized
+
+        ; ---- imports: entropy / DRBG / sqtab ----
+        .import entropy_init
+        .import drbg_init_entropy
+        .import sqtab_init
+
+        ; ---- imports: network (ip65 wrapper) ----
+        .import net_init
+        .import net_dhcp
+        .import net_poll
+        .import net_print_ip
+        .import net_dns_resolve
+        .import net_set_tcp_dest
+        .import net_tcp_connect
+        .import net_tcp_close
+
+        ; ---- imports: TLS state machine ----
+        .import tls_connect
+        .import tls_send
+        .import tls_recv
+        .import tls_close
+
+        ; ---- imports: HTTP ----
+        .import http_get_plain
+        .import http_build_get
+
+        ; ---- imports: HTTP I/O state (data.asm) ----
+        .import http_host_ptr
+        .import http_host_len
+        .import http_path_ptr
+        .import http_path_len
+        .import http_port
+        .import http_req_buf
+        .import http_req_len
+        .import http_resp_buf
+        .import http_resp_len
+
+        ; ---- imports: TLS app-data pointers (data.asm) ----
+        .import tls_app_ptr
+        .import tls_app_len
+        .import tls_hostname
+        .import tls_hostname_len
+
+        ; ---- imports: multiply / REU staging (data.asm) ----
+        .import mul_8x8
+        .import mul_dma_lo
+        .import mul_dma_hi
+        .import mul_cached_a
+        .import poly_prod_lo
+        .import poly_prod_hi
+
+; =============================================================================
 ; BASIC stub: 10 SYS 2064
-        !word @end              ; pointer to next BASIC line
-        !word 10                ; line number
-        !byte $9e               ; SYS token
-        !text "2064"            ; decimal address of @start
-        !byte 0                 ; end of BASIC line
-@end:
-        !word 0                 ; end of BASIC program
+; Loaded at $0801 via EXEHDR segment (first bytes of LOADER region).
+; =============================================================================
+        .segment "EXEHDR"
+        .word   bas_end                 ; pointer to next BASIC line
+        .word   10                      ; line number
+        .byte   $9e                     ; SYS token
+        .byte   "2064"                  ; decimal address of `start`
+        .byte   0                       ; end of BASIC line
+bas_end:
+        .word   0                       ; end of BASIC program
+
+; =============================================================================
+; Code
+; =============================================================================
+        .segment "CODE"
 
 ; --- entry point (address $0810) ---
-@start:
+start:
         ; disable BASIC ROM to free $A000-$BFFF
         lda $01
         and #%11111110          ; clear bit 0 (BASIC ROM off)
@@ -147,12 +272,14 @@ do_net_init:
         sta net_initialized
         rts
 
-net_initialized: !byte 0
-
 ; =============================================================================
 ; print_string - print null-terminated string at A(lo)/Y(hi)
+;
+; Also aliased as `print_null_terminated` for the screen_marker macro in
+; macros.inc.
 ; =============================================================================
 print_string:
+print_null_terminated:
         sta zp_ptr
         sty zp_ptr+1
         ldy #0
@@ -411,118 +538,6 @@ print_resp_body:
         rts
 
 ; =============================================================================
-; strings
-; =============================================================================
-banner_msg:
-        !text "C64-HTTPS CLIENT V0.1"
-        !byte $0d, $0d
-        !text "TLS 1.3 / CHACHA20-POLY1305"
-        !byte $0d
-        !text "RR-NET (CS8900A) ETHERNET"
-        !byte $0d, $0d, 0
-
-menu_msg:
-        !text "I=INIT  H=HTTP  G=HTTPS  Q=QUIT"
-        !byte $0d, $0d, 0
-
-init_msg:
-        !text "INITIALIZING NETWORK..."
-        !byte $0d, 0
-
-net_fail_msg:
-        !text "NETWORK INIT FAILED"
-        !byte $0d, 0
-
-net_ok_msg:
-        !text "NETWORK OK"
-        !byte $0d, 0
-
-dhcp_msg:
-        !text "REQUESTING DHCP..."
-        !byte $0d, 0
-
-dhcp_fail_msg:
-        !text "DHCP FAILED"
-        !byte $0d, 0
-
-dhcp_ok_msg:
-        !text "DHCP OK - IP: "
-        !byte 0
-
-no_net_msg:
-        !text "ERROR: NETWORK NOT INITIALIZED"
-        !byte $0d, 0
-
-http_get_msg:
-        !text "HTTP GET WWW.ZIMMERS.NET..."
-        !byte $0d, 0
-
-https_get_msg:
-        !text "HTTPS GET WWW.FOO.BAR..."
-        !byte $0d, 0
-
-dns_fail_msg:
-        !text "DNS RESOLVE FAILED"
-        !byte $0d, 0
-
-dns_ok_msg:
-        !text "DNS OK"
-        !byte $0d, 0
-
-tcp_fail_msg:
-        !text "TCP CONNECT FAILED"
-        !byte $0d, 0
-
-tcp_ok_msg:
-        !text "TCP CONNECTED"
-        !byte $0d, 0
-
-tls_fail_msg:
-        !text "TLS HANDSHAKE FAILED"
-        !byte $0d, 0
-
-tls_ok_msg:
-        !text "TLS HANDSHAKE OK"
-        !byte $0d, 0
-
-; TLS state transition markers (debug)
-ch_sent_msg:    !text "CH", $0d, 0
-sh_recv_msg:    !text "SH", $0d, 0
-hk1_msg:        !text "HK1", $0d, 0
-keys_ok_msg:    !text "KEYS", $0d, 0
-ee_recv_msg:    !text "EE", $0d, 0
-cert_recv_msg:  !text "CERT", $0d, 0
-cv_recv_msg:    !text "CV", $0d, 0
-fin_recv_msg:   !text "FIN", $0d, 0
-cfin_sent_msg:  !text "CFIN", $0d, 0
-enc1_msg:       !text "ENC1", $0d, 0
-rx_msg:         !text "RX", $0d, 0
-got_msg:        !text "GOT", $0d, 0
-got2_msg:       !text "GOT2", $0d, 0
-dec_msg:        !text "DEC", $0d, 0
-proc_msg:       !text "PROC", $0d, 0
-
-send_fail_msg:
-        !text "TLS SEND FAILED"
-        !byte $0d, 0
-
-send_ok_msg:
-        !text "REQUEST SENT"
-        !byte $0d, 0
-
-ok_msg:
-        !text "OK"
-        !byte $0d, 0
-
-failed_msg:
-        !text "FAILED"
-        !byte $0d, 0
-
-done_msg:
-        !text "CONNECTION CLOSED"
-        !byte $0d, 0
-
-; =============================================================================
 ; REU multiply table initialization (from c64-x25519 optimizations)
 ; =============================================================================
 
@@ -624,9 +639,6 @@ reu_mul_init:
         sta reu_len_hi         ; length high = 2 (512 bytes)
         rts
 
-reu_init_a:     !byte 0
-reu_init_b:     !byte 0
-
 ; =============================================================================
 ; reu_fetch_mul_row - DMA a multiplication table row from REU to C64
 ;
@@ -646,18 +658,141 @@ reu_fetch_mul_row:
         rts
 
 ; =============================================================================
+; Strings (read-only)
+; =============================================================================
+        .segment "RODATA"
+
+banner_msg:
+        .byte "C64-HTTPS CLIENT V0.1"
+        .byte $0d, $0d
+        .byte "TLS 1.3 / CHACHA20-POLY1305"
+        .byte $0d
+        .byte "RR-NET (CS8900A) ETHERNET"
+        .byte $0d, $0d, 0
+
+menu_msg:
+        .byte "I=INIT  H=HTTP  G=HTTPS  Q=QUIT"
+        .byte $0d, $0d, 0
+
+init_msg:
+        .byte "INITIALIZING NETWORK..."
+        .byte $0d, 0
+
+net_fail_msg:
+        .byte "NETWORK INIT FAILED"
+        .byte $0d, 0
+
+net_ok_msg:
+        .byte "NETWORK OK"
+        .byte $0d, 0
+
+dhcp_msg:
+        .byte "REQUESTING DHCP..."
+        .byte $0d, 0
+
+dhcp_fail_msg:
+        .byte "DHCP FAILED"
+        .byte $0d, 0
+
+dhcp_ok_msg:
+        .byte "DHCP OK - IP: "
+        .byte 0
+
+no_net_msg:
+        .byte "ERROR: NETWORK NOT INITIALIZED"
+        .byte $0d, 0
+
+http_get_msg:
+        .byte "HTTP GET WWW.ZIMMERS.NET..."
+        .byte $0d, 0
+
+https_get_msg:
+        .byte "HTTPS GET WWW.FOO.BAR..."
+        .byte $0d, 0
+
+dns_fail_msg:
+        .byte "DNS RESOLVE FAILED"
+        .byte $0d, 0
+
+dns_ok_msg:
+        .byte "DNS OK"
+        .byte $0d, 0
+
+tcp_fail_msg:
+        .byte "TCP CONNECT FAILED"
+        .byte $0d, 0
+
+tcp_ok_msg:
+        .byte "TCP CONNECTED"
+        .byte $0d, 0
+
+tls_fail_msg:
+        .byte "TLS HANDSHAKE FAILED"
+        .byte $0d, 0
+
+tls_ok_msg:
+        .byte "TLS HANDSHAKE OK"
+        .byte $0d, 0
+
+; TLS state transition markers (debug) — imported by tls13.s
+ch_sent_msg:    .byte "CH", $0d, 0
+sh_recv_msg:    .byte "SH", $0d, 0
+hk1_msg:        .byte "HK1", $0d, 0
+keys_ok_msg:    .byte "KEYS", $0d, 0
+ee_recv_msg:    .byte "EE", $0d, 0
+cert_recv_msg:  .byte "CERT", $0d, 0
+cv_recv_msg:    .byte "CV", $0d, 0
+fin_recv_msg:   .byte "FIN", $0d, 0
+cfin_sent_msg:  .byte "CFIN", $0d, 0
+enc1_msg:       .byte "ENC1", $0d, 0
+rx_msg:         .byte "RX", $0d, 0
+got_msg:        .byte "GOT", $0d, 0
+got2_msg:       .byte "GOT2", $0d, 0
+dec_msg:        .byte "DEC", $0d, 0
+proc_msg:       .byte "PROC", $0d, 0
+
+send_fail_msg:
+        .byte "TLS SEND FAILED"
+        .byte $0d, 0
+
+send_ok_msg:
+        .byte "REQUEST SENT"
+        .byte $0d, 0
+
+ok_msg:
+        .byte "OK"
+        .byte $0d, 0
+
+failed_msg:
+        .byte "FAILED"
+        .byte $0d, 0
+
+done_msg:
+        .byte "CONNECTION CLOSED"
+        .byte $0d, 0
+
+; =============================================================================
 ; hostname and path data
 ; =============================================================================
 http_host_zimmers:
-        !text "www.zimmers.net"
-        !byte 0
+        .byte "www.zimmers.net"
+        .byte 0
 http_host_zimmers_len = 15
 
 http_host_foo:
-        !text "www.foo.bar"
-        !byte 0
+        .byte "www.foo.bar"
+        .byte 0
 http_host_foo_len = 11
 
 http_path_root:
-        !text "/"
-        !byte 0
+        .byte "/"
+        .byte 0
+
+; =============================================================================
+; Local BSS
+; =============================================================================
+        .segment "BSS"
+
+net_initialized:        .res 1
+reu_init_a:             .res 1
+reu_init_b:             .res 1
