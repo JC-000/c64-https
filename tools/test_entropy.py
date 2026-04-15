@@ -349,14 +349,17 @@ def main():
         if idx + 1 < len(sys.argv):
             vice_seed = sys.argv[idx + 1]
 
-    # Build
-    print("=== Building ===")
-    subprocess.run(["make", "clean"], capture_output=True)
-    result = subprocess.run(["make"], capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"  Build failed:\n{result.stderr}")
-        sys.exit(1)
-    print("  Build OK")
+    # Build (skippable via C64_SKIP_BUILD=1 when a caller has already built)
+    if os.environ.get("C64_SKIP_BUILD"):
+        print("=== Building (skipped: C64_SKIP_BUILD set) ===")
+    else:
+        print("=== Building ===")
+        subprocess.run(["make", "clean"], capture_output=True)
+        result = subprocess.run(["make"], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  Build failed:\n{result.stderr}")
+            sys.exit(1)
+        print("  Build OK")
 
     if not os.path.exists(PRG_PATH):
         print(f"FATAL: {PRG_PATH} not found")
