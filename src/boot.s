@@ -122,7 +122,7 @@
         .import poly_prod_hi
 
 ; =============================================================================
-; BASIC stub: 10 SYS 2064
+; BASIC stub: 10 SYS 2061
 ; Loaded at $0801 via EXEHDR segment (first bytes of LOADER region).
 ; =============================================================================
         .segment "EXEHDR"
