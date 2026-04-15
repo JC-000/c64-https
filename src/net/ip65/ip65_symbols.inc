@@ -7,13 +7,9 @@
 ; Only symbols actually referenced by src/net/ip65/net.s are defined here —
 ; do not dump the full map. Add more symbols as the backend grows.
 ;
-; During Phase 3 these equates are ALSO present in src/constants.inc (legacy
-; ACME-era header). To avoid duplicate-symbol errors when net.s includes
-; both constants.inc and this file, every equate is guarded with `.ifndef`.
-; In Phase 7 constants.inc will stop defining ip65_* symbols and this file
-; becomes the single source of truth.
-
-.ifndef ip65_base
+; Phase 7: this file is the single source of truth for ip65_* equates.
+; src/constants.inc no longer defines them, so the earlier `.ifndef`
+; guard has been removed.
 
 ; --- ip65 ZP overlap zone (26 bytes: $02-$1B) ---
 ip65_zp_start   = $02
@@ -55,5 +51,3 @@ ip65_cfg_mac        = $3a84            ; 6 bytes: our MAC address
 ip65_tcp_snd_len    = $4f48            ; 2 bytes: tcp_send_data_len
 ip65_dns_ip_addr    = $4073            ; 4 bytes: resolved DNS IP
 ip65_error          = $4cea            ; 1 byte: last error code
-
-.endif ; ip65_base

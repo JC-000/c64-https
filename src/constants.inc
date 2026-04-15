@@ -134,52 +134,9 @@ sid_v3_ctrl     = $d412
 sid_v3_ad       = $d413
 sid_v3_sr       = $d414
 
-; --- ip65 ZP overlap zone ---
-; ip65 uses $02-$1B during its execution (cc65 standard: c_sp, sreg,
-; regsave, ptr1-ptr4, tmp1-tmp4, regbank). These overlap our crypto
-; ZP at $02-$1B. The net.asm wrapper handles save/restore.
-ip65_zp_start   = $02
-ip65_zp_end     = $1b           ; inclusive
-ip65_zp_size    = ip65_zp_end - ip65_zp_start + 1  ; 26 bytes
-
-; =============================================================================
-; ip65 jump table at $2000 (fixed offsets from ip65-build/ip65_stub.s)
-; =============================================================================
-ip65_base           = $2000
-ip65_init           = ip65_base + 0     ; A=0 default; C=0 ok
-ip65_process        = ip65_base + 3     ; poll; C=0 packet, C=1 idle
-ip65_dhcp_init      = ip65_base + 6     ; DHCP; C=0 ok
-ip65_dns_resolve    = ip65_base + 9     ; resolve; C=0 ok
-ip65_tcp_connect    = ip65_base + 12    ; AX=port; C=0 ok
-ip65_tcp_send       = ip65_base + 15    ; AX=data ptr; C=0 ok
-ip65_tcp_close      = ip65_base + 18    ; close connection
-ip65_tcp_keepalive  = ip65_base + 21    ; send keepalive
-ip65_dns_set_host   = ip65_base + 24    ; AX=hostname ptr
-ip65_set_tcp_cb     = ip65_base + 27    ; AX=callback addr
-ip65_set_tcp_dest   = ip65_base + 30    ; AX=4-byte IP ptr
-
-; ip65 variable table at ip65_base+33 (2-byte address pointers)
-; Read the pointer, then dereference to access the variable.
-; For convenience, we define the indirect addresses directly:
-ip65_vt             = ip65_base + 33
-ip65_vt_cfg_mac     = ip65_vt + 0      ; -> 6 bytes MAC
-ip65_vt_cfg_ip      = ip65_vt + 2      ; -> 4 bytes our IP
-ip65_vt_cfg_netmask = ip65_vt + 4      ; -> 4 bytes netmask
-ip65_vt_cfg_gateway = ip65_vt + 6      ; -> 4 bytes gateway
-ip65_vt_cfg_dns     = ip65_vt + 8      ; -> 4 bytes DNS server
-ip65_vt_dns_ip      = ip65_vt + 10     ; -> 4 bytes resolved IP
-ip65_vt_tcp_in_ptr  = ip65_vt + 12     ; -> 2 bytes inbound data ptr
-ip65_vt_tcp_in_len  = ip65_vt + 14     ; -> 2 bytes inbound data length
-ip65_vt_tcp_snd_len = ip65_vt + 16     ; -> 2 bytes send data length
-ip65_vt_ip65_error  = ip65_vt + 18     ; -> 1 byte error code
-ip65_vt_tcp_dest_ip = ip65_vt + 20     ; -> 4 bytes dest IP
-
-; Direct addresses (from ip65-c64.map, for when we need to poke directly)
-ip65_cfg_ip         = $3a8a            ; 4 bytes: our IP address
-ip65_cfg_mac        = $3a84            ; 6 bytes: our MAC address
-ip65_tcp_snd_len    = $4f48            ; 2 bytes: tcp_send_data_len
-ip65_dns_ip_addr    = $4073            ; 4 bytes: resolved DNS IP
-ip65_error          = $4cea            ; 1 byte: last error code
+; --- ip65 ZP overlap zone + jump table ---
+; Moved to src/net/ip65/ip65_symbols.inc (single source of truth). Files
+; that need ip65_* symbols must `.include "ip65_symbols.inc"` directly.
 
 ; =============================================================================
 ; TLS 1.3 constants

@@ -2,6 +2,7 @@
 ; Converted from ACME to ca65 in Phase 3 Batch D.
 
         .include "constants.inc"
+        .include "ip65_symbols.inc"
 
         ; ---- exports: entry + print helpers ----
         .export start

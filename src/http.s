@@ -8,6 +8,7 @@
 ; (status line + headers + body).
 
         .include "constants.inc"
+        .include "ip65_symbols.inc"
 
         ; ---- exports ----
         .export http_get

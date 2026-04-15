@@ -12,6 +12,7 @@
 ; Add symbols here as the harness needs them.
 
 .include "constants.inc"
+.include "ip65_symbols.inc"
 
 .export tcp_recv_buf
 .export ip65_init
