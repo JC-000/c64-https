@@ -73,9 +73,13 @@ tls_send_record:
 ; =============================================================================
 tls_recv_record:
         lda tls_recv_state
-        bne @read_payload       ; state 1: reading payload
+        beq @state0_enter       ; state 0: reading header
+        jmp @read_payload       ; state 1: reading payload
 
+@state0_enter:
         ; --- State 0: reading header bytes ---
+        lda #$02
+        sta tls_recv_sub_progress
 @read_header:
         jsr net_recv_byte
         bcc +                   ; data available, continue
@@ -85,6 +89,19 @@ tls_recv_record:
         ; store byte in tls_rec_header + offset
         ldx tls_recv_count      ; low byte is sufficient (max 5)
         sta tls_rec_header,x
+
+        ; If this was the first byte (header[0] = content type), validate it
+        ; immediately. Valid TLS content types are 20..23. Rejecting garbage
+        ; early limits resync damage to 1 byte per failed attempt instead of 5.
+        cpx #0
+        bne @store_continue
+        cmp #20
+        bcs +
+        jmp @error              ; < 20: invalid
++       cmp #24
+        bcc @store_continue
+        jmp @error              ; >= 24: invalid
+@store_continue:
 
         ; increment tls_recv_count (16-bit)
         inc tls_recv_count
@@ -99,6 +116,8 @@ tls_recv_record:
         bne @read_header        ; (shouldn't happen, but safe)
 
         ; --- Parse header ---
+        lda #$03
+        sta tls_recv_sub_progress
         ; tls_rec_type = header[0]
         lda tls_rec_header
         sta tls_rec_type
@@ -113,6 +132,8 @@ tls_recv_record:
         beq +
         jmp @error
 +
+        lda #$04
+        sta tls_recv_sub_progress
 
         ; tls_rec_len = header[3] * 256 + header[4] (big-endian)
         lda tls_rec_header+4    ; low byte
@@ -132,6 +153,8 @@ tls_recv_record:
         jmp @error              ; low byte >= $25: too big
 
 @len_ok:
+        lda #$05
+        sta tls_recv_sub_progress
         ; Switch to state 1, reset count
         lda #1
         sta tls_recv_state
@@ -148,6 +171,8 @@ tls_recv_record:
 
         ; --- State 1: reading payload bytes ---
 @read_payload:
+        lda #$06
+        sta tls_recv_sub_progress
         jsr net_recv_byte
         bcs @incomplete         ; no data available
 
@@ -187,6 +212,8 @@ tls_recv_record:
 
         ; --- Record complete ---
 @complete:
+        lda #$07
+        sta tls_recv_sub_progress
         ; Reset state machine for next record
         lda #0
         sta tls_recv_state
@@ -274,21 +301,38 @@ tls_record_send_encrypted:
 ; handles both plaintext and encrypted records based on tls_state.
 ; =============================================================================
 tls_record_recv_and_decrypt:
+@retry:
+        lda #$01
+        sta tls_recv_sub_progress
         ; Try to receive a complete record
         jsr tls_recv_record
         bcs @recv_incomplete
 
+        ; RFC 8446 Section 5: TLS 1.3 clients MUST ignore ChangeCipherSpec
+        ; records sent during the handshake for middlebox compatibility.
+        lda tls_rec_type
+        cmp #TLS_CT_CHANGE_CIPHER
+        beq @retry
+
         ; Record received. Check if decryption is needed.
-        ; After ServerHello (state >= TLS_STATE_SERVER_HELLO), records are encrypted.
+        ; After ServerHello (state >= TLS_STATE_ENCRYPTED_EXT), records are encrypted.
+        ; The ServerHello record itself is plaintext even though tls_state is
+        ; set to SERVER_HELLO during its receipt.
         lda tls_state
-        cmp #TLS_STATE_SERVER_HELLO
-        bcc @plaintext          ; state < SERVER_HELLO: no decryption
+        cmp #TLS_STATE_ENCRYPTED_EXT
+        bcc @plaintext          ; state < ENCRYPTED_EXT: no decryption
 
         ; Decrypt the record in-place
+        lda #$08
+        sta tls_recv_sub_progress
         jsr tls_record_decrypt
         bcs @aead_fail          ; AEAD verification failed
+        lda #$09
+        sta tls_recv_sub_progress
 
 @plaintext:
+        lda #$0A
+        sta tls_recv_sub_progress
         clc
         rts
 

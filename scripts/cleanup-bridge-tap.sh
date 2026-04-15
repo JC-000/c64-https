@@ -2,9 +2,14 @@
 # cleanup-bridge-tap.sh -- Tear down the bridge+dnsmasq env set up by
 # setup-bridge-tap.sh. Idempotent -- safe to run if already torn down.
 #
-# Kills any leftover VICE processes, tears down the br-c64 bridge and
-# its tap-c64-0/tap-c64-1 interfaces, removes the iptables FORWARD rules,
-# and cleans up stale /tmp/vice_eth_*.rc files.
+# Tears down the br-c64 bridge and its tap-c64-0/tap-c64-1 interfaces,
+# removes the iptables FORWARD rules, kills the project's dnsmasq, and
+# cleans up stale /tmp/vice_eth_*.rc files.
+#
+# NOTE: Does NOT kill x64sc processes. Our test-owned VICE instances are
+# managed per-instance by ViceProcess.stop() (see ViceInstanceManager /
+# shutdown_vice()), and sibling projects on this host may have their own
+# x64sc processes that MUST NOT be clobbered.
 #
 # Usage:
 #   sudo ./scripts/cleanup-bridge-tap.sh
@@ -20,30 +25,12 @@ DNSMASQ_PIDFILE="/tmp/c64-https-dnsmasq.pid"
 echo "=== c64-https bridge networking cleanup ==="
 echo
 
-# --- 1. Kill any leftover x64sc processes ------------------------------------
-echo "[1/6] Killing any leftover x64sc processes..."
-if pgrep -x x64sc > /dev/null 2>&1; then
-    pgrep -a x64sc | while read -r pid cmd; do
-        echo "  killing PID $pid: $cmd"
-    done
-    pkill -TERM x64sc 2>/dev/null || true
-    sleep 1
-    if pgrep -x x64sc > /dev/null 2>&1; then
-        pkill -KILL x64sc 2>/dev/null || true
-        sleep 1
-    fi
-    if pgrep -x x64sc > /dev/null 2>&1; then
-        echo "  WARNING: x64sc still running after SIGKILL"
-    else
-        echo "  all x64sc processes killed"
-    fi
-else
-    echo "  no x64sc processes running"
-fi
+# --- 1. (skipped) x64sc kill -- managed per-instance by ViceProcess ----------
+echo "[1/5] (skipping x64sc kill -- managed per-instance by ViceProcess)"
 echo
 
 # --- 2. Kill dnsmasq (pidfile + /proc scan) ----------------------------------
-echo "[2/6] Killing dnsmasq processes..."
+echo "[2/5] Killing dnsmasq processes..."
 found_dns=0
 
 # 2a. Primary path: pidfile
@@ -88,7 +75,7 @@ fi
 echo
 
 # --- 3. Remove iptables FORWARD rules ----------------------------------------
-echo "[3/6] Removing iptables FORWARD rules..."
+echo "[3/5] Removing iptables FORWARD rules..."
 removed=0
 for DEV in "$BRIDGE" "$TAP0" "$TAP1" "$TAP_LEGACY"; do
     if iptables -D FORWARD -i "$DEV" -j ACCEPT 2>/dev/null; then
@@ -106,7 +93,7 @@ fi
 echo
 
 # --- 4. Tear down TAP interfaces and bridge -----------------------------------
-echo "[4/6] Tearing down TAP interfaces and bridge..."
+echo "[4/5] Tearing down TAP interfaces and bridge..."
 for TAP_DEV in "$TAP0" "$TAP1" "$TAP_LEGACY"; do
     if ip link show "$TAP_DEV" > /dev/null 2>&1; then
         ip link set "$TAP_DEV" down 2>/dev/null || true
@@ -135,7 +122,7 @@ fi
 echo
 
 # --- 5. Remove stale temp vicerc files ----------------------------------------
-echo "[5/6] Removing stale /tmp/vice_eth_*.rc files..."
+echo "[5/5] Removing stale /tmp/vice_eth_*.rc files and final pidfile cleanup..."
 shopt -s nullglob
 rc_files=(/tmp/vice_eth_*.rc)
 if [[ ${#rc_files[@]} -gt 0 ]]; then
@@ -148,8 +135,7 @@ fi
 shopt -u nullglob
 echo
 
-# --- 6. Remove stale dnsmasq pidfile (if not already cleaned) -----------------
-echo "[6/6] Final pidfile cleanup..."
+# --- 5b. Remove stale dnsmasq pidfile (if not already cleaned) ----------------
 if [[ -f "$DNSMASQ_PIDFILE" ]]; then
     rm -f "$DNSMASQ_PIDFILE"
     echo "  [removed] $DNSMASQ_PIDFILE"

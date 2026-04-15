@@ -56,7 +56,8 @@ sha256_round    = $12           ; 1 byte
 cc20_round      = $14           ; 1 byte
 cc20_qr_idx     = $15           ; 1 byte
 cc20_data_ptr   = $16           ; 2 bytes ($16-$17)
-cc20_remain     = $18           ; 1 byte (also poly1305_update counter)
+cc20_remain     = $18           ; low byte of 16-bit ChaCha20/AEAD length
+                                ; (high byte = cc20_remain_hi in data.asm)
 cc20_buf_pos    = $19           ; 1 byte
 
 ; --- mult66 indirect-indexed multiply pointers (time-shared with ChaCha20) ---
@@ -107,8 +108,7 @@ zp_temp         = $fd           ; 1 byte
 zp_count        = $fe           ; 1 byte
 
 ; --- Quarter-square multiply table (shared by Poly1305 and ECDSA) ---
-sqtab_lo        = $7800         ; 512 bytes: floor(n^2/4) low bytes
-sqtab_hi        = $7a00         ; 512 bytes: floor(n^2/4) high bytes
+; sqtab_lo/sqtab_hi now defined as labels in data.asm — moved out of $7800 to free code space
 
 ; --- REU (Ram Expansion Unit) registers ---
 reu_status      = $df00         ; status register
@@ -240,5 +240,11 @@ TLS_ALERT_FATAL         = 2
 ; Buffer sizes
 ; =============================================================================
 TLS_RECORD_MAX          = 512   ; negotiated via max_fragment_length
-TCP_RECV_BUF_SIZE       = 256   ; ring buffer for ip65 callback data (8-bit wrap)
+TCP_RECV_BUF_SIZE       = 4096  ; ring buffer for ip65 callback data (masked wrap)
+TCP_RECV_MASK           = $0fff ; 12-bit mask for 16-bit head/tail wrap
 HTTP_BUF_SIZE           = 256   ; HTTP request/response line buffer
+
+; TCP receive ring buffer lives at $C000-$CFFF (4KB always-RAM region between
+; BASIC ROM shadow and I/O). Declared here as an equate rather than in
+; data.asm so the PRG/BSS stays small — the RAM exists regardless.
+tcp_recv_buf            = $c000

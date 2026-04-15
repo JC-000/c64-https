@@ -57,53 +57,101 @@ tls_connect:
         lda #TLS_STATE_CLIENT_HELLO
         sta tls_state
         jsr tls_send_client_hello
-        bcs @error
+        bcc @ok1
+        jmp @error
+@ok1:
+        lda #<ch_sent_msg
+        ldy #>ch_sent_msg
+        jsr print_string
 
         ; --- receive ServerHello ---
         lda #TLS_STATE_SERVER_HELLO
         sta tls_state
         jsr tls_recv_server_hello
-        bcs @error
+        bcc @ok2
+        jmp @error
+@ok2:
+        lda #<sh_recv_msg
+        ldy #>sh_recv_msg
+        jsr print_string
+
+        lda #<hk1_msg
+        ldy #>hk1_msg
+        jsr print_string
 
         ; derive handshake keys from ECDHE shared secret
         jsr tls_derive_handshake_keys
-        bcs @error
+        bcc @ok3
+        jmp @error
+@ok3:
+        lda #<keys_ok_msg
+        ldy #>keys_ok_msg
+        jsr print_string
 
         ; --- receive EncryptedExtensions (encrypted) ---
         lda #TLS_STATE_ENCRYPTED_EXT
         sta tls_state
         jsr tls_recv_encrypted
-        bcs @error
+        bcc @ok4
+        jmp @error
+@ok4:
+        lda #<ee_recv_msg
+        ldy #>ee_recv_msg
+        jsr print_string
 
         ; --- receive Certificate (encrypted) ---
         lda #TLS_STATE_CERTIFICATE
         sta tls_state
         jsr tls_recv_encrypted
-        bcs @error
+        bcc @ok5
+        jmp @error
+@ok5:
+        lda #<cert_recv_msg
+        ldy #>cert_recv_msg
+        jsr print_string
 
         ; --- receive CertificateVerify (encrypted) ---
         lda #TLS_STATE_CERT_VERIFY
         sta tls_state
         jsr tls_recv_encrypted
-        bcs @error
+        bcc @ok6
+        jmp @error
+@ok6:
+        lda #<cv_recv_msg
+        ldy #>cv_recv_msg
+        jsr print_string
 
         ; --- receive server Finished (encrypted) ---
         lda #TLS_STATE_FINISHED
         sta tls_state
         jsr tls_recv_encrypted
-        bcs @error
+        bcc @ok7
+        jmp @error
+@ok7:
+        lda #<fin_recv_msg
+        ldy #>fin_recv_msg
+        jsr print_string
 
         ; verify server Finished
         jsr tls_verify_finished
-        bcs @error
+        bcc @ok9
+        jmp @error
+@ok9:
 
         ; derive application traffic keys
         jsr tls_derive_traffic_keys
-        bcs @error
+        bcc @ok10
+        jmp @error
+@ok10:
 
         ; --- send client Finished (encrypted) ---
         jsr tls_send_finished
-        bcs @error
+        bcc @ok8
+        jmp @error
+@ok8:
+        lda #<cfin_sent_msg
+        ldy #>cfin_sent_msg
+        jsr print_string
 
         ; connected!
         lda #TLS_STATE_CONNECTED
@@ -112,6 +160,8 @@ tls_connect:
         rts
 
 @error:
+        lda tls_state           ; preserve last attempted state
+        sta tls_last_state
         lda #TLS_STATE_ERROR
         sta tls_state
         sec
@@ -239,10 +289,18 @@ tls_send_client_hello:
 ; Output: C=0 success, C=1 timeout or parse error
 ; =============================================================================
 tls_recv_server_hello:
+        lda #$01
+        sta tls_recv_progress
         lda #0
         sta @sh_timeout
         sta @sh_timeout+1
+        sta tls_recv_poll_count
+        sta tls_recv_poll_count+1
 @sh_wait:
+        inc tls_recv_poll_count
+        bne +
+        inc tls_recv_poll_count+1
++
         jsr net_poll
         jsr tls_record_recv_and_decrypt
         bcc @sh_got_record
@@ -254,10 +312,14 @@ tls_recv_server_hello:
         sec
         rts
 @sh_got_record:
+        lda #$02
+        sta tls_recv_progress
         ; verify content type is handshake
         lda tls_rec_type
         cmp #TLS_CT_HANDSHAKE
         bne @sh_error
+        lda #$03
+        sta tls_recv_progress
 
         ; copy tls_rec_buf to tls_hs_buf (tls_rec_len bytes)
         ldy #0
@@ -273,10 +335,18 @@ tls_recv_server_hello:
         sta tls_hs_len
         lda tls_rec_len+1
         sta tls_hs_len+1
+        lda #$04
+        sta tls_recv_progress
 
         ; parse ServerHello
         jsr tls_parse_server_hello
         bcs @sh_error
+        lda #$05
+        sta tls_recv_progress
+
+        ; compute ECDH shared secret now that tls_server_pubkey is populated
+        jsr tls_ecdh_compute_shared
+        clc
 
         ; update transcript with ServerHello
         lda #<tls_hs_buf
@@ -303,13 +373,26 @@ tls_recv_server_hello:
 ; Output: C=0 success, C=1 timeout/error
 ; =============================================================================
 tls_recv_encrypted:
+        lda #<enc1_msg
+        ldy #>enc1_msg
+        jsr print_string
         lda #0
         sta @enc_timeout
         sta @enc_timeout+1
+        lda #<rx_msg
+        ldy #>rx_msg
+        jsr print_string
 @enc_wait:
         jsr net_poll
         jsr tls_record_recv_and_decrypt
-        bcc @enc_got_record
+        bcs +
+        ; success -- print GOT2 marker so we can distinguish progress
+        lda #<got2_msg
+        ldy #>got2_msg
+        jsr print_string
+        clc
+        jmp @enc_got_record
++
         inc @enc_timeout
         bne @enc_wait
         inc @enc_timeout+1
@@ -318,6 +401,11 @@ tls_recv_encrypted:
         sec
         rts
 @enc_got_record:
+        pha
+        lda #<got_msg
+        ldy #>got_msg
+        jsr print_string
+        pla
         ; verify inner content type is handshake
         lda tls_rec_type
         cmp #TLS_CT_HANDSHAKE
@@ -346,6 +434,13 @@ tls_recv_encrypted:
         lda tls_hs_len
         sta zp_count
         jsr tls_transcript_update
+
+        lda #<dec_msg
+        ldy #>dec_msg
+        jsr print_string
+        lda #<proc_msg
+        ldy #>proc_msg
+        jsr print_string
 
         ; dispatch based on handshake type (first byte of tls_hs_buf)
         lda tls_hs_buf

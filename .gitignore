@@ -5,3 +5,6 @@ ip65-build/*.bin
 ip65-build/*.map
 .claude/
 .serena/
+tools/https_e2e/certs/
+tools/diag_4de0_*.py
+tools/diag_read_live.py
