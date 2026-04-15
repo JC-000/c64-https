@@ -128,7 +128,7 @@
         .word   bas_end                 ; pointer to next BASIC line
         .word   10                      ; line number
         .byte   $9e                     ; SYS token
-        .byte   "2064"                  ; decimal address of `start`
+        .byte   "2061"                  ; decimal address of `start` ($080D)
         .byte   0                       ; end of BASIC line
 bas_end:
         .word   0                       ; end of BASIC program
@@ -138,7 +138,7 @@ bas_end:
 ; =============================================================================
         .segment "CODE"
 
-; --- entry point (address $0810) ---
+; --- entry point (address $080D; SYS 2061) ---
 start:
         ; disable BASIC ROM to free $A000-$BFFF
         lda $01
@@ -146,6 +146,25 @@ start:
         sta $01
 
         sei                     ; disable interrupts during init
+
+        ; Zero SHADOW_BSS ($A000-$BFFF, 8 KiB). PRG LOAD does not zero BSS;
+        ; ca65 BSS segments in file-less regions start with whatever RAM
+        ; happened to contain. Without this, `net_initialized` and similar
+        ; boot guards read garbage and send us straight into ip65 code before
+        ; ip65 has been initialised, crashing us back to BASIC READY.
+        ldy #$00
+        ldx #$20                ; 32 pages = $2000 bytes
+        lda #$A0
+        sta @zbss_store+2       ; reset high byte (idempotent across resets)
+        lda #$00
+@zbss_page:
+@zbss_store:
+        sta $A000,y             ; self-modified high byte walks $A0..$BF
+        iny
+        bne @zbss_store
+        inc @zbss_store+2
+        dex
+        bne @zbss_page
 
         ; clear screen
         lda #$93
