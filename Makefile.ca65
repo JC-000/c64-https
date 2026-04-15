@@ -1,0 +1,28 @@
+# Makefile.ca65 — ca65/ld65 build for c64-https
+#
+# Runs alongside the existing ACME Makefile during the refactor.
+# Deleted in Phase 7 when the ACME build is retired.
+
+CA65      ?= ca65
+LD65      ?= ld65
+BACKEND   ?= ip65
+CFG       := cfg/c64-https-$(BACKEND).cfg
+
+CA65FLAGS := -I src -I src/inc --debug-info
+LD65FLAGS := -C $(CFG) -Ln build/labels.txt -m build/c64-https.map
+
+# Source inventory grows as Phase 3 converts more files.
+# Phase 2 only exercises the entropy pilot.
+PILOT_SRCS := src/entropy.s
+PILOT_OBJS := $(patsubst src/%.s,build/%.o,$(PILOT_SRCS))
+
+.PHONY: pilot clean
+
+pilot: $(PILOT_OBJS)
+
+build/%.o: src/%.s
+	@mkdir -p $(dir $@)
+	$(CA65) $(CA65FLAGS) -o $@ $<
+
+clean:
+	rm -rf build
