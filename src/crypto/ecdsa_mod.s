@@ -1,10 +1,39 @@
+; ecdsa_mod.s - P-256 scalar modular arithmetic (mod n)
+; Converted from ACME to ca65 in Phase 3 Batch A.
 ; =============================================================================
-; ecdsa_mod.asm - Modular arithmetic for ECDSA P-256
+; Modular arithmetic for ECDSA P-256
 ; fp_mod_add, fp_mod_sub, fp_mod_reduce, fp_mod_mul, fp_mod_inv,
 ; result registers fp_r0-r3
 ;
 ; Imported from c64-aes256-ecdsa for TLS 1.3 certificate verification.
 ; =============================================================================
+
+.include "constants.inc"
+
+.import fp_add, fp_sub, fp_mul, fp_cmp, fp_copy, fp_zero, fp_rshift1
+.import fp_wide
+
+.export fp_mod_add
+.export fp_mod_sub
+.export fp_mod_reduce
+.export fp_mod_mul
+.export fp_mod_inv
+.export fp_chk_one
+
+.export fp_rem
+.export fp_bc
+.export fp_bm
+.export fp_inv_iter
+.export fp_inv_u
+.export fp_inv_v
+.export fp_inv_x1
+.export fp_inv_x2
+.export fp_r0
+.export fp_r1
+.export fp_r2
+.export fp_r3
+
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; fp_mod_add: (fp_dst) = ((fp_src1) + (fp_src2)) mod (fp_misc)
@@ -190,10 +219,6 @@ fp_mod_reduce:
         bne @cpy
         rts
 
-fp_rem: !fill 33, 0
-fp_bc:  !byte 0
-fp_bm:  !byte 0
-
 ; =============================================================================
 ; fp_mod_mul: fp_r0 = ((fp_src1) * (fp_src2)) mod (fp_misc)
 ; =============================================================================
@@ -257,9 +282,9 @@ fp_mod_inv:
 
 @mainlp:
         inc fp_inv_iter
-        bne +
+        bne :+
         inc fp_inv_iter+1
-+
+:
 
         ; Check u == 1
         lda #<fp_inv_u
@@ -267,18 +292,18 @@ fp_mod_inv:
         lda #>fp_inv_u
         sta fp_src1+1
         jsr fp_chk_one
-        bne +
+        bne :+
         jmp @u_one
-+
+:
         ; Check v == 1
         lda #<fp_inv_v
         sta fp_src1
         lda #>fp_inv_v
         sta fp_src1+1
         jsr fp_chk_one
-        bne +
+        bne :+
         jmp @v_one
-+
+:
 
         ; While u is even
 @halfu: lda fp_inv_u+31
@@ -449,8 +474,6 @@ fp_mod_inv:
         bpl @cv
         rts
 
-fp_inv_iter: !word 0
-
 ; Check if (fp_src1) == 1: Z flag set if yes
 fp_chk_one:
         ldy #0
@@ -465,15 +488,24 @@ fp_chk_one:
 @no:    lda #$ff                ; clear Z
         rts
 
-fp_inv_u:   !fill 32, 0
-fp_inv_v:   !fill 32, 0
-fp_inv_x1:  !fill 32, 0
-fp_inv_x2:  !fill 32, 0
+; =============================================================================
+; BSS / scratch
+; =============================================================================
+.segment "CRYPTO_BSS"
 
-; =============================================================================
+fp_rem:      .res 33
+fp_bc:       .res 1
+fp_bm:       .res 1
+
+fp_inv_iter: .res 2
+
+fp_inv_u:    .res 32
+fp_inv_v:    .res 32
+fp_inv_x1:   .res 32
+fp_inv_x2:   .res 32
+
 ; Working registers
-; =============================================================================
-fp_r0:      !fill 32, 0        ; primary result register
-fp_r1:      !fill 32, 0
-fp_r2:      !fill 32, 0
-fp_r3:      !fill 32, 0
+fp_r0:       .res 32           ; primary result register
+fp_r1:       .res 32
+fp_r2:       .res 32
+fp_r3:       .res 32

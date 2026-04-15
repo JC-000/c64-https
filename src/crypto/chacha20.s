@@ -1,5 +1,5 @@
-; =============================================================================
-; chacha20.asm - ChaCha20 stream cipher (RFC 7539/8439)
+; chacha20.s — ChaCha20 stream cipher (RFC 7539/8439)
+; Converted from ACME to ca65 in Phase 3 Batch A.
 ;
 ; State layout: 16 x 32-bit words = 64 bytes (little-endian)
 ;   words[0-3]   = "expand 32-byte k" constants
@@ -10,27 +10,95 @@
 ; Uses ZP pointers w32_src1/w32_dst for word32 operations.
 ; =============================================================================
 
+.include "constants.inc"
+
+; --- External data (data.asm) ---
+.import cc20_state
+.import cc20_work
+.import cc20_keystream
+.import cc20_key
+.import cc20_nonce
+.import cc20_counter
+.import cc20_remain_hi
+
+; --- External word32 routines (word32.asm) ---
+.import add32_to_dst
+.import xor32_in_place
+.import rotr32_16
+.import rotl32_12
+.import rotl32_8
+.import rotl32_7
+
+; --- Exports ---
+.export cc20_constants
+.export cc20_qr_table
+.export chacha20_init
+.export chacha20_quarter_round
+.export chacha20_block
+.export chacha20_encrypt
+
+; =============================================================================
+; Local macros — set w32_dst / w32_src1 to cc20_work + word_index*4
+; tbl_off is the offset within cc20_qr_table entry (0..3)
+; Uses cc20_qr_idx as base row index.
+; =============================================================================
+.macro cc20_set_dst tbl_off
+        ldx cc20_qr_idx
+        lda cc20_qr_table+tbl_off,x
+        asl
+        asl                    ; *4 for byte offset
+        clc
+        adc #<cc20_work
+        sta w32_dst
+        lda #>cc20_work
+        adc #0
+        sta w32_dst+1
+.endmacro
+
+.macro cc20_set_src1 tbl_off
+        ldx cc20_qr_idx
+        lda cc20_qr_table+tbl_off,x
+        asl
+        asl
+        clc
+        adc #<cc20_work
+        sta w32_src1
+        lda #>cc20_work
+        adc #0
+        sta w32_src1+1
+.endmacro
+
+; =============================================================================
+; Read-only data
+; =============================================================================
+.segment "CRYPTO_RODATA"
+
 ; --- ChaCha20 constants ("expand 32-byte k" as LE uint32 words) ---
 cc20_constants:
-        !byte $65, $78, $70, $61     ; 0x61707865 "expa" (LE)
-        !byte $6e, $64, $20, $33     ; 0x3320646e "nd 3" (LE)
-        !byte $32, $2d, $62, $79     ; 0x79622d32 "2-by" (LE)
-        !byte $74, $65, $20, $6b     ; 0x6b206574 "te k" (LE)
+        .byte $65, $78, $70, $61     ; 0x61707865 "expa" (LE)
+        .byte $6e, $64, $20, $33     ; 0x3320646e "nd 3" (LE)
+        .byte $32, $2d, $62, $79     ; 0x79622d32 "2-by" (LE)
+        .byte $74, $65, $20, $6b     ; 0x6b206574 "te k" (LE)
 
 ; --- Quarter-round index table ---
 ; 8 quarter-rounds per double-round: 4 columns + 4 diagonals
 ; Each entry: 4 indices (a, b, c, d) into state words
 cc20_qr_table:
         ; Column rounds
-        !byte  0,  4,  8, 12          ; QR(0, 4, 8, 12)
-        !byte  1,  5,  9, 13          ; QR(1, 5, 9, 13)
-        !byte  2,  6, 10, 14          ; QR(2, 6, 10, 14)
-        !byte  3,  7, 11, 15          ; QR(3, 7, 11, 15)
+        .byte  0,  4,  8, 12          ; QR(0, 4, 8, 12)
+        .byte  1,  5,  9, 13          ; QR(1, 5, 9, 13)
+        .byte  2,  6, 10, 14          ; QR(2, 6, 10, 14)
+        .byte  3,  7, 11, 15          ; QR(3, 7, 11, 15)
         ; Diagonal rounds
-        !byte  0,  5, 10, 15          ; QR(0, 5, 10, 15)
-        !byte  1,  6, 11, 12          ; QR(1, 6, 11, 12)
-        !byte  2,  7,  8, 13          ; QR(2, 7, 8, 13)
-        !byte  3,  4,  9, 14          ; QR(3, 4, 9, 14)
+        .byte  0,  5, 10, 15          ; QR(0, 5, 10, 15)
+        .byte  1,  6, 11, 12          ; QR(1, 6, 11, 12)
+        .byte  2,  7,  8, 13          ; QR(2, 7, 8, 13)
+        .byte  3,  4,  9, 14          ; QR(3, 4, 9, 14)
+
+; =============================================================================
+; Code
+; =============================================================================
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; chacha20_init - Initialize ChaCha20 state
@@ -88,46 +156,15 @@ chacha20_init:
 ;
 ; Clobbers: A, X, Y
 ; =============================================================================
-
-; Macro-like helper: set w32_dst to cc20_work + word_index*4
-; Input: X = table offset for desired index position
-; Output: w32_dst points to cc20_work[table[X]*4]
-!macro cc20_set_dst .tbl_off {
-        ldx cc20_qr_idx
-        lda cc20_qr_table+.tbl_off,x
-        asl
-        asl                    ; *4 for byte offset
-        clc
-        adc #<cc20_work
-        sta w32_dst
-        lda #>cc20_work
-        adc #0
-        sta w32_dst+1
-}
-
-; Set w32_src1 to cc20_work + word_index*4
-!macro cc20_set_src1 .tbl_off {
-        ldx cc20_qr_idx
-        lda cc20_qr_table+.tbl_off,x
-        asl
-        asl
-        clc
-        adc #<cc20_work
-        sta w32_src1
-        lda #>cc20_work
-        adc #0
-        sta w32_src1+1
-}
-
 chacha20_quarter_round:
         ; --- a += b ---
-        +cc20_set_src1 1       ; src1 = &work[b]
-        +cc20_set_dst 0        ; dst = &work[a]
+        cc20_set_src1 1        ; src1 = &work[b]
+        cc20_set_dst 0         ; dst = &work[a]
         jsr add32_to_dst
 
         ; --- d ^= a ---
-        +cc20_set_src1 0       ; src1 = &work[a]
-        +cc20_set_dst 3        ; dst = &work[d]
+        cc20_set_src1 0        ; src1 = &work[a]
+        cc20_set_dst 3         ; dst = &work[d]
         jsr xor32_in_place
 
         ; --- d <<<= 16 ---
@@ -135,39 +172,39 @@ chacha20_quarter_round:
         jsr rotr32_16          ; rotr16 = rotl16 (same for 32-bit)
 
         ; --- c += d ---
-        +cc20_set_src1 3       ; src1 = &work[d]
-        +cc20_set_dst 2        ; dst = &work[c]
+        cc20_set_src1 3        ; src1 = &work[d]
+        cc20_set_dst 2         ; dst = &work[c]
         jsr add32_to_dst
 
         ; --- b ^= c ---
-        +cc20_set_src1 2       ; src1 = &work[c]
-        +cc20_set_dst 1        ; dst = &work[b]
+        cc20_set_src1 2        ; src1 = &work[c]
+        cc20_set_dst 1         ; dst = &work[b]
         jsr xor32_in_place
 
         ; --- b <<<= 12 ---
         jsr rotl32_12
 
         ; --- a += b ---
-        +cc20_set_src1 1       ; src1 = &work[b]
-        +cc20_set_dst 0        ; dst = &work[a]
+        cc20_set_src1 1        ; src1 = &work[b]
+        cc20_set_dst 0         ; dst = &work[a]
         jsr add32_to_dst
 
         ; --- d ^= a ---
-        +cc20_set_src1 0       ; src1 = &work[a]
-        +cc20_set_dst 3        ; dst = &work[d]
+        cc20_set_src1 0        ; src1 = &work[a]
+        cc20_set_dst 3         ; dst = &work[d]
         jsr xor32_in_place
 
         ; --- d <<<= 8 ---
         jsr rotl32_8
 
         ; --- c += d ---
-        +cc20_set_src1 3       ; src1 = &work[d]
-        +cc20_set_dst 2        ; dst = &work[c]
+        cc20_set_src1 3        ; src1 = &work[d]
+        cc20_set_dst 2         ; dst = &work[c]
         jsr add32_to_dst
 
         ; --- b ^= c ---
-        +cc20_set_src1 2       ; src1 = &work[c]
-        +cc20_set_dst 1        ; dst = &work[b]
+        cc20_set_src1 2        ; src1 = &work[c]
+        cc20_set_dst 1         ; dst = &work[b]
         jsr xor32_in_place
 
         ; --- b <<<= 7 ---

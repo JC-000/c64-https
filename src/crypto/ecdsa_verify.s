@@ -1,5 +1,5 @@
-; =============================================================================
-; ecdsa_verify.asm - ECDSA signature verification for P-256 and P-384
+; ecdsa_verify.s - P-256 (and P-384 dispatch stub) ECDSA signature verification
+; Converted from ACME to ca65 in Phase 3 Batch A.
 ;
 ; Verifies ECDSA signatures as required for TLS 1.3 CertificateVerify
 ; (P-256/SHA-256) and certificate chain verification (P-384).
@@ -11,25 +11,91 @@
 ;        ecdsa_pubkey_x/y (32 or 48 bytes each) = public key Q
 ; Output: C=0 signature valid, C=1 invalid
 ;
-; Algorithm:
-;   1. Check 0 < r < n and 0 < s < n
-;   2. w = s^(-1) mod n
-;   3. u1 = z * w mod n
-;   4. u2 = r * w mod n
-;   5. R = u1*G + u2*Q (two scalar multiplies + point addition)
-;   6. Convert R to affine coordinates
-;   7. Check R.x mod n == r
-;
-; External dependencies:
-;   P-256: fp_copy, fp_zero, fp_cmp, fp_is_zero, fp_mod_mul, fp_mod_inv,
-;          fp_mod_reduce, ec_set_modn, ec_set_modp,
-;          ec_scalar_mul, ec_point_add, ec_jacobian_to_affine
-;          ec_p1, ec_p2, ec_p3, ec_t1..ec_t6,
-;          ec_gx, ec_gy, ec_n, fp_r0, fp_wide
-;   P-384: _384 suffixed versions of all the above
-;
-; ZP: fp_src1, fp_src2, fp_dst, fp_misc, fp_carry, ec_scalar_ptr
+; NOTE: P-384 dispatch is currently stubbed (returns error). A full
+; P-384 verify body existed in an earlier revision — this post-fix file
+; only keeps the dispatch stub and the DER parser remains curve-agnostic.
+; P-384-suffixed symbols are still declared as `.import` below so future
+; restoration links cleanly once ecdsa_*_384.s exist.
 ; =============================================================================
+
+.include "constants.inc"
+
+; --- Externals: fp / ec helpers (ecdsa_fp, ecdsa_mod, ecdsa_curve) ---
+.import fp_copy
+.import fp_zero
+.import fp_cmp
+.import fp_is_zero
+.import fp_sub
+.import fp_mod_mul
+.import fp_mod_inv
+.import fp_r0
+
+.import ec_set_modn
+.import ec_set_modp
+.import ec_scalar_mul
+.import ec_point_add
+.import ec_jacobian_to_affine
+
+; --- Externals: P-256 curve data / scratch points (ecdsa_curve / ecdsa_points) ---
+.import ec_p1
+.import ec_p2
+.import ec_p3
+.import ec_gx
+.import ec_gy
+.import ec_n
+
+; --- Externals: P-384 symbols (currently unresolved; preserved for later restore) ---
+.import fp_copy_384
+.import fp_zero_384
+.import fp_cmp_384
+.import fp_is_zero_384
+.import fp_sub_384
+.import fp_mod_mul_384
+.import fp_mod_inv_384
+.import fp_r0_384
+
+.import ec_set_modn_384
+.import ec_set_modp_384
+.import ec_scalar_mul_384
+.import ec_point_add_384
+.import ec_jacobian_to_affine_384
+
+.import ec_p1_384
+.import ec_p2_384
+.import ec_p3_384
+.import ec_gx_384
+.import ec_gy_384
+.import ec_n_384
+
+; --- Externals: mutable data buffers (data.asm) ---
+.import ecdsa_curve_id
+.import ecdsa_hash
+.import ecdsa_hash_len
+.import ecdsa_sig_r
+.import ecdsa_sig_s
+.import ecdsa_sig_len
+.import ecdsa_pubkey_x
+.import ecdsa_pubkey_y
+.import ecdsa_verify_tmp
+
+.import ev_u1
+.import ev_u2
+.import ev_point_save
+
+.import ev_u1_384
+.import ev_u2_384
+.import ev_point_save_384
+
+.import ev_der_int_len
+.import ev_der_copy_cnt
+
+; --- Exports ---
+.export ecdsa_verify
+.export ecdsa_verify_256
+.export ecdsa_verify_384
+.export ecdsa_parse_der_sig
+
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; Curve dispatch
@@ -392,9 +458,9 @@ ecdsa_parse_der_sig:
         ; Expect SEQUENCE tag (0x30)
         lda (zp_ptr),y
         cmp #$30
-        beq +
+        beq :+
         jmp @der_error
-+
+:
         iny
 
         ; Skip SEQUENCE length byte (we trust the outer length)
@@ -404,9 +470,9 @@ ecdsa_parse_der_sig:
         ; Expect INTEGER tag (0x02)
         lda (zp_ptr),y
         cmp #$02
-        beq +
+        beq :+
         jmp @der_error
-+
+:
         iny
 
         ; Read r length
@@ -541,7 +607,3 @@ ecdsa_parse_der_sig:
 @der_error:
         sec
         rts
-
-; =============================================================================
-; Data buffers are in data.asm (moved there to avoid $7800-$7BFF sqtab region)
-; =============================================================================

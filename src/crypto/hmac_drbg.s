@@ -1,5 +1,7 @@
+; hmac_drbg.s — HMAC-DRBG deterministic RNG
+; Converted from ACME to ca65 in Phase 3 Batch A.
 ; =============================================================================
-; hmac_drbg.asm - HMAC-SHA256 and HMAC-DRBG (RFC 6979 + entropy-seeded)
+; HMAC-SHA256 and HMAC-DRBG (RFC 6979 + entropy-seeded)
 ; =============================================================================
 ; Adapted from c64-aes256-ecdsa for c64-https (TLS 1.3)
 ;
@@ -12,12 +14,46 @@
 ;   drbg_fill_bytes      - Fill buffer: zp_ptr=dest, A=count
 ;
 ; Uses SHA-256 primitives: sha256_init, sha256_process_block, sha256_final
-; ZP equates (zp_ptr, zp_count) are in constants.asm
-; Hardware addresses (sid_osc3, cia1_ta_lo) are in constants.asm
+; ZP equates (zp_ptr, zp_count) are in constants.inc
+; Hardware addresses (sid_osc3, cia1_ta_lo) are in constants.inc
 ; Data labels (hmac_key, hmac_val, hmac_opad_block, hmac_data_buf,
 ;              hmac_data_len, hmac_result, drbg_seed, drbg_seed_len,
 ;              drbg_output, drbg_buf_idx, sha256_block, sha256_hash) in data.asm
 ; =============================================================================
+
+.include "constants.inc"
+
+.export hmac_sha256
+.export hmac_drbg_update
+.export hmac_drbg_instantiate
+.export hmac_drbg_generate
+.export extra_sid_count
+.export extra_sid_lo
+.export extra_sid_hi
+.export drbg_init_entropy
+.export drbg_random_byte
+.export drbg_fill_bytes
+
+; SHA-256 primitives
+.import sha256_init
+.import sha256_process_block
+.import sha256_final
+
+; Data (BSS) symbols from data.asm
+.import hmac_key
+.import hmac_val
+.import hmac_opad_block
+.import hmac_data_buf
+.import hmac_data_len
+.import hmac_result
+.import drbg_seed
+.import drbg_seed_len
+.import drbg_output
+.import drbg_buf_idx
+.import sha256_block
+.import sha256_hash
+
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; hmac_sha256 - compute HMAC-SHA256
@@ -498,11 +534,11 @@ hmac_drbg_generate:
 ; Set to 0 so drbg_init_entropy skips the extra-SID XOR loop.
 ; =============================================================================
 extra_sid_count:
-	!byte 0
+	.byte 0
 extra_sid_lo:
-	!byte 0
+	.byte 0
 extra_sid_hi:
-	!byte 0
+	.byte 0
 
 ; =============================================================================
 ; drbg_init_entropy - collect 32 bytes from SID+CIA hardware, instantiate DRBG

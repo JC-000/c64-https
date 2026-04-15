@@ -1,12 +1,9 @@
-; =============================================================================
-; x25519.asm - X25519 Diffie-Hellman (RFC 7748)
+; x25519.s — Curve25519 scalar multiplication
+; Converted from ACME to ca65 in Phase 3 Batch A.
 ;
+; X25519 Diffie-Hellman (RFC 7748)
 ; Montgomery ladder scalar multiplication on Curve25519.
-; Uses fe25519.asm field arithmetic.
-;
-; Optimized version imported from c64-x25519 project:
-;   - Streamlined bit extraction (single read of scalar byte, no double-read)
-;   - RFC 7748 u-coordinate high-bit masking in scalarmult
+; Uses fe25519.s field arithmetic.
 ;
 ; API:
 ;   x25519_clamp       - Clamp 32-byte scalar per RFC 7748
@@ -16,9 +13,49 @@
 ; Input:  x25_scalar (32 bytes), x25_u (32 bytes)
 ; Output: x25_result (32 bytes)
 ;
-; ZP equates (x25_prev_bit, x25_byte_idx, x25_bit_mask) in constants.asm.
+; ZP equates (x25_prev_bit, x25_byte_idx, x25_bit_mask,
+;             fe_src1, fe_src2, fe_dst, fe_carry) in constants.inc.
 ; Data labels (x25_scalar, x25_u, x25_result, etc.) in data.asm.
-; =============================================================================
+
+        .include "constants.inc"
+
+        .export x25519_clamp
+        .export x25519_scalarmult
+        .export x25519_ladder_step
+        .export x25519_base
+
+        ; Field arithmetic (fe25519.s)
+        .import fe_one
+        .import fe_zero
+        .import fe_copy
+        .import fe_add
+        .import fe_sub
+        .import fe_sqr
+        .import fe_mul
+        .import fe_mul_a24
+        .import fe_inv
+        .import fe_cswap
+
+        ; Field temporaries and X25519 working storage (data.asm BSS)
+        .import fe_tmp1
+        .import fe_tmp2
+        .import fe_tmp3
+        .import fe_tmp4
+        .import x25_scalar
+        .import x25_u
+        .import x25_result
+        .import x25_x2
+        .import x25_z2
+        .import x25_x3
+        .import x25_z3
+        .import x25_a
+        .import x25_b
+        .import x25_da
+        .import x25_cb
+        .import x25_e
+        .import x25_basepoint
+
+        .segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; x25519_clamp - Clamp scalar per RFC 7748 §5

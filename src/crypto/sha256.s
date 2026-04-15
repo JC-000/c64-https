@@ -1,54 +1,85 @@
-; =============================================================================
-; sha256.asm - SHA-256 hash: init, update, final, process_block, H/K constants
+; sha256.s - SHA-256 hash / init, update, final, process_block
+; Converted from ACME to ca65 in Phase 3 Batch A.
 ; =============================================================================
 ; Adapted from c64-aes256-ecdsa for c64-https (TLS 1.3)
 ;
-; ZP equates (sha_temp1, sha_temp2, sha256_round) are in constants.asm
+; ZP equates (sha_temp1, sha_temp2, sha256_round) are in constants.inc
 ; Data labels (sha256_h0-h7, sha_a-sha_h, sha_temp3, sha_t1, sha_t2,
 ;              sha256_block, sha256_w, sha256_hash, sha256_len,
 ;              input_buffer, input_length) are in data.asm
 ; =============================================================================
 
+.include "constants.inc"
+
+; ---- Imports from data.asm BSS (resolved in Batch D) ----
+.import sha256_h0, sha256_h1, sha256_h2, sha256_h3
+.import sha256_h4, sha256_h5, sha256_h6, sha256_h7
+.import sha_a, sha_b, sha_c, sha_d, sha_e, sha_f, sha_g, sha_h
+.import sha_temp3, sha_t1, sha_t2
+.import sha256_block, sha256_w, sha256_hash, sha256_len
+.import input_buffer, input_length
+
+; ---- Exports ----
+.export sha256_h0_init, sha256_h1_init, sha256_h2_init, sha256_h3_init
+.export sha256_h4_init, sha256_h5_init, sha256_h6_init, sha256_h7_init
+.export sha256_k
+.export sha256_init, sha256_update, sha256_final, sha256_process_block
+.export sha256_load_word, sha256_load_word_to_temp2
+.export sha256_add_temp2_to_temp1
+.export sha256_sig0, sha256_sig1, sha256_big_sig0, sha256_big_sig1
+.export sha256_ch, sha256_maj, sha256_add_to_hash
+.export sha256_rotr1, sha256_rotl1, sha256_rotr8
+.export sha256_rotr2, sha256_rotr6, sha256_rotr7, sha256_rotr11
+.export sha256_rotr13, sha256_rotr17, sha256_rotr18, sha256_rotr19
+.export sha256_rotr22, sha256_rotr25
+.export sha256_shr3, sha256_shr10
+
 ; =============================================================================
-; SHA-256 Implementation
+; SHA-256 constants (read-only data)
 ; =============================================================================
+.segment "CRYPTO_RODATA"
 
 ; SHA-256 initial hash values (first 32 bits of fractional parts of square roots of first 8 primes)
 sha256_h0_init:
-	!byte $6a, $09, $e6, $67
+	.byte $6a, $09, $e6, $67
 sha256_h1_init:
-	!byte $bb, $67, $ae, $85
+	.byte $bb, $67, $ae, $85
 sha256_h2_init:
-	!byte $3c, $6e, $f3, $72
+	.byte $3c, $6e, $f3, $72
 sha256_h3_init:
-	!byte $a5, $4f, $f5, $3a
+	.byte $a5, $4f, $f5, $3a
 sha256_h4_init:
-	!byte $51, $0e, $52, $7f
+	.byte $51, $0e, $52, $7f
 sha256_h5_init:
-	!byte $9b, $05, $68, $8c
+	.byte $9b, $05, $68, $8c
 sha256_h6_init:
-	!byte $1f, $83, $d9, $ab
+	.byte $1f, $83, $d9, $ab
 sha256_h7_init:
-	!byte $5b, $e0, $cd, $19
+	.byte $5b, $e0, $cd, $19
 
 ; SHA-256 round constants (first 32 bits of fractional parts of cube roots of first 64 primes)
 sha256_k:
-	!byte $42, $8a, $2f, $98, $71, $37, $44, $91, $b5, $c0, $fb, $cf, $e9, $b5, $db, $a5
-	!byte $39, $56, $c2, $5b, $59, $f1, $11, $f1, $92, $3f, $82, $a4, $ab, $1c, $5e, $d5
-	!byte $d8, $07, $aa, $98, $12, $83, $5b, $01, $24, $31, $85, $be, $55, $0c, $7d, $c3
-	!byte $72, $be, $5d, $74, $80, $de, $b1, $fe, $9b, $dc, $06, $a7, $c1, $9b, $f1, $74
-	!byte $e4, $9b, $69, $c1, $ef, $be, $47, $86, $0f, $c1, $9d, $c6, $24, $0c, $a1, $cc
-	!byte $2d, $e9, $2c, $6f, $4a, $74, $84, $aa, $5c, $b0, $a9, $dc, $76, $f9, $88, $da
-	!byte $98, $3e, $51, $52, $a8, $31, $c6, $6d, $b0, $03, $27, $c8, $bf, $59, $7f, $c7
-	!byte $c6, $e0, $0b, $f3, $d5, $a7, $91, $47, $06, $ca, $63, $51, $14, $29, $29, $67
-	!byte $27, $b7, $0a, $85, $2e, $1b, $21, $38, $4d, $2c, $6d, $fc, $53, $38, $0d, $13
-	!byte $65, $0a, $73, $54, $76, $6a, $0a, $bb, $81, $c2, $c9, $2e, $92, $72, $2c, $85
-	!byte $a2, $bf, $e8, $a1, $a8, $1a, $66, $4b, $c2, $4b, $8b, $70, $c7, $6c, $51, $a3
-	!byte $d1, $92, $e8, $19, $d6, $99, $06, $24, $f4, $0e, $35, $85, $10, $6a, $a0, $70
-	!byte $19, $a4, $c1, $16, $1e, $37, $6c, $08, $27, $48, $77, $4c, $34, $b0, $bc, $b5
-	!byte $39, $1c, $0c, $b3, $4e, $d8, $aa, $4a, $5b, $9c, $ca, $4f, $68, $2e, $6f, $f3
-	!byte $74, $8f, $82, $ee, $78, $a5, $63, $6f, $84, $c8, $78, $14, $8c, $c7, $02, $08
-	!byte $90, $be, $ff, $fa, $a4, $50, $6c, $eb, $be, $f9, $a3, $f7, $c6, $71, $78, $f2
+	.byte $42, $8a, $2f, $98, $71, $37, $44, $91, $b5, $c0, $fb, $cf, $e9, $b5, $db, $a5
+	.byte $39, $56, $c2, $5b, $59, $f1, $11, $f1, $92, $3f, $82, $a4, $ab, $1c, $5e, $d5
+	.byte $d8, $07, $aa, $98, $12, $83, $5b, $01, $24, $31, $85, $be, $55, $0c, $7d, $c3
+	.byte $72, $be, $5d, $74, $80, $de, $b1, $fe, $9b, $dc, $06, $a7, $c1, $9b, $f1, $74
+	.byte $e4, $9b, $69, $c1, $ef, $be, $47, $86, $0f, $c1, $9d, $c6, $24, $0c, $a1, $cc
+	.byte $2d, $e9, $2c, $6f, $4a, $74, $84, $aa, $5c, $b0, $a9, $dc, $76, $f9, $88, $da
+	.byte $98, $3e, $51, $52, $a8, $31, $c6, $6d, $b0, $03, $27, $c8, $bf, $59, $7f, $c7
+	.byte $c6, $e0, $0b, $f3, $d5, $a7, $91, $47, $06, $ca, $63, $51, $14, $29, $29, $67
+	.byte $27, $b7, $0a, $85, $2e, $1b, $21, $38, $4d, $2c, $6d, $fc, $53, $38, $0d, $13
+	.byte $65, $0a, $73, $54, $76, $6a, $0a, $bb, $81, $c2, $c9, $2e, $92, $72, $2c, $85
+	.byte $a2, $bf, $e8, $a1, $a8, $1a, $66, $4b, $c2, $4b, $8b, $70, $c7, $6c, $51, $a3
+	.byte $d1, $92, $e8, $19, $d6, $99, $06, $24, $f4, $0e, $35, $85, $10, $6a, $a0, $70
+	.byte $19, $a4, $c1, $16, $1e, $37, $6c, $08, $27, $48, $77, $4c, $34, $b0, $bc, $b5
+	.byte $39, $1c, $0c, $b3, $4e, $d8, $aa, $4a, $5b, $9c, $ca, $4f, $68, $2e, $6f, $f3
+	.byte $74, $8f, $82, $ee, $78, $a5, $63, $6f, $84, $c8, $78, $14, $8c, $c7, $02, $08
+	.byte $90, $be, $ff, $fa, $a4, $50, $6c, $eb, $be, $f9, $a3, $f7, $c6, $71, $78, $f2
+
+; =============================================================================
+; SHA-256 Implementation (code)
+; =============================================================================
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; sha256_init - initialize hash state
@@ -885,11 +916,11 @@ sha256_rotr1:
 	ror sha_temp1+1
 	ror sha_temp1+2
 	ror sha_temp1+3
-	bcc +
+	bcc :+
 	lda sha_temp1
 	ora #$80
 	sta sha_temp1
-+	rts
+:	rts
 
 ; rotate sha_temp1 left by 1 bit
 sha256_rotl1:
@@ -897,11 +928,11 @@ sha256_rotl1:
 	rol sha_temp1+2
 	rol sha_temp1+1
 	rol sha_temp1
-	bcc +
+	bcc :+
 	lda sha_temp1+3
 	ora #$01
 	sta sha_temp1+3
-+	rts
+:	rts
 
 ; rotate sha_temp1 right by 8: [B0 B1 B2 B3] -> [B3 B0 B1 B2]
 sha256_rotr8:

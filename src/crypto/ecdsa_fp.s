@@ -1,12 +1,34 @@
-; =============================================================================
-; ecdsa_fp.asm - Big-number primitives for ECDSA P-256
+; ecdsa_fp.s - P-256 field prime arithmetic
+; Converted from ACME to ca65 in Phase 3 Batch A.
+;
+; Big-number primitives for ECDSA P-256.
 ; ZP pointers, fp_copy, fp_zero, fp_cmp, fp_add, fp_sub, fp_rshift1,
 ; fp_mul, fp_init_sqtab
 ;
 ; Imported from c64-aes256-ecdsa for TLS 1.3 certificate verification.
-; ZP equates (fp_src1=$22 etc.) are in constants.asm.
+; ZP equates (fp_src1=$22 etc.) are in constants.inc.
 ; Quarter-square table at $7800 is shared with Poly1305.
-; =============================================================================
+
+        .include "constants.inc"
+
+        .import sqtab_init
+        .import sqtab_lo, sqtab_hi
+
+        .export fp_init_sqtab
+        .export fp_copy
+        .export fp_zero
+        .export fp_cmp
+        .export fp_add
+        .export fp_sub
+        .export fp_is_zero
+        .export fp_rshift1
+        .export fp_mul
+        .export fp_a_byte
+        .export fp_b_byte
+        .export fp_s_hi
+        .export fp_p_lo
+        .export fp_p_hi
+        .export fp_wide
 
 ; =============================================================================
 ; fp_init_sqtab - quarter-square table at $7800-$7BFF
@@ -14,6 +36,8 @@
 ; Alias for callers that expect the ecdsa name:
 ; =============================================================================
 fp_init_sqtab = sqtab_init
+
+        .segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; fp_copy: copy 32 bytes from (fp_src1) to (fp_dst)
@@ -155,10 +179,10 @@ fp_mul:
         lda fp_a_byte
         sec
         sbc fp_b_byte
-        bcs +
+        bcs :+
         eor #$ff
         adc #1
-+       tay                     ; Y = |a-b| (always page 0)
+:       tay                     ; Y = |a-b| (always page 0)
 
         lda fp_s_hi
         beq @s0
@@ -215,9 +239,11 @@ fp_mul:
 @mul_done:
         rts
 
-fp_a_byte:  !byte 0
-fp_b_byte:  !byte 0
-fp_s_hi:    !byte 0
-fp_p_lo:    !byte 0
-fp_p_hi:    !byte 0
-fp_wide:    !fill 64, 0
+        .segment "CRYPTO_BSS"
+
+fp_a_byte:  .res 1
+fp_b_byte:  .res 1
+fp_s_hi:    .res 1
+fp_p_lo:    .res 1
+fp_p_hi:    .res 1
+fp_wide:    .res 64

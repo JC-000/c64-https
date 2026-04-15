@@ -1,5 +1,5 @@
-; =============================================================================
-; poly1305.asm - Poly1305 MAC (RFC 7539)
+; poly1305.s — Poly1305 MAC
+; Converted from ACME to ca65 in Phase 3 Batch A.
 ;
 ; 130-bit modular arithmetic using quarter-square lookup table for fast
 ; 8x8->16-bit byte multiplication.
@@ -7,12 +7,49 @@
 ; Accumulator h: 17 bytes (136 bits, room for carries in 130-bit range)
 ; Key r: 16 bytes (clamped per RFC 7539)
 ; Key s: 16 bytes (added to final result)
-;
-; Quarter-square table: sqtab_lo/hi at $7800-$7BFF (1024 bytes)
-; Identity: a*b = floor((a+b)^2/4) - floor((a-b)^2/4)
-; =============================================================================
 
-; sqtab_lo/sqtab_hi now defined as labels in data.asm — moved out of $7800 to free code space
+.include "constants.inc"
+
+; --- External data (data.asm) ---
+.import sqtab_lo, sqtab_hi
+.import poly_h, poly_r, poly_s, poly_product, poly1305_tag
+.import aead_scratch
+
+; --- Exports ---
+.export poly1305_init
+.export poly1305_clamp
+.export sqtab_init
+.export poly_prod_lo
+.export poly_prod_hi
+.export mul_8x8
+.export poly1305_multiply
+.export poly1305_reduce
+.export poly1305_block
+.export poly1305_update
+.export poly1305_final
+
+; =============================================================================
+; Scratch / BSS
+; =============================================================================
+.segment "CRYPTO_BSS"
+
+poly_prod_lo:   .res 1
+poly_prod_hi:   .res 1
+
+mul_a:          .res 1
+mul_b:          .res 1
+mul_s_pg:       .res 1
+
+; Temporaries for sqtab_init
+sq_acc:         .res 3          ; 24-bit accumulator for i^2
+sq_sh:          .res 3          ; 24-bit shifted result (i^2 / 4)
+sq_ad:          .res 2          ; 16-bit addition term (2i+1)
+sq_i:           .res 2          ; 16-bit index counter (0..511)
+
+; =============================================================================
+; Code
+; =============================================================================
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; poly1305_init - Initialize Poly1305 state
@@ -77,7 +114,7 @@ poly1305_clamp:
         rts
 
 ; =============================================================================
-; sqtab_init - Build quarter-square lookup table at $7800-$7BFF
+; sqtab_init - Build quarter-square lookup table
 ;
 ; Computes floor(i^2/4) for i = 0..511 using recurrence i^2 = (i-1)^2 + 2i - 1
 ; Ported from c64-aes256-ecdsa fp_init_sqtab.
@@ -132,9 +169,9 @@ sqtab_init:
         rol
         sta sq_ad+1
         inc sq_ad
-        bne +
+        bne :+
         inc sq_ad+1
-+
+:
         clc
         lda sq_acc
         adc sq_ad
@@ -147,19 +184,13 @@ sqtab_init:
         sta sq_acc+2
 
         inc sq_i
-        bne +
+        bne :+
         inc sq_i+1
-+       lda sq_i+1
+:       lda sq_i+1
         cmp #2                  ; check if i reached 512 (0x200)
         beq @done
         jmp @loop
 @done:  rts
-
-; Temporaries for sqtab_init
-sq_acc: !fill 3, 0              ; 24-bit accumulator for i^2
-sq_sh:  !fill 3, 0              ; 24-bit shifted result (i^2 / 4)
-sq_ad:  !fill 2, 0              ; 16-bit addition term (2i+1)
-sq_i:   !fill 2, 0              ; 16-bit index counter (0..511)
 
 ; =============================================================================
 ; mul_8x8 - 8-bit x 8-bit -> 16-bit multiply using quarter-square table
@@ -170,9 +201,6 @@ sq_i:   !fill 2, 0              ; 16-bit index counter (0..511)
 ; Uses identity: a*b = sqtab[a+b] - sqtab[|a-b|]
 ; Clobbers: A, X, Y
 ; =============================================================================
-poly_prod_lo:   !byte 0
-poly_prod_hi:   !byte 0
-
 mul_8x8:
         sta mul_a               ; save A
         stx mul_b               ; save X
@@ -189,10 +217,10 @@ mul_8x8:
         lda mul_a
         sec
         sbc mul_b
-        bcs +
+        bcs :+
         eor #$ff
         adc #1                  ; negate (carry was clear, so ADC adds 1)
-+       tay                     ; Y = |a-b| (always page 0, <=255)
+:       tay                     ; Y = |a-b| (always page 0, <=255)
 
         ; sqtab[sum] - sqtab[|diff|]
         lda mul_s_pg
@@ -216,10 +244,6 @@ mul_8x8:
         sbc sqtab_hi,y
         sta poly_prod_hi
         rts
-
-mul_a:          !byte 0
-mul_b:          !byte 0
-mul_s_pg:       !byte 0
 
 ; =============================================================================
 ; poly1305_multiply - Multiply h (17 bytes) by r (16 bytes), reduce mod 2^130-5
@@ -522,9 +546,9 @@ poly1305_update:
         sta aead_scratch,y
 
         ; Point zp_ptr to scratch buffer
-        lda #<aead_scratch
+        lda #<(aead_scratch)
         sta zp_ptr
-        lda #>aead_scratch
+        lda #>(aead_scratch)
         sta zp_ptr+1
 
         ; Process with high bit = 0 (the 0x01 in the buffer handles it)

@@ -1,5 +1,7 @@
-; =============================================================================
-; aead.asm - ChaCha20-Poly1305 AEAD (RFC 7539 S2.8)
+; aead.s — ChaCha20-Poly1305 AEAD envelope
+; Converted from ACME to ca65 in Phase 3 Batch A.
+;
+; ChaCha20-Poly1305 AEAD (RFC 7539 S2.8)
 ;
 ; Encrypt: derive OTK, encrypt plaintext, compute tag
 ; Decrypt: derive OTK, verify tag, decrypt ciphertext
@@ -16,7 +18,41 @@
 ;   Ciphertext written in-place at aead_data_ptr
 ;   aead_tag (16 bytes) -- authentication tag
 ;   A register: 0 = success (decrypt), nonzero = auth failure
-; =============================================================================
+
+.include "constants.inc"
+
+; --- External ChaCha20 routines (chacha20.s) ---
+.import chacha20_init
+.import chacha20_block
+.import chacha20_encrypt
+
+; --- External Poly1305 routines (poly1305.s) ---
+.import poly1305_init
+.import poly1305_block
+.import poly1305_final
+
+; --- External data (data.asm BSS) ---
+.import cc20_key, cc20_nonce, cc20_counter
+.import cc20_keystream
+.import cc20_remain_hi
+.import poly_r, poly_s
+.import poly1305_tag
+.import aead_key, aead_nonce
+.import aead_aad_ptr, aead_aad_len
+.import aead_data_ptr, aead_data_len
+.import aead_tag
+.import aead_scratch
+
+; --- Exports ---
+.export aead_encrypt
+.export aead_decrypt
+.export aead_derive_otk
+.export aead_setup_chacha
+.export aead_compute_tag
+.export aead_process_padded
+.export aead_verify_tag
+
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; aead_encrypt - ChaCha20-Poly1305 authenticated encryption

@@ -1,5 +1,5 @@
-; =============================================================================
-; fe25519.asm - Field arithmetic mod p = 2^255 - 19
+; fe25519.s - Field arithmetic mod 2^255 - 19
+; Converted from ACME to ca65 in Phase 3 Batch A.
 ;
 ; Optimized version imported from c64-x25519 project.
 ; Key optimizations over baseline:
@@ -12,16 +12,62 @@
 ; Uses ZP pointers fe_src1, fe_src2, fe_dst for operands.
 ; Reuses mul_8x8 and sqtab from poly1305.asm for multiplication.
 ;
-; Key design:
-;   - Little-endian throughout (matches 6502 carry propagation and X25519 wire)
-;   - DEX/DEY for all carry-dependent loops (CPX/CPY clobber carry)
-;   - Reduction mod p: 2^256 ≡ 38 mod p, so multiply overflow by 38 and add
-;
-; ZP equates (fe_src1, fe_src2, fe_dst, lmul0, lmul1) defined in constants.asm.
+; ZP equates (fe_src1, fe_src2, fe_dst, lmul0, lmul1) defined in constants.inc.
 ; Data labels (fe_wide, fe_tmp1..4, fe_p, mul_cached_a, mul_src2_buf,
 ;   mul_dma_lo, mul_dma_hi, sqtab2_lo, sqtab2_hi, mul38_lo_tab,
-;   mul38_hi_tab) defined in data.asm.
+;   mul38_hi_tab) defined in data.asm — imported, unresolved until Batch D.
 ; =============================================================================
+
+.include "constants.inc"
+
+; --- Exports (column-0 labels) ---
+.export fe_copy
+.export fe_zero
+.export fe_one
+.export fe_add
+.export fe_sub
+.export fe_cmp_p
+.export fe_reduce_final
+.export fe_cswap
+.export fe_mul
+.export fe_reduce_wide
+.export mul_by_38
+.export mul38_in
+.export mul38_lo
+.export mul38_hi
+.export fe_sqr
+.export fe_mul_a24
+.export fe_inv
+.export fe_inv_dst
+.export fe_inv_sqrn_tmp2
+.export fe_inv_sqr_cnt
+
+; --- Imports (data.asm BSS + poly1305 routines + boot REU helper) ---
+.import fe_p
+.import fe_wide
+.import fe_tmp1
+.import fe_tmp2
+.import fe_tmp3
+.import mul_src2_buf
+.import mul_cached_a
+.import mul_dma_lo
+.import mul_dma_hi
+.import mul38_lo_tab
+.import mul38_hi_tab
+.import sqtab_lo
+.import sqtab_hi
+.import sqtab2_lo
+.import sqtab2_hi
+.import x25_a
+.import x25_b
+.import x25_da
+.import x25_cb
+.import poly_prod_lo
+.import poly_prod_hi
+.import mul_8x8
+.import reu_fetch_mul_row
+
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; fe_copy - Copy 32 bytes: (fe_dst) = (fe_src1)
@@ -77,7 +123,7 @@ fe_add:
         iny
         dex                    ; DEX doesn't affect carry
         bne @add_loop
-        bcs @must_reduce       ; carry out → result >= 2^256 > p
+        bcs @must_reduce       ; carry out -> result >= 2^256 > p
 
         ; Check if result >= p
         jsr fe_cmp_p
@@ -115,7 +161,7 @@ fe_sub:
         iny
         dex
         bne @sub_loop
-        bcs @done              ; no borrow → done
+        bcs @done              ; no borrow -> done
 
         ; Borrow: add p
         clc
@@ -147,7 +193,7 @@ fe_cmp_p:
         bne @greater
         dey
         bpl @cmp_loop
-        sec                    ; equal → >= p
+        sec                    ; equal -> >= p
         rts
 @less:
         clc
@@ -664,10 +710,6 @@ mul_by_38:
         sta poly_prod_hi       ; prod = A*6 + A*32 = A*38
         rts
 
-mul38_in:  !byte 0
-mul38_lo:  !byte 0
-mul38_hi:  !byte 0
-
 ; =============================================================================
 ; fe_sqr - (fe_dst) = (fe_src1)^2 mod p
 ;
@@ -942,7 +984,7 @@ fe_mul_a24:
         lda (fe_src1),y
         beq @skip_zero_a24
 
-        ; src1[i] * $41 → add at offset i
+        ; src1[i] * $41 -> add at offset i
         ldx #$41
         jsr mul_8x8
         ldx fe_mul_i
@@ -953,12 +995,12 @@ fe_mul_a24:
         lda fe_wide+1,x
         adc poly_prod_hi
         sta fe_wide+1,x
-        bcc +
+        bcc :+
         inc fe_wide+2,x
-        bne +
+        bne :+
         inc fe_wide+3,x
-+
-        ; src1[i] * $DB → add at offset i+1
+:
+        ; src1[i] * $DB -> add at offset i+1
         ldy fe_mul_i
         lda (fe_src1),y
         ldx #$db
@@ -971,30 +1013,30 @@ fe_mul_a24:
         lda fe_wide+2,x
         adc poly_prod_hi
         sta fe_wide+2,x
-        bcc +
+        bcc :+
         inc fe_wide+3,x
-        bne +
+        bne :+
         inc fe_wide+4,x
-+
-        ; src1[i] * $01 → add at offset i+2
+:
+        ; src1[i] * $01 -> add at offset i+2
         ldy fe_mul_i
         lda (fe_src1),y
         ldx fe_mul_i
         clc
         adc fe_wide+2,x
         sta fe_wide+2,x
-        bcc +
+        bcc :+
         inc fe_wide+3,x
-        bne +
+        bne :+
         inc fe_wide+4,x
-+
+:
 @skip_zero_a24:
         ldx fe_mul_i
         inx
         cpx #32
         bcc @outer
 
-        ; Reduce: fe_wide[32..34] * 38 → add to fe_wide[0..31]
+        ; Reduce: fe_wide[32..34] * 38 -> add to fe_wide[0..31]
         lda fe_wide+32
         beq @r_b33
         jsr mul_by_38
@@ -1099,7 +1141,7 @@ fe_inv:
         sta fe_dst+1
         jsr fe_copy             ; fe_tmp1 = z
 
-        ; --- z2 = z^2 → fe_tmp2 ---
+        ; --- z2 = z^2 -> fe_tmp2 ---
         lda #<fe_tmp1
         sta fe_src1
         lda #>fe_tmp1
@@ -1110,7 +1152,7 @@ fe_inv:
         sta fe_dst+1
         jsr fe_sqr              ; fe_tmp2 = z^2
 
-        ; --- z4 = z2^2 → fe_tmp3 ---
+        ; --- z4 = z2^2 -> fe_tmp3 ---
         lda #<fe_tmp2
         sta fe_src1
         lda #>fe_tmp2
@@ -1121,7 +1163,7 @@ fe_inv:
         sta fe_dst+1
         jsr fe_sqr              ; fe_tmp3 = z^4
 
-        ; --- z8 = z4^2 → fe_tmp3 ---
+        ; --- z8 = z4^2 -> fe_tmp3 ---
         lda #<fe_tmp3
         sta fe_src1
         lda #>fe_tmp3
@@ -1132,7 +1174,7 @@ fe_inv:
         sta fe_dst+1
         jsr fe_sqr              ; fe_tmp3 = z^8
 
-        ; --- z9 = z8 * z → fe_tmp3 ---
+        ; --- z9 = z8 * z -> fe_tmp3 ---
         lda #<fe_tmp3
         sta fe_src1
         lda #>fe_tmp3
@@ -1147,7 +1189,7 @@ fe_inv:
         sta fe_dst+1
         jsr fe_mul              ; fe_tmp3 = z^9
 
-        ; --- z11 = z9 * z2 → x25_a (saved for final step) ---
+        ; --- z11 = z9 * z2 -> x25_a (saved for final step) ---
         lda #<fe_tmp3
         sta fe_src1
         lda #>fe_tmp3
@@ -1162,7 +1204,7 @@ fe_inv:
         sta fe_dst+1
         jsr fe_mul              ; x25_a = z^11
 
-        ; --- z22 = z11^2 → fe_tmp2 ---
+        ; --- z22 = z11^2 -> fe_tmp2 ---
         lda #<x25_a
         sta fe_src1
         lda #>x25_a
@@ -1173,7 +1215,7 @@ fe_inv:
         sta fe_dst+1
         jsr fe_sqr              ; fe_tmp2 = z^22
 
-        ; --- z_5_0 = z22 * z9 = z^31 → fe_tmp2 ---
+        ; --- z_5_0 = z22 * z9 = z^31 -> fe_tmp2 ---
         lda #<fe_tmp2
         sta fe_src1
         lda #>fe_tmp2
@@ -1202,7 +1244,7 @@ fe_inv:
         lda #5
         jsr fe_inv_sqrn_tmp2    ; fe_tmp2 = z_5_0^(2^5)
 
-        ; --- z_10_0 = fe_tmp2 * fe_tmp3 → x25_b (saved) ---
+        ; --- z_10_0 = fe_tmp2 * fe_tmp3 -> x25_b (saved) ---
         lda #<fe_tmp2
         sta fe_src1
         lda #>fe_tmp2
@@ -1273,7 +1315,7 @@ fe_inv:
         sta fe_dst+1
         jsr fe_mul              ; fe_tmp2 = z^(2^40-1)
 
-        ; --- z_50_0: square 10x, multiply with z_10_0 → x25_da (saved) ---
+        ; --- z_50_0: square 10x, multiply with z_10_0 -> x25_da (saved) ---
         lda #10
         jsr fe_inv_sqrn_tmp2    ; fe_tmp2 = z_40_0^(2^10)
 
@@ -1291,7 +1333,7 @@ fe_inv:
         sta fe_dst+1
         jsr fe_mul              ; x25_da = z^(2^50-1)
 
-        ; --- z_100_0: copy z_50_0 to tmp2, square 50x, multiply → x25_cb (saved) ---
+        ; --- z_100_0: copy z_50_0 to tmp2, square 50x, multiply -> x25_cb (saved) ---
         lda #<x25_da
         sta fe_src1
         lda #>x25_da
@@ -1385,9 +1427,6 @@ fe_inv:
 
         rts
 
-; Saved destination pointer for fe_inv
-fe_inv_dst:     !word 0
-
 ; =============================================================================
 ; fe_inv_sqrn_tmp2 - Square fe_tmp2 in place N times
 ;
@@ -1410,4 +1449,14 @@ fe_inv_sqrn_tmp2:
         bne @loop
         rts
 
-fe_inv_sqr_cnt: !byte 0
+; =============================================================================
+; Local writable scratch variables (were inline !byte 0 in ACME source).
+; Kept here rather than moved to data.asm — these are file-private state.
+; =============================================================================
+.segment "CRYPTO_BSS"
+
+mul38_in:       .res 1
+mul38_lo:       .res 1
+mul38_hi:       .res 1
+fe_inv_dst:     .res 2
+fe_inv_sqr_cnt: .res 1

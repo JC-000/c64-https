@@ -1,10 +1,53 @@
-; =============================================================================
-; ecdsa_points.asm - Point operations for ECDSA P-256
+; ecdsa_points.s — P-256 Jacobian point arithmetic
+; Converted from ACME to ca65 in Phase 3 Batch A.
+;
 ; ec_point_double, ec_point_add, ec_scalar_mul, ec_jacobian_to_affine
 ;
 ; Imported from c64-aes256-ecdsa for TLS 1.3 certificate verification.
 ; Debug output (chrout, print_decimal) stripped.
+
+.include "constants.inc"
+
+; -----------------------------------------------------------------------------
+; Imports from ecdsa_fp (fp_src1/fp_src2/fp_dst/ec_scalar_ptr come from
+; constants.inc as zero-page equates).
+; -----------------------------------------------------------------------------
+.import fp_r0
+.import fp_is_zero, fp_mod_add, fp_mod_sub, fp_mod_inv
+
+; -----------------------------------------------------------------------------
+; Imports from ecdsa_curve (curve constants + scratch + helpers)
+; -----------------------------------------------------------------------------
+.import ec_set_modp, ec_mulp
+.import ec_p1, ec_p2, ec_p3
+.import ec_t1, ec_t2, ec_t3, ec_t4, ec_t5, ec_t6
+
+; -----------------------------------------------------------------------------
+; Exports
+; -----------------------------------------------------------------------------
+.export ec_point_double
+.export ec_point_add
+.export ec_scalar_mul
+.export ec_jacobian_to_affine
+.export ec_affine_x
+.export ec_affine_y
+.export ec_sc_byte
+.export ec_sc_mask
+
+; -----------------------------------------------------------------------------
+; Scratch / output RAM
+; -----------------------------------------------------------------------------
+.segment "CRYPTO_BSS"
+
+ec_sc_byte:     .res 1
+ec_sc_mask:     .res 1
+ec_affine_x:    .res 32
+ec_affine_y:    .res 32
+
 ; =============================================================================
+; Code
+; =============================================================================
+.segment "CRYPTO_CODE"
 
 ; =============================================================================
 ; ec_point_double: ec_p3 = 2 * ec_p1 (Jacobian)
@@ -780,17 +823,11 @@ ec_scalar_mul:
         bpl @cfin
         rts
 
-ec_sc_byte:     !byte 0
-ec_sc_mask:     !byte 0
-
 ; =============================================================================
 ; ec_jacobian_to_affine: convert ec_p3 (Jacobian) to affine (x,y)
 ; Result: ec_affine_x, ec_affine_y (32 bytes each)
 ; Computes x = X/Z^2, y = Y/Z^3 using modular inverse.
 ; =============================================================================
-ec_affine_x:    !fill 32, 0
-ec_affine_y:    !fill 32, 0
-
 ec_jacobian_to_affine:
         jsr ec_set_modp
 
