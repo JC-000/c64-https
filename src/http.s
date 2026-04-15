@@ -1,12 +1,67 @@
-; =============================================================================
-; http.asm - HTTP/1.1 client over TLS
+; http.s — HTTP/1.1 client over TLS
+; Converted from ACME to ca65 in Phase 3 Batch C.
 ;
 ; Builds HTTP requests, parses responses. Operates over the TLS layer
 ; (tls_send / tls_recv), so all data is encrypted transparently.
 ;
 ; For the MVP, supports only GET requests with basic response parsing
 ; (status line + headers + body).
-; =============================================================================
+
+        .include "constants.inc"
+
+        ; ---- exports ----
+        .export http_get
+        .export http_build_get
+        .export http_recv_response
+        .export http_get_plain
+        .export http_get_verb
+        .export http_version
+        .export http_host_hdr
+        .export http_conn_hdr
+        .export http_crlf
+        .export http_bg_idx
+        .export http_bg_src
+
+        ; ---- imports: data.asm BSS (HTTP I/O + parser state) ----
+        .import http_host_ptr
+        .import http_host_len
+        .import http_path_ptr
+        .import http_path_len
+        .import http_port
+        .import http_status
+        .import http_req_buf
+        .import http_req_len
+        .import http_resp_buf
+        .import http_resp_len
+        .import http_parse_state
+        .import http_hdr_match
+        .import http_line_idx
+        .import http_line_buf
+
+        ; ---- imports: data.asm BSS (TLS app data + TCP ring tail) ----
+        .import tls_app_ptr
+        .import tls_app_len
+        .import tcp_recv_tail
+
+        ; ---- imports: TLS handshake layer (SNI buffer + connect/close) ----
+        .import tls_hostname
+        .import tls_hostname_len
+        .import tls_connect
+        .import tls_close
+
+        ; ---- imports: TLS record layer (app-data send/recv) ----
+        .import tls_send
+        .import tls_recv
+
+        ; ---- imports: net.asm wrappers around ip65 ----
+        .import net_dns_resolve
+        .import net_set_tcp_dest
+        .import net_tcp_connect
+        .import net_tcp_close
+        .import net_tcp_send
+        .import net_send_len
+        .import net_poll
+        .import net_recv_byte
 
 ; =============================================================================
 ; http_get - perform an HTTPS GET request
@@ -15,6 +70,8 @@
 ;        http_port = port (default 443)
 ; Output: C=0 success (response in http_resp_buf), C=1 failure
 ; =============================================================================
+        .segment "CODE"
+
 http_get:
         ; --- 1. DNS resolve hostname ---
         lda http_host_ptr
@@ -74,9 +131,9 @@ http_get:
         lda http_req_len+1
         sta tls_app_len+1
         jsr tls_send
-        bcc +
+        bcc :+
         jmp @close_error
-+
+:
 
         ; --- 8. Receive response via TLS ---
         ; Initialise parser state
@@ -129,7 +186,7 @@ http_get:
         inc tcp_recv_tail+1
 @feed_mask:
         lda tcp_recv_tail+1
-        and #>TCP_RECV_MASK
+        and #>(TCP_RECV_MASK)
         sta tcp_recv_tail+1
         iny
         bne @feed_loop          ; always branches (tls_app_len < 256)
@@ -156,7 +213,7 @@ http_get:
         clc
         rts
 
-@recv_timeout: !word 0
+@recv_timeout: .word 0
 
 @tls_error:
         jsr net_tcp_close
@@ -201,7 +258,7 @@ http_build_get:
         sta zp_ptr+1
         lda http_path_len
         sta zp_count
-        jsr @copy_indirect
+        jsr bg_copy_indirect
 
         ; --- " HTTP/1.1\r\n" (11 bytes) ---
         ldx #0
@@ -236,7 +293,7 @@ http_build_get:
         sta zp_ptr+1
         lda http_host_len
         sta zp_count
-        jsr @copy_indirect
+        jsr bg_copy_indirect
 
         ; --- \r\n after Host value (2 bytes) ---
         ldx #0
@@ -285,11 +342,13 @@ http_build_get:
         rts
 
 ; -----------------------------------------------------------------------------
-; @copy_indirect - copy zp_count bytes from (zp_ptr) into http_req_buf
+; bg_copy_indirect - copy zp_count bytes from (zp_ptr) into http_req_buf
 ;   at offset http_bg_idx.  Advances http_bg_idx.
 ;   Clobbers: A, X, Y
+; (Was a cheap local @copy_indirect under ACME; promoted to a module-local
+;  label so it is reachable from http_build_get without scope games.)
 ; -----------------------------------------------------------------------------
-@copy_indirect:
+bg_copy_indirect:
         ldy #0
 @ci_loop:
         cpy zp_count
@@ -554,7 +613,7 @@ http_get_plain:
         clc
         rts
 
-@poll_timeout: !word 0
+@poll_timeout: .word 0
 
 @plain_close_err:
         jsr net_tcp_close
@@ -565,19 +624,25 @@ http_get_plain:
 ; =============================================================================
 ; HTTP request/response string constants
 ; =============================================================================
+        .segment "RODATA"
+
 http_get_verb:
-        !text "GET "
+        .byte "GET "
 http_version:
-        !text " HTTP/1.1", $0d, $0a
+        .byte " HTTP/1.1", $0d, $0a
 http_host_hdr:
-        !text "Host: "
+        .byte "Host: "
 http_conn_hdr:
-        !text "Connection: close", $0d, $0a
+        .byte "Connection: close", $0d, $0a
 http_crlf:
-        !byte $0d, $0a
+        .byte $0d, $0a
 
 ; =============================================================================
-; Module-local data (build_get temporaries only; parser state is in data.asm)
+; Module-local scratch (build_get temporaries only; parser state is in
+; data.asm). These were ACME `!byte 0` slots; under ca65 they live in the
+; zero-initialised BSS segment.
 ; =============================================================================
-http_bg_idx:            !byte 0         ; build_get write cursor
-http_bg_src:            !byte 0         ; build_get source index temp
+        .segment "BSS"
+
+http_bg_idx:    .res 1          ; build_get write cursor
+http_bg_src:    .res 1          ; build_get source index temp

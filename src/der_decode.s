@@ -1,5 +1,5 @@
-; =============================================================================
-; der_decode.asm - Minimal DER/ASN.1 decoder for X.509 certificate parsing
+; der_decode.s — X.509 ASN.1 DER decoder
+; Converted from ACME to ca65 in Phase 3 Batch C.
 ;
 ; A "skip-and-seek" parser that extracts only the fields needed for TLS 1.3
 ; certificate verification: TBS bytes (for hashing), public key, and signature.
@@ -10,6 +10,39 @@
 ;   zp_ptr   ($FB-$FC) - parse cursor into certificate buffer
 ;   zp_temp  ($FD)      - temporary
 ;   zp_count ($FE)      - temporary
+
+.include "constants.inc"
+
+; --- Public exports: code ---
+.export der_read_tag
+.export der_read_length
+.export der_skip
+.export der_skip_tlv
+.export der_match_oid
+.export x509_parse_cert
+
+; --- Public exports: OID tables (RODATA) ---
+.export oid_ec_pubkey
+.export oid_prime256v1
+.export oid_secp384r1
+.export oid_sha256_ecdsa
+.export oid_sha384_ecdsa
+
+; --- Public exports: BSS data ---
+.export der_len
+.export cert_tbs_ptr
+.export cert_tbs_len
+.export cert_pubkey
+.export cert_pubkey_len
+.export cert_sig_r
+.export cert_sig_s
+.export cert_sig_len
+.export cert_curve_id
+.export cert_buf
+.export cert_buf_len
+
+; =============================================================================
+.segment "CODE"
 ; =============================================================================
 
 ; =============================================================================
@@ -22,9 +55,9 @@ der_read_tag:
         lda (zp_ptr),y
         ; advance zp_ptr by 1
         inc zp_ptr
-        bne +
+        bne :+
         inc zp_ptr+1
-+       rts
+:       rts
 
 ; =============================================================================
 ; der_read_length - Read a DER length at (zp_ptr) and advance pointer
@@ -35,7 +68,7 @@ der_read_tag:
 der_read_length:
         ldy #0
         lda (zp_ptr),y
-        bmi .long_form          ; bit 7 set = long form
+        bmi @long_form          ; bit 7 set = long form
 
         ; --- Short form: length < $80, single byte ---
         sta der_len
@@ -43,15 +76,15 @@ der_read_length:
         sta der_len+1
         ; advance zp_ptr by 1
         inc zp_ptr
-        bne +
+        bne :+
         inc zp_ptr+1
-+       rts
+:       rts
 
-.long_form:
+@long_form:
         cmp #$81
-        beq .one_byte_len
+        beq @one_byte_len
         cmp #$82
-        beq .two_byte_len
+        beq @two_byte_len
 
         ; Unsupported length encoding (>= $83 or indefinite $80)
         ; Set der_len = 0 as error indicator
@@ -60,7 +93,7 @@ der_read_length:
         sta der_len+1
         rts
 
-.one_byte_len:
+@one_byte_len:
         ; $81 xx: one length byte follows
         iny                     ; Y=1
         lda (zp_ptr),y
@@ -72,11 +105,11 @@ der_read_length:
         lda zp_ptr
         adc #2
         sta zp_ptr
-        bcc +
+        bcc :+
         inc zp_ptr+1
-+       rts
+:       rts
 
-.two_byte_len:
+@two_byte_len:
         ; $82 xx xx: two length bytes follow (big-endian)
         iny                     ; Y=1
         lda (zp_ptr),y          ; high byte
@@ -89,9 +122,9 @@ der_read_length:
         lda zp_ptr
         adc #3
         sta zp_ptr
-        bcc +
+        bcc :+
         inc zp_ptr+1
-+       rts
+:       rts
 
 ; =============================================================================
 ; der_skip - Advance zp_ptr by der_len bytes (skip over a TLV value)
@@ -125,25 +158,24 @@ der_skip_tlv:
 ; Clobbers: A, Y
 ; =============================================================================
 der_match_oid:
-        ; Store expected OID pointer in .oid_ptr (self-modifying)
-        sta .oid_ptr+1
-        stx .oid_ptr+2
+        ; Store expected OID pointer in @oid_ptr (self-modifying)
+        sta @oid_ptr+1
+        stx @oid_ptr+2
         ; Save OID length
         sty zp_temp
         dey                     ; start comparing from last byte
-.oid_cmp_loop:
+@oid_cmp_loop:
         lda (zp_ptr),y
-.oid_ptr:
+@oid_ptr:
         cmp $ffff,y             ; self-modified: address of OID table
-        bne .oid_mismatch
+        bne @oid_mismatch
         dey
-        bpl .oid_cmp_loop
-        ; All bytes matched — Z flag is set (from BPL falling through with Y=$FF,
-        ; but we need Z=1). Force it:
+        bpl @oid_cmp_loop
+        ; All bytes matched — force Z=1
         lda #0
         rts
 
-.oid_mismatch:
+@oid_mismatch:
         lda #1                  ; clear Z flag
         rts
 
@@ -167,9 +199,9 @@ x509_parse_cert:
         ; --- Step 1: Read outer SEQUENCE tag+length ---
         jsr der_read_tag
         cmp #$30                ; SEQUENCE
-        beq +
-        jmp .parse_error
-+       jsr der_read_length
+        beq :+
+        jmp @parse_error
+:       jsr der_read_length
 
         ; --- Step 2: Save pointer to start of TBS SEQUENCE ---
         lda zp_ptr
@@ -178,17 +210,14 @@ x509_parse_cert:
         sta cert_tbs_ptr+1
 
         ; --- Step 3: Read TBS SEQUENCE tag+length ---
-        ; We need to compute cert_tbs_len = total bytes of TBS including tag+len
-        ; Save current position before reading tag+length
         jsr der_read_tag
         cmp #$30                ; SEQUENCE
-        beq +
-        jmp .parse_error
-+
+        beq :+
+        jmp @parse_error
+:
         jsr der_read_length
 
         ; cert_tbs_len = (zp_ptr - cert_tbs_ptr) + der_len
-        ; (zp_ptr - cert_tbs_ptr) gives the tag+length header size
         sec
         lda zp_ptr
         sbc cert_tbs_ptr
@@ -209,33 +238,32 @@ x509_parse_cert:
         clc
         lda zp_ptr
         adc der_len
-        sta .tbs_end
+        sta @tbs_end
         lda zp_ptr+1
         adc der_len+1
-        sta .tbs_end+1
+        sta @tbs_end+1
 
         ; --- Step 4: Parse inside TBS ---
 
         ; 4a: Skip [0] EXPLICIT version (tag $A0)
         jsr der_read_tag
         cmp #$a0                ; context-specific, constructed, tag 0
-        bne .no_version         ; v1 certs may omit version
+        bne @no_version         ; v1 certs may omit version
         jsr der_read_length
         jsr der_skip
-        jmp .parse_serial
+        jmp @parse_serial
 
-.no_version:
+@no_version:
         ; Tag wasn't $A0, so it's the serialNumber INTEGER.
-        ; We already consumed the tag byte; read length and skip value.
         jsr der_read_length
         jsr der_skip
-        jmp .skip_sig_alg
+        jmp @skip_sig_alg
 
-.parse_serial:
+@parse_serial:
         ; 4b: Skip INTEGER serialNumber
         jsr der_skip_tlv
 
-.skip_sig_alg:
+@skip_sig_alg:
         ; 4c: Skip SEQUENCE signatureAlgorithm
         jsr der_skip_tlv
 
@@ -251,38 +279,38 @@ x509_parse_cert:
         ; --- 4g: Parse SEQUENCE subjectPublicKeyInfo ---
         jsr der_read_tag
         cmp #$30                ; SEQUENCE
-        beq +
-        jmp .parse_error
-+       jsr der_read_length
+        beq :+
+        jmp @parse_error
+:       jsr der_read_length
 
         ; Parse SEQUENCE algorithm identifier
         jsr der_read_tag
         cmp #$30                ; SEQUENCE
-        beq +
-        jmp .parse_error
-+       jsr der_read_length
+        beq :+
+        jmp @parse_error
+:       jsr der_read_length
         ; Save end of algorithmIdentifier
         clc
         lda zp_ptr
         adc der_len
-        sta .algid_end
+        sta @algid_end
         lda zp_ptr+1
         adc der_len+1
-        sta .algid_end+1
+        sta @algid_end+1
 
         ; Read OID tag inside algorithmIdentifier
         jsr der_read_tag
         cmp #$06                ; OID
-        beq +
-        jmp .parse_error
-+       jsr der_read_length
+        beq :+
+        jmp @parse_error
+:       jsr der_read_length
 
         ; Match ecPublicKey OID (1.2.840.10045.2.1)
         lda #<oid_ec_pubkey
         ldx #>oid_ec_pubkey
         ldy #7                  ; length of oid_ec_pubkey
         jsr der_match_oid
-        bne .parse_error_jmp
+        bne @parse_error_jmp
 
         ; Skip past the ecPublicKey OID value
         jsr der_skip
@@ -290,38 +318,38 @@ x509_parse_cert:
         ; Now read the curve OID
         jsr der_read_tag
         cmp #$06                ; OID
-        beq +
-.parse_error_jmp:
-        jmp .parse_error
-+       jsr der_read_length
+        beq :+
+@parse_error_jmp:
+        jmp @parse_error
+:       jsr der_read_length
 
         ; Try P-256 first
         lda #<oid_prime256v1
         ldx #>oid_prime256v1
         ldy #8                  ; length of oid_prime256v1
         jsr der_match_oid
-        beq .curve_p256
+        beq @curve_p256
 
         ; Try P-384
         lda #<oid_secp384r1
         ldx #>oid_secp384r1
         ldy #5                  ; length of oid_secp384r1
         jsr der_match_oid
-        beq .curve_p384
+        beq @curve_p384
 
         ; Unknown curve
-        jmp .parse_error
+        jmp @parse_error
 
-.curve_p256:
+@curve_p256:
         lda #0
         sta cert_curve_id
         lda #64
         sta cert_pubkey_len
         lda #32
         sta cert_sig_len
-        jmp .curve_done
+        jmp @curve_done
 
-.curve_p384:
+@curve_p384:
         lda #1
         sta cert_curve_id
         lda #96
@@ -329,85 +357,84 @@ x509_parse_cert:
         lda #48
         sta cert_sig_len
 
-.curve_done:
+@curve_done:
         ; Skip to end of algorithmIdentifier
-        lda .algid_end
+        lda @algid_end
         sta zp_ptr
-        lda .algid_end+1
+        lda @algid_end+1
         sta zp_ptr+1
 
         ; --- Parse BIT STRING containing the public key ---
         jsr der_read_tag
         cmp #$03                ; BIT STRING
-        beq +
-        jmp .parse_error
-+       jsr der_read_length
+        beq :+
+        jmp @parse_error
+:       jsr der_read_length
 
         ; Skip unused bits byte (always $00)
         ldy #0
         lda (zp_ptr),y
         ; (should be $00, but don't error-check — just skip)
         inc zp_ptr
-        bne +
+        bne :+
         inc zp_ptr+1
-+
+:
         ; Skip uncompressed point marker ($04)
         ldy #0
         lda (zp_ptr),y
         cmp #$04
-        beq +
-        jmp .parse_error
-+       inc zp_ptr
-        bne +
+        beq :+
+        jmp @parse_error
+:       inc zp_ptr
+        bne :+
         inc zp_ptr+1
-+
+:
         ; --- Copy Qx to cert_pubkey ---
         ; Length is cert_sig_len (32 for P-256, 48 for P-384) = half of pubkey
         lda cert_sig_len        ; 32 or 48
         sta zp_count
         ldy #0
-.copy_qx:
+@copy_qx:
         lda (zp_ptr),y
         sta cert_pubkey,y
         iny
         cpy zp_count
-        bne .copy_qx
+        bne @copy_qx
 
         ; Advance zp_ptr by coordinate size
         clc
         lda zp_ptr
         adc zp_count
         sta zp_ptr
-        bcc +
+        bcc :+
         inc zp_ptr+1
-+
+:
         ; --- Copy Qy to cert_pubkey + coord_size ---
         ; Destination offset = cert_sig_len (32 or 48)
-        ; Use X as destination index, Y as source index
         ldx zp_count            ; dest starts at offset 32 or 48
         ldy #0
-.copy_qy:
+@copy_qy:
         lda (zp_ptr),y
         sta cert_pubkey,x
         inx
         iny
         cpy zp_count
-        bne .copy_qy
+        bne @copy_qy
 
         ; Advance zp_ptr past Qy
         clc
         lda zp_ptr
         adc zp_count
         sta zp_ptr
-        bcc +
+        bcc :+
         inc zp_ptr+1
-+
+:
 
         ; --- Skip any remaining TBS fields (extensions, etc.) ---
         ; Jump to saved end-of-TBS
-        lda .tbs_end
+        lda @tbs_end
         sta zp_ptr
-        lda .tbs_end+1
+        lda @tbs_end+1
         sta zp_ptr+1
 
         ; --- Step 5: Skip SEQUENCE signatureAlgorithm (after TBS) ---
@@ -416,132 +443,135 @@ x509_parse_cert:
         ; --- Step 6: Parse BIT STRING signatureValue ---
         jsr der_read_tag
         cmp #$03                ; BIT STRING
-        beq +
-        jmp .parse_error
-+       jsr der_read_length
+        beq :+
+        jmp @parse_error
+:       jsr der_read_length
 
         ; Skip unused bits byte ($00)
         inc zp_ptr
-        bne +
+        bne :+
         inc zp_ptr+1
-+
+:
         ; Read inner SEQUENCE (contains r, s as INTEGERs)
         jsr der_read_tag
         cmp #$30                ; SEQUENCE
-        beq +
-        jmp .parse_error
-+       jsr der_read_length
+        beq :+
+        jmp @parse_error
+:       jsr der_read_length
 
         ; --- Parse INTEGER r ---
         jsr der_read_tag
         cmp #$02                ; INTEGER
-        beq +
-        jmp .parse_error
-+       jsr der_read_length
+        beq :+
+        jmp @parse_error
+:       jsr der_read_length
 
         ; Handle leading zero pad byte
         ; If der_len > cert_sig_len, there's a leading $00
         lda der_len
         sec
         sbc cert_sig_len
-        beq .copy_r             ; exact length, no padding
+        beq @copy_r             ; exact length, no padding
         ; Leading pad byte(s) — skip (der_len - cert_sig_len) bytes
         sta zp_temp             ; number of pad bytes to skip
-.skip_r_pad:
+@skip_r_pad:
         inc zp_ptr
-        bne +
+        bne :+
         inc zp_ptr+1
-+       dec zp_temp
-        bne .skip_r_pad
+:       dec zp_temp
+        bne @skip_r_pad
 
-.copy_r:
+@copy_r:
         ldy #0
         ldx cert_sig_len        ; 32 or 48
         stx zp_count
-.copy_r_loop:
+@copy_r_loop:
         lda (zp_ptr),y
         sta cert_sig_r,y
         iny
         cpy zp_count
-        bne .copy_r_loop
+        bne @copy_r_loop
 
         ; Advance past r value
         clc
         lda zp_ptr
         adc zp_count
         sta zp_ptr
-        bcc +
+        bcc :+
         inc zp_ptr+1
-+
+:
 
         ; --- Parse INTEGER s ---
         jsr der_read_tag
         cmp #$02                ; INTEGER
-        beq +
-        jmp .parse_error
-+       jsr der_read_length
+        beq :+
+        jmp @parse_error
+:       jsr der_read_length
 
         ; Handle leading zero pad byte
         lda der_len
         sec
         sbc cert_sig_len
-        beq .copy_s
+        beq @copy_s
         sta zp_temp
-.skip_s_pad:
+@skip_s_pad:
         inc zp_ptr
-        bne +
+        bne :+
         inc zp_ptr+1
-+       dec zp_temp
-        bne .skip_s_pad
+:       dec zp_temp
+        bne @skip_s_pad
 
-.copy_s:
+@copy_s:
         ldy #0
         ldx cert_sig_len
         stx zp_count
-.copy_s_loop:
+@copy_s_loop:
         lda (zp_ptr),y
         sta cert_sig_s,y
         iny
         cpy zp_count
-        bne .copy_s_loop
+        bne @copy_s_loop
 
         ; --- Success ---
         clc
         rts
 
-.parse_error:
+@parse_error:
         sec
         rts
 
-; --- Local temporaries (not ZP, just inline storage) ---
-.tbs_end:        !word 0
-.algid_end:      !word 0
+; --- Local temporaries (not ZP, just inline storage within x509_parse_cert) ---
+@tbs_end:        .word 0
+@algid_end:      .word 0
 
 ; =============================================================================
+.segment "RODATA"
+; =============================================================================
+
 ; Known OIDs (DER-encoded value bytes, without tag and length)
-; =============================================================================
 oid_ec_pubkey:                          ; 1.2.840.10045.2.1 (ecPublicKey)
-        !byte $2a,$86,$48,$ce,$3d,$02,$01
+        .byte $2a,$86,$48,$ce,$3d,$02,$01
 oid_prime256v1:                         ; 1.2.840.10045.3.1.7 (P-256)
-        !byte $2a,$86,$48,$ce,$3d,$03,$01,$07
+        .byte $2a,$86,$48,$ce,$3d,$03,$01,$07
 oid_secp384r1:                          ; 1.3.132.0.34 (P-384)
-        !byte $2b,$81,$04,$00,$22
+        .byte $2b,$81,$04,$00,$22
 oid_sha256_ecdsa:                       ; 1.2.840.10045.4.3.2 (ecdsa-with-SHA256)
-        !byte $2a,$86,$48,$ce,$3d,$04,$03,$02
+        .byte $2a,$86,$48,$ce,$3d,$04,$03,$02
 oid_sha384_ecdsa:                       ; 1.2.840.10045.4.3.3 (ecdsa-with-SHA384)
-        !byte $2a,$86,$48,$ce,$3d,$04,$03,$03
+        .byte $2a,$86,$48,$ce,$3d,$04,$03,$03
 
 ; =============================================================================
-; Data labels
+.segment "BSS"
 ; =============================================================================
-der_len:           !word 0              ; last parsed length (16-bit LE)
-cert_tbs_ptr:      !word 0              ; pointer to TBS bytes in cert_buf
-cert_tbs_len:      !word 0              ; length of TBS (tag + length + value)
-cert_pubkey:       !fill 96, 0          ; public key Qx||Qy (max 48+48 for P-384)
-cert_pubkey_len:   !byte 0             ; 64 (P-256) or 96 (P-384)
-cert_sig_r:        !fill 48, 0          ; signature r component (max 48 for P-384)
-cert_sig_s:        !fill 48, 0          ; signature s component (max 48 for P-384)
-cert_sig_len:      !byte 0             ; 32 (P-256) or 48 (P-384)
-cert_curve_id:     !byte 0             ; 0=P-256, 1=P-384
-cert_buf:          !fill 1536, 0        ; certificate DER buffer
-cert_buf_len:      !word 0             ; certificate length
+
+der_len:           .res 2               ; last parsed length (16-bit LE)
+cert_tbs_ptr:      .res 2               ; pointer to TBS bytes in cert_buf
+cert_tbs_len:      .res 2               ; length of TBS (tag + length + value)
+cert_pubkey:       .res 96              ; public key Qx||Qy (max 48+48 for P-384)
+cert_pubkey_len:   .res 1               ; 64 (P-256) or 96 (P-384)
+cert_sig_r:        .res 48              ; signature r component (max 48 for P-384)
+cert_sig_s:        .res 48              ; signature s component (max 48 for P-384)
+cert_sig_len:      .res 1               ; 32 (P-256) or 48 (P-384)
+cert_curve_id:     .res 1               ; 0=P-256, 1=P-384
+cert_buf:          .res 1536            ; certificate DER buffer
+cert_buf_len:      .res 2               ; certificate length

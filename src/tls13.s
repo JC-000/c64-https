@@ -1,5 +1,5 @@
-; =============================================================================
-; tls13.asm - TLS 1.3 state machine
+; tls13.s — TLS 1.3 state machine and record assembly
+; Converted from ACME to ca65 in Phase 3 Batch C.
 ;
 ; Orchestrates the TLS 1.3 handshake and application data flow:
 ;
@@ -24,7 +24,86 @@
 ; After ServerHello, all messages are encrypted with handshake keys
 ; derived from ECDHE shared secret via HKDF.
 ; After both Finished, traffic keys replace handshake keys.
-; =============================================================================
+
+.include "constants.inc"
+
+; --- Public exports ---
+.export tls_connect
+.export tls_send
+.export tls_recv
+.export tls_close
+.export tls_send_client_hello
+.export tls_recv_server_hello
+.export tls_recv_encrypted
+.export tls_send_finished
+
+; --- TLS BSS / data (data.asm) ---
+.import tls_state
+.import tls_last_state
+.import tls_client_random
+.import tls_ecdhe_privkey
+.import tls_hs_buf
+.import tls_hs_len
+.import tls_rec_buf
+.import tls_rec_len
+.import tls_rec_type
+.import tls_app_ptr
+.import tls_app_len
+.import tls_recv_progress
+.import tls_recv_poll_count
+
+; --- Crypto / DRBG / ECDH helpers ---
+.import drbg_fill_bytes
+.import tls_ecdh_generate_keypair
+.import tls_ecdh_compute_shared
+
+; --- TLS record layer (tls_record.s / tls_record_io.s) ---
+.import tls_record_send_plaintext
+.import tls_record_send_encrypted
+.import tls_record_recv_and_decrypt
+
+; --- ClientHello / ServerHello builders & parsers (tls_handshake) ---
+.import tls_build_client_hello
+.import tls_parse_server_hello
+
+; --- Transcript hash (tls_transcript.s) ---
+.import tls_transcript_init
+.import tls_transcript_update
+
+; --- Key schedule (tls_keyschedule.s) ---
+.import tls_derive_handshake_keys
+.import tls_derive_traffic_keys
+.import tls_compute_finished
+.import tls_verify_finished
+
+; --- Encrypted handshake sub-handlers (tls_cert.s) ---
+.import tls_handle_certificate
+.import tls_handle_cert_verify
+
+; --- Networking (net.s) ---
+.import net_poll
+
+; --- Console output (main/util) ---
+.import print_string
+
+; --- Status strings (data.asm / rodata) ---
+.import ch_sent_msg
+.import sh_recv_msg
+.import hk1_msg
+.import keys_ok_msg
+.import ee_recv_msg
+.import cert_recv_msg
+.import cv_recv_msg
+.import fin_recv_msg
+.import cfin_sent_msg
+.import enc1_msg
+.import rx_msg
+.import got2_msg
+.import got_msg
+.import dec_msg
+.import proc_msg
+
+.segment "CODE"
 
 ; =============================================================================
 ; tls_connect - perform full TLS 1.3 handshake
@@ -292,21 +371,21 @@ tls_recv_server_hello:
         lda #$01
         sta tls_recv_progress
         lda #0
-        sta @sh_timeout
-        sta @sh_timeout+1
+        sta sh_timeout
+        sta sh_timeout+1
         sta tls_recv_poll_count
         sta tls_recv_poll_count+1
 @sh_wait:
         inc tls_recv_poll_count
-        bne +
+        bne :+
         inc tls_recv_poll_count+1
-+
+:
         jsr net_poll
         jsr tls_record_recv_and_decrypt
         bcc @sh_got_record
-        inc @sh_timeout
+        inc sh_timeout
         bne @sh_wait
-        inc @sh_timeout+1
+        inc sh_timeout+1
         bne @sh_wait
         ; timeout
         sec
@@ -362,11 +441,10 @@ tls_recv_server_hello:
 @sh_error:
         sec
         rts
-@sh_timeout: !word 0
 
-; tls_derive_handshake_keys — in tls_keyschedule.asm
-; tls_derive_traffic_keys — in tls_keyschedule.asm
-; tls_verify_finished — in tls_keyschedule.asm
+; tls_derive_handshake_keys - in tls_keyschedule.s
+; tls_derive_traffic_keys   - in tls_keyschedule.s
+; tls_verify_finished       - in tls_keyschedule.s
 
 ; =============================================================================
 ; tls_recv_encrypted - receive encrypted handshake msg, decrypt, dispatch
@@ -377,25 +455,25 @@ tls_recv_encrypted:
         ldy #>enc1_msg
         jsr print_string
         lda #0
-        sta @enc_timeout
-        sta @enc_timeout+1
+        sta enc_timeout
+        sta enc_timeout+1
         lda #<rx_msg
         ldy #>rx_msg
         jsr print_string
 @enc_wait:
         jsr net_poll
         jsr tls_record_recv_and_decrypt
-        bcs +
+        bcs :+
         ; success -- print GOT2 marker so we can distinguish progress
         lda #<got2_msg
         ldy #>got2_msg
         jsr print_string
         clc
         jmp @enc_got_record
-+
-        inc @enc_timeout
+:
+        inc enc_timeout
         bne @enc_wait
-        inc @enc_timeout+1
+        inc enc_timeout+1
         bne @enc_wait
         ; timeout
         sec
@@ -473,7 +551,6 @@ tls_recv_encrypted:
 @enc_error:
         sec
         rts
-@enc_timeout: !word 0
 
 ; =============================================================================
 ; tls_send_finished - compute client Finished, encrypt, send
@@ -513,3 +590,13 @@ tls_send_finished:
         ; encrypt and send
         jsr tls_record_send_encrypted
         rts
+
+; =============================================================================
+; File-local BSS — 16-bit timeout counters used by recv routines.
+; Originally `@sh_timeout` / `@enc_timeout` cheap locals embedded in code with
+; `!word 0`. Promoted to module-scope BSS so ca65 can place them cleanly; they
+; are not exported.
+; =============================================================================
+.segment "BSS"
+sh_timeout:     .res 2
+enc_timeout:    .res 2

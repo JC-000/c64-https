@@ -1,11 +1,28 @@
-; =============================================================================
-; tls_handshake.asm - TLS 1.3 handshake message construction and parsing
+; tls_handshake.s — TLS 1.3 handshake messages
+; Converted from ACME to ca65 in Phase 3 Batch C.
 ;
 ; Builds ClientHello, parses ServerHello and EncryptedExtensions.
-; =============================================================================
 
-; x25519 named group (not in constants.asm)
-TLS_GROUP_X25519 = $001d
+.include "constants.inc"
+
+; --- Externals (data.asm BSS / scratch) ---
+.import tls_hs_buf
+.import tls_hs_len
+.import tls_client_random
+.import tls_ecdhe_pubkey
+.import tls_server_random
+.import tls_server_pubkey
+
+; --- Exports ---
+.export tls_build_client_hello
+.export tls_parse_server_hello
+.export tls_parse_encrypted_extensions
+.export tls_hostname
+.export tls_hostname_len
+
+; x25519 named group is defined in constants.inc; no local equate needed.
+
+.segment "CODE"
 
 ; =============================================================================
 ; tls_build_client_hello - construct ClientHello message
@@ -43,13 +60,13 @@ tls_build_client_hello:
 
         ; --- [6-37] client_random (32 bytes) ---
         ldx #0
-.copy_random:
+@copy_random:
         lda tls_client_random,x
         sta tls_hs_buf,y
         iny
         inx
         cpx #32
-        bne .copy_random
+        bne @copy_random
         ; Y=38
 
         ; --- [38] session_id_length = 0x00 ---
@@ -207,19 +224,19 @@ tls_build_client_hello:
 
         ; Copy 32 bytes of x25519 public key
         ldx #0
-.copy_pubkey:
+@copy_pubkey:
         lda tls_ecdhe_pubkey,x
         sta tls_hs_buf,y
         iny
         inx
         cpx #32
-        bne .copy_pubkey
+        bne @copy_pubkey
         ; 10 + 32 = 42 bytes written
 
         ; --- Extension 5: server_name / SNI (0x0000) ---
         ; Only include if tls_hostname_len > 0
         lda tls_hostname_len
-        beq .skip_sni
+        beq @skip_sni
 
         ; Type 00 00
         lda #$00
@@ -263,14 +280,14 @@ tls_build_client_hello:
 
         ; Copy hostname bytes
         ldx #0
-.copy_hostname:
+@copy_hostname:
         lda tls_hostname,x
         sta tls_hs_buf,y
         iny
         inx
         cpx tls_hostname_len
-        bne .copy_hostname
-.skip_sni:
+        bne @copy_hostname
+@skip_sni:
 
         ; --- Extension 6: max_fragment_length (0x0001) ---
         ; 00 01 00 01 01
@@ -335,9 +352,9 @@ tls_parse_server_hello:
         ; --- [0] Verify handshake type = 0x02 ---
         lda tls_hs_buf
         cmp #TLS_HS_SERVER_HELLO
-        beq .sh_type_ok
-        jmp .sh_error
-.sh_type_ok:
+        beq @sh_type_ok
+        jmp @sh_error
+@sh_type_ok:
         iny                             ; Y=1
 
         ; --- [1-3] Length (24-bit) — skip past ---
@@ -351,40 +368,40 @@ tls_parse_server_hello:
 
         ; --- [6-37] server_random — copy 32 bytes ---
         ldx #0
-.copy_server_random:
+@copy_server_random:
         lda tls_hs_buf,y
         sta tls_server_random,x
         iny
         inx
         cpx #32
-        bne .copy_server_random
+        bne @copy_server_random
         ; Y=38
 
         ; --- [38] session_id_echo_length — skip that many bytes ---
         lda tls_hs_buf,y
         iny                             ; past length byte
         tax
-        beq .sh_no_session_id
-.sh_skip_session_id:
+        beq @sh_no_session_id
+@sh_skip_session_id:
         iny
         dex
-        bne .sh_skip_session_id
-.sh_no_session_id:
+        bne @sh_skip_session_id
+@sh_no_session_id:
 
         ; --- cipher_suite (2 bytes) — verify = 0x1303 ---
         lda tls_hs_buf,y
         cmp #$13
-        bne .sh_error_jmp
+        bne @sh_error_jmp
         iny
         lda tls_hs_buf,y
         cmp #$03
-        bne .sh_error_jmp
+        bne @sh_error_jmp
         iny
 
         ; --- compression_method (1 byte) — verify = 0x00 ---
         lda tls_hs_buf,y
         cmp #$00
-        bne .sh_error_jmp
+        bne @sh_error_jmp
         iny
 
         ; --- extensions_length (2 bytes, big-endian) ---
@@ -397,25 +414,25 @@ tls_parse_server_hello:
 
         ; Reset flags for required extensions
         lda #0
-        sta .sh_found_ver       ; supported_versions found?
-        sta .sh_found_ks        ; key_share found?
-        jmp .sh_ext_loop
+        sta sh_found_ver        ; supported_versions found?
+        sta sh_found_ks         ; key_share found?
+        jmp @sh_ext_loop
 
-.sh_error_jmp:
-        jmp .sh_error
+@sh_error_jmp:
+        jmp @sh_error
 
         ; =================================================================
         ; Extension parsing loop
         ; zp_tmp1 = remaining extension bytes (low)
         ; zp_tmp2 = remaining extension bytes (high)
         ; =================================================================
-.sh_ext_loop:
+@sh_ext_loop:
         ; Check if we've consumed all extension bytes
         lda zp_tmp1
         ora zp_tmp2
-        bne .sh_ext_continue
-        jmp .sh_done
-.sh_ext_continue:
+        bne @sh_ext_continue
+        jmp @sh_done
+@sh_ext_continue:
 
         ; Read extension type (2 bytes, big-endian)
         lda tls_hs_buf,y               ; type high byte
@@ -438,114 +455,110 @@ tls_parse_server_hello:
         sec
         sbc #4
         sta zp_tmp1
-        bcs +
+        bcs :+
         dec zp_tmp2
-+
+:
         ; Subtract ext data length from remaining
         lda zp_tmp1
         sec
         sbc zp_temp
         sta zp_tmp1
-        bcs +
+        bcs :+
         dec zp_tmp2
-+
+:
         lda zp_tmp1
         sec
         sbc zp_count
         sta zp_tmp1
-        bcs +
+        bcs :+
         dec zp_tmp2
-+
+:
 
         ; --- Check: supported_versions (type 0x002B)? ---
         lda zp_ptr                      ; type_hi
-        bne .sh_not_sup_ver             ; high byte != 0
+        bne @sh_not_sup_ver             ; high byte != 0
         lda zp_ptr+1                    ; type_lo
         cmp #$2b
-        bne .sh_not_sup_ver
+        bne @sh_not_sup_ver
 
         ; supported_versions: expect 2 bytes = 03 04
         lda tls_hs_buf,y
         cmp #$03
-        bne .sh_error
+        bne @sh_error
         iny
         lda tls_hs_buf,y
         cmp #$04
-        bne .sh_error
+        bne @sh_error
         iny
-        inc .sh_found_ver       ; mark supported_versions found
-        jmp .sh_ext_loop
+        inc sh_found_ver        ; mark supported_versions found
+        jmp @sh_ext_loop
 
-.sh_not_sup_ver:
+@sh_not_sup_ver:
         ; --- Check: key_share (type 0x0033)? ---
         lda zp_ptr                      ; type_hi
-        bne .sh_skip_ext                ; high byte != 0
+        bne @sh_skip_ext                ; high byte != 0
         lda zp_ptr+1                    ; type_lo
         cmp #$33
-        bne .sh_skip_ext
+        bne @sh_skip_ext
 
         ; key_share: group(2) + key_len(2) + key_data
         ; Verify group = 0x001D (x25519)
         lda tls_hs_buf,y
-        bne .sh_error                   ; high byte must be 0
+        bne @sh_error                   ; high byte must be 0
         iny
         lda tls_hs_buf,y
         cmp #$1d
-        bne .sh_error
+        bne @sh_error
         iny
 
         ; Verify key_len = 0x0020
         lda tls_hs_buf,y
-        bne .sh_error                   ; high byte must be 0
+        bne @sh_error                   ; high byte must be 0
         iny
         lda tls_hs_buf,y
         cmp #$20
-        bne .sh_error
+        bne @sh_error
         iny
 
         ; Copy 32 bytes to tls_server_pubkey
         ldx #0
-.copy_server_key:
+@copy_server_key:
         lda tls_hs_buf,y
         sta tls_server_pubkey,x
         iny
         inx
         cpx #32
-        bne .copy_server_key
-        inc .sh_found_ks        ; mark key_share found
-        jmp .sh_ext_loop
+        bne @copy_server_key
+        inc sh_found_ks         ; mark key_share found
+        jmp @sh_ext_loop
 
         ; --- Unknown extension: skip ext data ---
-.sh_skip_ext:
+@sh_skip_ext:
         ; zp_count = ext_len_hi, zp_temp = ext_len_lo
         ; For ServerHello extensions, length should be small (<256)
         lda zp_count
-        bne .sh_error                   ; can't handle >255 byte ext here
+        bne @sh_error                   ; can't handle >255 byte ext here
         ldx zp_temp
-        bne .sh_skip_bytes             ; has data to skip
-        jmp .sh_ext_loop               ; zero-length: nothing to skip
-.sh_skip_bytes:
+        bne @sh_skip_bytes             ; has data to skip
+        jmp @sh_ext_loop               ; zero-length: nothing to skip
+@sh_skip_bytes:
         iny
         dex
-        bne .sh_skip_bytes
-        jmp .sh_ext_loop
+        bne @sh_skip_bytes
+        jmp @sh_ext_loop
 
-.sh_done:
+@sh_done:
         ; Verify required extensions were found
-        lda .sh_found_ver
-        beq .sh_error           ; supported_versions is mandatory
-        lda .sh_found_ks
-        beq .sh_error           ; key_share is mandatory
+        lda sh_found_ver
+        beq @sh_error           ; supported_versions is mandatory
+        lda sh_found_ks
+        beq @sh_error           ; key_share is mandatory
         clc
         rts
 
-.sh_error:
+@sh_error:
         sec
         rts
-
-; Extension tracking flags (inline data)
-.sh_found_ver: !byte 0
-.sh_found_ks:  !byte 0
 
 
 ; =============================================================================
@@ -558,16 +571,28 @@ tls_parse_encrypted_extensions:
         ; Verify handshake type byte
         lda tls_hs_buf
         cmp #TLS_HS_ENCRYPTED_EXT
-        bne .ee_error
+        bne @ee_error
         clc
         rts
-.ee_error:
+@ee_error:
         sec
         rts
 
 
 ; =============================================================================
+; Extension tracking flags (module-local BSS; moved out of CODE so they don't
+; break relative-branch reachability, and so CODE stays pure instructions).
+; =============================================================================
+.segment "BSS"
+
+sh_found_ver:  .res 1
+sh_found_ks:   .res 1
+
+
+; =============================================================================
 ; Inline data: hostname for SNI extension
 ; =============================================================================
-tls_hostname:       !fill 64, 0
-tls_hostname_len:   !byte 0
+.segment "BSS"
+
+tls_hostname:      .res 64
+tls_hostname_len:  .res 1
