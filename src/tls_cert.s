@@ -43,7 +43,7 @@
         .import ecdsa_pubkey_x
         .import ecdsa_pubkey_y
 
-        .segment "CODE"
+        .segment "TLS_CODE"
 
 ; =============================================================================
 ; tls_handle_certificate - Process TLS 1.3 Certificate message

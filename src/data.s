@@ -96,8 +96,11 @@ zp_save_buf:    .res 26         ; saves $02-$1B during ip65 calls
 
 ; -----------------------------------------------------------------------------
 ; fe25519/x25519 optimization tables — MUST live below $A000 to avoid
-; BASIC ROM shadow. (Original ACME layout guarantee; see NOTE at top.)
+; BASIC ROM shadow. Placed in TABLES_BSS which ld65 maps to the top of the
+; CRYPTO region ($6000-$9FFF), keeping them below $A000.
 ; -----------------------------------------------------------------------------
+
+.segment "TABLES_BSS"
 
 .align 256
 .export mul_dma_lo
@@ -111,6 +114,8 @@ mul_dma_hi:     .res 256        ; DMA target: hi bytes of a*b for current a
 .export sqtab_hi
 sqtab_lo:       .res 512
 sqtab_hi:       .res 512
+
+.segment "BSS"
 
 ; -----------------------------------------------------------------------------
 ; Network layer buffers

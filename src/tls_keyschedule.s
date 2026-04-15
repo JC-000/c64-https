@@ -83,7 +83,7 @@
 ;   8. server_hs_key = HKDF-Expand-Label(s_hs_traffic, "key", "", 32)
 ;   9. server_hs_iv  = HKDF-Expand-Label(s_hs_traffic, "iv", "", 12)
 ; =============================================================================
-.segment "CODE"
+.segment "TLS_CODE"
 
 tls_derive_handshake_keys:
         ; --- Step 1: early_secret = HKDF-Extract(salt=zeros, IKM=zeros) ---
