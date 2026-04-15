@@ -1,5 +1,5 @@
-; =============================================================================
-; tls_ecdh.asm - ECDH key exchange wrapper for TLS 1.3
+; tls_ecdh.s — TLS 1.3 ECDH (X25519) wrapper
+; Converted from ACME to ca65 in Phase 3 Batch B.
 ;
 ; Uses x25519 (RFC 7748) for ephemeral key exchange.
 ;
@@ -19,7 +19,24 @@
 ;   x25_result (32 bytes) = output
 ;   x25519_base           = scalar * basepoint(9) (clamps + scalarmult)
 ;   x25519_scalarmult     = scalar * u (raw, caller must clamp)
-; =============================================================================
+
+.include "constants.inc"
+
+.export tls_ecdh_generate_keypair
+.export tls_ecdh_compute_shared
+
+.import x25519_base
+.import x25519_scalarmult
+.import x25519_clamp
+.import x25_scalar
+.import x25_u
+.import x25_result
+.import tls_ecdhe_privkey
+.import tls_ecdhe_pubkey
+.import tls_server_pubkey
+.import tls_shared_secret
+
+.segment "CODE"
 
 ; =============================================================================
 ; tls_ecdh_generate_keypair

@@ -1,5 +1,5 @@
-; =============================================================================
-; tls_record.asm - TLS 1.3 record layer
+; tls_record.s — TLS 1.3 record layer
+; Converted from ACME to ca65 in Phase 3 Batch B.
 ;
 ; TLS record format (RFC 8446 Section 5.1):
 ;   ContentType     (1 byte)  -- always 23 (application_data) for encrypted
@@ -13,7 +13,56 @@
 ; We negotiate max_fragment_length = 512 bytes to fit C64 RAM constraints.
 ; With 16-byte Poly1305 tag + 1-byte inner content type, max encrypted
 ; record payload = 512 + 1 + 16 = 529 bytes.
-; =============================================================================
+
+.include "constants.inc"
+
+; --- Public exports ---
+.export tls_select_keys
+.export tls_build_nonce
+.export tls_seq_increment
+.export tls_record_encrypt
+.export tls_record_decrypt
+.export tls_record_write
+.export tls_record_read
+.export tls_enc_aead_len
+
+; --- AEAD engine (crypto/aead.s) ---
+.import aead_encrypt
+.import aead_decrypt
+
+; --- AEAD parameter block (data.asm) ---
+.import aead_key
+.import aead_nonce
+.import aead_aad_ptr
+.import aead_aad_len
+.import aead_data_ptr
+.import aead_data_len
+.import aead_tag
+.import poly1305_tag
+
+; --- TLS record / key schedule state (data.asm) ---
+.import tls_state
+.import tls_rec_buf
+.import tls_rec_len
+.import tls_rec_type
+.import tls_rec_header
+.import tls_nonce
+.import tls_hs_write_key
+.import tls_hs_write_iv
+.import tls_hs_read_key
+.import tls_hs_read_iv
+.import tls_app_write_key
+.import tls_app_write_iv
+.import tls_app_read_key
+.import tls_app_read_iv
+.import tls_write_seq
+.import tls_read_seq
+
+; --- Record I/O (tls_record_io.s) ---
+.import tls_send_record
+.import tls_recv_record
+
+.segment "CODE"
 
 ; =============================================================================
 ; tls_select_keys - Select key/IV/seq pointers based on direction and state
@@ -502,12 +551,13 @@ tls_record_write:
 ;         C=1 incomplete/error
 ; =============================================================================
 tls_record_read:
-        ; Delegates to tls_recv_record (tls_record_io.asm) which handles
+        ; Delegates to tls_recv_record (tls_record_io.s) which handles
         ; header parsing, validation, and payload buffering.
         jsr tls_recv_record
         rts
 
 ; =============================================================================
-; Record layer working data (inline, not in data.asm)
+; Record layer working data (file-local BSS)
 ; =============================================================================
-tls_enc_aead_len:       !word 0 ; AEAD plaintext/ciphertext length (survives ZP clobber)
+.segment "BSS"
+tls_enc_aead_len:       .res 2  ; AEAD plaintext/ciphertext length (survives ZP clobber)

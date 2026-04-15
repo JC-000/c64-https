@@ -1,5 +1,5 @@
-; =============================================================================
-; hkdf.asm - HKDF-SHA256 (RFC 5869) for TLS 1.3 key derivation
+; hkdf.s - HKDF-SHA256 (RFC 5869) for TLS 1.3 key derivation
+; Converted from ACME to ca65 in Phase 3 Batch B.
 ;
 ; TLS 1.3 key schedule uses three HKDF operations:
 ;   HKDF-Extract(salt, IKM) = HMAC-SHA256(salt, IKM)
@@ -12,8 +12,41 @@
 ; For TLS 1.3 with SHA-256, L <= 32 always, so we only need T(1).
 ; This simplifies HKDF-Expand to a single HMAC call.
 ;
-; Dependencies: hmac_sha256 from hmac_drbg.asm (HMAC-SHA256 primitive)
-; =============================================================================
+; Dependencies: hmac_sha256 from hmac_drbg.s (HMAC-SHA256 primitive)
+
+        .include "constants.inc"
+
+        .export hkdf_extract
+        .export hkdf_expand
+        .export hkdf_expand_label
+        .export tls_derive_secret
+
+        ; HMAC primitive (from hmac_drbg.s)
+        .import hmac_sha256
+        .import hmac_key
+        .import hmac_data_buf
+        .import hmac_data_len
+        .import hmac_result
+
+        ; HKDF I/O buffers (data.asm BSS — unresolved until Batch D)
+        .import hkdf_salt_ptr
+        .import hkdf_salt_len
+        .import hkdf_ikm_ptr
+        .import hkdf_ikm_len
+        .import hkdf_prk
+        .import hkdf_info_buf
+        .import hkdf_info_len
+        .import hkdf_out_len
+        .import hkdf_okm
+        .import hkdf_label_ptr
+        .import hkdf_label_len
+        .import hkdf_context_ptr
+        .import hkdf_context_len
+
+        ; TLS transcript hash output buffer
+        .import tls_transcript
+
+        .segment "CODE"
 
 ; =============================================================================
 ; hkdf_extract - HKDF-Extract(salt, IKM) -> PRK
@@ -27,7 +60,7 @@ hkdf_extract:
 
         ; Step 1: Set up HMAC key from salt
         lda hkdf_salt_len
-        beq .extract_zero_salt
+        beq @extract_zero_salt
 
         ; Non-empty salt: copy salt_len bytes via indirect addressing
         lda hkdf_salt_ptr
@@ -35,36 +68,36 @@ hkdf_extract:
         lda hkdf_salt_ptr+1
         sta zp_ptr+1
         ldy #0
-.extract_copy_salt:
+@extract_copy_salt:
         cpy hkdf_salt_len
-        beq .extract_zero_rest
+        beq @extract_zero_rest
         lda (zp_ptr),y
         sta hmac_key,y
         iny
-        bne .extract_copy_salt      ; always branches (salt_len < 256)
+        bne @extract_copy_salt      ; always branches (salt_len < 256)
 
         ; Zero-fill remainder of hmac_key (32 - salt_len bytes)
-.extract_zero_rest:
+@extract_zero_rest:
         cpy #32
-        beq .extract_key_done
+        beq @extract_key_done
         lda #0
-.extract_zero_loop:
+@extract_zero_loop:
         sta hmac_key,y
         iny
         cpy #32
-        bne .extract_zero_loop
-        beq .extract_key_done       ; always branches
+        bne @extract_zero_loop
+        beq @extract_key_done       ; always branches
 
         ; Empty salt: zero-fill all 32 bytes of hmac_key
-.extract_zero_salt:
+@extract_zero_salt:
         ldx #31
         lda #0
-.extract_zero_all:
+@extract_zero_all:
         sta hmac_key,x
         dex
-        bpl .extract_zero_all
+        bpl @extract_zero_all
 
-.extract_key_done:
+@extract_key_done:
         ; Step 2: Copy IKM to hmac_data_buf
         lda hkdf_ikm_ptr
         sta zp_ptr
@@ -72,14 +105,14 @@ hkdf_extract:
         sta zp_ptr+1
         ldy #0
         lda hkdf_ikm_len
-        beq .extract_ikm_done
-.extract_copy_ikm:
+        beq @extract_ikm_done
+@extract_copy_ikm:
         lda (zp_ptr),y
         sta hmac_data_buf,y
         iny
         cpy hkdf_ikm_len
-        bne .extract_copy_ikm
-.extract_ikm_done:
+        bne @extract_copy_ikm
+@extract_ikm_done:
 
         ; Step 3: Set data length and call HMAC
         lda hkdf_ikm_len
@@ -88,11 +121,11 @@ hkdf_extract:
 
         ; Step 4: Copy hmac_result to hkdf_prk
         ldx #31
-.extract_copy_result:
+@extract_copy_result:
         lda hmac_result,x
         sta hkdf_prk,x
         dex
-        bpl .extract_copy_result
+        bpl @extract_copy_result
         rts
 
 ; =============================================================================
@@ -108,23 +141,23 @@ hkdf_expand:
 
         ; Step 1: Copy hkdf_prk to hmac_key (32 bytes)
         ldx #31
-.expand_copy_prk:
+@expand_copy_prk:
         lda hkdf_prk,x
         sta hmac_key,x
         dex
-        bpl .expand_copy_prk
+        bpl @expand_copy_prk
 
         ; Step 2: Copy hkdf_info_len bytes from hkdf_info_buf to hmac_data_buf
         ldy #0
         lda hkdf_info_len
-        beq .expand_info_done
-.expand_copy_info:
+        beq @expand_info_done
+@expand_copy_info:
         lda hkdf_info_buf,y
         sta hmac_data_buf,y
         iny
         cpy hkdf_info_len
-        bne .expand_copy_info
-.expand_info_done:
+        bne @expand_copy_info
+@expand_info_done:
 
         ; Step 3: Append 0x01 byte at end of info
         lda #$01
@@ -141,14 +174,14 @@ hkdf_expand:
 
         ; Step 6: Copy first hkdf_out_len bytes of hmac_result to hkdf_okm
         ldx hkdf_out_len
-        beq .expand_done
+        beq @expand_done
         dex
-.expand_copy_okm:
+@expand_copy_okm:
         lda hmac_result,x
         sta hkdf_okm,x
         dex
-        bpl .expand_copy_okm
-.expand_done:
+        bpl @expand_copy_okm
+@expand_done:
         rts
 
 ; =============================================================================
@@ -188,12 +221,12 @@ hkdf_expand_label:
 
         ; [3..8] = "tls13 " prefix (6 bytes)
         ldy #0
-.elabel_copy_prefix:
+@elabel_copy_prefix:
         lda hkdf_tls13_prefix,y
         sta hkdf_info_buf+3,y
         iny
         cpy #6
-        bne .elabel_copy_prefix
+        bne @elabel_copy_prefix
 
         ; X = 9 (next write position, absolute index into hkdf_info_buf)
         ldx #9
@@ -204,16 +237,16 @@ hkdf_expand_label:
         lda hkdf_label_ptr+1
         sta zp_ptr+1
         lda hkdf_label_len
-        beq .elabel_label_done
+        beq @elabel_label_done
         ldy #0                      ; source index
-.elabel_copy_label:
+@elabel_copy_label:
         lda (zp_ptr),y
         sta hkdf_info_buf,x
         iny
         inx
         cpy hkdf_label_len
-        bne .elabel_copy_label
-.elabel_label_done:
+        bne @elabel_copy_label
+@elabel_label_done:
 
         ; Store context_len at current position
         lda hkdf_context_len
@@ -226,16 +259,16 @@ hkdf_expand_label:
         lda hkdf_context_ptr+1
         sta zp_ptr+1
         lda hkdf_context_len
-        beq .elabel_ctx_done
+        beq @elabel_ctx_done
         ldy #0                      ; source index
-.elabel_copy_ctx:
+@elabel_copy_ctx:
         lda (zp_ptr),y
         sta hkdf_info_buf,x
         iny
         inx
         cpy hkdf_context_len
-        bne .elabel_copy_ctx
-.elabel_ctx_done:
+        bne @elabel_copy_ctx
+@elabel_ctx_done:
 
         ; hkdf_info_len = X (total bytes written)
         stx hkdf_info_len
@@ -251,9 +284,9 @@ hkdf_expand_label:
 ; =============================================================================
 tls_derive_secret:
         ; Set context = transcript hash (32 bytes)
-        lda #<tls_transcript
+        lda #<(tls_transcript)
         sta hkdf_context_ptr
-        lda #>tls_transcript
+        lda #>(tls_transcript)
         sta hkdf_context_ptr+1
         lda #32
         sta hkdf_context_len
@@ -264,5 +297,7 @@ tls_derive_secret:
 ; =============================================================================
 ; Constant: "tls13 " prefix for labels
 ; =============================================================================
+        .segment "RODATA"
+
 hkdf_tls13_prefix:
-        !text "tls13 "          ; 6 bytes, no null terminator
+        .byte "tls13 "          ; 6 bytes, no null terminator

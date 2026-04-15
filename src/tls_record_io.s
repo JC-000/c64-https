@@ -1,19 +1,43 @@
-; =============================================================================
-; tls_record_io.asm - TCP-facing record layer I/O
+; tls_record_io.s — TLS record TCP I/O
+; Converted from ACME to ca65 in Phase 3 Batch B.
 ;
 ; Handles building TLS record headers, sending records over TCP via
 ; net_tcp_send, and reading complete records from the TCP receive ring
 ; buffer via net_recv_byte.
 ;
 ; External dependencies:
-;   net.asm       — net_tcp_send, net_recv_byte, net_send_len
-;   constants.asm — TLS constants, ZP equates
-;   data.asm      — tls_rec_header, tls_rec_buf, tls_rec_len, tls_rec_type,
-;                   tls_state
-;   tls_record.asm — tls_record_decrypt
+;   net.s        — net_tcp_send, net_recv_byte, net_send_len
+;   constants.inc — TLS constants, ZP equates (via .include)
+;   data.s       — tls_rec_header, tls_rec_buf, tls_rec_len, tls_rec_type,
+;                  tls_state
+;   tls_record.s — tls_record_encrypt, tls_record_decrypt
 ;
 ; ZP used: tls_rec_ptr ($1E), tls_rec_idx ($20), zp_ptr ($FB)
 ; =============================================================================
+
+.include "constants.inc"
+
+.export tls_send_record
+.export tls_recv_record
+.export tls_record_send_plaintext
+.export tls_record_send_encrypted
+.export tls_record_recv_and_decrypt
+.export tls_recv_state
+.export tls_recv_count
+
+.import net_tcp_send
+.import net_recv_byte
+.import net_send_len
+.import tls_record_encrypt
+.import tls_record_decrypt
+.import tls_rec_header
+.import tls_rec_buf
+.import tls_rec_len
+.import tls_rec_type
+.import tls_state
+.import tls_recv_sub_progress
+
+.segment "CODE"
 
 ; Maximum record payload we can buffer (512 data + 1 inner type + 16 tag + 19 pad)
 TLS_REC_BUF_MAX = 548
@@ -82,9 +106,9 @@ tls_recv_record:
         sta tls_recv_sub_progress
 @read_header:
         jsr net_recv_byte
-        bcc +                   ; data available, continue
+        bcc :+                  ; data available, continue
         jmp @incomplete
-+
+:
 
         ; store byte in tls_rec_header + offset
         ldx tls_recv_count      ; low byte is sufficient (max 5)
@@ -96,18 +120,18 @@ tls_recv_record:
         cpx #0
         bne @store_continue
         cmp #20
-        bcs +
+        bcs :+
         jmp @error              ; < 20: invalid
-+       cmp #24
+:       cmp #24
         bcc @store_continue
         jmp @error              ; >= 24: invalid
 @store_continue:
 
         ; increment tls_recv_count (16-bit)
         inc tls_recv_count
-        bne +
+        bne :+
         inc tls_recv_count+1
-+
+:
         ; have we received all 5 header bytes?
         lda tls_recv_count
         cmp #5
@@ -125,13 +149,13 @@ tls_recv_record:
         ; Validate version = 0x0303 (header[1..2])
         lda tls_rec_header+1
         cmp #$03
-        beq +
+        beq :+
         jmp @error
-+       lda tls_rec_header+2
+:       lda tls_rec_header+2
         cmp #$03
-        beq +
+        beq :+
         jmp @error
-+
+:
         lda #$04
         sta tls_recv_sub_progress
 
@@ -145,9 +169,9 @@ tls_recv_record:
         lda tls_rec_len+1
         cmp #>TLS_REC_BUF_MAX
         bcc @len_ok             ; high byte < 2: definitely ok
-        beq +                   ; high byte == 2: check low byte
+        beq :+                  ; high byte == 2: check low byte
         jmp @error              ; high byte > 2: too big
-+       lda tls_rec_len
+:       lda tls_rec_len
         cmp #<TLS_REC_BUF_MAX+1
         bcc @len_ok
         jmp @error              ; low byte >= $25: too big
@@ -195,9 +219,9 @@ tls_recv_record:
 
         ; Increment tls_recv_count (16-bit)
         inc tls_recv_count
-        bne +
+        bne :+
         inc tls_recv_count+1
-+
+:
         ; Check if tls_recv_count == tls_rec_len
         lda tls_recv_count
         cmp tls_rec_len
@@ -208,7 +232,7 @@ tls_recv_record:
 
         jmp @complete
 
-@recv_byte_tmp: !byte 0
+@recv_byte_tmp: .byte 0
 
         ; --- Record complete ---
 @complete:
@@ -273,7 +297,7 @@ tls_record_send_plaintext:
 ;         tls_rec_type = inner content type
 ; Output: C=0 success, C=1 error
 ;
-; Calls tls_record_encrypt (from tls_record.asm) to build the header,
+; Calls tls_record_encrypt (from tls_record.s) to build the header,
 ; encrypt in-place, and update tls_rec_len, then sends via TCP.
 ; =============================================================================
 tls_record_send_encrypted:
@@ -347,5 +371,5 @@ tls_record_recv_and_decrypt:
 ; =============================================================================
 ; Module data — state machine for tls_recv_record
 ; =============================================================================
-tls_recv_state: !byte 0        ; 0 = reading header, 1 = reading payload
-tls_recv_count: !word 0        ; bytes received so far in current phase
+tls_recv_state: .byte 0        ; 0 = reading header, 1 = reading payload
+tls_recv_count: .word 0        ; bytes received so far in current phase
