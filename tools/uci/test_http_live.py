@@ -40,7 +40,7 @@ CARRY_FLAG_ADDR  = 0x4542
 SENTINEL_VALUE   = 0xBB
 LIVE_HOSTNAME    = "www.zimmers.net"
 LIVE_PORT        = 80
-DEFAULT_TIMEOUT  = 120.0
+DEFAULT_TIMEOUT  = 300.0
 
 
 def _load_labels() -> dict[str, int]:
