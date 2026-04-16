@@ -95,15 +95,85 @@ Current backends:
     is the ABI adapter. `src/net/ip65/ip65_symbols.inc` is the single
     source of truth for the `ip65_*` jump-table / variable-table
     equates (Phase 7 consolidated these out of `constants.inc`).
-  - `src/net/uci/`  — placeholder for a future U64E UCI backend
-    (Ultimate 64 Elite). `cfg/c64-https-uci.cfg` exists but is empty
-    stubs; selecting `BACKEND=uci` does not yet produce a working PRG.
+  - `src/net/uci/`  — Ultimate 64 Elite (U64E) UCI backend. See the
+    "UCI backend" section below for details. `make BACKEND=uci`
+    produces a working PRG; `cfg/c64-https-uci.cfg` defines the
+    UCI-specific memory map.
 
 Public symbols (see `src/net_abi.inc`):
   net_init, net_poll, net_dhcp_acquire
   net_tcp_connect, net_tcp_send, net_tcp_close, net_tcp_set_recv_cb
   net_dns_resolve
   net_local_ip, net_resolved_ip, net_last_error, net_tcp_state
+
+## UCI backend
+
+`make BACKEND=uci` builds the UCI variant. Default is still `BACKEND=ip65`;
+both backends coexist and share the same TLS/HTTP/crypto code.
+
+### UCI register map
+
+UCI I/O registers live at **$DF1B-$DF1F**; firmware identification byte
+is **$C9**. See `src/net/uci/uci_regs.inc` for the full equate list
+(CMD_PUSH, CMD_CTRL, STAT, DATA, ID).
+
+### UCI command primitives
+
+`src/net/uci/uci_cmd.s` provides shared subroutines used by `net.s`:
+`uci_wait_idle`, `uci_begin_cmd`, `uci_push_wait`, `uci_end_cmd`,
+`uci_read_data`, etc. No zero-page usage — all absolute addressing
+and self-modifying code.
+
+### DNS
+
+UCI firmware resolves hostnames internally during `TCP_CONNECT`. There
+is no DNS code in the adapter. `net_dns_resolve` memcpies the hostname
+into `uci_host_buf` (256 bytes in UCI_BSS); `net_tcp_connect` passes
+it to firmware. Dotted-quad IP literals work because firmware passes
+them through.
+
+### Firmware quirk — per-byte NEXT_DATA ACK
+
+Per-byte `NEXT_DATA` ACK truncates multi-byte responses on the current
+U64E firmware revision. The read path uses a tight-poll pattern instead
+(read `$DF1E` until `DATA_AV` clears). Documented in `uci_cmd.s`.
+
+### Memory layout under UCI
+
+The NET_CODE/NET_BSS regions ($2000-$5FFF) are repurposed:
+
+  $2000-$3FFF  UCI_CODE     UCI adapter code (`net.s`, `uci_cmd.s`)
+  $4000-$5FFF  UCI_BSS      `uci_host_buf`, ipaddr scratch, socket
+                            state, command control block
+
+All other regions (LOADER, CRYPTO, SHADOW_BSS, TCP_BUF) are identical
+to the ip65 layout.
+
+### UCI test scripts
+
+Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
+`DeviceLock` + `enable_uci`/`disable_uci`:
+
+  - `boot_check.py`       — verify UCI firmware detection and boot banner
+  - `phase2_check.py`     — DHCP acquire + local IP readback
+  - `phase3_tcp_echo.py`  — TCP connect/send/recv against a local echo server
+  - `test_http_local.py`  — HTTP GET against a local test server
+  - `test_http_live.py`   — HTTP GET against a real internet host (requires
+                            internet access from the U64E)
+
+### Known issues
+
+  - Ring buffer needs explicit zeroing before `http_get_plain` calls
+    (stale data from auto-init polling).
+  - `http_status` parsing is garbled on large responses because the
+    poll-timeout counter in `http.s` expires before all headers are
+    consumed under UCI's slower `net_poll` round-trip. Body arrives
+    correctly; status line is mis-parsed. Pre-existing `http.s` issue,
+    not UCI-specific.
+  - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
+  - Boot banner line 03 still says "rr-net" under ip65 build even
+    though Phase 2 made it backend-aware — this is correct/expected
+    behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
 
 ## Memory layout
 
@@ -159,6 +229,9 @@ the TLS state machine. For a quick sanity check after a build:
   - `tools/test_x509.py`           — X.509 parser
 
 All 7 pass as of the ca65-conversion branch (97/97 assertions).
+
+The `tools/uci/` scripts cover the UCI backend on U64E hardware (see
+the "UCI test scripts" subsection above).
 
 End-to-end HTTPS against a real server (`www.foo.bar` via the local
 bridge rig — never a real internet domain) is still blocked on an
