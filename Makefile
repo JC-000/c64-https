@@ -24,19 +24,29 @@ IP65_DIR     := ip65
 IP65_BUILD   := ip65-build
 IP65_BIN     := $(IP65_BUILD)/ip65-c64.bin
 
-CA65FLAGS := -I src -I src/inc -I src/net/ip65 --debug-info
+CA65FLAGS := -I src -I src/inc -I src/net/$(BACKEND) --debug-info
 LD65FLAGS := -C $(CFG) -Ln build/labels.txt -m build/c64-https.map
 
 # Source inventory.
 TOP_SRCS    := $(wildcard src/*.s)
 CRYPTO_SRCS := $(wildcard src/crypto/*.s)
-IP65_SRCS   := src/net/ip65/ip65_blob.s src/net/ip65/net.s
+IP65_SRCS   := src/net/ip65/ip65_blob.s src/net/ip65/net.s src/net/ip65/net_banner.s src/net/ip65/exports.s
+UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s
+
+# Per-backend source + object selection.
+ifeq ($(BACKEND),ip65)
+NET_SRCS := $(IP65_SRCS)
+else ifeq ($(BACKEND),uci)
+NET_SRCS := $(UCI_SRCS)
+else
+$(error Unknown BACKEND=$(BACKEND); expected ip65 or uci)
+endif
 
 TOP_OBJS    := $(patsubst src/%.s,build/%.o,$(TOP_SRCS))
 CRYPTO_OBJS := $(patsubst src/%.s,build/%.o,$(CRYPTO_SRCS))
-IP65_OBJS   := $(patsubst src/%.s,build/%.o,$(IP65_SRCS))
+NET_OBJS    := $(patsubst src/%.s,build/%.o,$(NET_SRCS))
 
-ALL_OBJS := $(TOP_OBJS) $(CRYPTO_OBJS) $(IP65_OBJS)
+ALL_OBJS := $(TOP_OBJS) $(CRYPTO_OBJS) $(NET_OBJS)
 
 PRG    := build/c64-https.prg
 LABELS := build/labels.txt
@@ -45,7 +55,13 @@ LABELS := build/labels.txt
 
 all: $(PRG)
 
-$(PRG): $(ALL_OBJS) $(IP65_BIN)
+ifeq ($(BACKEND),ip65)
+PRG_DEPS := $(ALL_OBJS) $(IP65_BIN)
+else
+PRG_DEPS := $(ALL_OBJS)
+endif
+
+$(PRG): $(PRG_DEPS)
 	@mkdir -p build
 	$(LD65) $(LD65FLAGS) -o $@ $(ALL_OBJS)
 	# Rewrite ca65 label format `al XXXXXX .name` -> VICE format `al C:XXXX .name`

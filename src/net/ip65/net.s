@@ -25,7 +25,6 @@
 .export net_poll
 .export net_dns_resolve
 .export net_tcp_connect
-.export net_set_tcp_dest
 .export net_tcp_send
 .export net_tcp_close
 .export net_print_ip
@@ -114,7 +113,9 @@ net_dns_resolve:
 
 ; =============================================================================
 ; net_tcp_connect - establish TCP connection
-; Input: A/X = remote port (lo/hi), dest IP already set via net_set_tcp_dest
+; Input: A/X = remote port (lo/hi)
+; The destination IP is taken from ip65_dns_ip_addr (populated by the most
+; recent net_dns_resolve). Callers do not have to set the dest IP explicitly.
 ; Output: C=0 success, C=1 failure
 ; =============================================================================
 net_tcp_connect:
@@ -122,6 +123,10 @@ net_tcp_connect:
         txa
         pha
         jsr net_save_zp
+        ; set dest IP from last DNS resolution (ZP already saved)
+        lda #<ip65_dns_ip_addr
+        ldx #>ip65_dns_ip_addr
+        jsr ip65_set_tcp_dest
         ; set callback to our ring buffer handler
         lda #<net_tcp_recv_cb
         ldx #>net_tcp_recv_cb
@@ -134,22 +139,6 @@ net_tcp_connect:
         php
         jsr net_restore_zp
         plp
-        rts
-
-; =============================================================================
-; net_set_tcp_dest - set TCP destination IP address
-; Input: A/X = pointer to 4-byte IP address
-; =============================================================================
-net_set_tcp_dest:
-        pha                     ; save A (IP ptr lo) across ZP save
-        txa
-        pha                     ; save X (IP ptr hi) across ZP save
-        jsr net_save_zp
-        pla
-        tax                     ; restore X
-        pla                     ; restore A
-        jsr ip65_set_tcp_dest   ; AX = pointer to 4-byte IP
-        jsr net_restore_zp
         rts
 
 ; =============================================================================
