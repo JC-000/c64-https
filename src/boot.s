@@ -75,7 +75,7 @@
         .import drbg_init_entropy
         .import sqtab_init
 
-        ; ---- imports: network (ip65 wrapper) ----
+        ; ---- imports: network (backend adapter — ip65 or uci) ----
         .import net_init
         .import net_dhcp
         .import net_poll
@@ -83,6 +83,7 @@
         .import net_dns_resolve
         .import net_tcp_connect
         .import net_tcp_close
+        .import net_banner_str
 
         ; ---- imports: TLS state machine ----
         .import tls_connect
@@ -169,9 +170,19 @@ start:
         lda #$93
         jsr chrout
 
-        ; print banner
+        ; print banner (front-matter)
         lda #<banner_msg
         ldy #>banner_msg
+        jsr print_string
+
+        ; print backend-specific network identification line
+        lda #<net_banner_str
+        ldy #>net_banner_str
+        jsr print_string
+
+        ; print banner tail (trailing blank line before the menu)
+        lda #<banner_msg_tail
+        ldy #>banner_msg_tail
         jsr print_string
 
         cli                     ; re-enable interrupts
@@ -189,6 +200,14 @@ start:
         and #%11111110
         sta $01
         jsr reu_mul_init
+
+        ; Auto-initialize networking at boot so the banner shows the
+        ; firmware-assigned IP without waiting for the user to press 'I'.
+        ; On ip65 this runs the full cs8900a + DHCP handshake; on the
+        ; UCI backend it probes the U64E command interface and reads the
+        ; firmware's existing DHCP lease via GET_IPADDR. A failure here
+        ; is non-fatal — the user can still retry from the menu.
+        jsr do_net_init
 
         ; print menu
         lda #<menu_msg
@@ -675,13 +694,17 @@ reu_fetch_mul_row:
 ; =============================================================================
         .segment "RODATA"
 
+; Banner is split in two so the per-backend `net_banner_str` (imported
+; from src/net/<backend>/net.s or net_banner.s) can be slotted between
+; the constant front-matter and the trailing blank lines at print time.
 banner_msg:
         .byte "C64-HTTPS CLIENT V0.1"
         .byte $0d, $0d
         .byte "TLS 1.3 / CHACHA20-POLY1305"
-        .byte $0d
-        .byte "RR-NET (CS8900A) ETHERNET"
-        .byte $0d, $0d, 0
+        .byte $0d, 0
+
+banner_msg_tail:
+        .byte $0d, 0
 
 menu_msg:
         .byte "I=INIT  H=HTTP  G=HTTPS  Q=QUIT"

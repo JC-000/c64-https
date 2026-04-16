@@ -30,8 +30,8 @@ LD65FLAGS := -C $(CFG) -Ln build/labels.txt -m build/c64-https.map
 # Source inventory.
 TOP_SRCS    := $(wildcard src/*.s)
 CRYPTO_SRCS := $(wildcard src/crypto/*.s)
-IP65_SRCS   := src/net/ip65/ip65_blob.s src/net/ip65/net.s src/net/ip65/exports.s
-UCI_SRCS    := src/net/uci/net.s
+IP65_SRCS   := src/net/ip65/ip65_blob.s src/net/ip65/net.s src/net/ip65/net_banner.s src/net/ip65/exports.s
+UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s
 
 # Per-backend source + object selection.
 ifeq ($(BACKEND),ip65)
