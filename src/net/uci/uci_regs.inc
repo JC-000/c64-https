@@ -47,6 +47,19 @@ UCI_CTRL_CLR_ERR  = $08         ; clear error state
 UCI_TARGET_NETWORK = $03        ; network stack
 
 ; =============================================================================
+; NOP-sled fence macro — insert after every STA to UCI_CONTROL / UCI_CMD_DATA.
+; At 48 MHz, 16 NOPs = 32 cycles ≈ 0.67 µs, giving the FPGA time to latch
+; each register write. At 1 MHz the overhead is 32 µs per write — negligible
+; for networking. Unlike an LDA UCI_STATUS fence, NOPs cannot interfere with
+; the UCI state machine.
+; =============================================================================
+.macro uci_fence
+    .repeat 16
+        nop
+    .endrepeat
+.endmacro
+
+; =============================================================================
 ; Command IDs (issued as the first command byte after selecting the target)
 ; Phase 2+ will use these; Phase 1b keeps them here purely as equates.
 ; =============================================================================
