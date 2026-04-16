@@ -43,7 +43,7 @@
 .export uci_resp_max
 .export uci_resp_count
 
-.segment "CODE"
+.segment "UCI_CODE"
 
 ; =============================================================================
 ; uci_abort — force the UCI FIFO back to idle
