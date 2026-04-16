@@ -163,17 +163,27 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
 
 ### Known issues
 
-  - Ring buffer needs explicit zeroing before `http_get_plain` calls
-    (stale data from auto-init polling).
   - `http_status` parsing is garbled on large responses because the
     poll-timeout counter in `http.s` expires before all headers are
     consumed under UCI's slower `net_poll` round-trip. Body arrives
     correctly; status line is mis-parsed. Pre-existing `http.s` issue,
     not UCI-specific.
   - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
-  - Boot banner line 03 still says "rr-net" under ip65 build even
-    though Phase 2 made it backend-aware — this is correct/expected
-    behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
+  - Boot banner line 03 says "RR-NET (CS8900A) ETHERNET" under ip65
+    and "UCI NETWORKING" under UCI — this is correct/expected behavior.
+  - **Live HTTP GET to www.zimmers.net**: TCP connection establishes
+    (valid socket, no error) but the receive loop intermittently
+    receives zero bytes. Diagnosed as a net_poll/SOCKET_READ timing
+    issue with large responses from real servers. The local HTTP test
+    (small controlled response) passes reliably. Under investigation.
+
+### Resolved issues (follow-up fixes landed)
+
+  - Ring buffer zeroing is now performed inside `http_get_plain`
+    (previously required manual zeroing before each call).
+  - Legacy symbol names (`net_dhcp`, `net_print_ip`, `net_recv_byte`,
+    `net_send_len`) have been cleaned up — only `net_abi.inc` symbols
+    are exported now.
 
 ## Memory layout
 
