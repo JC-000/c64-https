@@ -173,7 +173,7 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
   - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
   - Boot banner line 03 still says "rr-net" under ip65 build even
     though Phase 2 made it backend-aware — this is correct/expected
-    behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
+    behavior. Under UCI it says "UCI NETWORKING".
 
 ## Memory layout
 

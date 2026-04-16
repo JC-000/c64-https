@@ -820,7 +820,7 @@ net_recv_byte:
 .segment "RODATA"
 
 net_banner_str:
-        .byte "ULTIMATE 64 ELITE (UCI)"
+        .byte "UCI NETWORKING"
         .byte $0d, 0
 
 ; =============================================================================
