@@ -1,6 +1,6 @@
 # c64-https
 
-An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over TCP/IP with two networking backends: **ip65/RR-Net (CS8900a)** for original C64 hardware, and **UCI** for the Ultimate 64 Elite (U64E). The default backend is ip65, built on the [ip65](https://github.com/cc65/ip65) networking stack; select the UCI backend with `make BACKEND=uci`.
+An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over TCP/IP using the RR-Net (CS8900a) ethernet adapter, built on the [ip65](https://github.com/cc65/ip65) networking stack.
 
 **For demonstration and educational purposes only — not cryptographically secure.**
 
@@ -8,26 +8,24 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
 
 ```
  ┌─────────────────────────────────────────┐
- │             HTTP/1.1 Client             │  http.s
+ │             HTTP/1.1 Client             │  http.asm
  ├─────────────────────────────────────────┤
- │          TLS 1.3 Engine                 │  tls13.s (state machine)
+ │          TLS 1.3 Engine                 │  tls13.asm (state machine)
  │  ┌──────────────┬──────────────────┐    │
- │  │ Record Layer │ Handshake Proto  │    │  tls_record.s, tls_handshake.s
+ │  │ Record Layer │ Handshake Proto  │    │  tls_record.asm, tls_handshake.asm
  │  └──────┬───────┴────────┬─────────┘    │
  │         │                │              │
  │  ┌──────┴───────┐ ┌─────┴──────────┐   │
  │  │   AEAD       │ │  Key Schedule  │   │  (crypto modules)
- │  │ ChaCha20-    │ │  HKDF-SHA256   │   │  hkdf.s
+ │  │ ChaCha20-    │ │  HKDF-SHA256   │   │  hkdf.asm
  │  │ Poly1305     │ │  ECDHE P-256   │   │
  │  └──────────────┘ └────────────────┘   │
  ├─────────────────────────────────────────┤
- │    Network ABI (src/net_abi.inc)        │  src/net/<backend>/net.s
+ │        Network Wrapper (ZP swap)        │  net.asm
  ├─────────────────────────────────────────┤
- │   ip65 (TCP/UDP/DNS/DHCP/ARP)           │  ip65 binary blob
- │    — OR —                               │
- │   UCI (Ultimate 64 Elite firmware)      │  src/net/uci/
+ │     ip65  (TCP/UDP/DNS/DHCP/ARP)        │  ip65 binary blob
  ├─────────────────────────────────────────┤
- │  RR-Net CS8900a  /  U64E UCI registers  │  hardware layer
+ │     RR-Net CS8900a Ethernet Driver      │  ip65 driver
  └─────────────────────────────────────────┘
 ```
 
@@ -44,8 +42,6 @@ Target: **TLS_CHACHA20_POLY1305_SHA256** (0x1303)
 ### Zero Page Time-Sharing
 
 The crypto modules and ip65 overlap on zero page $02-$1B. Rather than relocating ip65's ZP (which would cost performance in the networking hot path), we time-share: save crypto ZP before calling ip65, restore after. Crypto and networking never run simultaneously.
-
-**Note:** The UCI backend does not use zero page at all (pure absolute addressing and self-modifying code), so the ZP time-sharing section below applies only to the ip65 backend.
 
 ```
 $02-$03   Shared tmp (save/restore around ip65 calls)
@@ -68,8 +64,8 @@ $0200-$033F  KERNAL/BASIC work area
 $0334-$03FF  Scratch / test harness trampoline
 $0801-$08FF  BASIC stub + boot
 $0900-$1FFF  TLS 1.3 engine + HTTP client + net wrapper (~6 KB)
-$2000-$3FFF  ip65 code + BSS (~8 KB)         [UCI: UCI_CODE]
-$4000-$5FFF  Crypto: ChaCha20, Poly1305, AEAD (~8 KB)  [UCI: UCI_BSS]
+$2000-$3FFF  ip65 code + BSS (~8 KB)
+$4000-$5FFF  Crypto: ChaCha20, Poly1305, AEAD (~8 KB)
 $6000-$6FFF  Crypto: SHA-256, HMAC-SHA256, HKDF (~4 KB)
 $7000-$77FF  Crypto: ECDSA/ECDH P-256 (~2 KB)
 $7800-$7BFF  Quarter-square multiply table (1 KB, runtime-generated)
@@ -81,28 +77,26 @@ $C000-$CFFF  Free RAM (4 KB, overflow buffers)
 $DE00-$DE0F  RR-Net CS8900a I/O registers (directly accessed by ip65)
 ```
 
-Under `BACKEND=uci`, the $2000-$3FFF region holds UCI adapter code (`UCI_CODE`) and $4000-$5FFF holds UCI BSS (`UCI_BSS`) instead of ip65. All other regions are identical.
-
 TLS 1.3 records can be up to 16,384 bytes, but we negotiate `max_fragment_length` (RFC 6066) to limit records to 512 or 1024 bytes, fitting within C64 RAM constraints.
 
 ## Building
 
 **Requirements:**
-- [cc65 toolchain](https://cc65.github.io/) — ca65 + ld65 (assembler and linker)
+- [ACME cross-assembler](https://sourceforge.net/projects/acme-crossass/) (our code)
+- [cc65 toolchain](https://cc65.github.io/) — ca65 + ld65 (ip65 build)
 - GNU Make
 
 ```bash
 git clone --recursive https://github.com/JC-000/c64-https.git
 cd c64-https
-make                  # Build build/c64-https.prg (ip65/RR-Net, default)
-make BACKEND=uci      # Build for Ultimate 64 Elite (UCI networking)
-make run              # Build and launch in VICE (x64sc)
-make clean            # Remove build artifacts
+make            # Build build/c64-https.prg
+make run        # Build and launch in VICE (x64sc)
+make clean      # Remove build artifacts
 ```
 
 ### ip65 Build
 
-The Makefile automatically builds ip65 from the submodule into a flat binary blob at $2000, using a custom ld65 linker config (`ip65-build/ip65.cfg`). The blob is then included in the ca65 build via `.incbin` (in `src/net/ip65/ip65_blob.s`).
+The Makefile automatically builds ip65 from the submodule into a flat binary blob at $2000, using a custom ld65 linker config (`ip65-build/ip65.cfg`). The blob is then included in the ACME build via `!binary`.
 
 ## Project Status
 
@@ -123,7 +117,6 @@ Current status (40 KB binary, 537 labels):
 - [x] X.509 certificate parsing — DER parser extracts TBS, public key, signature (r,s), curve ID for P-256 and P-384
 - [x] ECDSA signature verification — P-256 and P-384, full verify (s⁻¹, scalar mul, point add, Jacobian→affine)
 - [x] HTTP/1.1 GET request — build GET, parse response (status + headers + body), plain HTTP end-to-end
-- [x] UCI networking backend — Ultimate 64 Elite (U64E) support via `make BACKEND=uci`, tested on real hardware
 - [ ] End-to-end HTTPS GET demo
 
 ### Known Issues
@@ -155,13 +148,6 @@ python3 tools/test_entropy.py          # 7 tests: SID/CIA hardware init, DRBG se
 python3 tools/test_http.py            # 27 tests: HTTP/1.1 GET builder, response parser, status codes
 python3 tools/test_x25519.py          # 71 tests: fe25519 field ops, x25519_clamp, scalarmult (--slow for RFC 7748 vectors)
 python3 tools/test_chained_hmac.py    # 10 tests: chained HMAC-SHA256 stability (N=1..10, standalone)
-
-# UCI backend tests (require U64E hardware at 192.168.1.81)
-python3 tools/uci/boot_check.py        # UCI firmware detection and boot banner
-python3 tools/uci/phase2_check.py      # DHCP acquire + local IP readback
-python3 tools/uci/phase3_tcp_echo.py   # TCP connect/send/recv against local echo server
-python3 tools/uci/test_http_local.py   # HTTP GET against local test server (regression gate)
-python3 tools/uci/test_http_live.py    # HTTP GET against real internet host (aspirational)
 
 # Benchmark
 python3 tools/bench_x25519.py         # X25519 key generation (~3.6 min C64 time, ~8s warp)

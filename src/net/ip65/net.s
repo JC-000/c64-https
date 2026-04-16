@@ -17,18 +17,21 @@
 .include "constants.inc"
 .include "ip65_symbols.inc"
 
-; --- Public ABI (net_abi.inc contract) ---
+; --- Public ABI (what the rest of the firmware imports) ---
+; Names match the legacy ACME entry points; net_abi.inc-style renames
+; (net_dhcp_acquire, net_tcp_set_recv_cb, etc.) are deferred to Phase 7.
 .export net_init
-.export net_dhcp_acquire
+.export net_dhcp
 .export net_poll
 .export net_dns_resolve
 .export net_tcp_connect
 .export net_tcp_send
 .export net_tcp_close
-.export net_tcp_set_recv_cb
 .export net_print_ip
+.export net_recv_ready
 .export net_recv_byte
 .export net_send_len
+.export net_tcp_recv_cb
 
 ; --- BSS imports from data.s ---
 .import zp_save_buf
@@ -59,10 +62,10 @@ net_init:
         rts
 
 ; =============================================================================
-; net_dhcp_acquire - obtain IP address via DHCP
+; net_dhcp - obtain IP address via DHCP
 ; Output: C=0 success, C=1 failure
 ; =============================================================================
-net_dhcp_acquire:
+net_dhcp:
         jsr net_save_zp
         jsr ip65_dhcp_init
         php
@@ -168,13 +171,6 @@ net_tcp_close:
         jsr net_save_zp
         jsr ip65_tcp_close
         jsr net_restore_zp
-        rts
-
-; =============================================================================
-; net_tcp_set_recv_cb — RTS stub (ip65 callback is wired internally
-; in net_tcp_connect; no external caller needs this).
-; =============================================================================
-net_tcp_set_recv_cb:
         rts
 
 ; =============================================================================

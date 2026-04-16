@@ -40,7 +40,7 @@ CARRY_FLAG_ADDR  = 0x4542
 SENTINEL_VALUE   = 0xBB
 LIVE_HOSTNAME    = "www.zimmers.net"
 LIVE_PORT        = 80
-DEFAULT_TIMEOUT  = 300.0
+DEFAULT_TIMEOUT  = 120.0
 
 
 def _load_labels() -> dict[str, int]:
@@ -87,6 +87,8 @@ def _build_http_routine(labels: dict[str, int], hostname_len: int, port: int) ->
     http_path_len  = labels["http_path_len"]
     http_port_addr = labels["http_port"]
     net_init       = labels["net_init"]
+    tcp_recv_head  = labels["tcp_recv_head"]
+    tcp_recv_tail  = labels["tcp_recv_tail"]
 
     # Bank BASIC ROM OUT
     emit_lda_abs(0x0001)
@@ -104,7 +106,13 @@ def _build_http_routine(labels: dict[str, int], hostname_len: int, port: int) ->
     # Re-init UCI
     emit_jsr(net_init)
 
-    # Ring zeroing now handled inside http_get_plain itself (Bug 2 fix).
+    # Zero the TCP ring head/tail so stale data from boot polling
+    # does not corrupt the HTTP parser's status-line parse.
+    emit_lda_imm(0x00)
+    emit_sta_abs(tcp_recv_head)
+    emit_sta_abs(tcp_recv_head + 1)
+    emit_sta_abs(tcp_recv_tail)
+    emit_sta_abs(tcp_recv_tail + 1)
 
     emit_progress(0x02)
 

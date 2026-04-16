@@ -20,13 +20,3 @@
 .import net_resolved_ip
 .import net_last_error
 .import net_tcp_state
-
-; --- data symbols used by callers of net_tcp_send ---
-.import net_send_len            ; 16-bit length for net_tcp_send (set by caller)
-
-; --- receive-side helpers ---
-.import net_recv_byte           ; pop one byte from TCP receive ring; C=0 ok, C=1 empty
-
-; --- display / banner ---
-.import net_print_ip            ; print net_local_ip as dotted decimal
-.import net_banner_str          ; backend-specific banner string (null-terminated)

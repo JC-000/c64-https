@@ -144,6 +144,8 @@ def _build_http_routine(labels: dict[str, int], port: int) -> bytes:
     http_path_len  = labels["http_path_len"]
     http_port      = labels["http_port"]
     net_init       = labels["net_init"]
+    tcp_recv_head  = labels["tcp_recv_head"]
+    tcp_recv_tail  = labels["tcp_recv_tail"]
 
     # 0) Bank BASIC ROM OUT so $A000-$BFFF is RAM
     emit_lda_abs(0x0001)
@@ -161,7 +163,12 @@ def _build_http_routine(labels: dict[str, int], port: int) -> bytes:
     # Re-init UCI (ensure idle state after auto-init)
     emit_jsr(net_init)
 
-    # Ring zeroing now handled inside http_get_plain itself (Bug 2 fix).
+    # Zero the TCP ring head/tail to flush any stale boot-poll data
+    emit_lda_imm(0x00)
+    emit_sta_abs(tcp_recv_head)
+    emit_sta_abs(tcp_recv_head + 1)
+    emit_sta_abs(tcp_recv_tail)
+    emit_sta_abs(tcp_recv_tail + 1)
 
     emit_progress(0x02)
 

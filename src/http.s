@@ -41,7 +41,6 @@
         ; ---- imports: data.asm BSS (TLS app data + TCP ring tail) ----
         .import tls_app_ptr
         .import tls_app_len
-        .import tcp_recv_head
         .import tcp_recv_tail
 
         ; ---- imports: TLS handshake layer (SNI buffer + connect/close) ----
@@ -561,13 +560,6 @@ http_get_plain:
         jsr net_tcp_connect
         bcs @plain_error
 
-        ; --- 3. Reset TCP ring buffer (flush stale boot-poll data) ---
-        lda #0
-        sta tcp_recv_head
-        sta tcp_recv_head+1
-        sta tcp_recv_tail
-        sta tcp_recv_tail+1
-
         ; --- 4. Build GET request ---
         jsr http_build_get
 
@@ -590,12 +582,6 @@ http_get_plain:
         sta http_resp_len+1
 
         ; --- 7. Poll + parse loop (with timeout) ---
-        ; 24-bit timeout: outer * 65536 iterations.  At ~1ms/iteration
-        ; (UCI worst case), outer=$80 gives ~128 * 65.5s ≈ 8000s — way
-        ; more than needed.  Under ip65 each iteration is <10us so
-        ; the timeout is effectively infinite.
-        lda #$04
-        sta @poll_outer
         lda #0
         sta @poll_timeout
         sta @poll_timeout+1
@@ -603,12 +589,10 @@ http_get_plain:
         jsr net_poll
         jsr http_recv_response
         bcc @plain_done         ; C=0 means complete
+        ; reset timeout on any progress (data was consumed)
         inc @poll_timeout
         bne @plain_poll
         inc @poll_timeout+1
-        bne @plain_poll
-        ; inner 16-bit counter rolled over — decrement outer
-        dec @poll_outer
         bne @plain_poll
         ; timeout: accept whatever we got so far
 @plain_done:
@@ -619,7 +603,6 @@ http_get_plain:
         rts
 
 @poll_timeout: .word 0
-@poll_outer:   .byte 0
 
 @plain_close_err:
         jsr net_tcp_close

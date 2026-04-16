@@ -77,7 +77,7 @@
 
         ; ---- imports: network (backend adapter — ip65 or uci) ----
         .import net_init
-        .import net_dhcp_acquire
+        .import net_dhcp
         .import net_poll
         .import net_print_ip
         .import net_dns_resolve
@@ -291,7 +291,7 @@ do_net_init:
         ldy #>dhcp_msg
         jsr print_string
 
-        jsr net_dhcp_acquire
+        jsr net_dhcp
         bcc @dhcp_ok
 
         lda #<dhcp_fail_msg

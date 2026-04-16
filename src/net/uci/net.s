@@ -10,8 +10,15 @@
 ;                     GET_IPADDR command. Does NOT run DHCP ourselves —
 ;                     the firmware already did that before the PRG started.
 ;
-; Exports exactly the net_abi.inc contract symbols (including
-; net_banner_str, the backend-specific banner consumed by boot.s).
+; Exports two symbol families:
+;
+;   (a) net_abi.inc contract — the long-term public names.
+;   (b) legacy caller names currently imported by boot.s / http.s /
+;       tls_record_io.s — kept as thin aliases until those callers are
+;       migrated onto net_abi.inc in a later phase.
+;
+; Also publishes `net_banner_str`, the backend-specific banner line
+; consumed by boot.s's startup print.
 
 .include "uci_regs.inc"
 .include "uci_errors.inc"
@@ -30,9 +37,14 @@
 .export net_resolved_ip
 .export net_last_error
 .export net_tcp_state
-.export net_send_len
-.export net_recv_byte
+
+; --- legacy caller names (still imported by boot.s / http.s / tls_record_io.s) ---
+.export net_dhcp
 .export net_print_ip
+.export net_recv_byte
+.export net_send_len
+
+; --- banner label consumed by boot.s ---
 .export net_banner_str
 
 ; --- UCI-owned state exported for future phases ---
@@ -351,6 +363,10 @@ net_dhcp_acquire:
 @have_ip:
         clc
         rts
+
+; Legacy alias — boot.s still imports `net_dhcp` directly.
+net_dhcp:
+        jmp net_dhcp_acquire
 
 ; =============================================================================
 ; net_tcp_connect — open a TCP socket to (uci_host_buf, port).
@@ -804,7 +820,7 @@ net_recv_byte:
 .segment "RODATA"
 
 net_banner_str:
-        .byte "UCI NETWORKING"
+        .byte "ULTIMATE 64 ELITE (UCI)"
         .byte $0d, 0
 
 ; =============================================================================
