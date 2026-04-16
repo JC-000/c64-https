@@ -408,11 +408,13 @@ net_tcp_connect:
         lda uci_host_buf,y
         beq @host_done
         sta UCI_CMD_DATA
+        lda UCI_STATUS          ; bus fence
         iny
         bne @host_loop          ; bounded by 256 B (and by null before that)
 @host_done:
         lda #$00
         sta UCI_CMD_DATA        ; explicit null terminator
+        lda UCI_STATUS          ; bus fence
 
         jsr uci_push_wait
 
@@ -531,6 +533,7 @@ net_tcp_send:
 @sb_load:
         lda $ffff,y             ; SMC: source base patched above
         sta UCI_CMD_DATA
+        lda UCI_STATUS          ; bus fence
         iny
         bne @sb_nohi
         inc @sb_load+2          ; advance base high byte

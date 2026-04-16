@@ -53,6 +53,7 @@
 uci_abort:
         lda #UCI_CTRL_ABORT
         sta UCI_CONTROL
+        lda UCI_STATUS          ; bus fence — let FPGA latch the write
         ldx #$20
 @spin:
         dex
@@ -91,6 +92,7 @@ uci_wait_not_busy:
 ; =============================================================================
 uci_begin_cmd:
         sta UCI_CMD_DATA
+        lda UCI_STATUS          ; bus fence
         rts
 
 ; =============================================================================
@@ -100,6 +102,7 @@ uci_begin_cmd:
 ; =============================================================================
 uci_put_byte:
         sta UCI_CMD_DATA
+        lda UCI_STATUS          ; bus fence
         rts
 
 ; =============================================================================
@@ -109,6 +112,7 @@ uci_put_byte:
 uci_push_wait:
         lda #UCI_CTRL_PUSH_CMD
         sta UCI_CONTROL
+        lda UCI_STATUS          ; bus fence
         jmp uci_wait_not_busy
 
 ; =============================================================================
@@ -123,6 +127,7 @@ uci_check_err:
         ; clear the latched error
         lda #UCI_CTRL_CLR_ERR
         sta UCI_CONTROL
+        lda UCI_STATUS          ; bus fence
         sec
         rts
 @no_err:
@@ -136,6 +141,7 @@ uci_check_err:
 uci_ack:
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
+        lda UCI_STATUS          ; bus fence
         rts
 
 ; =============================================================================
@@ -198,6 +204,7 @@ uci_drain_resp:
         lda UCI_RESP_DATA
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
+        lda UCI_STATUS          ; bus fence
         jmp uci_drain_resp
 @drn_done:
         rts
@@ -214,6 +221,7 @@ uci_drain_status:
         lda UCI_STATUS_DATA
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
+        lda UCI_STATUS          ; bus fence
         jmp uci_drain_status
 @dst_done:
         rts
