@@ -2,7 +2,6 @@
 ; Converted from ACME to ca65 in Phase 3 Batch D.
 
         .include "constants.inc"
-        .include "ip65_symbols.inc"
 
         ; ---- exports: entry + print helpers ----
         .export start
@@ -82,7 +81,6 @@
         .import net_poll
         .import net_print_ip
         .import net_dns_resolve
-        .import net_set_tcp_dest
         .import net_tcp_connect
         .import net_tcp_close
 
@@ -435,11 +433,6 @@ do_https_get:
         lda #<dns_ok_msg
         ldy #>dns_ok_msg
         jsr print_string
-
-        ; --- set TCP destination IP ---
-        lda #<ip65_dns_ip_addr
-        ldx #>ip65_dns_ip_addr
-        jsr net_set_tcp_dest
 
         ; --- TCP connect port 443 ---
         lda #<443               ; port low byte

@@ -8,7 +8,6 @@
 ; (status line + headers + body).
 
         .include "constants.inc"
-        .include "ip65_symbols.inc"
 
         ; ---- exports ----
         .export http_get
@@ -56,7 +55,6 @@
 
         ; ---- imports: net.asm wrappers around ip65 ----
         .import net_dns_resolve
-        .import net_set_tcp_dest
         .import net_tcp_connect
         .import net_tcp_close
         .import net_tcp_send
@@ -82,12 +80,7 @@ http_get:
         jmp @error
 @dns_ok:
 
-        ; --- 2. Set TCP destination IP ---
-        lda #<ip65_dns_ip_addr
-        ldx #>ip65_dns_ip_addr
-        jsr net_set_tcp_dest
-
-        ; --- 3. TCP connect on http_port ---
+        ; --- 2. TCP connect on http_port ---
         lda http_port
         ldx http_port+1
         jsr net_tcp_connect
@@ -561,12 +554,7 @@ http_get_plain:
         jsr net_dns_resolve
         bcs @plain_error
 
-        ; --- 2. Set TCP destination IP ---
-        lda #<ip65_dns_ip_addr
-        ldx #>ip65_dns_ip_addr
-        jsr net_set_tcp_dest
-
-        ; --- 3. TCP connect on http_port ---
+        ; --- 2. TCP connect on http_port ---
         lda http_port
         ldx http_port+1
         jsr net_tcp_connect
