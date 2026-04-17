@@ -132,11 +132,23 @@ into `uci_host_buf` (256 bytes in UCI_BSS); `net_tcp_connect` passes
 it to firmware. Dotted-quad IP literals work because firmware passes
 them through.
 
-### Firmware quirk — per-byte NEXT_DATA ACK
+### Firmware quirk — FPGA register timing (delay-loop fence)
 
-Per-byte `NEXT_DATA` ACK truncates multi-byte responses on the current
-U64E firmware revision. The read path uses a tight-poll pattern instead
-(read `$DF1E` until `DATA_AV` clears). Documented in `uci_cmd.s`.
+The U64E's UCI FPGA needs **~38 us** between consecutive register
+accesses regardless of CPU clock speed. At stock 1 MHz the bus cycle
+time naturally satisfies this. At turbo speeds (4-48 MHz) the CPU
+outruns the FPGA, causing double-latched writes and stale reads that
+corrupt the UCI command protocol.
+
+**Fix:** A nested delay-loop macro `uci_fence` (defined in
+`src/net/uci/uci_regs.inc`) is inserted after every read/write to UCI
+registers `$DF1C-$DF1F`. Parameters: `UCI_FENCE_OUTER = 5`,
+`UCI_FENCE_INNER = 100`, yielding ~2525 cycles (~52 us at 48 MHz,
+35% safety margin). 14 bytes per fence site, 24 fence sites total
+(11 write + 13 read). At 1 MHz the same loop costs ~2.5 ms per
+access — negligible for networking.
+
+48 MHz turbo is fully supported and verified on real U64E hardware.
 
 ### Memory layout under UCI
 
@@ -163,8 +175,6 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
 
 ### Known issues
 
-  - Ring buffer needs explicit zeroing before `http_get_plain` calls
-    (stale data from auto-init polling).
   - `http_status` parsing is garbled on large responses because the
     poll-timeout counter in `http.s` expires before all headers are
     consumed under UCI's slower `net_poll` round-trip. Body arrives
@@ -173,7 +183,9 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
   - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
   - Boot banner line 03 still says "rr-net" under ip65 build even
     though Phase 2 made it backend-aware — this is correct/expected
-    behavior. Under UCI it says "UCI NETWORKING".
+    behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
+  - The delay-loop fence adds ~2.5 ms overhead per UCI register access
+    at 1 MHz (negligible for networking, but visible in tight loops).
 
 ## Memory layout
 

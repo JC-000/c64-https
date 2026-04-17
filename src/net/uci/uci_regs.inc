@@ -47,6 +47,44 @@ UCI_CTRL_CLR_ERR  = $08         ; clear error state
 UCI_TARGET_NETWORK = $03        ; network stack
 
 ; =============================================================================
+; Delay-loop fence macro — insert after every STA or LDA that accesses a UCI
+; register ($DF1C-$DF1F), giving the FPGA time to latch writes AND settle
+; reads before the CPU acts on the value.
+;
+; A simple NOP sled can't provide enough wall-clock time at high CPU
+; speeds without overflowing the code segment (256 NOPs is the max that
+; fits, giving only ~10.7 µs at 48 MHz — insufficient for the ~38 µs
+; the FPGA needs). Instead we use a nested delay loop:
+;   total cycles ≈ OUTER * (INNER * 5 + 5)
+;
+; Tuned empirically via binary search at 48 MHz:
+;   OUTER=3 INNER=121 (~1830 cycles, ~38 µs at 48 MHz) = FAIL
+;   OUTER=3 INNER=122 (~1845 cycles, ~38.4 µs at 48 MHz) = PASS (minimum)
+;   OUTER=5 INNER=100 (~2525 cycles, ~52 µs at 48 MHz) = chosen (35% margin)
+;
+; At 1 MHz the overhead is ~2.5 ms per access — acceptable for networking.
+; The macro preserves A and X via the stack, costing ~14 bytes per call
+; site (vs 256 for the NOP sled that still wasn't enough).
+; =============================================================================
+UCI_FENCE_OUTER = 5     ; outer loop iterations
+UCI_FENCE_INNER = 100   ; inner loop iterations
+
+.macro uci_fence
+    pha                         ; save A
+    txa
+    pha                         ; save X
+    ldx #UCI_FENCE_OUTER
+:   lda #UCI_FENCE_INNER
+:   sbc #1
+    bne :-
+    dex
+    bne :--
+    pla
+    tax                         ; restore X
+    pla                         ; restore A
+.endmacro
+
+; =============================================================================
 ; Command IDs (issued as the first command byte after selecting the target)
 ; Phase 2+ will use these; Phase 1b keeps them here purely as equates.
 ; =============================================================================

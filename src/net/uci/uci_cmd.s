@@ -53,6 +53,7 @@
 uci_abort:
         lda #UCI_CTRL_ABORT
         sta UCI_CONTROL
+        uci_fence
         ldx #$20
 @spin:
         dex
@@ -67,8 +68,11 @@ uci_abort:
 ; =============================================================================
 uci_wait_idle:
         lda UCI_STATUS
+        uci_fence                   ; settle read before testing bits
         and #(UCI_STAT_STATE | UCI_STAT_CMD_BUSY)   ; $31
-        bne uci_wait_idle
+        beq @idle_done
+        jmp uci_wait_idle           ; long branch: fence too wide for BNE
+@idle_done:
         rts
 
 ; =============================================================================
@@ -79,8 +83,11 @@ uci_wait_idle:
 ; =============================================================================
 uci_wait_not_busy:
         lda UCI_STATUS
+        uci_fence                   ; settle read before testing bits
         and #UCI_STAT_CMD_BUSY
-        bne uci_wait_not_busy
+        beq @busy_done
+        jmp uci_wait_not_busy       ; long branch: fence too wide for BNE
+@busy_done:
         rts
 
 ; =============================================================================
@@ -91,6 +98,7 @@ uci_wait_not_busy:
 ; =============================================================================
 uci_begin_cmd:
         sta UCI_CMD_DATA
+        uci_fence
         rts
 
 ; =============================================================================
@@ -100,15 +108,33 @@ uci_begin_cmd:
 ; =============================================================================
 uci_put_byte:
         sta UCI_CMD_DATA
+        uci_fence
         rts
 
 ; =============================================================================
 ; uci_push_wait — commit pushed bytes as a command, then wait for CMD_BUSY=0
-; Clobbers: A
+;
+; At turbo speeds the FPGA may not have latched PUSH_CMD by the time the
+; CPU starts polling CMD_BUSY. A plain uci_fence after the write gives only
+; ≈ 2 µs at 48 MHz — insufficient for the FPGA to assert CMD_BUSY. We add
+; a short delay loop ($40 iterations ≈ 6 µs at 48 MHz, ≈ 300 µs at 1 MHz)
+; before polling, ensuring CMD_BUSY has been asserted by the time we check.
+;
+; Clobbers: A, X
 ; =============================================================================
 uci_push_wait:
         lda #UCI_CTRL_PUSH_CMD
         sta UCI_CONTROL
+        uci_fence
+        ; Fixed settle delay — at turbo speeds the FPGA may not have
+        ; latched PUSH_CMD and asserted CMD_BUSY by the time the CPU
+        ; starts polling. $FF iterations × 5 cycles ≈ 27 µs at 48 MHz,
+        ; ≈ 1.3 ms at 1 MHz — sufficient for the FPGA to latch the
+        ; command without using inline NOP fences that bloat code size.
+        ldx #$FF
+@pw_settle:
+        dex
+        bne @pw_settle
         jmp uci_wait_not_busy
 
 ; =============================================================================
@@ -118,15 +144,17 @@ uci_push_wait:
 ; =============================================================================
 uci_check_err:
         lda UCI_STATUS
+        uci_fence                   ; settle before testing error bit
         and #UCI_STAT_ERROR
-        beq @no_err
+        bne @has_err
+        clc
+        rts
+@has_err:
         ; clear the latched error
         lda #UCI_CTRL_CLR_ERR
         sta UCI_CONTROL
+        uci_fence
         sec
-        rts
-@no_err:
-        clc
         rts
 
 ; =============================================================================
@@ -136,6 +164,7 @@ uci_check_err:
 uci_ack:
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
+        uci_fence
         rts
 
 ; =============================================================================
@@ -158,12 +187,10 @@ uci_ack:
 ; =============================================================================
 uci_read_resp_bytes:
         ; Patch the dst pointer into the STA abs,Y instruction below.
-        ; The inner loop mirrors the SOCKET_READ read pattern in
-        ; c64-test-harness/scripts/test_uci_tcp_echo.py (lines ~350-362):
-        ; tight-poll DATA_AV and read $DF1E directly — the UCI response
-        ; FIFO auto-advances on read, so no per-byte NEXT_DATA is needed
-        ; inside the loop. NEXT_DATA acknowledgment happens once at the
-        ; end via uci_drain_resp / uci_ack.
+        ; At turbo speeds the firmware may not have staged response data
+        ; by the time the CPU reaches this point (e.g. TCP_CONNECT takes
+        ; a full network round-trip). Use a 16-bit spin-wait on DATA_AV
+        ; so we tolerate up to ~150 ms at 48 MHz without bailing early.
         lda uci_resp_dst
         sta @rd_store+1
         lda uci_resp_dst+1
@@ -171,11 +198,36 @@ uci_read_resp_bytes:
         ldy #$00
 @rd_loop:
         cpy uci_resp_max
-        bcs @rd_done
+        bcc @rd_not_max
+        jmp @rd_done
+@rd_not_max:
+        ; 16-bit spin-wait for DATA_AV. ~65536 iterations; at 48 MHz
+        ; each iteration is ~110 cycles → total ≈ 150 ms, enough for
+        ; TCP handshakes over a LAN. X is preserved across the wait.
+        stx @rd_save_x
+        lda #$00
+        sta @rd_ctr_hi
+        ldx #$00
+@rd_wait:
         lda UCI_STATUS
+        uci_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
-        beq @rd_done
+        bne @rd_have
+        dex
+        beq @rd_xzero
+        jmp @rd_wait                ; long branch: fence too wide for BNE
+@rd_xzero:
+        dec @rd_ctr_hi
+        beq @rd_timeout
+        jmp @rd_wait                ; long branch: fence too wide for BNE
+@rd_timeout:
+        ; Timeout: DATA_AV never appeared — bail with partial read.
+        ldx @rd_save_x
+        jmp @rd_done
+@rd_have:
+        ldx @rd_save_x
         lda UCI_RESP_DATA
+        uci_fence                   ; settle before storing/looping
 @rd_store:
         sta $FFFF,y             ; SMC: dst low/high patched above
         iny
@@ -183,6 +235,8 @@ uci_read_resp_bytes:
 @rd_done:
         sty uci_resp_count
         rts
+@rd_save_x: .byte 0
+@rd_ctr_hi: .byte 0
 
 ; =============================================================================
 ; uci_drain_resp — ACK remaining response bytes until DATA_AV is clear.
@@ -193,14 +247,17 @@ uci_read_resp_bytes:
 ; =============================================================================
 uci_drain_resp:
         lda UCI_STATUS
+        uci_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
-        beq @drn_done
+        bne @drn_have
+        rts
+@drn_have:
         lda UCI_RESP_DATA
+        uci_fence                   ; settle before NEXT_DATA write
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
+        uci_fence
         jmp uci_drain_resp
-@drn_done:
-        rts
 
 ; =============================================================================
 ; uci_drain_status — ACK remaining status string bytes until STAT_AV is clear.
@@ -209,14 +266,17 @@ uci_drain_resp:
 ; =============================================================================
 uci_drain_status:
         lda UCI_STATUS
+        uci_fence                   ; settle before testing STAT_AV
         and #UCI_STAT_STAT_AV
-        beq @dst_done
+        bne @dst_have
+        rts
+@dst_have:
         lda UCI_STATUS_DATA
+        uci_fence                   ; settle before NEXT_DATA write
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
+        uci_fence
         jmp uci_drain_status
-@dst_done:
-        rts
 
 ; =============================================================================
 ; Control block for uci_read_resp_bytes — lives in UCI_BSS so no ZP is needed

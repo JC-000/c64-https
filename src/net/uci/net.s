@@ -91,6 +91,7 @@ net_init:
         jsr uci_abort
 
         lda UCI_ID
+        uci_fence                   ; settle before comparing ID
         cmp #UCI_ID_VALUE
         beq @present
 
@@ -175,16 +176,23 @@ net_poll:
         ; SMC dst. Loop style matches uci_read_resp_bytes — tight-poll
         ; DATA_AV and read UCI_RESP_DATA; the firmware FIFO auto-advances
         ; on read (Phase 2 finding), so NO per-byte NEXT_DATA.
+        uci_fence             ; give firmware time to stage response
         ldy #$00
 @hdr_loop:
         lda UCI_STATUS
+        uci_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
-        beq @hdr_done_short
+        bne @hdr_got                ; branch past trampoline
+        jmp @hdr_done_short         ; long branch: fence too wide for BEQ
+@hdr_got:
         lda UCI_RESP_DATA
+        uci_fence                   ; settle before storing header byte
         sta uci_read_hdr,y
         iny
         cpy #2
-        bcc @hdr_loop
+        bcs @hdr_got2               ; branch past trampoline (inverted BCC)
+        jmp @hdr_loop               ; long branch back: fence too wide for BCC
+@hdr_got2:
         jmp @hdr_done
 
 @hdr_done_short:
@@ -234,13 +242,15 @@ net_poll:
         bne @not_full
         lda uci_next_hi
         cmp tcp_recv_head+1
-        beq @done_data          ; ring full — drop the rest
+        bne @not_full
+        jmp @done_data          ; ring full — drop the rest
 
 @not_full:
         ; Wait for DATA_AV — the firmware streams data in bursts; if the
         ; FIFO drained mid-record we bail (shouldn't happen if firmware
         ; honored actual_len but we defend anyway).
         lda UCI_STATUS
+        uci_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
         bne @have_byte
         jmp @done_data
@@ -256,6 +266,7 @@ net_poll:
         sta @rb_store+2
 
         lda UCI_RESP_DATA
+        uci_fence                   ; settle before storing data byte
 @rb_store:
         sta $ffff               ; SMC: patched each byte
 
@@ -406,13 +417,18 @@ net_tcp_connect:
         ldy #$00
 @host_loop:
         lda uci_host_buf,y
-        beq @host_done
+        bne @host_push          ; branch past trampoline
+        jmp @host_done          ; long branch: fence too wide for BEQ
+@host_push:
         sta UCI_CMD_DATA
+        uci_fence         ; heavy fence: hostname bytes at 48 MHz
         iny
-        bne @host_loop          ; bounded by 256 B (and by null before that)
+        beq @host_done          ; Y wrapped to 0 — stop (bounded by 256 B)
+        jmp @host_loop          ; long branch back: fence too wide for BNE
 @host_done:
         lda #$00
         sta UCI_CMD_DATA        ; explicit null terminator
+        uci_fence
 
         jsr uci_push_wait
 
@@ -531,6 +547,7 @@ net_tcp_send:
 @sb_load:
         lda $ffff,y             ; SMC: source base patched above
         sta UCI_CMD_DATA
+        uci_fence         ; heavy fence: FIFO overruns at 48 MHz with standard fence
         iny
         bne @sb_nohi
         inc @sb_load+2          ; advance base high byte
