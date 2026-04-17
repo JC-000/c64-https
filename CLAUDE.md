@@ -172,6 +172,16 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
   - `test_http_local.py`  — HTTP GET against a local test server
   - `test_http_live.py`   — HTTP GET against a real internet host (requires
                             internet access from the U64E)
+  - `test_https_local.py` — HTTPS e2e scaffolding against a local TLS 1.3
+                            listener (ECDSA-P256 cert from
+                            `tools/https_e2e/certs/`). DMAs a 6502 stub
+                            that calls `http_get`, flips the U64E to 48
+                            MHz turbo, and captures full diagnostics on
+                            pass or timeout. `DEBUG_CAPTURE=1` enables a
+                            bounded 6510 bus stream for post-mortem.
+                            Reproducibly stalls at `tls_state=0x03`
+                            (see Known issues below) — the test exists
+                            to capture the stall, not to fix it.
 
 ### Known issues
 
@@ -186,6 +196,25 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
     behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
   - The delay-loop fence adds ~2.5 ms overhead per UCI register access
     at 1 MHz (negligible for networking, but visible in tight loops).
+  - TLS 1.3 handshake stalls mid-flight on real U64E at 48 MHz turbo.
+    Server sends its full flight and the C64 consumes ServerHello plus
+    partial encrypted records (tcp_recv ring drains to ~$02B1), then
+    TLS recv waits indefinitely for more bytes at `tls_state=0x03`.
+    Reproducible under `tools/uci/test_https_local.py`. Root cause not
+    yet identified. DHCP and plain HTTP are unaffected at all speeds.
+
+### Design note — bounded timeouts must use wall-clock time
+
+Any future robustness work on the UCI adapter's spin-wait helpers
+(`uci_wait_idle`, `uci_push_wait`, etc.) MUST use a wall-clock time
+source — CIA timer on stock C64, TOD clock on U64E — rather than a
+cycle-counted iteration budget. The fences around every UCI register
+access make per-iteration cost scale with CPU speed: a budget that is
+ample at 1 MHz collapses to far too short at 48 MHz because turbo
+scales CPU cycles but not the FPGA's wire-level operation durations.
+A prior attempt on branch `feat/net-drain-abi` split waits into
+fast/long tiers with cycle-count budgets and broke DHCP at turbo for
+exactly this reason; the branch was abandoned.
 
 ## Memory layout
 
