@@ -374,10 +374,179 @@ def _dump_diag(transport: Ultimate64Transport,
             print(f"  {name:22s} : ${r16(name):04X}")
 
 
+def _dump_tls_state_snapshot(transport: Ultimate64Transport,
+                             labels: dict[str, int],
+                             run_dir: Path) -> None:
+    """DMA-snapshot every TLS state-machine variable we know the label for.
+
+    Written as ``tls_state_dump.json`` in ``run_dir`` to support post-mortem
+    decoding of stalls. Byte blobs come out as hex strings; word values are
+    unsigned little-endian ints; per-variable entries also carry the label
+    address for sanity-checking vs ``build/labels.txt``.
+
+    Silently skips any label that isn't present in ``labels`` (older builds
+    may omit some TLS progress counters).
+    """
+    # Layout: (label_name, byte_count). Anything not present is skipped.
+    byte_specs: list[tuple[str, int]] = [
+        # --- top-level state / progress ---
+        ("tls_state", 1),
+        ("tls_last_state", 1),
+        ("tls_recv_progress", 1),
+        ("tls_recv_sub_progress", 1),
+        ("tls_recv_poll_count", 2),
+        # --- record-layer framer ---
+        ("tls_rec_header", 5),
+        ("tls_rec_type", 1),
+        ("tls_rec_len", 2),
+        ("tls_recv_state", 1),
+        ("tls_recv_count", 2),
+        # --- handshake msg buffer (256B total per data.s) ---
+        ("tls_hs_buf", 256),
+        ("tls_hs_len", 2),
+        # --- app-data plumbing ---
+        ("tls_app_ptr", 2),
+        ("tls_app_len", 2),
+        # --- seq counters / key schedule ---
+        ("tls_read_seq", 8),
+        ("tls_write_seq", 8),
+        ("tls_hs_read_key", 32),
+        ("tls_hs_read_iv", 12),
+        ("tls_hs_write_key", 32),
+        ("tls_hs_write_iv", 12),
+        ("tls_app_read_key", 32),
+        ("tls_app_read_iv", 12),
+        ("tls_app_write_key", 32),
+        ("tls_app_write_iv", 12),
+        # --- secrets (handshake/master) ---
+        ("tls_early_secret", 32),
+        ("tls_handshake_secret", 32),
+        ("tls_master_secret", 32),
+        # --- net state ---
+        ("net_last_error", 1),
+        ("net_tcp_state", 1),
+        ("net_initialized", 1),
+        ("net_poll_entry_count", 2),
+        ("net_poll_return_count", 2),
+        # --- http parser ---
+        ("http_parse_state", 1),
+        ("http_status", 2),
+        ("http_resp_len", 2),
+    ]
+
+    dump: dict = {"labels_file": str(LABELS_PATH)}
+    for name, n in byte_specs:
+        if name not in labels:
+            continue
+        addr = labels[name]
+        try:
+            raw = bytes(transport.read_memory(addr, n))
+        except Exception as exc:
+            dump[name] = {"addr": f"${addr:04X}", "error": str(exc)}
+            continue
+        entry: dict = {"addr": f"${addr:04X}", "hex": raw.hex()}
+        if n == 1:
+            entry["u8"] = raw[0]
+        elif n == 2:
+            entry["u16_le"] = raw[0] | (raw[1] << 8)
+        elif n == 8:
+            entry["u64_le"] = int.from_bytes(raw, "little")
+        dump[name] = entry
+
+    # Ring indices, in one struct for easy cross-reference with ring.bin
+    ring_head_addr = labels.get("tcp_recv_head")
+    ring_tail_addr = labels.get("tcp_recv_tail")
+    ring_ovf_addr = labels.get("tcp_recv_overflow")
+    ring_entry: dict = {}
+    if ring_head_addr is not None:
+        try:
+            b = transport.read_memory(ring_head_addr, 2)
+            ring_entry["head"] = b[0] | (b[1] << 8)
+            ring_entry["head_addr"] = f"${ring_head_addr:04X}"
+        except Exception as exc:
+            ring_entry["head_error"] = str(exc)
+    if ring_tail_addr is not None:
+        try:
+            b = transport.read_memory(ring_tail_addr, 2)
+            ring_entry["tail"] = b[0] | (b[1] << 8)
+            ring_entry["tail_addr"] = f"${ring_tail_addr:04X}"
+        except Exception as exc:
+            ring_entry["tail_error"] = str(exc)
+    if ring_ovf_addr is not None:
+        try:
+            b = transport.read_memory(ring_ovf_addr, 1)
+            ring_entry["overflow"] = b[0]
+        except Exception as exc:
+            ring_entry["overflow_error"] = str(exc)
+    dump["ring"] = ring_entry
+
+    (run_dir / "tls_state_dump.json").write_text(json.dumps(dump, indent=2))
+
+
+def _dump_ring(transport: Ultimate64Transport,
+               labels: dict[str, int],
+               run_dir: Path) -> None:
+    """DMA-snapshot the entire TCP receive ring + metadata to ``run_dir``.
+
+    ``ring.bin`` is the raw 4 KB buffer starting at ``tcp_recv_buf`` (no
+    reordering — consumers use ``ring_meta.json`` to find head/tail/size).
+    ``ring_meta.json`` records base address, size, and current head/tail
+    so a post-mortem tool can slice out just the live window.
+    """
+    base = labels.get("tcp_recv_buf", 0xC000)
+    # Match TCP_RECV_MASK = $0FFF from constants.inc — 4 KB ring.
+    size = 4096
+    try:
+        raw = bytes(transport.read_memory(base, size))
+    except Exception as exc:
+        (run_dir / "ring_meta.json").write_text(json.dumps({
+            "error": f"read_memory failed: {exc}",
+            "base_addr": f"${base:04X}",
+            "size": size,
+        }, indent=2))
+        return
+    (run_dir / "ring.bin").write_bytes(raw)
+
+    meta: dict = {
+        "base_addr": f"${base:04X}",
+        "size": size,
+        "mask": "0x0FFF (TCP_RECV_MASK)",
+        "file": "ring.bin",
+        "note": "ring.bin is tcp_recv_buf[0..4095] verbatim; head/tail "
+                "are masked indices *into* this buffer (not byte offsets "
+                "relative to a live window). See net/uci/net.s "
+                "net_recv_byte for addressing.",
+    }
+    try:
+        b = transport.read_memory(labels["tcp_recv_head"], 2)
+        meta["head"] = b[0] | (b[1] << 8)
+    except Exception as exc:
+        meta["head_error"] = str(exc)
+    try:
+        b = transport.read_memory(labels["tcp_recv_tail"], 2)
+        meta["tail"] = b[0] | (b[1] << 8)
+    except Exception as exc:
+        meta["tail_error"] = str(exc)
+    try:
+        meta["overflow"] = transport.read_memory(
+            labels["tcp_recv_overflow"], 1)[0]
+    except Exception as exc:
+        meta["overflow_error"] = str(exc)
+
+    (run_dir / "ring_meta.json").write_text(json.dumps(meta, indent=2))
+
+
 def _dump_full(transport: Ultimate64Transport,
                labels: dict[str, int],
-               server_result: dict) -> None:
-    """Dump the full diagnostic set (used on both success and TIMEOUT paths)."""
+               server_result: dict,
+               run_dir: Path | None = None) -> None:
+    """Dump the full diagnostic set (used on both success and TIMEOUT paths).
+
+    When ``run_dir`` is provided, extra binary/JSON artifacts are written
+    alongside the trace files for post-mortem decoding:
+      - ``ring.bin`` / ``ring_meta.json`` : full 4 KB tcp_recv_buf + head/tail
+      - ``tls_state_dump.json``           : every TLS state-machine variable
+    """
     _dump_diag(transport, labels)
 
     try:
@@ -435,6 +604,20 @@ def _dump_full(transport: Ultimate64Transport,
     print(f"  client_addr   : {server_result.get('client_addr')}")
     print(f"  request       : {server_result.get('request', b'<none>')!r}")
     print(f"  error         : {server_result.get('error', '<none>')}")
+
+    # --- Persist ring + TLS-state snapshots alongside the trace ---
+    if run_dir is not None:
+        try:
+            _dump_ring(transport, labels, run_dir)
+            print(f"  ring.bin            -> {run_dir / 'ring.bin'}")
+        except Exception as exc:
+            print(f"WARNING: ring dump failed: {exc}")
+        try:
+            _dump_tls_state_snapshot(transport, labels, run_dir)
+            print(f"  tls_state_dump.json -> "
+                  f"{run_dir / 'tls_state_dump.json'}")
+        except Exception as exc:
+            print(f"WARNING: tls_state_dump failed: {exc}")
 
 
 def _git_head_sha() -> str:
@@ -918,7 +1101,7 @@ def main() -> int:
                   f"{SENTINEL_POLL_TIMEOUT:.0f}s "
                   f"(progress=0x{last_progress:02X})", file=sys.stderr)
             server_thread.join(timeout=1.0)
-            _dump_full(transport, labels, server_result)
+            _dump_full(transport, labels, server_result, run_dir=run_dir)
             outcome = "TIMEOUT"
             exit_code = 1
             return exit_code
@@ -926,7 +1109,7 @@ def main() -> int:
         # --- Results ---
         # Join server thread briefly so server_result is populated
         server_thread.join(timeout=5.0)
-        _dump_full(transport, labels, server_result)
+        _dump_full(transport, labels, server_result, run_dir=run_dir)
 
         # Reread resp_data + screen_text for the assertion logic below.
         resp_len_raw = transport.read_memory(labels["http_resp_len"], 2)
