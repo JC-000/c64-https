@@ -70,7 +70,9 @@ uci_wait_idle:
         lda UCI_STATUS
         uci_fence                   ; settle read before testing bits
         and #(UCI_STAT_STATE | UCI_STAT_CMD_BUSY)   ; $31
-        bne uci_wait_idle
+        beq @idle_done
+        jmp uci_wait_idle           ; long branch: fence too wide for BNE
+@idle_done:
         rts
 
 ; =============================================================================
@@ -83,7 +85,9 @@ uci_wait_not_busy:
         lda UCI_STATUS
         uci_fence                   ; settle read before testing bits
         and #UCI_STAT_CMD_BUSY
-        bne uci_wait_not_busy
+        beq @busy_done
+        jmp uci_wait_not_busy       ; long branch: fence too wide for BNE
+@busy_done:
         rts
 
 ; =============================================================================
@@ -142,15 +146,15 @@ uci_check_err:
         lda UCI_STATUS
         uci_fence                   ; settle before testing error bit
         and #UCI_STAT_ERROR
-        beq @no_err
+        bne @has_err
+        clc
+        rts
+@has_err:
         ; clear the latched error
         lda #UCI_CTRL_CLR_ERR
         sta UCI_CONTROL
         uci_fence
         sec
-        rts
-@no_err:
-        clc
         rts
 
 ; =============================================================================
@@ -210,9 +214,13 @@ uci_read_resp_bytes:
         and #UCI_STAT_DATA_AV
         bne @rd_have
         dex
-        bne @rd_wait
+        beq @rd_xzero
+        jmp @rd_wait                ; long branch: fence too wide for BNE
+@rd_xzero:
         dec @rd_ctr_hi
-        bne @rd_wait
+        beq @rd_timeout
+        jmp @rd_wait                ; long branch: fence too wide for BNE
+@rd_timeout:
         ; Timeout: DATA_AV never appeared — bail with partial read.
         ldx @rd_save_x
         jmp @rd_done
@@ -241,15 +249,15 @@ uci_drain_resp:
         lda UCI_STATUS
         uci_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
-        beq @drn_done
+        bne @drn_have
+        rts
+@drn_have:
         lda UCI_RESP_DATA
         uci_fence                   ; settle before NEXT_DATA write
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
         uci_fence
         jmp uci_drain_resp
-@drn_done:
-        rts
 
 ; =============================================================================
 ; uci_drain_status — ACK remaining status string bytes until STAT_AV is clear.
@@ -260,15 +268,15 @@ uci_drain_status:
         lda UCI_STATUS
         uci_fence                   ; settle before testing STAT_AV
         and #UCI_STAT_STAT_AV
-        beq @dst_done
+        bne @dst_have
+        rts
+@dst_have:
         lda UCI_STATUS_DATA
         uci_fence                   ; settle before NEXT_DATA write
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
         uci_fence
         jmp uci_drain_status
-@dst_done:
-        rts
 
 ; =============================================================================
 ; Control block for uci_read_resp_bytes — lives in UCI_BSS so no ZP is needed

@@ -182,13 +182,17 @@ net_poll:
         lda UCI_STATUS
         uci_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
-        beq @hdr_done_short
+        bne @hdr_got                ; branch past trampoline
+        jmp @hdr_done_short         ; long branch: fence too wide for BEQ
+@hdr_got:
         lda UCI_RESP_DATA
         uci_fence                   ; settle before storing header byte
         sta uci_read_hdr,y
         iny
         cpy #2
-        bcc @hdr_loop
+        bcs @hdr_got2               ; branch past trampoline (inverted BCC)
+        jmp @hdr_loop               ; long branch back: fence too wide for BCC
+@hdr_got2:
         jmp @hdr_done
 
 @hdr_done_short:
@@ -413,11 +417,14 @@ net_tcp_connect:
         ldy #$00
 @host_loop:
         lda uci_host_buf,y
-        beq @host_done
+        bne @host_push          ; branch past trampoline
+        jmp @host_done          ; long branch: fence too wide for BEQ
+@host_push:
         sta UCI_CMD_DATA
         uci_fence         ; heavy fence: hostname bytes at 48 MHz
         iny
-        bne @host_loop          ; bounded by 256 B (and by null before that)
+        beq @host_done          ; Y wrapped to 0 — stop (bounded by 256 B)
+        jmp @host_loop          ; long branch back: fence too wide for BNE
 @host_done:
         lda #$00
         sta UCI_CMD_DATA        ; explicit null terminator
