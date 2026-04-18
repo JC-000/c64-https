@@ -507,9 +507,22 @@ http_recv_response:
         jmp @state_headers
 
 ; ----- state 2: read body bytes -----
+; RFC 7230 behaviour: we treat an empty ring as "body still arriving"
+; (return @not_done, letting the caller poll for more TLS records) instead
+; of declaring the response complete.  Only two events end body reads:
+;   1. buffer full (512 B safety cap — http_resp_buf is 512 B), or
+;   2. caller-side poll-timeout in http_get's @recv_loop (the caller gives
+;      up after ~65 k empty ticks with no data).
+; Previously this state treated "ring empty this instant" as "body done",
+; which clipped the response to zero bytes whenever the HTTP response
+; arrived in a second TLS record after the headers — a real situation
+; under UCI because the server emits NewSessionTicket handshake records
+; (app-key phase) ahead of the actual HTTP response record, so the very
+; first post-handshake TLS record the parser sees contains only the
+; status line + headers and the body lands in the next record.
 @state_body:
         jsr net_recv_byte
-        bcs @done               ; no more data -> complete
+        bcs @not_done           ; no byte right now -> poll more
         ; store byte using zp_ptr = http_resp_buf + http_resp_len
         pha                     ; save received byte
         clc
