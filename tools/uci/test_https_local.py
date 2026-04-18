@@ -422,6 +422,20 @@ def _dump_tls_state_snapshot(transport: Ultimate64Transport,
         ("tls_early_secret", 32),
         ("tls_handshake_secret", 32),
         ("tls_master_secret", 32),
+        # --- key-schedule intermediates (for post-mortem verification of
+        #     x25519 / HKDF-Extract / HKDF-Expand-Label stages) ---
+        ("tls_ecdhe_privkey", 32),      # our X25519 private scalar
+        ("tls_ecdhe_pubkey", 32),       # our X25519 public key (= G * priv)
+        ("tls_server_pubkey", 32),      # server's X25519 public key (from SH)
+        ("tls_shared_secret", 32),      # X25519(priv, server_pub)
+        ("tls_client_random", 32),      # CH.random
+        ("tls_server_random", 32),      # SH.random
+        ("tls_transcript", 32),         # SHA-256(CH||SH), context for derives
+        ("tls_c_hs_secret", 32),        # client-handshake-traffic-secret
+        ("tls_s_hs_secret", 32),        # server-handshake-traffic-secret
+        ("tls_derived_tmp", 32),        # "derived" intermediate
+        ("tls_verify_data", 32),        # computed Finished verify_data
+        ("tls_finished_key", 32),       # HKDF-Expand-Label(..., "finished", ...)
         # --- net state ---
         ("net_last_error", 1),
         ("net_tcp_state", 1),
