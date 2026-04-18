@@ -69,6 +69,7 @@
 ; --- Transcript hash (tls_transcript.s) ---
 .import tls_transcript_init
 .import tls_transcript_update
+.import tls_transcript_hash
 
 ; --- Key schedule (tls_keyschedule.s) ---
 .import tls_derive_handshake_keys
@@ -158,6 +159,13 @@ tls_connect:
         ldy #>hk1_msg
         jsr print_string
 
+        ; finalize transcript hash = SHA-256(CH || SH) for "s hs traffic"
+        ; / "c hs traffic" context. tls_transcript_hash is non-destructive:
+        ; it snapshots the running state and restores it, so subsequent
+        ; tls_transcript_update calls (EE, Cert, CertVerify, ServerFinished,
+        ; client Finished) still feed the same streaming SHA-256.
+        jsr tls_transcript_hash
+
         ; derive handshake keys from ECDHE shared secret
         jsr tls_derive_handshake_keys
         bcc @ok3
@@ -216,6 +224,12 @@ tls_connect:
         bcc @ok9
         jmp @error
 @ok9:
+
+        ; finalize transcript hash = SHA-256(CH || .. || ServerFinished)
+        ; for application traffic key derivation. Non-destructive finalize
+        ; preserves the running state for the subsequent client Finished
+        ; update.
+        jsr tls_transcript_hash
 
         ; derive application traffic keys
         jsr tls_derive_traffic_keys
