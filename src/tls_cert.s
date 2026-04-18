@@ -623,11 +623,20 @@ tls_handle_cert_verify:
         sta sha256_block+2
 
         ; Message length in bits = 130 * 8 = 1040 = $0410
-        ; Write as 64-bit big-endian at block[56..63]
+        ; Write as 64-bit big-endian at block[56..63].  The LSB of the
+        ; bit-count lives at block[63], the next byte at block[62]; all
+        ; higher bytes remain 0.  The earlier code wrote the high byte of
+        ; the 16-bit value at [61] and the low byte at [62], leaving [63]
+        ; zero — this off-by-one fed SHA-256 a bogus message length, which
+        ; produced a wrong digest (~ "buggy" offset-61 layout) and caused
+        ; ecdsa_verify to reject every valid CertificateVerify signature
+        ; the server sent.  Confirmed by reproducing the buggy digest in
+        ; pure Python and matching it bit-for-bit against the DMA-read
+        ; ecdsa_hash on the U64E.
         lda #$04
-        sta sha256_block+61
-        lda #$10
         sta sha256_block+62
+        lda #$10
+        sta sha256_block+63
         ; All other length bytes are already 0
 
         jsr sha256_process_block
