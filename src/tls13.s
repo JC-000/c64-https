@@ -42,8 +42,6 @@
 .import tls_last_state
 .import tls_client_random
 .import tls_ecdhe_privkey
-.import tls_hs_buf
-.import tls_hs_len
 .import tls_rec_buf
 .import tls_rec_len
 .import tls_rec_type
@@ -76,6 +74,7 @@
 .import tls_derive_traffic_keys
 .import tls_compute_finished
 .import tls_verify_finished
+.import tls_verify_data
 
 ; --- Encrypted handshake sub-handlers (tls_cert.s) ---
 .import tls_handle_certificate
@@ -338,36 +337,22 @@ tls_send_client_hello:
         ; initialize transcript hash
         jsr tls_transcript_init
 
-        ; build ClientHello into tls_hs_buf, sets tls_hs_len
+        ; build ClientHello directly into tls_rec_buf, sets tls_rec_len
         jsr tls_build_client_hello
-
-        ; copy tls_hs_buf to tls_rec_buf (tls_hs_len bytes)
-        ldy #0
-@ch_copy:
-        cpy tls_hs_len
-        beq @ch_copy_done
-        lda tls_hs_buf,y
-        sta tls_rec_buf,y
-        iny
-        bne @ch_copy
-@ch_copy_done:
-        ; set record length
-        lda tls_hs_len
-        sta tls_rec_len
-        lda tls_hs_len+1
-        sta tls_rec_len+1
 
         ; send as plaintext handshake record
         lda #TLS_CT_HANDSHAKE
         jsr tls_record_send_plaintext
         bcs @ch_fail
 
-        ; update transcript with ClientHello
-        lda #<tls_hs_buf
+        ; update transcript with ClientHello (content still in tls_rec_buf;
+        ; tls_record_send_plaintext prepends the 5-byte record header but
+        ; does not touch the payload bytes).
+        lda #<tls_rec_buf
         sta zp_ptr
-        lda #>tls_hs_buf
+        lda #>tls_rec_buf
         sta zp_ptr+1
-        lda tls_hs_len
+        lda tls_rec_len
         sta zp_count
         jsr tls_transcript_update
 
@@ -414,20 +399,13 @@ tls_recv_server_hello:
         lda #$03
         sta tls_recv_progress
 
-        ; copy tls_rec_buf to tls_hs_buf (tls_rec_len bytes)
-        ldy #0
-@sh_copy:
-        cpy tls_rec_len
-        beq @sh_copy_done
-        lda tls_rec_buf,y
-        sta tls_hs_buf,y
-        iny
-        bne @sh_copy
-@sh_copy_done:
-        lda tls_rec_len
-        sta tls_hs_len
-        lda tls_rec_len+1
-        sta tls_hs_len+1
+        ; ServerHello plaintext already sits in tls_rec_buf / tls_rec_len;
+        ; no staging copy is needed (the old copy was truncated to the low
+        ; 8 bits of length, which broke any record >=256 B).  Invariant:
+        ; tls_parse_server_hello must finish reading tls_rec_buf before the
+        ; next record is fetched — the state machine enforces this, since
+        ; the handler runs synchronously and the next recv sits after the
+        ; return.
         lda #$04
         sta tls_recv_progress
 
@@ -442,11 +420,11 @@ tls_recv_server_hello:
         clc
 
         ; update transcript with ServerHello
-        lda #<tls_hs_buf
+        lda #<tls_rec_buf
         sta zp_ptr
-        lda #>tls_hs_buf
+        lda #>tls_rec_buf
         sta zp_ptr+1
-        lda tls_hs_len
+        lda tls_rec_len
         sta zp_count
         jsr tls_transcript_update
 
@@ -503,27 +481,24 @@ tls_recv_encrypted:
         cmp #TLS_CT_HANDSHAKE
         bne @enc_error
 
-        ; copy tls_rec_buf to tls_hs_buf
-        ldy #0
-@enc_copy:
-        cpy tls_rec_len
-        beq @enc_copy_done
-        lda tls_rec_buf,y
-        sta tls_hs_buf,y
-        iny
-        bne @enc_copy
-@enc_copy_done:
-        lda tls_rec_len
-        sta tls_hs_len
-        lda tls_rec_len+1
-        sta tls_hs_len+1
+        ; Decrypted handshake plaintext already sits in tls_rec_buf /
+        ; tls_rec_len (tls_record_decrypt leaves it in-place with the inner
+        ; content type byte stripped).  The prior 8-bit copy into
+        ; tls_hs_buf silently truncated records >=256 B — e.g. the 352 B
+        ; Certificate wrapped Y at offset 96 and lost the rest.
+        ;
+        ; Invariant: the dispatch handlers (tls_handle_certificate,
+        ; tls_handle_cert_verify, tls_parse_encrypted_extensions) MUST
+        ; finish reading tls_rec_buf before the next record is fetched.
+        ; The state machine enforces this today because each handler runs
+        ; synchronously and the next recv sits after the return path.
 
         ; update transcript with the handshake message
-        lda #<tls_hs_buf
+        lda #<tls_rec_buf
         sta zp_ptr
-        lda #>tls_hs_buf
+        lda #>tls_rec_buf
         sta zp_ptr+1
-        lda tls_hs_len
+        lda tls_rec_len
         sta zp_count
         jsr tls_transcript_update
 
@@ -534,8 +509,8 @@ tls_recv_encrypted:
         ldy #>proc_msg
         jsr print_string
 
-        ; dispatch based on handshake type (first byte of tls_hs_buf)
-        lda tls_hs_buf
+        ; dispatch based on handshake type (first byte of tls_rec_buf)
+        lda tls_rec_buf
         cmp #TLS_HS_ENCRYPTED_EXT
         beq @enc_ok                     ; accept, nothing to extract for MVP
         cmp #TLS_HS_CERTIFICATE
@@ -571,35 +546,44 @@ tls_recv_encrypted:
 ; Output: C=0 success, C=1 failure
 ; =============================================================================
 tls_send_finished:
-        ; compute client Finished verify_data into tls_hs_buf, sets tls_hs_len
+        ; Compute verify_data into tls_verify_data (32 bytes).
         jsr tls_compute_finished
 
-        ; update transcript with the finished message
-        lda #<tls_hs_buf
-        sta zp_ptr
-        lda #>tls_hs_buf
-        sta zp_ptr+1
-        lda tls_hs_len
-        sta zp_count
-        jsr tls_transcript_update
+        ; Assemble the Finished handshake message directly in tls_rec_buf:
+        ;   [0]   0x14  (TLS_HS_FINISHED)
+        ;   [1-3] 0x000020 (24-bit length = 32)
+        ;   [4-35] verify_data (32 bytes copied from tls_verify_data)
+        lda #TLS_HS_FINISHED
+        sta tls_rec_buf+0
+        lda #0
+        sta tls_rec_buf+1
+        sta tls_rec_buf+2
+        lda #32
+        sta tls_rec_buf+3
 
-        ; copy tls_hs_buf to tls_rec_buf
-        ldy #0
-@fin_copy:
-        cpy tls_hs_len
-        beq @fin_copy_done
-        lda tls_hs_buf,y
-        sta tls_rec_buf,y
-        iny
-        bne @fin_copy
-@fin_copy_done:
-        ; set record length and inner content type
-        lda tls_hs_len
+        ldx #31
+@fin_copy_vd:
+        lda tls_verify_data,x
+        sta tls_rec_buf+4,x
+        dex
+        bpl @fin_copy_vd
+
+        ; tls_rec_len = 36, inner content type = handshake
+        lda #36
         sta tls_rec_len
-        lda tls_hs_len+1
+        lda #0
         sta tls_rec_len+1
         lda #TLS_CT_HANDSHAKE
         sta tls_rec_type
+
+        ; update transcript with the finished message (36 bytes)
+        lda #<tls_rec_buf
+        sta zp_ptr
+        lda #>tls_rec_buf
+        sta zp_ptr+1
+        lda #36
+        sta zp_count
+        jsr tls_transcript_update
 
         ; encrypt and send
         jsr tls_record_send_encrypted

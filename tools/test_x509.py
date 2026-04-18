@@ -79,7 +79,7 @@ ECDSA_LABELS = [
 # Labels for CertificateVerify tests
 CV_LABELS = [
     "tls_handle_cert_verify",
-    "tls_hs_buf", "tls_hs_len",
+    "tls_rec_buf", "tls_rec_len",
     "tls_transcript",
 ]
 

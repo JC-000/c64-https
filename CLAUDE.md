@@ -190,9 +190,11 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
                             the listener's `server_result.json`, and
                             `run_info.txt`. Rotation keeps the last 5
                             dirs; `UCI_DEBUG_KEEP_ON_PASS=1` preserves
-                            PASS runs. Currently still fails inside
-                            `tls_handle_certificate` (X.509 parsing) —
-                            see Known issues below.
+                            PASS runs. The TLS state snapshot now
+                            includes the full 548 B `tls_rec_buf`
+                            (handshake plaintext is parsed in place
+                            there — see Known issues below for the
+                            current stall site).
 
 ### Known issues
 
@@ -207,20 +209,27 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
     behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
   - The delay-loop fence adds ~2.5 ms overhead per UCI register access
     at 1 MHz (negligible for networking, but visible in tight loops).
-  - TLS 1.3 handshake currently stalls inside `tls_handle_certificate`
-    (`src/tls_cert.s`) during X.509 parsing. Two upstream bugs that
-    used to mask this were fixed in the current branch: (a) a `net_poll`
-    entry gate that spun forever on post-drain residual STATE bits
-    (fixed by swapping `uci_wait_idle` → `uci_wait_not_busy` at the
-    `net_poll` preamble only — other call sites remain on wait_idle),
-    and (b) `tls_transcript_hash` was defined in `src/tls_transcript.s`
-    but never called, so handshake + application key derivation fed
-    32 zero bytes into HKDF-Expand-Label as the transcript context.
-    After the fix, handshake AEAD decryption succeeds, EncryptedExt
-    processes, and the 352 B Certificate record decrypts into
-    `tls_hs_buf` — stall moved forward from ENCRYPTED_EXT (0x03) to
-    CERTIFICATE (0x04). DHCP and plain HTTP are unaffected at all
-    speeds.
+  - TLS 1.3 handshake now advances past CERTIFICATE. The 352 B
+    Certificate record is parsed directly out of `tls_rec_buf`
+    (the separate 256 B `tls_hs_buf` staging buffer — along with
+    the three 8-bit copy loops in `src/tls13.s` that populated it,
+    which had been truncating the Certificate at byte 96 — was
+    eliminated). Handlers in `src/tls_cert.s`,
+    `src/tls_handshake.s`, and `src/tls_keyschedule.s` now read
+    from `tls_rec_buf` / `tls_rec_len` in place; the state machine
+    enforces that each handler finishes before the next record is
+    fetched. Current stall is downstream at CERTIFICATE_VERIFY
+    (`tls_last_state = 0x05`). Two known follow-ups, both
+    pre-existing, surfaced now that we reach this point:
+      * ECDSA P-256 `verify` appears not to complete within the
+        test harness's 120 s deadline at 48 MHz turbo — suspected
+        wall-clock budget issue, not a correctness bug.
+      * `tls_transcript_update`'s ingest loop uses an 8-bit
+        `zp_count`, so handshake messages larger than 256 B (the
+        352 B Certificate in particular) are only hashed for their
+        first 96 B. This will break Finished MAC verification once
+        we clear the CERT_VERIFY stall; needs a 16-bit rewrite.
+    DHCP and plain HTTP are unaffected at all speeds.
 
 ### Design note — bounded timeouts must use wall-clock time
 
@@ -252,7 +261,10 @@ TCP ring at $C000.
 Tight regions (after Phase 6 fit-up):
   - **CRYPTO** is **100%** full. Any new crypto byte requires relocation
     or reclamation somewhere.
-  - **SHADOW_BSS** is **99.8%** full — roughly 20 bytes of slack.
+  - **SHADOW_BSS** was **99.8%** full after Phase 6; ≈258 B was reclaimed
+    in the `tls_hs_buf` removal (256 B buffer + 2 B length word), so
+    there is a bit more slack now. Still the tightest region after
+    CRYPTO — check the linker map before adding anything sizeable.
 
 There is a known TODO to restructure the MEMORY map so that all
 file-backed regions are physically contiguous in a single ROM-like

@@ -376,15 +376,15 @@ def test_client_hello(transport, labels, rng):
     failed = 0
 
     required = [
-        "tls_build_client_hello", "tls_hs_buf", "tls_hs_len",
+        "tls_build_client_hello", "tls_rec_buf", "tls_rec_len",
         "tls_client_random", "tls_ecdhe_pubkey",
     ]
     if not check_labels(labels, required):
         return 0, 0
 
     build_ch = labels["tls_build_client_hello"]
-    hs_buf = labels["tls_hs_buf"]
-    hs_len_addr = labels["tls_hs_len"]
+    hs_buf = labels["tls_rec_buf"]
+    hs_len_addr = labels["tls_rec_len"]
 
     # Write known client_random and pubkey
     client_random = bytes(rng.getrandbits(8) for _ in range(32))
@@ -587,15 +587,15 @@ def test_server_hello_parse(transport, labels, rng):
     failed = 0
 
     required = [
-        "tls_parse_server_hello", "tls_hs_buf", "tls_hs_len",
+        "tls_parse_server_hello", "tls_rec_buf", "tls_rec_len",
         "tls_server_random", "tls_server_pubkey",
     ]
     if not check_labels(labels, required):
         return 0, 0
 
     parse_sh = labels["tls_parse_server_hello"]
-    hs_buf = labels["tls_hs_buf"]
-    hs_len_addr = labels["tls_hs_len"]
+    hs_buf = labels["tls_rec_buf"]
+    hs_len_addr = labels["tls_rec_len"]
 
     # --- Test 3a: Valid ServerHello with x25519 ---
     print("\n  [3a] ServerHello: valid parse (x25519, cipher 0x1303)")
@@ -611,7 +611,7 @@ def test_server_hello_parse(transport, labels, rng):
         key_share_pubkey=server_pubkey,
     )
 
-    # Write to tls_hs_buf with handshake header
+    # Write to tls_rec_buf with handshake header
     hs_msg = bytes([0x02]) + struct.pack(">I", len(sh_body))[1:] + sh_body
     write_bytes(transport, hs_buf, hs_msg)
     write_bytes(transport, hs_len_addr,
@@ -1243,7 +1243,7 @@ def main():
     optional_labels = [
         "tls_transcript_init", "tls_transcript_update", "tls_transcript_hash",
         "tls_transcript",
-        "tls_build_client_hello", "tls_hs_buf", "tls_hs_len",
+        "tls_build_client_hello", "tls_rec_buf", "tls_rec_len",
         "tls_client_random", "tls_ecdhe_pubkey",
         "tls_parse_server_hello", "tls_server_random", "tls_server_pubkey",
         "tls_derive_handshake_keys",

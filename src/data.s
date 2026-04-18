@@ -222,11 +222,17 @@ tls_rec_buf:            .res 548
 .export tls_nonce
 tls_nonce:              .res 12
 
-; Handshake message buffer
-.export tls_hs_buf
-.export tls_hs_len
-tls_hs_buf:             .res 256
-tls_hs_len:             .res 2
+; Handshake messages are parsed and assembled directly in tls_rec_buf /
+; tls_rec_len.  The previous tls_hs_buf / tls_hs_len copy staging buffer
+; was removed: an 8-bit copy loop truncated records >=256 B (e.g. the
+; 352 B Certificate), and tls_hs_buf was too small to hold the
+; decrypted plaintext anyway.  tls_rec_buf is 548 B so every fragment
+; that fits in our negotiated max_fragment_length of 512 fits there.
+; Invariant: handshake handlers (tls_handle_certificate,
+; tls_handle_cert_verify, tls_parse_server_hello, ...) must finish
+; reading tls_rec_buf before the next record is fetched.  The state
+; machine already enforces this (each handler runs synchronously and
+; the next-record fetch sits after the handler returns).
 
 ; -----------------------------------------------------------------------------
 ; HKDF buffers
