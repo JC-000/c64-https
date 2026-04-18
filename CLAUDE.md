@@ -196,40 +196,87 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
                             there — see Known issues below for the
                             current stall site).
 
+### End-to-end HTTPS status
+
+The TLS 1.3 handshake now completes end-to-end against the local test
+listener (ECDSA-P256 cert, `tools/https_e2e/certs/`). The flow that
+works on real U64E hardware at 48 MHz turbo:
+
+  - ClientHello → ServerHello (X25519 key share)
+  - EncryptedExtensions, Certificate, CertificateVerify (ECDSA-P256
+    verify against server.pem takes ~85 s wall-clock; see the ECDSA
+    benchmark subsection)
+  - Server Finished verified
+  - Client Finished computed + sent under HS write key
+  - Application traffic keys derived; AEAD seq counters reset to 0
+  - HTTP/1.1 GET sent under app write key
+  - Server NewSessionTicket records (rejected as non-application),
+    then the HTTP response record — decrypted, fed into the TCP
+    ring, parsed by `http_recv_response`
+  - `http_status = 200`, `http_resp_buf = "HELLO FROM TLS SERVER"`,
+    `http_resp_len = 21`
+
+### Summary of recent fixes (post-PR23 branch)
+
+Five latent bugs and three new ones were cleared to get here:
+
+  1. `tls_transcript_update` 16-bit length fix
+     (pre-existing, cherry-picked `2f01c0d`).
+  2. CertVerify / Finished transcript ordering — snapshot before
+     dispatch, fold after (`2bb014a`).
+  3. `fp_zero` clobbering Y across calls in `ecdsa_parse_der_sig`
+     (`f006f10`).
+  4. Off-by-one SHA-256 length field in CertificateVerify signed
+     digest (`4a2c4f3`).
+  5. `tls_derive_traffic_keys` not setting CLC on success
+     (`cf8d326`).
+  6. Client Finished ordering vs. traffic-key derivation, and
+     reloading `hkdf_prk` from `tls_c_hs_secret` before computing
+     the client Finished HMAC (`4130356`).
+  7. AEAD sequence counters reset at handshake→application key
+     boundary per RFC 8446 §5.3 (`a18f324`).
+  8. `http.s` state_body now polls when ring briefly empty instead
+     of declaring the body complete on the first empty tick
+     (`7821ffb`) — removed the "http_status parses, body truncated"
+     symptom documented previously as a known issue.
+  9. `http_recv_response` state transitions fall through instead of
+     returning @not_done, so one dispatch walks status + headers +
+     body when they all fit in a single TLS record (`fbc7d10`).
+
 ### Known issues
 
-  - `http_status` parsing is garbled on large responses because the
-    poll-timeout counter in `http.s` expires before all headers are
-    consumed under UCI's slower `net_poll` round-trip. Body arrives
-    correctly; status line is mis-parsed. Pre-existing `http.s` issue,
-    not UCI-specific.
+  - `http_recv_response` now terminates body-read on a Content-Length
+    match: a 16-bit `http_content_length` sentinel ($FFFF = absent)
+    lives in SHADOW_BSS at `$A851`, populated by a case-insensitive
+    header match for `Content-Length:` requiring a single SP after
+    the colon. Once `http_resp_len` equals `http_content_length`,
+    state_body returns C=0 and `http_get` exits cleanly. When the
+    header is absent the parser falls back to the previous
+    keep-polling behaviour (preserves chunked/streaming paths).
   - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
   - Boot banner line 03 still says "rr-net" under ip65 build even
     though Phase 2 made it backend-aware — this is correct/expected
     behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
   - The delay-loop fence adds ~2.5 ms overhead per UCI register access
     at 1 MHz (negligible for networking, but visible in tight loops).
-  - TLS 1.3 handshake now advances past CERTIFICATE. The 352 B
-    Certificate record is parsed directly out of `tls_rec_buf`
-    (the separate 256 B `tls_hs_buf` staging buffer — along with
-    the three 8-bit copy loops in `src/tls13.s` that populated it,
-    which had been truncating the Certificate at byte 96 — was
-    eliminated). Handlers in `src/tls_cert.s`,
-    `src/tls_handshake.s`, and `src/tls_keyschedule.s` now read
-    from `tls_rec_buf` / `tls_rec_len` in place; the state machine
-    enforces that each handler finishes before the next record is
-    fetched. Current stall is downstream at CERTIFICATE_VERIFY
-    (`tls_last_state = 0x05`). Two known follow-ups, both
-    pre-existing, surfaced now that we reach this point:
-      * ECDSA P-256 `verify` appears not to complete within the
-        test harness's 120 s deadline at 48 MHz turbo — suspected
-        wall-clock budget issue, not a correctness bug.
-      * `tls_transcript_update`'s ingest loop uses an 8-bit
-        `zp_count`, so handshake messages larger than 256 B (the
-        352 B Certificate in particular) are only hashed for their
-        first 96 B. This will break Finished MAC verification once
-        we clear the CERT_VERIFY stall; needs a 16-bit rewrite.
-    DHCP and plain HTTP are unaffected at all speeds.
+
+### ECDSA P-256 verify wall-clock
+
+`ecdsa_verify` of the RFC 6979 test vector on a U64E at 48 MHz turbo
+runs in ~85 s median (see `tools/uci/bench_ecdsa_u64e.py` for the
+protocol).  The full `tls_connect` handshake — which does one
+ECDSA verify over the CertificateVerify signature — takes ~110 s
+wall-clock end-to-end.  The remainder is network I/O + SHA-256 +
+X25519 + Finished HMACs + handshake state-machine overhead.
+
+~85 s does not fit a typical 10-30 s real-world server handshake
+window, so the current implementation is a blocker for arbitrary
+internet TLS targets that require ECDSA-P256 CertificateVerify.
+It is fine for the local listener used by the e2e harness (600 s
+budget, ample headroom). The speedup path is a sibling-style
+optimized P-256 implementation (parallel to the `c64-x25519`
+effort) that can be dropped in through the Crypto ABI without
+touching TLS call sites.
 
 ### Design note — bounded timeouts must use wall-clock time
 
@@ -251,12 +298,20 @@ regions run from $0801 through $9FFF, with SHADOW_BSS at $A000 and the
 TCP ring at $C000.
 
   $0801-$1FFF  LOADER       BASIC stub + boot + TLS + HTTP + net wrapper
-  $2000-$3FFF  NET_CODE     ip65 code (as .incbin blob)
+  $2000-$3FFF  NET_CODE     ip65 code (as .incbin blob) / UCI adapter,
+                            plus LOADER_OVERFLOW tail
   $4000-$5FFF  NET_BSS      ip65 BSS (zero-filled in the PRG)
   $6000-$9FFF  CRYPTO       all crypto code, rodata, and TABLES_BSS
   $A000-$BFFF  SHADOW_BSS   mutable state behind BASIC ROM shadow
                             (CPU port $01 = $36 selects RAM)
   $C000-$CFFF  TCP_BUF      `tcp_recv_buf`, 4KB ring for ip65 callback
+
+`LOADER_OVERFLOW` is a small segment carrying ~125 B of `http.s` growth
+(Content-Length parser + digit pattern) that did not fit in LOADER's
+~50 B of slack. It rides in the tail of `NET_CODE`, after the ip65
+blob under the ip65 backend and after the UCI adapter under the UCI
+backend. Both `cfg/c64-https-ip65.cfg` and `cfg/c64-https-uci.cfg`
+declare it. Reachable via JSR from LOADER-resident CODE.
 
 Tight regions (after Phase 6 fit-up):
   - **CRYPTO** is **100%** full. Any new crypto byte requires relocation

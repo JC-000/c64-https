@@ -18,6 +18,7 @@
 .export tls_compute_finished
 .export tls_verify_finished
 .export tls_verify_data
+.export tls_c_hs_secret
 
 ; HKDF primitives (hkdf.s)
 .import hkdf_extract
@@ -623,6 +624,10 @@ tls_derive_traffic_keys:
         dex
         bpl @dtk_c8b
 
+        ; Explicit success carry: tls_connect's `bcc @ok10` branch depends
+        ; on the carry flag, and none of the HKDF primitives above set or
+        ; clear it deterministically on the success path.
+        clc
         rts
 
 ; =============================================================================

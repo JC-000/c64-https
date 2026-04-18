@@ -480,18 +480,26 @@ ecdsa_parse_der_sig:
         sta ev_der_int_len
         iny
 
-        ; Clear ecdsa_sig_r
+        ; Clear ecdsa_sig_r.  fp_zero clobbers Y (uses it as a counter),
+        ; so save/restore around the call — we need Y to still point at the
+        ; first byte of r after the clear.
         lda #<ecdsa_sig_r
         sta fp_dst
         lda #>ecdsa_sig_r
         sta fp_dst+1
+        tya
+        pha
         lda ecdsa_sig_len
         cmp #48
         beq @clr_r_384
         jsr fp_zero
+        pla
+        tay
         jmp @parse_r
 @clr_r_384:
         jsr fp_zero            ; STUBBED — dead code for P-256 only
+        pla
+        tay
 
 @parse_r:
         ; Handle leading zero padding: if int_len > sig_len, skip leading 0x00
@@ -548,18 +556,26 @@ ecdsa_parse_der_sig:
         sta ev_der_int_len
         iny
 
-        ; Clear ecdsa_sig_s
+        ; Clear ecdsa_sig_s.  Same Y-preservation dance as for r above:
+        ; fp_zero clobbers Y but we need Y to continue pointing at the
+        ; first byte of s after the clear.
         lda #<ecdsa_sig_s
         sta fp_dst
         lda #>ecdsa_sig_s
         sta fp_dst+1
+        tya
+        pha
         lda ecdsa_sig_len
         cmp #48
         beq @clr_s_384
         jsr fp_zero
+        pla
+        tay
         jmp @parse_s
 @clr_s_384:
         jsr fp_zero            ; STUBBED — dead code for P-256 only
+        pla
+        tay
 
 @parse_s:
         ; Handle leading zero padding

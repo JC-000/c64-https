@@ -75,6 +75,16 @@
 .import tls_compute_finished
 .import tls_verify_finished
 .import tls_verify_data
+.import tls_c_hs_secret
+
+; --- HKDF scratch (hkdf.s / data.asm) ---
+.import hkdf_prk
+
+; --- AEAD sequence counters (data.asm). Reset at every key-epoch change
+;     per RFC 8446 §5.3: the sequence number MUST be zero at the beginning
+;     of a connection and whenever the key is changed. ---
+.import tls_write_seq
+.import tls_read_seq
 
 ; --- Encrypted handshake sub-handlers (tls_cert.s) ---
 .import tls_handle_certificate
@@ -207,7 +217,10 @@ tls_connect:
         ldy #>cv_recv_msg
         jsr print_string
 
-        ; --- receive server Finished (encrypted) ---
+        ; --- receive + verify server Finished (encrypted) ---
+        ; tls_recv_encrypted dispatches to tls_verify_finished internally
+        ; for TLS_HS_FINISHED, so that it runs against the pre-Finished
+        ; transcript (the running hash is updated AFTER the handler).
         lda #TLS_STATE_FINISHED
         sta tls_state
         jsr tls_recv_encrypted
@@ -218,25 +231,24 @@ tls_connect:
         ldy #>fin_recv_msg
         jsr print_string
 
-        ; verify server Finished
-        jsr tls_verify_finished
-        bcc @ok9
-        jmp @error
-@ok9:
-
         ; finalize transcript hash = SHA-256(CH || .. || ServerFinished)
-        ; for application traffic key derivation. Non-destructive finalize
-        ; preserves the running state for the subsequent client Finished
-        ; update.
+        ; for application-traffic-key derivation and for the client
+        ; Finished HMAC.  Non-destructive finalize preserves the running
+        ; state for the subsequent client Finished update.
         jsr tls_transcript_hash
 
-        ; derive application traffic keys
-        jsr tls_derive_traffic_keys
-        bcc @ok10
-        jmp @error
-@ok10:
-
         ; --- send client Finished (encrypted) ---
+        ;
+        ; ORDERING: tls_send_finished MUST run before tls_derive_traffic_keys.
+        ;
+        ; tls_derive_traffic_keys overwrites tls_c_hs_secret / tls_s_hs_secret
+        ; in place with the c_ap_traffic / s_ap_traffic secrets (see the
+        ; "reuse temp buffer" comments in tls_keyschedule.s).  The client
+        ; Finished HMAC needs the client HANDSHAKE traffic secret though,
+        ; so we must compute + send it while those buffers still hold
+        ; the right value.  Both derivations sign the same transcript
+        ; (Transcript-Hash(ClientHello..ServerFinished)), so the single
+        ; snapshot above is shared cleanly.
         jsr tls_send_finished
         bcc @ok8
         jmp @error
@@ -244,6 +256,30 @@ tls_connect:
         lda #<cfin_sent_msg
         ldy #>cfin_sent_msg
         jsr print_string
+
+        ; derive application traffic keys
+        jsr tls_derive_traffic_keys
+        bcc @ok10
+        jmp @error
+@ok10:
+
+        ; RFC 8446 §5.3: reset BOTH AEAD sequence counters at the key-epoch
+        ; boundary.  The write counter was at 1 after sending client Finished
+        ; under the handshake write key; the read counter was at 4 after
+        ; consuming EE/Cert/CV/ServerFinished under the handshake read key.
+        ; Next write (HTTP GET via tls_send) uses the application WRITE key
+        ; and must start from seq=0; next read (server NewSessionTicket or
+        ; application data) uses the application READ key and must likewise
+        ; start from seq=0.  Leaving either non-zero desynchronises the
+        ; AEAD nonce with the peer and the server returns record-layer
+        ; failure on the first application record we send.
+        ldx #7
+@seq_reset:
+        lda #0
+        sta tls_write_seq,x
+        sta tls_read_seq,x
+        dex
+        bpl @seq_reset
 
         ; connected!
         lda #TLS_STATE_CONNECTED
@@ -354,6 +390,8 @@ tls_send_client_hello:
         sta zp_ptr+1
         lda tls_rec_len
         sta zp_count
+        lda tls_rec_len+1
+        sta zp_count+1
         jsr tls_transcript_update
 
         clc
@@ -426,6 +464,8 @@ tls_recv_server_hello:
         sta zp_ptr+1
         lda tls_rec_len
         sta zp_count
+        lda tls_rec_len+1
+        sta zp_count+1
         jsr tls_transcript_update
 
         clc
@@ -483,24 +523,33 @@ tls_recv_encrypted:
 
         ; Decrypted handshake plaintext already sits in tls_rec_buf /
         ; tls_rec_len (tls_record_decrypt leaves it in-place with the inner
-        ; content type byte stripped).  The prior 8-bit copy into
-        ; tls_hs_buf silently truncated records >=256 B — e.g. the 352 B
-        ; Certificate wrapped Y at offset 96 and lost the rest.
+        ; content type byte stripped).
         ;
-        ; Invariant: the dispatch handlers (tls_handle_certificate,
-        ; tls_handle_cert_verify, tls_parse_encrypted_extensions) MUST
-        ; finish reading tls_rec_buf before the next record is fetched.
-        ; The state machine enforces this today because each handler runs
-        ; synchronously and the next recv sits after the return path.
+        ; Transcript discipline (RFC 8446 §4.4.*):
+        ;   - CertificateVerify is signed over Transcript-Hash(ClientHello..Certificate)
+        ;     — i.e. the transcript BEFORE the CertVerify message itself.
+        ;   - server Finished verify_data is HMAC over
+        ;     Transcript-Hash(ClientHello..CertificateVerify) — again, the
+        ;     transcript BEFORE Finished.
+        ;
+        ; So the handlers need tls_transcript to hold the hash EXCLUDING the
+        ; current message.  We:
+        ;   1. snapshot the running hash into tls_transcript (non-destructive)
+        ;      BEFORE the dispatch so tls_handle_cert_verify /
+        ;      tls_verify_finished see the correct value,
+        ;   2. run the handler,
+        ;   3. fold the current message into the running transcript for the
+        ;      next message.
+        ;
+        ; The previous order (update-then-dispatch) left tls_transcript holding
+        ; the stale CH||SH hash at CertVerify time, causing the ECDSA verify
+        ; step to compute a wrong signed-content digest and reject the
+        ; signature.  Invariant: handlers MUST finish reading tls_rec_buf
+        ; before the next record is fetched — enforced by the synchronous
+        ; dispatch/return flow.
 
-        ; update transcript with the handshake message
-        lda #<tls_rec_buf
-        sta zp_ptr
-        lda #>tls_rec_buf
-        sta zp_ptr+1
-        lda tls_rec_len
-        sta zp_count
-        jsr tls_transcript_update
+        ; Snapshot running transcript hash BEFORE dispatch.
+        jsr tls_transcript_hash
 
         lda #<dec_msg
         ldy #>dec_msg
@@ -512,29 +561,49 @@ tls_recv_encrypted:
         ; dispatch based on handshake type (first byte of tls_rec_buf)
         lda tls_rec_buf
         cmp #TLS_HS_ENCRYPTED_EXT
-        beq @enc_ok                     ; accept, nothing to extract for MVP
+        beq @enc_dispatched             ; accept, nothing to extract for MVP
         cmp #TLS_HS_CERTIFICATE
         beq @enc_cert
         cmp #TLS_HS_CERT_VERIFY
         beq @enc_cert_verify
         cmp #TLS_HS_FINISHED
-        beq @enc_ok                     ; accept, verified later by tls_verify_finished
+        beq @enc_finished               ; verify here with pre-Finished transcript
         ; unknown handshake type for current state
         bne @enc_error
 
 @enc_cert:
         jsr tls_handle_certificate
         bcs @enc_error
-        clc
-        rts
+        jmp @enc_update_transcript
 
 @enc_cert_verify:
         jsr tls_handle_cert_verify
         bcs @enc_error
-        clc
-        rts
+        jmp @enc_update_transcript
 
-@enc_ok:
+@enc_finished:
+        ; Verify server Finished with pre-Finished transcript. Must happen
+        ; BEFORE we fold this message into the running hash, otherwise the
+        ; client Finished (and the subsequent app-traffic key derivation)
+        ; would see a mis-ordered transcript.
+        jsr tls_verify_finished
+        bcs @enc_error
+        jmp @enc_update_transcript
+
+@enc_dispatched:
+        ; Fall through: EE etc. accepted, nothing to extract.
+@enc_update_transcript:
+        ; After a successful handler, fold this message into the running
+        ; transcript so the NEXT message sees the correct prefix hash.
+        lda #<tls_rec_buf
+        sta zp_ptr
+        lda #>tls_rec_buf
+        sta zp_ptr+1
+        lda tls_rec_len
+        sta zp_count
+        lda tls_rec_len+1
+        sta zp_count+1
+        jsr tls_transcript_update
         clc
         rts
 @enc_error:
@@ -546,6 +615,20 @@ tls_recv_encrypted:
 ; Output: C=0 success, C=1 failure
 ; =============================================================================
 tls_send_finished:
+        ; tls_compute_finished reads hkdf_prk and treats it as the traffic
+        ; secret to derive the finished_key from.  For the CLIENT Finished we
+        ; need the client HANDSHAKE traffic secret; the previous call into
+        ; the key schedule (tls_verify_finished) left hkdf_prk set to the
+        ; SERVER handshake traffic secret, which would silently produce the
+        ; wrong verify_data and let the server reject our Finished with a
+        ; DIGEST_CHECK_FAILED alert.  Explicitly load c_hs_secret first.
+        ldx #31
+@sf_load_prk:
+        lda tls_c_hs_secret,x
+        sta hkdf_prk,x
+        dex
+        bpl @sf_load_prk
+
         ; Compute verify_data into tls_verify_data (32 bytes).
         jsr tls_compute_finished
 
@@ -583,6 +666,8 @@ tls_send_finished:
         sta zp_ptr+1
         lda #36
         sta zp_count
+        lda #0
+        sta zp_count+1
         jsr tls_transcript_update
 
         ; encrypt and send

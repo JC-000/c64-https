@@ -105,7 +105,8 @@ x25_bit_mask    = $3a           ; 1 byte — current bit mask
 ; --- General pointers (shared, save/restore around ip65) ---
 zp_ptr          = $fb           ; 2 bytes ($FB-$FC)
 zp_temp         = $fd           ; 1 byte
-zp_count        = $fe           ; 1 byte
+zp_count        = $fe           ; 2 bytes ($FE-$FF) — 16-bit count
+                                ; (tls_transcript_update reads both bytes)
 
 ; --- Quarter-square multiply table (shared by Poly1305 and ECDSA) ---
 ; sqtab_lo/sqtab_hi now defined as labels in data.asm — moved out of $7800 to free code space
