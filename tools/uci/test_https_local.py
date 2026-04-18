@@ -445,6 +445,17 @@ def _dump_tls_state_snapshot(transport: Ultimate64Transport,
         ("tls_derived_tmp", 32),        # "derived" intermediate
         ("tls_verify_data", 32),        # computed Finished verify_data
         ("tls_finished_key", 32),       # HKDF-Expand-Label(..., "finished", ...)
+        # --- ECDSA verification inputs (populated by tls_handle_certificate
+        #     and tls_handle_cert_verify — useful for reproducing a failed
+        #     signature check offline in python-cryptography) ---
+        ("ecdsa_pubkey_x", 32),
+        ("ecdsa_pubkey_y", 32),
+        ("ecdsa_sig_r", 32),
+        ("ecdsa_sig_s", 32),
+        ("ecdsa_hash", 32),
+        ("ecdsa_hash_len", 1),
+        ("ecdsa_sig_len", 1),
+        ("ecdsa_curve_id", 1),
         # --- net state ---
         ("net_last_error", 1),
         ("net_tcp_state", 1),
