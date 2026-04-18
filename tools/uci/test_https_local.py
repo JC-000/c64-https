@@ -109,8 +109,12 @@ SENTINEL_VALUE   = 0xAA
 DEFAULT_HTTPS_PORT = int(os.environ.get("HTTPS_PORT", "443"))
 FALLBACK_HTTPS_PORT = 4433
 
-SENTINEL_POLL_TIMEOUT = 120.0   # TLS handshake ~13-15s at 48 MHz; leave slack
-ACCEPT_TIMEOUT        = 180.0   # server-side accept + handshake slack
+SENTINEL_POLL_TIMEOUT = 600.0   # ecdsa_verify alone is ~85s at 48 MHz; full
+                                # post-flight handshake + HTTP needs several
+                                # minutes, so keep this generous. Speed is not
+                                # in scope — correctness is.
+ACCEPT_TIMEOUT        = 600.0   # server-side accept + handshake slack (matches
+                                # the sentinel-poll budget above)
 TURBO_MHZ             = 48
 
 EXPECTED_BODY    = "HELLO FROM TLS SERVER"
@@ -175,7 +179,10 @@ def _run_https_server(srv: socket.socket, ctx: ssl.SSLContext,
                 pass
             return
         try:
-            tls_conn.settimeout(30.0)
+            # Post-handshake request read: C64 still needs to finish Finished
+            # MAC + verify server Finished + send client Finished + build HTTP
+            # request under the ~2.5 ms UCI fence overhead — give it plenty.
+            tls_conn.settimeout(600.0)
             try:
                 req = tls_conn.recv(1024)
                 result["request"] = req
