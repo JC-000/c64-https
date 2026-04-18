@@ -18,11 +18,11 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
  │  │ Record Layer │ Handshake Proto  │    │  tls_record.asm, tls_handshake.asm
  │  └──────┬───────┴────────┬─────────┘    │
  │         │                │              │
- │  ┌──────┴───────┐ ┌─────┴──────────┐   │
- │  │   AEAD       │ │  Key Schedule  │   │  (crypto modules)
- │  │ ChaCha20-    │ │  HKDF-SHA256   │   │  hkdf.asm
- │  │ Poly1305     │ │  ECDHE P-256   │   │
- │  └──────────────┘ └────────────────┘   │
+ │  ┌──────┴───────┐ ┌─────┴──────────┐    │
+ │  │   AEAD       │ │  Key Schedule  │    │  (crypto modules)
+ │  │ ChaCha20-    │ │  HKDF-SHA256   │    │  hkdf.asm
+ │  │ Poly1305     │ │  ECDHE P-256   │    │
+ │  └──────────────┘ └────────────────┘    │
  ├─────────────────────────────────────────┤
  │     Network ABI  (src/net_abi.inc)      │  net_init / net_tcp_* / net_dns_*
  ├──────────────────────┬──────────────────┤
