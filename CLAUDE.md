@@ -245,19 +245,14 @@ Five latent bugs and three new ones were cleared to get here:
 
 ### Known issues
 
-  - `http_get` does not terminate after a complete response: the
-    outer poll-timeout in `http.s` is budgeted as 65536 net_poll
-    iterations, which at 48 MHz turbo with the UCI fence works out
-    to ~40 minutes of wall-clock and always overshoots the
-    `SENTINEL_POLL_TIMEOUT` in the Python harness (600 s).  Body
-    arrives correctly and `http_resp_buf` / `http_resp_len` are
-    already populated when the harness reports TIMEOUT — manual
-    inspection of the diagnostic dump confirms `HELLO FROM TLS
-    SERVER` in the buffer.  Fixing this cleanly needs either a
-    `Content-Length` parse + body-length check (preferred) or a
-    wall-clock-based outer timeout; cycle-counted iteration budgets
-    will always misbehave under the fence as noted in the design
-    note below.
+  - `http_recv_response` now terminates body-read on a Content-Length
+    match: a 16-bit `http_content_length` sentinel ($FFFF = absent)
+    lives in SHADOW_BSS at `$A851`, populated by a case-insensitive
+    header match for `Content-Length:` requiring a single SP after
+    the colon. Once `http_resp_len` equals `http_content_length`,
+    state_body returns C=0 and `http_get` exits cleanly. When the
+    header is absent the parser falls back to the previous
+    keep-polling behaviour (preserves chunked/streaming paths).
   - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
   - Boot banner line 03 still says "rr-net" under ip65 build even
     though Phase 2 made it backend-aware — this is correct/expected
@@ -272,9 +267,16 @@ runs in ~85 s median (see `tools/uci/bench_ecdsa_u64e.py` for the
 protocol).  The full `tls_connect` handshake — which does one
 ECDSA verify over the CertificateVerify signature — takes ~110 s
 wall-clock end-to-end.  The remainder is network I/O + SHA-256 +
-X25519 + Finished HMACs + handshake state-machine overhead.  This
-number is informational: the test harness budgets 600 s total,
-which has ample headroom.
+X25519 + Finished HMACs + handshake state-machine overhead.
+
+~85 s does not fit a typical 10-30 s real-world server handshake
+window, so the current implementation is a blocker for arbitrary
+internet TLS targets that require ECDSA-P256 CertificateVerify.
+It is fine for the local listener used by the e2e harness (600 s
+budget, ample headroom). The speedup path is a sibling-style
+optimized P-256 implementation (parallel to the `c64-x25519`
+effort) that can be dropped in through the Crypto ABI without
+touching TLS call sites.
 
 ### Design note — bounded timeouts must use wall-clock time
 
@@ -296,12 +298,20 @@ regions run from $0801 through $9FFF, with SHADOW_BSS at $A000 and the
 TCP ring at $C000.
 
   $0801-$1FFF  LOADER       BASIC stub + boot + TLS + HTTP + net wrapper
-  $2000-$3FFF  NET_CODE     ip65 code (as .incbin blob)
+  $2000-$3FFF  NET_CODE     ip65 code (as .incbin blob) / UCI adapter,
+                            plus LOADER_OVERFLOW tail
   $4000-$5FFF  NET_BSS      ip65 BSS (zero-filled in the PRG)
   $6000-$9FFF  CRYPTO       all crypto code, rodata, and TABLES_BSS
   $A000-$BFFF  SHADOW_BSS   mutable state behind BASIC ROM shadow
                             (CPU port $01 = $36 selects RAM)
   $C000-$CFFF  TCP_BUF      `tcp_recv_buf`, 4KB ring for ip65 callback
+
+`LOADER_OVERFLOW` is a small segment carrying ~125 B of `http.s` growth
+(Content-Length parser + digit pattern) that did not fit in LOADER's
+~50 B of slack. It rides in the tail of `NET_CODE`, after the ip65
+blob under the ip65 backend and after the UCI adapter under the UCI
+backend. Both `cfg/c64-https-ip65.cfg` and `cfg/c64-https-uci.cfg`
+declare it. Reachable via JSR from LOADER-resident CODE.
 
 Tight regions (after Phase 6 fit-up):
   - **CRYPTO** is **100%** full. Any new crypto byte requires relocation
