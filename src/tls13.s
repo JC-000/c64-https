@@ -80,6 +80,12 @@
 ; --- HKDF scratch (hkdf.s / data.asm) ---
 .import hkdf_prk
 
+; --- AEAD sequence counters (data.asm). Reset at every key-epoch change
+;     per RFC 8446 §5.3: the sequence number MUST be zero at the beginning
+;     of a connection and whenever the key is changed. ---
+.import tls_write_seq
+.import tls_read_seq
+
 ; --- Encrypted handshake sub-handlers (tls_cert.s) ---
 .import tls_handle_certificate
 .import tls_handle_cert_verify
@@ -256,6 +262,24 @@ tls_connect:
         bcc @ok10
         jmp @error
 @ok10:
+
+        ; RFC 8446 §5.3: reset BOTH AEAD sequence counters at the key-epoch
+        ; boundary.  The write counter was at 1 after sending client Finished
+        ; under the handshake write key; the read counter was at 4 after
+        ; consuming EE/Cert/CV/ServerFinished under the handshake read key.
+        ; Next write (HTTP GET via tls_send) uses the application WRITE key
+        ; and must start from seq=0; next read (server NewSessionTicket or
+        ; application data) uses the application READ key and must likewise
+        ; start from seq=0.  Leaving either non-zero desynchronises the
+        ; AEAD nonce with the peer and the server returns record-layer
+        ; failure on the first application record we send.
+        ldx #7
+@seq_reset:
+        lda #0
+        sta tls_write_seq,x
+        sta tls_read_seq,x
+        dex
+        bpl @seq_reset
 
         ; connected!
         lda #TLS_STATE_CONNECTED
