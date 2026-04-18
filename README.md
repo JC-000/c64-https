@@ -24,13 +24,22 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
  │  │ Poly1305     │ │  ECDHE P-256   │   │
  │  └──────────────┘ └────────────────┘   │
  ├─────────────────────────────────────────┤
- │        Network Wrapper (ZP swap)        │  net.asm
- ├─────────────────────────────────────────┤
- │     ip65  (TCP/UDP/DNS/DHCP/ARP)        │  ip65 binary blob
- ├─────────────────────────────────────────┤
- │     RR-Net CS8900a Ethernet Driver      │  ip65 driver
- └─────────────────────────────────────────┘
+ │     Network ABI  (src/net_abi.inc)      │  net_init / net_tcp_* / net_dns_*
+ ├──────────────────────┬──────────────────┤
+ │  ip65 backend        │  UCI backend     │  src/net/ip65/  |  src/net/uci/
+ │  (TCP/UDP/DNS/       │  (firmware-level │
+ │   DHCP/ARP)          │   TCP/UDP/DNS)   │
+ ├──────────────────────┼──────────────────┤
+ │  RR-Net CS8900a      │  Ultimate 64     │  original C64    |  U64E
+ │  Ethernet Driver     │  Elite UCI I/O   │  ($DE00-$DE0F)   |  ($DF1B-$DF1F)
+ └──────────────────────┴──────────────────┘
+   make BACKEND=ip65       make BACKEND=uci
 ```
+
+The TLS, HTTP, and crypto layers are backend-agnostic; they consume
+networking only through `src/net_abi.inc`. Switching backend is a
+link-line change (different cfg + different `src/net/<backend>/*.o`),
+not a call-site change.
 
 ### TLS 1.3 Cipher Suite
 
@@ -42,9 +51,9 @@ Target: **TLS_CHACHA20_POLY1305_SHA256** (0x1303)
 - **Key derivation:** HKDF-SHA256 (new, built from HMAC-SHA256)
 - **PRNG:** HMAC-DRBG seeded from SID+CIA entropy (from c64-aes256-ecdsa)
 
-### Zero Page Time-Sharing
+### Zero Page Time-Sharing (ip65 backend)
 
-The crypto modules and ip65 overlap on zero page $02-$1B. Rather than relocating ip65's ZP (which would cost performance in the networking hot path), we time-share: save crypto ZP before calling ip65, restore after. Crypto and networking never run simultaneously.
+Under the ip65 backend, the crypto modules and ip65 overlap on zero page $02-$1B. Rather than relocating ip65's ZP (which would cost performance in the networking hot path), we time-share: save crypto ZP before calling ip65, restore after. Crypto and networking never run simultaneously. The UCI backend uses absolute addressing throughout and needs no ZP swap.
 
 ```
 $02-$03   Shared tmp (save/restore around ip65 calls)
@@ -77,7 +86,8 @@ $8E00-$93FF  Optimization tables: REU DMA, sqtab2, mul38 (~1.5 KB, below ROM)
 $9400-$BFFF  Data buffers: TLS state, crypto state, record buffers (~11 KB)
               ($A000-$BFFF under BASIC ROM, banked out at boot)
 $C000-$CFFF  Free RAM (4 KB, overflow buffers)
-$DE00-$DE0F  RR-Net CS8900a I/O registers (directly accessed by ip65)
+$DE00-$DE0F  RR-Net CS8900a I/O registers (ip65 backend)
+$DF1B-$DF1F  UCI command/data registers (UCI backend, U64E only)
 ```
 
 TLS 1.3 records can be up to 16,384 bytes, but we negotiate `max_fragment_length` (RFC 6066) to limit records to 512 or 1024 bytes, fitting within C64 RAM constraints.
