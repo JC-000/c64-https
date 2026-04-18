@@ -207,7 +207,10 @@ tls_connect:
         ldy #>cv_recv_msg
         jsr print_string
 
-        ; --- receive server Finished (encrypted) ---
+        ; --- receive + verify server Finished (encrypted) ---
+        ; tls_recv_encrypted dispatches to tls_verify_finished internally
+        ; for TLS_HS_FINISHED, so that it runs against the pre-Finished
+        ; transcript (the running hash is updated AFTER the handler).
         lda #TLS_STATE_FINISHED
         sta tls_state
         jsr tls_recv_encrypted
@@ -217,12 +220,6 @@ tls_connect:
         lda #<fin_recv_msg
         ldy #>fin_recv_msg
         jsr print_string
-
-        ; verify server Finished
-        jsr tls_verify_finished
-        bcc @ok9
-        jmp @error
-@ok9:
 
         ; finalize transcript hash = SHA-256(CH || .. || ServerFinished)
         ; for application traffic key derivation. Non-destructive finalize
@@ -487,26 +484,33 @@ tls_recv_encrypted:
 
         ; Decrypted handshake plaintext already sits in tls_rec_buf /
         ; tls_rec_len (tls_record_decrypt leaves it in-place with the inner
-        ; content type byte stripped).  The prior 8-bit copy into
-        ; tls_hs_buf silently truncated records >=256 B — e.g. the 352 B
-        ; Certificate wrapped Y at offset 96 and lost the rest.
+        ; content type byte stripped).
         ;
-        ; Invariant: the dispatch handlers (tls_handle_certificate,
-        ; tls_handle_cert_verify, tls_parse_encrypted_extensions) MUST
-        ; finish reading tls_rec_buf before the next record is fetched.
-        ; The state machine enforces this today because each handler runs
-        ; synchronously and the next recv sits after the return path.
+        ; Transcript discipline (RFC 8446 §4.4.*):
+        ;   - CertificateVerify is signed over Transcript-Hash(ClientHello..Certificate)
+        ;     — i.e. the transcript BEFORE the CertVerify message itself.
+        ;   - server Finished verify_data is HMAC over
+        ;     Transcript-Hash(ClientHello..CertificateVerify) — again, the
+        ;     transcript BEFORE Finished.
+        ;
+        ; So the handlers need tls_transcript to hold the hash EXCLUDING the
+        ; current message.  We:
+        ;   1. snapshot the running hash into tls_transcript (non-destructive)
+        ;      BEFORE the dispatch so tls_handle_cert_verify /
+        ;      tls_verify_finished see the correct value,
+        ;   2. run the handler,
+        ;   3. fold the current message into the running transcript for the
+        ;      next message.
+        ;
+        ; The previous order (update-then-dispatch) left tls_transcript holding
+        ; the stale CH||SH hash at CertVerify time, causing the ECDSA verify
+        ; step to compute a wrong signed-content digest and reject the
+        ; signature.  Invariant: handlers MUST finish reading tls_rec_buf
+        ; before the next record is fetched — enforced by the synchronous
+        ; dispatch/return flow.
 
-        ; update transcript with the handshake message
-        lda #<tls_rec_buf
-        sta zp_ptr
-        lda #>tls_rec_buf
-        sta zp_ptr+1
-        lda tls_rec_len
-        sta zp_count
-        lda tls_rec_len+1
-        sta zp_count+1
-        jsr tls_transcript_update
+        ; Snapshot running transcript hash BEFORE dispatch.
+        jsr tls_transcript_hash
 
         lda #<dec_msg
         ldy #>dec_msg
@@ -518,29 +522,49 @@ tls_recv_encrypted:
         ; dispatch based on handshake type (first byte of tls_rec_buf)
         lda tls_rec_buf
         cmp #TLS_HS_ENCRYPTED_EXT
-        beq @enc_ok                     ; accept, nothing to extract for MVP
+        beq @enc_dispatched             ; accept, nothing to extract for MVP
         cmp #TLS_HS_CERTIFICATE
         beq @enc_cert
         cmp #TLS_HS_CERT_VERIFY
         beq @enc_cert_verify
         cmp #TLS_HS_FINISHED
-        beq @enc_ok                     ; accept, verified later by tls_verify_finished
+        beq @enc_finished               ; verify here with pre-Finished transcript
         ; unknown handshake type for current state
         bne @enc_error
 
 @enc_cert:
         jsr tls_handle_certificate
         bcs @enc_error
-        clc
-        rts
+        jmp @enc_update_transcript
 
 @enc_cert_verify:
         jsr tls_handle_cert_verify
         bcs @enc_error
-        clc
-        rts
+        jmp @enc_update_transcript
 
-@enc_ok:
+@enc_finished:
+        ; Verify server Finished with pre-Finished transcript. Must happen
+        ; BEFORE we fold this message into the running hash, otherwise the
+        ; client Finished (and the subsequent app-traffic key derivation)
+        ; would see a mis-ordered transcript.
+        jsr tls_verify_finished
+        bcs @enc_error
+        jmp @enc_update_transcript
+
+@enc_dispatched:
+        ; Fall through: EE etc. accepted, nothing to extract.
+@enc_update_transcript:
+        ; After a successful handler, fold this message into the running
+        ; transcript so the NEXT message sees the correct prefix hash.
+        lda #<tls_rec_buf
+        sta zp_ptr
+        lda #>tls_rec_buf
+        sta zp_ptr+1
+        lda tls_rec_len
+        sta zp_count
+        lda tls_rec_len+1
+        sta zp_count+1
+        jsr tls_transcript_update
         clc
         rts
 @enc_error:
