@@ -54,6 +54,7 @@
 ; --- primitives from uci_cmd.s ---
 .import uci_abort
 .import uci_wait_idle
+.import uci_wait_not_busy
 .import uci_begin_cmd
 .import uci_put_byte
 .import uci_push_wait
@@ -137,7 +138,7 @@ net_poll:
         beq @do_poll
         rts
 @do_poll:
-        jsr uci_wait_idle
+        jsr uci_wait_not_busy
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd

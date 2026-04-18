@@ -179,9 +179,20 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
                             MHz turbo, and captures full diagnostics on
                             pass or timeout. `DEBUG_CAPTURE=1` enables a
                             bounded 6510 bus stream for post-mortem.
-                            Reproducibly stalls at `tls_state=0x03`
-                            (see Known issues below) — the test exists
-                            to capture the stall, not to fix it.
+                            Each run writes a timestamped artifact dir
+                            under `$UCI_DEBUG_DIR` (default
+                            `/tmp/uci_https_debug/<ISO>/`) containing:
+                            packed raw trace (`trace.bin` + meta sidecar),
+                            derived `summary.txt` / `tail.txt` /
+                            `uci_accesses.txt`, the full 4 KB ring
+                            (`ring.bin` + `ring_meta.json`), a DMA-read
+                            TLS state snapshot (`tls_state_dump.json`),
+                            the listener's `server_result.json`, and
+                            `run_info.txt`. Rotation keeps the last 5
+                            dirs; `UCI_DEBUG_KEEP_ON_PASS=1` preserves
+                            PASS runs. Currently still fails inside
+                            `tls_handle_certificate` (X.509 parsing) —
+                            see Known issues below.
 
 ### Known issues
 
@@ -196,12 +207,20 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
     behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
   - The delay-loop fence adds ~2.5 ms overhead per UCI register access
     at 1 MHz (negligible for networking, but visible in tight loops).
-  - TLS 1.3 handshake stalls mid-flight on real U64E at 48 MHz turbo.
-    Server sends its full flight and the C64 consumes ServerHello plus
-    partial encrypted records (tcp_recv ring drains to ~$02B1), then
-    TLS recv waits indefinitely for more bytes at `tls_state=0x03`.
-    Reproducible under `tools/uci/test_https_local.py`. Root cause not
-    yet identified. DHCP and plain HTTP are unaffected at all speeds.
+  - TLS 1.3 handshake currently stalls inside `tls_handle_certificate`
+    (`src/tls_cert.s`) during X.509 parsing. Two upstream bugs that
+    used to mask this were fixed in the current branch: (a) a `net_poll`
+    entry gate that spun forever on post-drain residual STATE bits
+    (fixed by swapping `uci_wait_idle` → `uci_wait_not_busy` at the
+    `net_poll` preamble only — other call sites remain on wait_idle),
+    and (b) `tls_transcript_hash` was defined in `src/tls_transcript.s`
+    but never called, so handshake + application key derivation fed
+    32 zero bytes into HKDF-Expand-Label as the transcript context.
+    After the fix, handshake AEAD decryption succeeds, EncryptedExt
+    processes, and the 352 B Certificate record decrypts into
+    `tls_hs_buf` — stall moved forward from ENCRYPTED_EXT (0x03) to
+    CERTIFICATE (0x04). DHCP and plain HTTP are unaffected at all
+    speeds.
 
 ### Design note — bounded timeouts must use wall-clock time
 
