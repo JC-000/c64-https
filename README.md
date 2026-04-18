@@ -108,9 +108,9 @@ make run                # Build and launch in VICE (x64sc)
 make clean              # Remove build artifacts
 ```
 
-### ip65 Build
+### ip65 Build (ip65 backend only)
 
-The Makefile automatically builds ip65 from the submodule into a flat binary blob at $2000, using a custom ld65 linker config (`ip65-build/ip65.cfg`). The blob is then included in the ACME build via `!binary`.
+The Makefile automatically builds ip65 from the submodule into a flat binary blob at $2000, using a custom ld65 linker config (`ip65-build/ip65.cfg`). The blob is then linked into the ca65 build via `.incbin`. The UCI backend does not use this blob.
 
 ## Project Status
 
@@ -131,17 +131,18 @@ Current status (40 KB binary, 537 labels):
 - [x] X.509 certificate parsing — DER parser extracts TBS, public key, signature (r,s), curve ID for P-256 and P-384
 - [x] ECDSA signature verification — P-256 and P-384, full verify (s⁻¹, scalar mul, point add, Jacobian→affine)
 - [x] HTTP/1.1 GET request — build GET, parse response (status + headers + body), plain HTTP end-to-end
-- [x] **End-to-end HTTPS GET demo** — TLS 1.3 handshake + HTTP GET completes against a local Python TLS listener (ECDSA-P256 cert) on real Ultimate 64 Elite hardware at 48 MHz turbo. Returns `http_status=200`, body `"HELLO FROM TLS SERVER"`. See `tools/uci/test_https_local.py`.
+- [x] **End-to-end HTTPS GET demo (UCI backend)** — TLS 1.3 handshake + HTTP GET completes against a local Python TLS listener (ECDSA-P256 cert) on real Ultimate 64 Elite hardware at 48 MHz turbo. Returns `http_status=200`, body `"HELLO FROM TLS SERVER"`. See `tools/uci/test_https_local.py`. The equivalent end-to-end HTTPS path over VICE/ip65 is not yet proven — only DHCP and plain HTTP currently pass on the bridge rig (see End-to-End Bridge Tests below).
 
 ### Known Issues
 
-- **ECDSA P-256 verify** runs ~85 s/op at 48 MHz turbo on the U64E. Sufficient for the local listener (which holds the connection open), but exceeds typical 10-30 s real-world server handshake windows. Real-internet ECDSA-P256 targets need a sibling-style optimized P-256 implementation (parallel to the `c64-x25519` work).
-- **P-384** ECDSA is currently stubbed. Cert chains requiring P-384 will not verify until restored.
-- **VICE 3.9** previously appeared to crash on chained HMAC-SHA256 calls, but this was caused by hardcoded port numbers bypassing the test harness port allocator. With proper `ViceInstanceManager` usage (no hardcoded ports), all N=1..10 chained calls succeed reliably.
+- **ECDSA P-256 verify** runs ~85 s/op on the U64E at 48 MHz turbo (UCI backend). Sufficient for the local listener (which holds the connection open), but exceeds typical 10-30 s real-world server handshake windows. Real-internet ECDSA-P256 targets need a sibling-style optimized P-256 implementation (parallel to the `c64-x25519` work). The ip65/VICE path has not been measured end-to-end because HTTPS over the bridge rig is not yet proven.
+- **P-384** ECDSA is currently stubbed (both backends). Cert chains requiring P-384 will not verify until restored.
+- **Live internet HTTP GET (UCI backend)** has not been re-verified since the FPGA-fence rework; only the local multi-segment listener is exercised regularly.
+- **VICE 3.9** previously appeared to crash on chained HMAC-SHA256 calls (backend-independent — affects the crypto-only test suites), but this was caused by hardcoded port numbers bypassing the test harness port allocator. With proper `ViceInstanceManager` usage (no hardcoded ports), all N=1..10 chained calls succeed reliably.
 
 ## Test Automation
 
-253 tests across 11 suites (+ 1 standalone diagnostic), using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its binary monitor protocol. The parallel runner allocates a fresh VICE instance per suite (with REU support for x25519) to avoid state contamination. All tests log VICE PID and port for multi-agent safety.
+253 tests across 11 suites (+ 1 standalone diagnostic), using the [`c64-test-harness`](../c64-test-harness) package to drive VICE via its binary monitor protocol. VICE runs the **ip65 backend by default** (the UCI backend targets real U64E hardware — see the Ultimate 64 Elite Hardware Tests section below). The parallel runner allocates a fresh VICE instance per suite (with REU support for x25519) to avoid state contamination. All tests log VICE PID and port for multi-agent safety.
 
 ```bash
 pip install -e ../c64-test-harness
@@ -177,9 +178,9 @@ sudo PYTHONPATH=tools python3 tests/test_phase1_dhcp.py   # DHCP over RR-Net bri
 sudo PYTHONPATH=tools python3 tests/test_phase2_http.py   # Plain HTTP GET over bridge
 ```
 
-### End-to-End Bridge Tests
+### End-to-End Bridge Tests (ip65 backend)
 
-Full end-to-end tests that drive the real c64-https binary in VICE over a Linux bridge with RR-Net ethernet (the same pattern used by [`c64-test-harness` bridge networking](../c64-test-harness/docs/bridge_networking.md)). VICE runs at **normal speed** (warp breaks RR-Net DHCP), so these tests need generous timeouts (~90-120s per phase).
+Full end-to-end tests that drive the real c64-https binary in VICE over a Linux bridge with RR-Net ethernet (the same pattern used by [`c64-test-harness` bridge networking](../c64-test-harness/docs/bridge_networking.md)). These exercise the **ip65/RR-Net path only** — HTTPS end-to-end on this rig is not yet proven; only DHCP (phase1) and plain HTTP (phase2) pass today. VICE runs at **normal speed** (warp breaks RR-Net DHCP), so these tests need generous timeouts (~90-120s per phase).
 
 **Setup:**
 
@@ -202,9 +203,9 @@ The setup script creates `br-c64` with `tap-c64-0`/`tap-c64-1`, assigns `10.0.65
 | `c64_menu.py` | `press_key()`, `wait_for_screen_text()`, `get_screen_text()` |
 | `http_listener.py` | `start_http_listener()` → `HttpListenerHandle`, `stop_http_listener()` |
 
-### Ultimate 64 Elite Hardware Tests
+### Ultimate 64 Elite Hardware Tests (UCI backend)
 
-Scripts under `tools/uci/` drive a real Ultimate 64 Elite over the network (default `192.168.1.81`). They DMA the PRG into RAM, run the boot, and snapshot UCI/TLS state on completion or timeout.
+Scripts under `tools/uci/` drive a real Ultimate 64 Elite over the network (default `192.168.1.81`), exercising the **UCI backend only** (built with `make BACKEND=uci`). They DMA the PRG into RAM, run the boot, and snapshot UCI/TLS state on completion or timeout. These scripts do not run under VICE.
 
 ```bash
 python3 tools/uci/boot_check.py          # UCI firmware detection
@@ -214,7 +215,7 @@ python3 tools/uci/test_http_local.py     # HTTP GET against local listener
 python3 tools/uci/test_https_local.py    # HTTPS GET (TLS 1.3 + ECDSA-P256)
 ```
 
-`test_https_local.py` is the end-to-end HTTPS demo: it boots the U64E at 48 MHz turbo, connects to a local Python TLS listener using the test cert under `tools/https_e2e/certs/`, and confirms a full TLS 1.3 handshake + HTTP GET. With `DEBUG_CAPTURE=1`, each run writes a timestamped artifact directory under `$UCI_DEBUG_DIR` (default `/tmp/uci_https_debug/`) with raw 6510 bus trace, TLS state snapshot, and listener result.
+`test_https_local.py` is the end-to-end HTTPS demo (UCI backend only): it boots the U64E at 48 MHz turbo, connects to a local Python TLS listener using the test cert under `tools/https_e2e/certs/`, and confirms a full TLS 1.3 handshake + HTTP GET. With `DEBUG_CAPTURE=1`, each run writes a timestamped artifact directory under `$UCI_DEBUG_DIR` (default `/tmp/uci_https_debug/`) with raw 6510 bus trace, TLS state snapshot, and listener result.
 
 ## Related Projects
 
