@@ -17,6 +17,7 @@
 .export tls_derive_traffic_keys
 .export tls_compute_finished
 .export tls_verify_finished
+.export tls_verify_data
 
 ; HKDF primitives (hkdf.s)
 .import hkdf_extract
@@ -53,7 +54,7 @@
 .import tls_app_write_iv
 .import tls_app_read_key
 .import tls_app_read_iv
-.import tls_hs_buf
+.import tls_rec_buf
 .import input_buffer
 
 ; HMAC BSS state (data.asm)
@@ -703,7 +704,7 @@ tls_compute_finished:
 ;
 ; Input: tls_s_hs_secret = server handshake traffic secret
 ;        tls_transcript = transcript hash up to (but not including) Finished
-;        tls_hs_buf+4 = received verify_data (32 bytes, after 4-byte HS header)
+;        tls_rec_buf+4 = received verify_data (32 bytes, after 4-byte HS header)
 ; Output: C=0 if match (server Finished is valid)
 ;         C=1 if mismatch (verification failed)
 ;
@@ -721,14 +722,14 @@ tls_verify_finished:
         ; Compute expected Finished
         jsr tls_compute_finished
 
-        ; Constant-time comparison of tls_verify_data vs tls_hs_buf+4
+        ; Constant-time comparison of tls_verify_data vs tls_rec_buf+4
         ; Accumulate differences in A (OR of all XOR bytes)
         lda #0
         sta zp_tmp1                     ; clear accumulator
         tax                             ; X = index
 @vf_cmp:
         lda tls_verify_data,x
-        eor tls_hs_buf+4,x
+        eor tls_rec_buf+4,x
         ora zp_tmp1                     ; accumulate differences
         sta zp_tmp1
         inx

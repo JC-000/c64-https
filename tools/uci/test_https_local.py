@@ -401,9 +401,11 @@ def _dump_tls_state_snapshot(transport: Ultimate64Transport,
         ("tls_rec_len", 2),
         ("tls_recv_state", 1),
         ("tls_recv_count", 2),
-        # --- handshake msg buffer (256B total per data.s) ---
-        ("tls_hs_buf", 256),
-        ("tls_hs_len", 2),
+        # tls_rec_buf holds the decrypted handshake message plaintext
+        # (formerly copied into tls_hs_buf; staging buffer removed).
+        # 548 B is a bit large for the JSON snapshot but essential for
+        # post-mortem cert-parse diagnosis, so capture the full record.
+        ("tls_rec_buf", 548),
         # --- app-data plumbing ---
         ("tls_app_ptr", 2),
         ("tls_app_len", 2),
