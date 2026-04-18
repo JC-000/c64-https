@@ -210,7 +210,7 @@ The setup script creates `br-c64` with `tap-c64-0`/`tap-c64-1`, assigns `10.0.65
 
 ### Ultimate 64 Elite Hardware Tests (UCI backend)
 
-Scripts under `tools/uci/` drive a real Ultimate 64 Elite over the network (default `192.168.1.81`), exercising the **UCI backend only** (built with `make BACKEND=uci`). They DMA the PRG into RAM, run the boot, and snapshot UCI/TLS state on completion or timeout. These scripts do not run under VICE.
+Scripts under `tools/uci/` drive a real Ultimate 64 Elite over the network (default `192.168.1.81`, overridable via the `U64_HOST` environment variable), exercising the **UCI backend only** (built with `make BACKEND=uci`). They DMA the PRG into RAM, run the boot, and snapshot UCI/TLS state on completion or timeout. These scripts do not run under VICE.
 
 ```bash
 python3 tools/uci/boot_check.py          # UCI firmware detection

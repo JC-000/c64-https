@@ -163,7 +163,8 @@ to the ip65 layout.
 
 ### UCI test scripts
 
-Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
+Scripts under `tools/uci/` require a U64E (default 192.168.1.81,
+overridable via the `U64_HOST` environment variable) and use
 `DeviceLock` + `enable_uci`/`disable_uci`:
 
   - `boot_check.py`       — verify UCI firmware detection and boot banner

@@ -3,9 +3,10 @@
 Phase 1b boot check for the UCI backend.
 
 Uploads build/c64-https.prg (assumed to have been built with
-`make BACKEND=uci`) to the U64E at 192.168.1.81, waits for the PRG
-to boot, reads screen RAM at $0400 (40x25 = 1000 bytes), decodes the
-Commodore screen-code bytes to ASCII, and prints the non-empty lines.
+`make BACKEND=uci`) to the U64E (default 192.168.1.81, overridable via
+U64_HOST), waits for the PRG to boot, reads screen RAM at $0400
+(40x25 = 1000 bytes), decodes the Commodore screen-code bytes to
+ASCII, and prints the non-empty lines.
 
 Pass criterion: screen contains printable text (not a uniform field
 of spaces or garbage). This only verifies the PRG loads and runs on
@@ -13,9 +14,13 @@ real hardware — no UCI commands are exercised.
 
 Usage:
     python3 tools/uci/boot_check.py
+
+Environment:
+    U64_HOST  — U64E address (default 192.168.1.81)
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -23,7 +28,7 @@ from pathlib import Path
 from c64_test_harness.backends.device_lock import DeviceLock
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 
-HOST = "192.168.1.81"
+HOST = os.environ.get("U64_HOST", "192.168.1.81")
 PRG_PATH = Path(__file__).resolve().parents[2] / "build" / "c64-https.prg"
 
 
