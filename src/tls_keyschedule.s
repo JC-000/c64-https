@@ -18,6 +18,7 @@
 .export tls_compute_finished
 .export tls_verify_finished
 .export tls_verify_data
+.export tls_c_hs_secret
 
 ; HKDF primitives (hkdf.s)
 .import hkdf_extract

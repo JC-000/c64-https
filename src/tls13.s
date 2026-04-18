@@ -75,6 +75,10 @@
 .import tls_compute_finished
 .import tls_verify_finished
 .import tls_verify_data
+.import tls_c_hs_secret
+
+; --- HKDF scratch (hkdf.s / data.asm) ---
+.import hkdf_prk
 
 ; --- Encrypted handshake sub-handlers (tls_cert.s) ---
 .import tls_handle_certificate
@@ -222,18 +226,23 @@ tls_connect:
         jsr print_string
 
         ; finalize transcript hash = SHA-256(CH || .. || ServerFinished)
-        ; for application traffic key derivation. Non-destructive finalize
-        ; preserves the running state for the subsequent client Finished
-        ; update.
+        ; for application-traffic-key derivation and for the client
+        ; Finished HMAC.  Non-destructive finalize preserves the running
+        ; state for the subsequent client Finished update.
         jsr tls_transcript_hash
 
-        ; derive application traffic keys
-        jsr tls_derive_traffic_keys
-        bcc @ok10
-        jmp @error
-@ok10:
-
         ; --- send client Finished (encrypted) ---
+        ;
+        ; ORDERING: tls_send_finished MUST run before tls_derive_traffic_keys.
+        ;
+        ; tls_derive_traffic_keys overwrites tls_c_hs_secret / tls_s_hs_secret
+        ; in place with the c_ap_traffic / s_ap_traffic secrets (see the
+        ; "reuse temp buffer" comments in tls_keyschedule.s).  The client
+        ; Finished HMAC needs the client HANDSHAKE traffic secret though,
+        ; so we must compute + send it while those buffers still hold
+        ; the right value.  Both derivations sign the same transcript
+        ; (Transcript-Hash(ClientHello..ServerFinished)), so the single
+        ; snapshot above is shared cleanly.
         jsr tls_send_finished
         bcc @ok8
         jmp @error
@@ -241,6 +250,12 @@ tls_connect:
         lda #<cfin_sent_msg
         ldy #>cfin_sent_msg
         jsr print_string
+
+        ; derive application traffic keys
+        jsr tls_derive_traffic_keys
+        bcc @ok10
+        jmp @error
+@ok10:
 
         ; connected!
         lda #TLS_STATE_CONNECTED
@@ -576,6 +591,20 @@ tls_recv_encrypted:
 ; Output: C=0 success, C=1 failure
 ; =============================================================================
 tls_send_finished:
+        ; tls_compute_finished reads hkdf_prk and treats it as the traffic
+        ; secret to derive the finished_key from.  For the CLIENT Finished we
+        ; need the client HANDSHAKE traffic secret; the previous call into
+        ; the key schedule (tls_verify_finished) left hkdf_prk set to the
+        ; SERVER handshake traffic secret, which would silently produce the
+        ; wrong verify_data and let the server reject our Finished with a
+        ; DIGEST_CHECK_FAILED alert.  Explicitly load c_hs_secret first.
+        ldx #31
+@sf_load_prk:
+        lda tls_c_hs_secret,x
+        sta hkdf_prk,x
+        dex
+        bpl @sf_load_prk
+
         ; Compute verify_data into tls_verify_data (32 bytes).
         jsr tls_compute_finished
 
