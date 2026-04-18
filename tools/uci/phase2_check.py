@@ -20,9 +20,13 @@ UCI_ERR_NOT_PRESENT code and net_dhcp_acquire would never execute.
 
 Usage:
     python3 tools/uci/phase2_check.py
+
+Environment:
+    U64_HOST  — U64E address (default 192.168.1.81)
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -32,7 +36,7 @@ from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 from c64_test_harness.uci_network import enable_uci, disable_uci
 
-HOST = "192.168.1.81"
+HOST = os.environ.get("U64_HOST", "192.168.1.81")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRG_PATH = REPO_ROOT / "build" / "c64-https.prg"
 LABELS_PATH = REPO_ROOT / "build" / "labels.txt"
