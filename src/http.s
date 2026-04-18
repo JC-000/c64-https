@@ -37,6 +37,7 @@
         .import http_hdr_match
         .import http_line_idx
         .import http_line_buf
+        .import http_content_length
 
         ; ---- imports: data.asm BSS (TLS app data + TCP ring tail) ----
         .import tls_app_ptr
@@ -130,7 +131,8 @@ http_get:
 :
 
         ; --- 8. Receive response via TLS ---
-        ; Initialise parser state
+        ; Initialise parser state. http_content_length / _known are reset
+        ; at the status-line -> headers transition (see @parse_status_line).
         lda #0
         sta http_parse_state
         sta http_line_idx
@@ -465,60 +467,55 @@ http_recv_response:
         sta http_parse_state
         lda #0
         sta http_hdr_match
+        sta http_line_idx
+        ; Reset Content-Length sentinel to $FFFF ("unknown") — will be
+        ; overwritten by check_content_length if the header is seen.
+        lda #$ff
+        sta http_content_length
+        sta http_content_length+1
         jmp @state_headers
 
-; ----- state 1: skip headers until \r\n\r\n -----
+; ----- state 1: read header lines into http_line_buf until an empty line -----
+; Each header line is accumulated (CR stripped) and on LF we call
+; check_content_length to pick up Content-Length.  An empty accumulated
+; line (idx == 0 on LF) signals end-of-headers (the \r\n\r\n terminator).
+; This replaces the earlier 4-byte \r\n\r\n pattern matcher — one state
+; machine is smaller than two running in parallel.
 @state_headers:
         jsr net_recv_byte
-        bcs @not_done
-        ; We track a match index into the pattern \r\n\r\n
-        ; Pattern bytes: $0d, $0a, $0d, $0a
-        ldx http_hdr_match
-        cpx #0
-        bne @hm_check1
-        ; expecting $0d
-        cmp #$0d
-        bne @hm_reset
-        inc http_hdr_match
+        bcc @hdr_got_byte
+        jmp @not_done
+@hdr_got_byte:
+        cmp #$0a                ; LF ends a line
+        beq @hl_eol
+        cmp #$0d                ; CR is discarded
+        beq @state_headers
+        ldx http_line_idx
+        cpx #31                 ; cap buffer at 31 bytes (32-byte buf)
+        bcs @state_headers
+        sta http_line_buf,x
+        inc http_line_idx
         jmp @state_headers
-@hm_check1:
-        cpx #1
-        bne @hm_check2
-        cmp #$0a
-        bne @hm_reset
-        inc http_hdr_match
+
+@hl_eol:
+        lda http_line_idx
+        beq @hdr_end            ; empty line -> end of headers
+        jsr check_content_length
+        lda #0
+        sta http_line_idx
         jmp @state_headers
-@hm_check2:
-        cpx #2
-        bne @hm_check3
-        cmp #$0d
-        bne @hm_reset
-        inc http_hdr_match
-        jmp @state_headers
-@hm_check3:
-        ; idx == 3, expecting $0a
-        cmp #$0a
-        bne @hm_reset
-        ; matched full \r\n\r\n -> body starts.  Fall through to
-        ; @state_body in the same call so that any body bytes already in
-        ; the ring from the current TLS record get consumed immediately.
-        ; Returning @not_done here would strand the body bytes until the
-        ; next TLS record arrived — and if the body was short enough to
-        ; fit alongside the headers in one record (as in our 21 B local
-        ; test) no further TLS record would come, so http_recv_response
-        ; would stall in state 1 forever and http_get would spin until
-        ; its poll-timeout gave up with http_resp_len == 0.
+@hdr_end:
+        ; Transition to state 2.  Body bytes that share this TLS record
+        ; will be consumed in the same http_recv_response call by the
+        ; fallthrough below — returning @not_done here would strand a
+        ; short body until the next record, and for a response that
+        ; fits entirely in one record no further record ever arrives.
         lda #2
         sta http_parse_state
         lda #0
         sta http_resp_len
         sta http_resp_len+1
         jmp @state_body
-
-@hm_reset:
-        lda #0
-        sta http_hdr_match
-        jmp @state_headers
 
 ; ----- state 2: read body bytes -----
 ; RFC 7230 behaviour: we treat an empty ring as "body still arriving"
@@ -535,6 +532,19 @@ http_recv_response:
 ; first post-handshake TLS record the parser sees contains only the
 ; status line + headers and the body lands in the next record.
 @state_body:
+        ; Content-Length termination: http_content_length defaults to $FFFF
+        ; ("unknown"), overwritten by check_content_length if the header
+        ; was seen.  $FFFF will never match because the buffer-full check
+        ; below bails at 512 bytes.  For a real Content-Length value we
+        ; finish the instant resp_len matches — handles Content-Length: 0
+        ; on entry and the post-append case below.
+        lda http_resp_len
+        cmp http_content_length
+        bne @body_read
+        lda http_resp_len+1
+        cmp http_content_length+1
+        beq @done
+@body_read:
         jsr net_recv_byte
         bcs @not_done           ; no byte right now -> poll more
         ; store byte using zp_ptr = http_resp_buf + http_resp_len
@@ -558,7 +568,7 @@ http_recv_response:
         lda http_resp_len+1
         cmp #$02
         bcs @done               ; high byte >= 2 means >= 512
-        jmp @state_body         ; keep reading
+        jmp @state_body         ; keep reading (also re-checks Content-Length)
 
 @not_done:
         sec
@@ -568,12 +578,95 @@ http_recv_response:
         rts
 
 ; =============================================================================
+; check_content_length - inspect http_line_buf[0..http_line_idx) for the
+;   header  "Content-Length: <digits>"  (case-insensitive on the name, a
+;   single SP after the colon).  On match, the decimal value is stored in
+;   http_content_length (16-bit) — which the caller pre-loaded with the
+;   $FFFF "unknown" sentinel.  No-op otherwise.
+;   Clobbers: A, X, Y
+;
+; Lives in the LOADER_OVERFLOW segment (reachable via JSR from CODE in
+; LOADER) because the LOADER region is packed; see c64-https-ip65.cfg.
+; =============================================================================
+        .segment "LOADER_OVERFLOW"
+check_content_length:
+        ; Need at least len("content-length: ") = 16 bytes in the line.
+        lda http_line_idx
+        cmp #16
+        bcc @ccl_rts            ; line too short -> no-op
+        ; Case-insensitive compare against lowercase pattern.  Each line
+        ; byte is OR'd with $20, which folds A..Z to a..z and leaves ':'
+        ; and ' ' unchanged.
+        ldx #15
+@ccl_cmp:
+        lda http_line_buf,x
+        ora #$20
+        cmp cl_pattern,x
+        bne @ccl_rts
+        dex
+        bpl @ccl_cmp
+        ; Matched.  Zero the accumulator and parse digits starting at idx 16.
+        lda #0
+        sta http_content_length
+        sta http_content_length+1
+        ldx #16
+@ccl_digit_loop:
+        cpx http_line_idx
+        bcs @ccl_rts
+        lda http_line_buf,x
+        cmp #$30                ; '0'
+        bcc @ccl_rts
+        cmp #$3a                ; '9'+1
+        bcs @ccl_rts
+        sec
+        sbc #$30                ; A = digit 0..9
+        pha
+        ; old *= 10  =  old*8 + old*2 (need THREE ASLs to reach *8; tmp
+        ; holds *2 after the first shift).
+        asl http_content_length
+        rol http_content_length+1
+        lda http_content_length
+        sta zp_ptr              ; tmp_lo = old*2
+        lda http_content_length+1
+        sta zp_ptr+1            ; tmp_hi = old*2
+        asl http_content_length
+        rol http_content_length+1
+        asl http_content_length
+        rol http_content_length+1
+        clc
+        lda http_content_length
+        adc zp_ptr
+        sta http_content_length
+        lda http_content_length+1
+        adc zp_ptr+1
+        sta http_content_length+1
+        pla
+        clc
+        adc http_content_length
+        sta http_content_length
+        bcc @ccl_nc
+        inc http_content_length+1
+@ccl_nc:
+        inx
+        jmp @ccl_digit_loop
+@ccl_rts:
+        rts
+
+; Lowercase "content-length: " — each incoming header byte is OR'd with
+; $20 before compare, which folds A..Z to a..z and leaves ':' and ' '
+; unchanged.  The trailing SP is part of the match so we don't need a
+; separate whitespace-skip loop.
+cl_pattern:
+        .byte "content-length: "
+
+; =============================================================================
 ; http_get_plain - perform a plain HTTP (no TLS) GET request
 ; Input: http_host_ptr/http_host_len = hostname
 ;        http_path_ptr/http_path_len = path
 ;        http_port = port (typically 80)
 ; Output: C=0 success (response in http_resp_buf), C=1 failure
 ; =============================================================================
+        .segment "CODE"
 http_get_plain:
         ; --- 1. DNS resolve hostname ---
         lda http_host_ptr
@@ -601,6 +694,8 @@ http_get_plain:
         bcs @plain_close_err
 
         ; --- 6. Initialise response parser ---
+        ; (Content-Length state is reset at the status-line -> headers
+        ; transition — see @parse_status_line.)
         lda #0
         sta http_parse_state
         sta http_line_idx
@@ -652,6 +747,7 @@ http_conn_hdr:
         .byte "Connection: close", $0d, $0a
 http_crlf:
         .byte $0d, $0a
+
 
 ; =============================================================================
 ; Module-local scratch (build_get temporaries only; parser state is in

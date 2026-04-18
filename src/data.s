@@ -299,10 +299,12 @@ http_resp_len:          .res 2
 .export http_hdr_match
 .export http_line_idx
 .export http_line_buf
+.export http_content_length
 http_parse_state:       .res 1
 http_hdr_match:         .res 1
 http_line_idx:          .res 1
 http_line_buf:          .res 32
+http_content_length:    .res 2          ; 16-bit; $FFFF when header absent
 
 ; -----------------------------------------------------------------------------
 ; Application data pointers (for tls_send)
