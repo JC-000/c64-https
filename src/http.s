@@ -454,12 +454,18 @@ http_recv_response:
         adc #0
         sta http_status+1
 
-        ; advance to state 1 (skip headers)
+        ; advance to state 1 (skip headers). Fall through to @state_headers
+        ; instead of returning — one http_recv_response call is dispatched
+        ; per successfully decrypted TLS record, so returning here would
+        ; defer all header parsing until the next TLS record arrived.  With
+        ; the current UCI server the status line and the entire headers
+        ; block fit inside the same TLS record, so we want to consume both
+        ; within the same call.
         lda #1
         sta http_parse_state
         lda #0
         sta http_hdr_match
-        jmp @not_done
+        jmp @state_headers
 
 ; ----- state 1: skip headers until \r\n\r\n -----
 @state_headers:
@@ -493,13 +499,21 @@ http_recv_response:
         ; idx == 3, expecting $0a
         cmp #$0a
         bne @hm_reset
-        ; matched full \r\n\r\n -> body starts
+        ; matched full \r\n\r\n -> body starts.  Fall through to
+        ; @state_body in the same call so that any body bytes already in
+        ; the ring from the current TLS record get consumed immediately.
+        ; Returning @not_done here would strand the body bytes until the
+        ; next TLS record arrived — and if the body was short enough to
+        ; fit alongside the headers in one record (as in our 21 B local
+        ; test) no further TLS record would come, so http_recv_response
+        ; would stall in state 1 forever and http_get would spin until
+        ; its poll-timeout gave up with http_resp_len == 0.
         lda #2
         sta http_parse_state
         lda #0
         sta http_resp_len
         sta http_resp_len+1
-        jmp @not_done
+        jmp @state_body
 
 @hm_reset:
         lda #0
