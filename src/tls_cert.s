@@ -47,6 +47,12 @@
         .import ecdsa_pubkey_x
         .import ecdsa_pubkey_y
 
+        ; Debug progress byte repurposed from tls_record_io.s's existing label.
+        ; Used by tls_handle_cert_verify to mark which stage we reached so a
+        ; post-mortem DMA read of tls_recv_sub_progress reveals where a
+        ; failure happened.
+        .import tls_recv_sub_progress
+
         .segment "TLS_CODE"
 
 ; =============================================================================
@@ -492,12 +498,18 @@ x509_extract_pubkey:
 ; Output: C=0 signature valid, C=1 invalid
 ; =============================================================================
 tls_handle_cert_verify:
+        ; stage marker: entered handler
+        lda #$20
+        sta tls_recv_sub_progress
+
         ; --- Verify handshake type = 15 (CertificateVerify) ---
         lda tls_rec_buf
         cmp #TLS_HS_CERT_VERIFY
         beq @cv_type_ok
         jmp @cv_error
 @cv_type_ok:
+        lda #$21
+        sta tls_recv_sub_progress
 
         ; --- Read signature algorithm [4-5] ---
         ; Must be 0x0403 (ecdsa_secp256r1_sha256)
@@ -511,6 +523,8 @@ tls_handle_cert_verify:
         beq :+
         jmp @cv_error
 :
+        lda #$22
+        sta tls_recv_sub_progress
 
         ; --- Read signature length [6-7] (big-endian) ---
         lda tls_rec_buf+6            ; high byte (expect 0)
@@ -533,11 +547,15 @@ tls_handle_cert_verify:
         lda #32
         sta ecdsa_sig_len
 
+        lda #$23
+        sta tls_recv_sub_progress
         jsr ecdsa_parse_der_sig
         bcc @cv_sig_parsed
         jmp @cv_error               ; DER parse failed
 
 @cv_sig_parsed:
+        lda #$24
+        sta tls_recv_sub_progress
         ; ---------------------------------------------------------------
         ; Build the signed content and hash it with SHA-256
         ;
@@ -617,6 +635,9 @@ tls_handle_cert_verify:
         ; Finalize: copy hash state to sha256_hash
         jsr sha256_final
 
+        lda #$25
+        sta tls_recv_sub_progress
+
         ; --- Copy hash to ecdsa_hash ---
         ldx #31
 @copy_ecdsa_hash:
@@ -633,12 +654,22 @@ tls_handle_cert_verify:
 
         ; ecdsa_pubkey_x/y already set by tls_handle_certificate
 
+        lda #$26
+        sta tls_recv_sub_progress
+
         ; --- Verify signature ---
         jsr ecdsa_verify
         ; Carry flag already set/clear by ecdsa_verify
+        php
+        lda #$27
+        sta tls_recv_sub_progress
+        plp
         rts
 
 @cv_error:
+        ; Note: do NOT overwrite tls_recv_sub_progress here.  We want the
+        ; post-mortem read to reveal the LAST stage marker we successfully
+        ; passed, so a wrapper/setter at each stage is enough.
         sec
         rts
 
