@@ -623,6 +623,10 @@ tls_derive_traffic_keys:
         dex
         bpl @dtk_c8b
 
+        ; Explicit success carry: tls_connect's `bcc @ok10` branch depends
+        ; on the carry flag, and none of the HKDF primitives above set or
+        ; clear it deterministically on the success path.
+        clc
         rts
 
 ; =============================================================================
