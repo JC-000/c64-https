@@ -114,7 +114,12 @@ The Makefile automatically builds ip65 from the submodule into a flat binary blo
 
 ## Project Status
 
-Current status (40 KB binary, 537 labels):
+Current status:
+
+- 38 KB binary (ip65 build), 1738 labels
+- 38 KB binary (uci build), 1816 labels
+
+Progress:
 
 - [x] Project structure and build system
 - [x] ip65 submodule integration — 6.8 KB binary blob at $2000 (TCP/UDP/DNS/DHCP/ARP + RR-Net CS8900a)
