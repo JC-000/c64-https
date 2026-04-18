@@ -196,40 +196,85 @@ Scripts under `tools/uci/` require a U64E at 192.168.1.81 and use
                             there — see Known issues below for the
                             current stall site).
 
+### End-to-end HTTPS status
+
+The TLS 1.3 handshake now completes end-to-end against the local test
+listener (ECDSA-P256 cert, `tools/https_e2e/certs/`). The flow that
+works on real U64E hardware at 48 MHz turbo:
+
+  - ClientHello → ServerHello (X25519 key share)
+  - EncryptedExtensions, Certificate, CertificateVerify (ECDSA-P256
+    verify against server.pem takes ~85 s wall-clock; see the ECDSA
+    benchmark subsection)
+  - Server Finished verified
+  - Client Finished computed + sent under HS write key
+  - Application traffic keys derived; AEAD seq counters reset to 0
+  - HTTP/1.1 GET sent under app write key
+  - Server NewSessionTicket records (rejected as non-application),
+    then the HTTP response record — decrypted, fed into the TCP
+    ring, parsed by `http_recv_response`
+  - `http_status = 200`, `http_resp_buf = "HELLO FROM TLS SERVER"`,
+    `http_resp_len = 21`
+
+### Summary of recent fixes (post-PR23 branch)
+
+Five latent bugs and three new ones were cleared to get here:
+
+  1. `tls_transcript_update` 16-bit length fix
+     (pre-existing, cherry-picked `2f01c0d`).
+  2. CertVerify / Finished transcript ordering — snapshot before
+     dispatch, fold after (`2bb014a`).
+  3. `fp_zero` clobbering Y across calls in `ecdsa_parse_der_sig`
+     (`f006f10`).
+  4. Off-by-one SHA-256 length field in CertificateVerify signed
+     digest (`4a2c4f3`).
+  5. `tls_derive_traffic_keys` not setting CLC on success
+     (`cf8d326`).
+  6. Client Finished ordering vs. traffic-key derivation, and
+     reloading `hkdf_prk` from `tls_c_hs_secret` before computing
+     the client Finished HMAC (`4130356`).
+  7. AEAD sequence counters reset at handshake→application key
+     boundary per RFC 8446 §5.3 (`a18f324`).
+  8. `http.s` state_body now polls when ring briefly empty instead
+     of declaring the body complete on the first empty tick
+     (`7821ffb`) — removed the "http_status parses, body truncated"
+     symptom documented previously as a known issue.
+  9. `http_recv_response` state transitions fall through instead of
+     returning @not_done, so one dispatch walks status + headers +
+     body when they all fit in a single TLS record (`fbc7d10`).
+
 ### Known issues
 
-  - `http_status` parsing is garbled on large responses because the
-    poll-timeout counter in `http.s` expires before all headers are
-    consumed under UCI's slower `net_poll` round-trip. Body arrives
-    correctly; status line is mis-parsed. Pre-existing `http.s` issue,
-    not UCI-specific.
+  - `http_get` does not terminate after a complete response: the
+    outer poll-timeout in `http.s` is budgeted as 65536 net_poll
+    iterations, which at 48 MHz turbo with the UCI fence works out
+    to ~40 minutes of wall-clock and always overshoots the
+    `SENTINEL_POLL_TIMEOUT` in the Python harness (600 s).  Body
+    arrives correctly and `http_resp_buf` / `http_resp_len` are
+    already populated when the harness reports TIMEOUT — manual
+    inspection of the diagnostic dump confirms `HELLO FROM TLS
+    SERVER` in the buffer.  Fixing this cleanly needs either a
+    `Content-Length` parse + body-length check (preferred) or a
+    wall-clock-based outer timeout; cycle-counted iteration budgets
+    will always misbehave under the fence as noted in the design
+    note below.
   - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
   - Boot banner line 03 still says "rr-net" under ip65 build even
     though Phase 2 made it backend-aware — this is correct/expected
     behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
   - The delay-loop fence adds ~2.5 ms overhead per UCI register access
     at 1 MHz (negligible for networking, but visible in tight loops).
-  - TLS 1.3 handshake now advances past CERTIFICATE. The 352 B
-    Certificate record is parsed directly out of `tls_rec_buf`
-    (the separate 256 B `tls_hs_buf` staging buffer — along with
-    the three 8-bit copy loops in `src/tls13.s` that populated it,
-    which had been truncating the Certificate at byte 96 — was
-    eliminated). Handlers in `src/tls_cert.s`,
-    `src/tls_handshake.s`, and `src/tls_keyschedule.s` now read
-    from `tls_rec_buf` / `tls_rec_len` in place; the state machine
-    enforces that each handler finishes before the next record is
-    fetched. Current stall is downstream at CERTIFICATE_VERIFY
-    (`tls_last_state = 0x05`). Two known follow-ups, both
-    pre-existing, surfaced now that we reach this point:
-      * ECDSA P-256 `verify` appears not to complete within the
-        test harness's 120 s deadline at 48 MHz turbo — suspected
-        wall-clock budget issue, not a correctness bug.
-      * `tls_transcript_update`'s ingest loop uses an 8-bit
-        `zp_count`, so handshake messages larger than 256 B (the
-        352 B Certificate in particular) are only hashed for their
-        first 96 B. This will break Finished MAC verification once
-        we clear the CERT_VERIFY stall; needs a 16-bit rewrite.
-    DHCP and plain HTTP are unaffected at all speeds.
+
+### ECDSA P-256 verify wall-clock
+
+`ecdsa_verify` of the RFC 6979 test vector on a U64E at 48 MHz turbo
+runs in ~85 s median (see `tools/uci/bench_ecdsa_u64e.py` for the
+protocol).  The full `tls_connect` handshake — which does one
+ECDSA verify over the CertificateVerify signature — takes ~110 s
+wall-clock end-to-end.  The remainder is network I/O + SHA-256 +
+X25519 + Finished HMACs + handshake state-machine overhead.  This
+number is informational: the test harness budgets 600 s total,
+which has ample headroom.
 
 ### Design note — bounded timeouts must use wall-clock time
 
