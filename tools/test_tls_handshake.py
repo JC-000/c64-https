@@ -49,7 +49,7 @@ SCRATCH_ADDR = 0x0334
 
 # Zero-page addresses
 ZP_PTR = 0xFB        # zp_ptr ($FB-$FC)
-ZP_COUNT = 0xFE      # zp_count ($FE)
+ZP_COUNT = 0xFE      # zp_count ($FE-$FF) — 16-bit LE count
 
 # ---------------------------------------------------------------------------
 # RFC 8448 Section 3 test values (Simple 1-RTT Handshake)
@@ -276,11 +276,12 @@ def test_transcript_hash(transport, labels, rng):
     input_buf = labels["input_buffer"]
 
     def feed_chunk(data):
-        """Write data to input_buffer, set zp_ptr and zp_count, call update."""
+        """Write data to input_buffer, set zp_ptr and zp_count (16-bit), call update."""
         write_bytes(transport, input_buf, data)
         write_bytes(transport, ZP_PTR,
                     [input_buf & 0xFF, (input_buf >> 8) & 0xFF])
-        write_bytes(transport, ZP_COUNT, [len(data)])
+        write_bytes(transport, ZP_COUNT,
+                    [len(data) & 0xFF, (len(data) >> 8) & 0xFF])
         jsr(transport, transcript_update, timeout=120.0)
 
     def get_hash():

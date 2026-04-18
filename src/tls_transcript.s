@@ -9,7 +9,7 @@
 ;
 ; ZP usage:
 ;   zp_ptr   ($FB-$FC) - source data pointer (tls_transcript_update)
-;   zp_count ($FE)     - remaining bytes in current call
+;   zp_count ($FE-$FF) - remaining bytes in current call (16-bit LE)
 ;
 ; External dependencies (sha256.s / data.asm):
 ;   sha256_init, sha256_process_block, sha256_final
@@ -76,29 +76,36 @@ tls_transcript_init:
 ; =============================================================================
 ; tls_transcript_update - Feed data into the running transcript hash
 ; =============================================================================
-; Input: zp_ptr ($FB-$FC) = pointer to data
-;        zp_count ($FE)   = length (1-255, call multiple times for >255)
+; Input: zp_ptr        ($FB-$FC) = pointer to data
+;        zp_count      ($FE)     = length low byte
+;        zp_count+1    ($FF)     = length high byte  (16-bit LE total)
 ; Clobbers: A, X, Y
 ;
 ; Algorithm:
 ;   1. Copy bytes from source into tls_transcript_block at current offset
 ;   2. When block reaches 64 bytes, process it through SHA-256
-;   3. Continue until all input consumed
+;   3. Continue until all 16-bit input count consumed
 ;   4. Update total byte counter
+;
+; Previously zp_count was 8-bit, which silently truncated handshake
+; messages larger than 256 bytes (e.g. the 352 B TLS 1.3 Certificate,
+; which wrapped Y at 96 and lost the rest).  Now callers must set both
+; zp_count and zp_count+1.
 ; =============================================================================
 tls_transcript_update:
-    ; Update total byte counter (16-bit addition)
+    ; Update total byte counter (16-bit += zp_count)
     clc
     lda tls_transcript_total_lo
     adc zp_count
     sta tls_transcript_total_lo
     lda tls_transcript_total_hi
-    adc #0
+    adc zp_count+1
     sta tls_transcript_total_hi
 
 @update_loop:
-    ; Check if any bytes remain
+    ; Check if any bytes remain (zp_count | zp_count+1 == 0 -> done)
     lda zp_count
+    ora zp_count+1
     beq @update_done
 
     ; Load current block position
@@ -117,8 +124,11 @@ tls_transcript_update:
     bne :+
     inc zp_ptr+1
 :
-    ; Decrement remaining count
-    dec zp_count
+    ; Decrement remaining 16-bit count
+    lda zp_count
+    bne :+
+    dec zp_count+1
+:   dec zp_count
 
     ; Check if block is full (64 bytes)
     cpx #64
@@ -126,6 +136,7 @@ tls_transcript_update:
 
     ; Check if more bytes remain
     lda zp_count
+    ora zp_count+1
     bne @copy_byte
 
     ; Input exhausted, save block position and return

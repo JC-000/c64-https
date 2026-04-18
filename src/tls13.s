@@ -354,6 +354,8 @@ tls_send_client_hello:
         sta zp_ptr+1
         lda tls_rec_len
         sta zp_count
+        lda tls_rec_len+1
+        sta zp_count+1
         jsr tls_transcript_update
 
         clc
@@ -426,6 +428,8 @@ tls_recv_server_hello:
         sta zp_ptr+1
         lda tls_rec_len
         sta zp_count
+        lda tls_rec_len+1
+        sta zp_count+1
         jsr tls_transcript_update
 
         clc
@@ -500,6 +504,8 @@ tls_recv_encrypted:
         sta zp_ptr+1
         lda tls_rec_len
         sta zp_count
+        lda tls_rec_len+1
+        sta zp_count+1
         jsr tls_transcript_update
 
         lda #<dec_msg
@@ -583,6 +589,8 @@ tls_send_finished:
         sta zp_ptr+1
         lda #36
         sta zp_count
+        lda #0
+        sta zp_count+1
         jsr tls_transcript_update
 
         ; encrypt and send
