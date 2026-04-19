@@ -205,8 +205,11 @@ overridable via the `U64_HOST` environment variable) and use
 ### End-to-end HTTPS status
 
 The TLS 1.3 handshake now completes end-to-end against the local test
-listener (ECDSA-P256 cert, `tools/https_e2e/certs/`). The flow that
-works on real U64E hardware at 48 MHz turbo:
+listener (ECDSA-P256 cert, `tools/https_e2e/certs/`) on **both** backends:
+UCI/U64E at 48 MHz turbo and stock 1 MHz, and ip65/VICE at stock 1 MHz
+no-WARP (after the 255-byte TCP RX clamp fix in `src/net/ip65/net.s`;
+see `tests/test_phase3_https_1mhz.py`). The flow, identical across both
+backends:
 
   - ClientHello → ServerHello (X25519 key share)
   - EncryptedExtensions, Certificate, CertificateVerify (ECDSA-P256
@@ -248,6 +251,14 @@ Five latent bugs and three new ones were cleared to get here:
   9. `http_recv_response` state transitions fall through instead of
      returning @not_done, so one dispatch walks status + headers +
      body when they all fit in a single TLS record (`fbc7d10`).
+ 10. ip65 TCP RX callback 255-byte clamp removed (PR #27). The old
+     callback truncated `cb_remaining` to 255 when the high byte was
+     non-zero while ip65 ACKed the full `tcp_inbound_data_length`,
+     silently dropping bytes 256+. Any TLS record &gt;255 B (Certificate
+     in particular, ~369 B in the local listener setup) got partially
+     delivered and the TLS reassembly buffer ended up gluing a prefix
+     of record N onto bytes from record N+1. Replaced with a
+     16-bit-safe copy loop that mirrors the UCI adapter.
 
 ### Known issues
 
@@ -265,6 +276,10 @@ Five latent bugs and three new ones were cleared to get here:
     behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
   - The delay-loop fence adds ~2.5 ms overhead per UCI register access
     at 1 MHz (negligible for networking, but visible in tight loops).
+  - `http_resp_buf` is rendered as raw ASCII on the C64 screen instead
+    of being translated to screen codes, so the response body displays
+    as graphics characters. Response bytes themselves are correct —
+    purely cosmetic. Tracked as issue #28.
 
 ### ECDSA P-256 verify wall-clock
 
