@@ -10,9 +10,15 @@
 ; The callback must NOT touch crypto state — it only copies received data
 ; into tcp_recv_buf (a ring buffer) for later processing by the TLS layer.
 ;
-; The d973531 fix (clamp cb_remaining to 255 per callback invocation) is
-; preserved verbatim. The ZP $02-$1B save/restore around every ip65 call
-; is load-bearing — do not remove.
+; The ZP $02-$1B save/restore around every ip65 call is load-bearing —
+; do not remove.
+;
+; The former d973531 clamp (cb_remaining -> 255 bytes per callback) was
+; a data-loss bug: ip65 ACKs the full tcp_inbound_data_length regardless
+; of how many bytes the callback consumes, so any byte past #255 was
+; silently dropped. TLS records larger than 255 B (e.g. a Certificate
+; record) got corrupted. The callback now copies the full 16-bit length
+; and advances the SMC source high-byte when the 8-bit X index wraps.
 
 .include "constants.inc"
 .include "ip65_symbols.inc"
@@ -316,8 +322,11 @@ net_recv_byte:
 ; SMC instructions below so we can read those ip65 variables using absolute
 ; addressing (no ZP indirection needed).
 ;
-; d973531 fix (preserved): cb_remaining is clamped to 255 bytes per callback
-; invocation so the 8-bit X index cannot wrap and re-read the inbound buffer.
+; 16-bit copy: cb_remaining carries the full inbound length (up to 1460 B
+; for a full MSS segment). The inner loop uses X as an 8-bit source index
+; and the SMC source base (cb_copy_byte+1/+2). When X wraps 0->0 (256 B
+; consumed) we advance the high byte of the SMC source so successive
+; 256-byte windows of the inbound buffer are copied correctly.
 ; =============================================================================
 net_tcp_recv_cb:
         ; --- Read inbound data length (16-bit) ---
@@ -340,17 +349,10 @@ cb_load_ptr_hi:
         lda $ffff               ; SMC: patched to addr of tcp_inbound_data_ptr+1
         sta cb_copy_byte+2      ; patch high byte of LDA abs,x source
 
-        ; Clamp cb_remaining to 255 bytes max per callback to prevent
-        ; 8-bit X-index wrap which would re-read source byte 0 onwards
-        ; and overwrite previously-copied ring bytes. (d973531)
-        lda cb_remaining+1
-        beq :+
-        lda #255
-        sta cb_remaining
-        lda #0
-        sta cb_remaining+1
-:
-        ; Copy loop: X = source index; ring store uses SMC on cb_store
+        ; Copy loop: X = source index (wraps every 256 B; when it wraps
+        ; we advance the high byte of the SMC source pointer so the next
+        ; 256-byte window is read from the correct address). The ring
+        ; store uses SMC on cb_store, repatched per byte.
         ldx #0
 cb_loop:
         ; Check 16-bit remaining count
@@ -359,7 +361,7 @@ cb_loop:
         bne :+
         jmp cb_done
 :
-        ; --- Overflow check: if ((tail+1) & $3FF) == head, ring is full ---
+        ; --- Overflow check: if ((tail+1) & TCP_RECV_MASK) == head, ring is full ---
         lda tcp_recv_tail+0
         clc
         adc #1
@@ -395,6 +397,11 @@ cb_copy_byte:
 cb_store:
         sta $ffff               ; SMC: patched to tcp_recv_buf + tail
         inx
+        bne cb_src_ok
+        ; X wrapped $FF -> $00: advance SMC source high byte to read the
+        ; next 256-byte window of the inbound buffer.
+        inc cb_copy_byte+2
+cb_src_ok:
 
         ; tail = next (already computed above)
         lda cb_next_lo
