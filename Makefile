@@ -24,14 +24,23 @@ IP65_DIR     := ip65
 IP65_BUILD   := ip65-build
 IP65_BIN     := $(IP65_BUILD)/ip65-c64.bin
 
-CA65FLAGS := -I src -I src/inc -I src/net/$(BACKEND) --debug-info
+CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net/$(BACKEND) --debug-info
 LD65FLAGS := -C $(CFG) -Ln build/labels.txt -m build/c64-https.map
 
 # Source inventory.
 TOP_SRCS    := $(wildcard src/*.s)
 CRYPTO_SRCS := $(wildcard src/crypto/*.s)
+# Shared crypto infrastructure introduced in Phase C.0: canonical ZP map,
+# overlay swap dispatcher, init orchestrator, shared sqtab stub. Always
+# linked; sibling-lib integration (Phase C.1-.3) hangs off these.
+CRYPTO_SHARED_SRCS := $(wildcard src/crypto/shared/*.s)
 IP65_SRCS   := src/net/ip65/ip65_blob.s src/net/ip65/net.s src/net/ip65/net_banner.s src/net/ip65/exports.s
 UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s
+
+# Sibling-lib archive placeholder. Phase C.1-.3 agents append their lib's
+# `build/lib/<name>.a` path here; Phase C.0 leaves it empty so the in-tree
+# crypto sources are the only providers.
+SIBLING_LIB_ARCHIVES :=
 
 # Per-backend source + object selection.
 ifeq ($(BACKEND),ip65)
@@ -44,9 +53,10 @@ endif
 
 TOP_OBJS    := $(patsubst src/%.s,build/%.o,$(TOP_SRCS))
 CRYPTO_OBJS := $(patsubst src/%.s,build/%.o,$(CRYPTO_SRCS))
+CRYPTO_SHARED_OBJS := $(patsubst src/%.s,build/%.o,$(CRYPTO_SHARED_SRCS))
 NET_OBJS    := $(patsubst src/%.s,build/%.o,$(NET_SRCS))
 
-ALL_OBJS := $(TOP_OBJS) $(CRYPTO_OBJS) $(NET_OBJS)
+ALL_OBJS := $(TOP_OBJS) $(CRYPTO_OBJS) $(CRYPTO_SHARED_OBJS) $(NET_OBJS)
 
 PRG    := build/c64-https.prg
 LABELS := build/labels.txt
@@ -63,7 +73,7 @@ endif
 
 $(PRG): $(PRG_DEPS)
 	@mkdir -p build
-	$(LD65) $(LD65FLAGS) -o $@ $(ALL_OBJS)
+	$(LD65) $(LD65FLAGS) -o $@ $(ALL_OBJS) $(SIBLING_LIB_ARCHIVES)
 	# Rewrite ca65 label format `al XXXXXX .name` -> VICE format `al C:XXXX .name`
 	# so the c64-test-harness Labels.from_file() reader can parse it.
 	sed -i 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(LABELS)
