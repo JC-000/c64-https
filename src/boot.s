@@ -552,7 +552,9 @@ do_https_get:
         rts
 
 ; =============================================================================
-; print_resp_body - print up to 200 bytes of http_resp_buf to screen
+; print_resp_body - print up to 200 bytes of http_resp_buf to screen.
+; Bytes originate from the network as ASCII, so they are fed through
+; ascii_chrout (below) which translates ASCII -> PETSCII before CHROUT.
 ; =============================================================================
 print_resp_body:
         ldx #0
@@ -561,12 +563,50 @@ print_resp_body:
         beq @done
         lda http_resp_buf,x
         beq @done               ; stop at null
-        jsr chrout
+        jsr ascii_chrout
         inx
         bne @loop
 @done:
         lda #$0d                ; trailing carriage return
         jsr chrout
+        rts
+
+; =============================================================================
+; ascii_chrout - translate ASCII byte in A to PETSCII and print via CHROUT.
+;
+; Mapping (default uppercase/graphics character set, strategy B):
+;   $0A (LF)        -> $0D       (CHROUT advances one line)
+;   $0D (CR)        -> $0D       (pass through)
+;   $20-$3F         -> pass through (space, digits, punctuation)
+;   $40-$5F         -> pass through (@, uppercase A-Z, [\]^_)
+;   $61-$7A (a-z)   -> uppercase fold ($41-$5A) so lowercase letters render
+;                      as uppercase glyphs instead of graphics characters.
+;   everything else -> drop (return without calling CHROUT)
+;
+; Single entry point used by every render site that takes network-origin
+; ASCII bytes.  Preserves X and Y.  Clobbers A (consumed by CHROUT).
+; =============================================================================
+ascii_chrout:
+        cmp #$20
+        bcc @ctrl               ; $00-$1F: handle CR/LF, drop rest
+        cmp #$7f
+        bcs @drop               ; $7F-$FF: drop (DEL + high-bit)
+        cmp #$61
+        bcc @emit               ; $20-$60: pass through unchanged
+        cmp #$7b
+        bcs @drop               ; $7B-$7E: drop { | } ~
+        sec                     ; $61-$7A: a-z -> A-Z
+        sbc #$20
+@emit:
+        jmp chrout              ; CHROUT preserves X,Y; tail-call
+@ctrl:
+        cmp #$0d
+        beq @emit               ; CR pass through
+        cmp #$0a
+        bne @drop               ; LF -> CR, anything else drop
+        lda #$0d
+        jmp chrout
+@drop:
         rts
 
 ; =============================================================================
