@@ -276,10 +276,20 @@ Five latent bugs and three new ones were cleared to get here:
     behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
   - The delay-loop fence adds ~2.5 ms overhead per UCI register access
     at 1 MHz (negligible for networking, but visible in tight loops).
-  - `http_resp_buf` is rendered as raw ASCII on the C64 screen instead
-    of being translated to screen codes, so the response body displays
-    as graphics characters. Response bytes themselves are correct —
-    purely cosmetic. Tracked as issue #28.
+  - `http_resp_buf` is rendered through `ascii_chrout` (a small
+    translator in `src/boot.s` adjacent to `print_resp_body`) before
+    being handed to KERNAL CHROUT.  Issue #28 — the original pipeline
+    sent raw ASCII straight to CHROUT, which renders ASCII lowercase
+    `$61-$7A` as PETSCII graphics characters in the default
+    uppercase/graphics character set.  `ascii_chrout` passes
+    `$20-$60` unchanged, folds lowercase `a-z` to uppercase (strategy
+    B: `sub #$20`), remaps `$0A` LF to `$0D` CR, and drops everything
+    else.  Body text therefore renders correctly regardless of case
+    (all letters appear as uppercase glyphs; case is dropped).
+    Verified end-to-end on U64E at 48 MHz by
+    `tools/uci/test_https_print_body.py` with a mixed-case response
+    body.  `http_resp_buf` still holds raw ASCII — only the render
+    pipeline is translated.
 
 ### ECDSA P-256 verify wall-clock
 
