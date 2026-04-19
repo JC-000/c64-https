@@ -24,17 +24,20 @@ REU_X25519_MUL_TABLES_BASE = $00000
 .endif
 
 ; --- overlay storage (single bank; three 8 KB slots) ---
+; NOTE: offset $0000-$003F in bank 2 is reserved by the c64-x25519 sibling
+; as a 64-byte zero buffer for `reu_clear_wide` (DMA-zeros fe_wide on the
+; C64 side). Overlay images start at offset $0100 so they do not collide.
 .ifndef REU_OVERLAY_STORE_BASE
-REU_OVERLAY_STORE_BASE     = $20000
+REU_OVERLAY_STORE_BASE     = $20100
 .endif
 .ifndef REU_OVERLAY_X25519
-REU_OVERLAY_X25519         = $20000
+REU_OVERLAY_X25519         = $20100
 .endif
 .ifndef REU_OVERLAY_P256
-REU_OVERLAY_P256           = $22000
+REU_OVERLAY_P256           = $22100
 .endif
 .ifndef REU_OVERLAY_P384
-REU_OVERLAY_P384           = $24000
+REU_OVERLAY_P384           = $24100
 .endif
 
 ; --- P-256 precompute (1 bank) ---
