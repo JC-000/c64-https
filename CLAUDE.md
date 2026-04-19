@@ -176,10 +176,15 @@ overridable via the `U64_HOST` environment variable) and use
   - `test_https_local.py` — HTTPS e2e scaffolding against a local TLS 1.3
                             listener (ECDSA-P256 cert from
                             `tools/https_e2e/certs/`). DMAs a 6502 stub
-                            that calls `http_get`, flips the U64E to 48
-                            MHz turbo, and captures full diagnostics on
-                            pass or timeout. `DEBUG_CAPTURE=1` enables a
-                            bounded 6510 bus stream for post-mortem.
+                            that calls `http_get`, flips the U64E to the
+                            CPU speed selected by `TURBO_MHZ` (default
+                            48; `TURBO_MHZ=1` runs at stock 1 MHz with
+                            all wall-clock budgets auto-scaled by 48x
+                            and has been validated end-to-end on real
+                            U64E hardware), and captures full
+                            diagnostics on pass or timeout.
+                            `DEBUG_CAPTURE=1` enables a bounded 6510
+                            bus stream for post-mortem.
                             Each run writes a timestamped artifact dir
                             under `$UCI_DEBUG_DIR` (default
                             `/tmp/uci_https_debug/<ISO>/`) containing:

@@ -222,6 +222,16 @@ python3 tools/uci/test_https_local.py    # HTTPS GET (TLS 1.3 + ECDSA-P256)
 
 `test_https_local.py` is the end-to-end HTTPS demo (UCI backend only): it boots the U64E at 48 MHz turbo, connects to a local Python TLS listener using the test cert under `tools/https_e2e/certs/`, and confirms a full TLS 1.3 handshake + HTTP GET. With `DEBUG_CAPTURE=1`, each run writes a timestamped artifact directory under `$UCI_DEBUG_DIR` (default `/tmp/uci_https_debug/`) with raw 6510 bus trace, TLS state snapshot, and listener result.
 
+Environment variables honored by `test_https_local.py`:
+
+- `U64_HOST` (default `192.168.1.81`) — U64E address
+- `TURBO_MHZ` (default `48`) — C64 CPU speed. `TURBO_MHZ=1` runs the test at stock 1 MHz with every wall-clock budget auto-scaled by 48x (~2-3 h total, validated end-to-end on real U64E hardware).
+- `HTTPS_PORT` (default `443`, falls back to `4433` if the bind fails)
+- `SENTINEL_POLL_TIMEOUT`, `ACCEPT_TIMEOUT` — per-test overrides in seconds; default to `600 * (48 / TURBO_MHZ)`.
+- `DEBUG_CAPTURE` (default `1`) — set to `0` to disable the bounded 6510 bus stream.
+- `KEEP_DEBUG_ON_PASS` (default `0`) — set to `1` to preserve artifacts on PASS runs.
+- `UCI_DEBUG_DIR` (default `/tmp/uci_https_debug`) — base directory for run artifacts.
+
 ## Related Projects
 
 - [c64-aes256-ecdsa](../c64-aes256-ecdsa) — AES-256, SHA-256, ECDSA P-256, HMAC-DRBG
