@@ -95,7 +95,7 @@
 .export ecdsa_verify_384
 .export ecdsa_parse_der_sig
 
-.segment "CRYPTO_CODE"
+.segment "CRYPTO_AUX_CODE"
 
 ; =============================================================================
 ; Curve dispatch

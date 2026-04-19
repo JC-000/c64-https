@@ -53,7 +53,7 @@
 .import sha256_block
 .import sha256_hash
 
-.segment "CRYPTO_CODE"
+.segment "CRYPTO_AUX_CODE"
 
 ; =============================================================================
 ; hmac_sha256 - compute HMAC-SHA256
