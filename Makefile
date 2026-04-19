@@ -130,6 +130,19 @@ build/lib/nistcurves-p384.a:
 	@mkdir -p build/lib
 	bash tools/integration/build_nistcurves_p384.sh
 
+# Phase C.3b: P-384 overlay IMAGE + labels for harness-time use only.
+# The production PRG does NOT link nistcurves-p384.a — this is smoke-test
+# infrastructure. tools/test_p384_symbols.py loads overlay-p384.bin into
+# REU at test time via a trampoline, then calls crypto_swap_to_p384 to
+# page it into the live slot. Keeps the main PRG size unchanged.
+#
+# Both outputs live below build/; depend on the archive being built first.
+build/lib/overlay-p384.bin build/labels-p384.txt: build/lib/nistcurves-p384.a cfg/p384-overlay.cfg tools/integration/build_nistcurves_p384_bin.sh
+	bash tools/integration/build_nistcurves_p384_bin.sh
+
+.PHONY: p384-overlay
+p384-overlay: build/lib/overlay-p384.bin build/labels-p384.txt
+
 # Build ip65 object libraries from the submodule. Only needed if the ip65
 # submodule changes; the prebuilt blob is committed to ip65-build/.
 ip65-libs:
