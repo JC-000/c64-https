@@ -276,10 +276,20 @@ Five latent bugs and three new ones were cleared to get here:
     behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
   - The delay-loop fence adds ~2.5 ms overhead per UCI register access
     at 1 MHz (negligible for networking, but visible in tight loops).
-  - `http_resp_buf` is rendered as raw ASCII on the C64 screen instead
-    of being translated to screen codes, so the response body displays
-    as graphics characters. Response bytes themselves are correct —
-    purely cosmetic. Tracked as issue #28.
+  - (closed, issue #28) The response body renders correctly after all.
+    `print_resp_body` in `src/boot.s` prints via KERNAL `chrout`
+    ($FFD2), which already applies the PETSCII→screen-code bias. For
+    the local listener body "HELLO FROM TLS SERVER" the 21-byte
+    screen-code sequence `08 05 0C 0C 0F 20 06 12 0F 0D 20 14 0C 13 20
+    13 05 12 16 05 12` appears at `$0798` (row 23, col 0) after a JSR
+    to `print_resp_body` on a U64E at 48 MHz turbo. Raw ASCII bytes
+    (`48 45 4C 4C 4F …`) are *not* present anywhere in screen RAM.
+    The verification harness is `tools/uci/test_https_print_body.py`
+    (adds a JSR print_resp_body to the standard stub and scans
+    $0400–$07E7 for the expected screen-code run). The original
+    report assumed direct `sta $0400,x` screen writes; in practice
+    the code path goes through KERNAL CHROUT, which does the
+    translation for us.
 
 ### ECDSA P-256 verify wall-clock
 
