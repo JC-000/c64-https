@@ -56,6 +56,24 @@ NET_SRCS := $(UCI_SRCS)
 CRYPTO_SRCS := $(filter-out src/crypto/x25519.s src/crypto/fe25519.s,$(CRYPTO_SRCS_ALL))
 CA65FLAGS += -D USE_X25519_SIBLING=1
 SIBLING_LIB_ARCHIVES += build/lib/x25519.a
+# Phase C.3: add c64-nist-curves P-384 primitives as a REU overlay.
+# Variable-base P-384 point ops (double/add/jacobian-to-affine) only —
+# see tools/integration/build_nistcurves_p384.sh for the scope rationale.
+# `USE_NISTCURVES_P384` toggles the `.ifdef` guard in
+# src/crypto/p384_force_link.s so ld65 pulls the archive members into
+# the final PRG. P-256 ECDSA stays in-tree under both backends.
+# Phase C.3 is BLOCKED at the cfg level: the current CRYPTO_OVERLAY region
+# (7.5 KB at $4200) can only hold one of OVERLAY_X25519 (3.4 KB) and
+# OVERLAY_P384 (5.7 KB) at a time; ld65 lays them out sequentially and
+# overflows by 1.6 KB. Architecturally max(x25519,p384)=5.7 KB ≤ 7.5 KB,
+# so the slot is large enough — what's missing is the `run=CRYPTO_OVERLAY,
+# load=<separate staging>` cfg plumbing plus a boot-time stash for both
+# images. That restructure is out of scope for Phase C.3 and is gated on
+# a supervisor OK. The archive + force-link stub are in place so the
+# integration can be re-enabled by uncommenting the two lines below once
+# the cfg is extended.
+#CA65FLAGS += -D USE_NISTCURVES_P384=1
+#SIBLING_LIB_ARCHIVES += build/lib/nistcurves-p384.a
 else
 $(error Unknown BACKEND=$(BACKEND); expected ip65 or uci)
 endif
@@ -103,6 +121,14 @@ build/%.o: src/%.s
 build/lib/x25519.a:
 	@mkdir -p build/lib
 	bash tools/integration/build_x25519.sh
+
+# Phase C.3: c64-nist-curves sibling archive (libs/nistcurves/ submodule).
+# Same gating as x25519: only linked under BACKEND=uci; ip65 continues
+# without P-384 entirely. Exports only the variable-base primitives
+# (see the build script for the excluded symbols and why).
+build/lib/nistcurves-p384.a:
+	@mkdir -p build/lib
+	bash tools/integration/build_nistcurves_p384.sh
 
 # Build ip65 object libraries from the submodule. Only needed if the ip65
 # submodule changes; the prebuilt blob is committed to ip65-build/.

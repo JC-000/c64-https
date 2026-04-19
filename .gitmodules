@@ -4,3 +4,6 @@
 [submodule "libs/x25519"]
 	path = libs/x25519
 	url = /home/someone/c64-x25519
+[submodule "libs/nistcurves"]
+	path = libs/nistcurves
+	url = /home/someone/c64-nist-curves
