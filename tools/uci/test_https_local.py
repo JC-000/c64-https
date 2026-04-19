@@ -1,7 +1,28 @@
 #!/usr/bin/env python3
 """
 Phase 5 LOCAL HTTPS: exercise the real http_get (TLS 1.3) code path through
-the UCI backend on a real Ultimate 64 Elite at 48 MHz turbo.
+the UCI backend on a real Ultimate 64 Elite.
+
+Environment variables:
+  U64_HOST              — U64E IP address (default 192.168.1.81)
+  TURBO_MHZ             — C64 CPU MHz (default 48). TURBO_MHZ=1 runs the test
+                          at stock 1 MHz with auto-scaled timeouts; the full
+                          handshake + HTTP round-trip takes ~2-3 h wall-clock
+                          and has been validated end-to-end on real U64E
+                          hardware.
+  HTTPS_PORT            — listener port (default 443; falls back to 4433 if
+                          the bind fails, e.g. unprivileged)
+  SENTINEL_POLL_TIMEOUT — per-test override in seconds for the C64-side
+                          sentinel poll (default 600 * _TIMEOUT_SCALE).
+  ACCEPT_TIMEOUT        — per-test override in seconds for the server-side
+                          accept + handshake slack (default 600 *
+                          _TIMEOUT_SCALE).
+  DEBUG_CAPTURE         — set to 0 to disable 6510 bus capture (default on).
+  KEEP_DEBUG_ON_PASS    — set to 1 to preserve artifacts on PASS runs.
+  UCI_DEBUG_DIR         — base directory for run artifacts (default
+                          /tmp/uci_https_debug).
+
+Timeouts auto-scale relative to TURBO_MHZ; see env-var docs above.
 
 Debug-stream capture: set DEBUG_CAPTURE=0 in env to disable. Default enabled.
 Artifacts land in a per-run timestamped directory under $UCI_DEBUG_DIR
@@ -109,13 +130,21 @@ SENTINEL_VALUE   = 0xAA
 DEFAULT_HTTPS_PORT = int(os.environ.get("HTTPS_PORT", "443"))
 FALLBACK_HTTPS_PORT = 4433
 
-SENTINEL_POLL_TIMEOUT = 600.0   # ecdsa_verify alone is ~85s at 48 MHz; full
-                                # post-flight handshake + HTTP needs several
-                                # minutes, so keep this generous. Speed is not
-                                # in scope — correctness is.
-ACCEPT_TIMEOUT        = 600.0   # server-side accept + handshake slack (matches
-                                # the sentinel-poll budget above)
-TURBO_MHZ             = 48
+# TURBO_MHZ drives a single wall-clock scale factor applied to every
+# time-based constant below. At the default 48 MHz the scale is 1.0 and the
+# behavior matches the historical hardcoded budgets. TURBO_MHZ=1 (stock C64
+# speed) yields a 48x scale across the board; per-test overrides are still
+# available via SENTINEL_POLL_TIMEOUT / ACCEPT_TIMEOUT env vars. Timeouts
+# auto-scale relative to TURBO_MHZ; see module docstring for details.
+TURBO_MHZ       = int(os.environ.get("TURBO_MHZ", "48"))
+_TIMEOUT_SCALE  = max(1.0, 48.0 / float(TURBO_MHZ))
+
+SENTINEL_POLL_TIMEOUT = float(
+    os.environ.get("SENTINEL_POLL_TIMEOUT", str(600.0 * _TIMEOUT_SCALE))
+)
+ACCEPT_TIMEOUT        = float(
+    os.environ.get("ACCEPT_TIMEOUT", str(600.0 * _TIMEOUT_SCALE))
+)
 
 EXPECTED_BODY    = "HELLO FROM TLS SERVER"
 HTTP_RESPONSE    = (
@@ -182,7 +211,7 @@ def _run_https_server(srv: socket.socket, ctx: ssl.SSLContext,
             # Post-handshake request read: C64 still needs to finish Finished
             # MAC + verify server Finished + send client Finished + build HTTP
             # request under the ~2.5 ms UCI fence overhead — give it plenty.
-            tls_conn.settimeout(600.0)
+            tls_conn.settimeout(ACCEPT_TIMEOUT)
             try:
                 req = tls_conn.recv(1024)
                 result["request"] = req
@@ -1056,8 +1085,9 @@ def main() -> int:
 
         print("run_prg(PRG)...")
         client.run_prg(prg)
-        # Wait for auto-init (entropy, REU stash, DHCP)
-        time.sleep(22.0)
+        # Wait for auto-init (entropy, REU stash, DHCP). Scales with TURBO_MHZ
+        # so stock 1 MHz runs allow enough time for entropy + REU sqtab init.
+        time.sleep(22.0 * _TIMEOUT_SCALE)
 
         init_flag = transport.read_memory(labels["net_initialized"], 1)[0]
         print(f"net_initialized = ${init_flag:02X}")
@@ -1094,7 +1124,9 @@ def main() -> int:
         # Quit PRG main_loop back to BASIC
         print("Sending 'Q' to exit PRG main_loop...")
         send_text(transport, "q\r")
-        time.sleep(2.0)
+        # Keyboard-buffer polling scales with CPU speed; grace period scales
+        # with TURBO_MHZ to keep BASIC-return reliable at stock 1 MHz.
+        time.sleep(2.0 * _TIMEOUT_SCALE)
 
         # DMA-write the routine + data
         CHUNK = 64

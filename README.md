@@ -136,11 +136,13 @@ Progress:
 - [x] X.509 certificate parsing — DER parser extracts TBS, public key, signature (r,s), curve ID for P-256 and P-384
 - [x] ECDSA signature verification — P-256 and P-384, full verify (s⁻¹, scalar mul, point add, Jacobian→affine)
 - [x] HTTP/1.1 GET request — build GET, parse response (status + headers + body), plain HTTP end-to-end
-- [x] **End-to-end HTTPS GET demo (UCI backend)** — TLS 1.3 handshake + HTTP GET completes against a local Python TLS listener (ECDSA-P256 cert) on real Ultimate 64 Elite hardware at 48 MHz turbo. Returns `http_status=200`, body `"HELLO FROM TLS SERVER"`. See `tools/uci/test_https_local.py`. The equivalent end-to-end HTTPS path over VICE/ip65 is not yet proven — only DHCP and plain HTTP currently pass on the bridge rig (see End-to-End Bridge Tests below).
+- [x] **End-to-end HTTPS GET demo (both backends)** — TLS 1.3 handshake + HTTP GET completes against a local Python TLS listener (ECDSA-P256 cert). Returns `http_status=200`, body `"HELLO FROM TLS SERVER"`.
+  - UCI: real Ultimate 64 Elite hardware at both 48 MHz turbo and stock 1 MHz. See `tools/uci/test_https_local.py` (supports `TURBO_MHZ` env var).
+  - ip65: VICE + RR-Net + bridge rig at stock 1 MHz (no WARP). See `tests/test_phase3_https_1mhz.py`. Wall-clock ~2-3 h end-to-end, dominated by ECDSA-P256 verify.
 
 ### Known Issues
 
-- **ECDSA P-256 verify** runs ~85 s/op on the U64E at 48 MHz turbo (UCI backend). Sufficient for the local listener (which holds the connection open), but exceeds typical 10-30 s real-world server handshake windows. Real-internet ECDSA-P256 targets need a sibling-style optimized P-256 implementation (parallel to the `c64-x25519` work). The ip65/VICE path has not been measured end-to-end because HTTPS over the bridge rig is not yet proven.
+- **ECDSA P-256 verify** runs ~85 s/op on the U64E at 48 MHz turbo (UCI backend) and scales to ~60-70 min at stock 1 MHz (both backends). Sufficient for the local listener (which holds the connection open), but exceeds typical 10-30 s real-world server handshake windows. Real-internet ECDSA-P256 targets need a sibling-style optimized P-256 implementation (parallel to the `c64-x25519` work).
 - **P-384** ECDSA is currently stubbed (both backends). Cert chains requiring P-384 will not verify until restored.
 - **Live internet HTTP GET (UCI backend)** has not been re-verified since the FPGA-fence rework; only the local multi-segment listener is exercised regularly.
 - **VICE 3.9** previously appeared to crash on chained HMAC-SHA256 calls (backend-independent — affects the crypto-only test suites), but this was caused by hardcoded port numbers bypassing the test harness port allocator. With proper `ViceInstanceManager` usage (no hardcoded ports), all N=1..10 chained calls succeed reliably.
@@ -185,7 +187,7 @@ sudo PYTHONPATH=tools python3 tests/test_phase2_http.py   # Plain HTTP GET over 
 
 ### End-to-End Bridge Tests (ip65 backend)
 
-Full end-to-end tests that drive the real c64-https binary in VICE over a Linux bridge with RR-Net ethernet (the same pattern used by [`c64-test-harness` bridge networking](../c64-test-harness/docs/bridge_networking.md)). These exercise the **ip65/RR-Net path only** — HTTPS end-to-end on this rig is not yet proven; only DHCP (phase1) and plain HTTP (phase2) pass today. VICE runs at **normal speed** (warp breaks RR-Net DHCP), so these tests need generous timeouts (~90-120s per phase).
+Full end-to-end tests that drive the real c64-https binary in VICE over a Linux bridge with RR-Net ethernet (the same pattern used by [`c64-test-harness` bridge networking](../c64-test-harness/docs/bridge_networking.md)). These exercise the **ip65/RR-Net path only**. All three phases pass: DHCP (phase1), plain HTTP (phase2), and HTTPS (phase3 via `tests/test_phase3_https_1mhz.py`). VICE runs at **normal speed** (warp breaks RR-Net DHCP), so these tests need generous timeouts (~90-120s per phase; the phase3 HTTPS run is ~2-3 h at 1 MHz).
 
 **Setup:**
 
@@ -221,6 +223,16 @@ python3 tools/uci/test_https_local.py    # HTTPS GET (TLS 1.3 + ECDSA-P256)
 ```
 
 `test_https_local.py` is the end-to-end HTTPS demo (UCI backend only): it boots the U64E at 48 MHz turbo, connects to a local Python TLS listener using the test cert under `tools/https_e2e/certs/`, and confirms a full TLS 1.3 handshake + HTTP GET. With `DEBUG_CAPTURE=1`, each run writes a timestamped artifact directory under `$UCI_DEBUG_DIR` (default `/tmp/uci_https_debug/`) with raw 6510 bus trace, TLS state snapshot, and listener result.
+
+Environment variables honored by `test_https_local.py`:
+
+- `U64_HOST` (default `192.168.1.81`) — U64E address
+- `TURBO_MHZ` (default `48`) — C64 CPU speed. `TURBO_MHZ=1` runs the test at stock 1 MHz with every wall-clock budget auto-scaled by 48x (~2-3 h total, validated end-to-end on real U64E hardware).
+- `HTTPS_PORT` (default `443`, falls back to `4433` if the bind fails)
+- `SENTINEL_POLL_TIMEOUT`, `ACCEPT_TIMEOUT` — per-test overrides in seconds; default to `600 * (48 / TURBO_MHZ)`.
+- `DEBUG_CAPTURE` (default `1`) — set to `0` to disable the bounded 6510 bus stream.
+- `KEEP_DEBUG_ON_PASS` (default `0`) — set to `1` to preserve artifacts on PASS runs.
+- `UCI_DEBUG_DIR` (default `/tmp/uci_https_debug`) — base directory for run artifacts.
 
 ## Related Projects
 
