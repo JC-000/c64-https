@@ -25,3 +25,11 @@
 .export fe_src1
 .export fe_src2
 .export fe_dst
+
+; Phase F fallout: tools/test_crypto.py resolves these ZP equates via
+; labels.txt and failed under both backends because the equates were
+; never linker-visible. Promote them here — they have stable addresses
+; across in-tree and canonical-ZP layouts.
+.export cc20_data_ptr
+.export cc20_remain
+.export zp_ptr
