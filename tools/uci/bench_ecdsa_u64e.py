@@ -102,6 +102,8 @@ def _load_labels() -> dict[str, int]:
         parts = line.split()
         if len(parts) >= 3 and parts[0] == "al" and parts[2].startswith("."):
             name = parts[2][1:]
+            if ":" not in parts[1]:
+                continue  # REU / non-CPU addrs (Phase C overlay labels)
             _, hex_addr = parts[1].split(":", 1)
             labels[name] = int(hex_addr, 16)
     return labels
