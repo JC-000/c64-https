@@ -80,6 +80,7 @@ from c64_test_harness.backends.u64_debug_capture import (
 )
 from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
+from c64_test_harness.labels import Labels
 
 
 DEBUG_CAPTURE_ENABLED = os.environ.get("DEBUG_CAPTURE", "1") != "0"
@@ -239,18 +240,9 @@ def _run_https_server(srv: socket.socket, ctx: ssl.SSLContext,
 
 
 def _load_labels() -> dict[str, int]:
-    labels: dict[str, int] = {}
-    for line in LABELS_PATH.read_text().splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[0] == "al" and parts[2].startswith("."):
-            name = parts[2][1:]
-            if ":" not in parts[1]:
-                # REU / non-CPU addresses (e.g. REU_OVERLAY_*) lack the
-                # "C:" bank prefix; skip — test harness only needs CPU addrs.
-                continue
-            _, hex_addr = parts[1].split(":", 1)
-            labels[name] = int(hex_addr, 16)
-    return labels
+    # c64-test-harness Labels is a Mapping since 0.12.4 (JC-000/c64-test-harness#64)
+    # and parses both C: and non-C (REU/bank) label lines since #62.
+    return dict(Labels.from_file(LABELS_PATH))
 
 
 def _build_http_routine(labels: dict[str, int], port: int) -> tuple[bytes, int]:
