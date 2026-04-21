@@ -51,11 +51,11 @@ Public symbols (calling conventions are AX=pointer-low/high-byte except
 where noted, buffers provided by caller, keys/IVs passed via fixed
 buffers in the crypto BSS — see per-module headers for details):
 
-  X25519 / field arithmetic  (c64-x25519 sibling)
+  X25519 / field arithmetic  (in-tree; c64-x25519 overlay deferred, see #33)
     x25519_scalarmult     — X25519 scalar × point, 32-byte buffers
     fe25519_mul, fe25519_sqr, fe25519_inv
 
-  ChaCha20-Poly1305         (c64-ChaCha20-Poly1305 sibling)
+  ChaCha20-Poly1305         (in-tree, permanent)
     chacha20_encrypt
     poly1305_init, poly1305_update, poly1305_final
     aead_encrypt, aead_decrypt
@@ -63,12 +63,17 @@ buffers in the crypto BSS — see per-module headers for details):
   SHA-256                   (in-tree; no sibling)
     sha256_init, sha256_update, sha256_final
 
-  ECDSA P-256 point ops     (c64-nist-curves sibling)
-    ec_point_double, ec_point_add, ec_jacobian_to_affine
+  ECDSA P-256                (libs/nistcurves sibling, Phase C.4)
+    ecdsa_verify_256      — TLS dispatcher in src/crypto/ecdsa_verify.s
+                            packs the BE struct + calls the sibling entry
+    ec_scalar_mul_var     — variable-base scalar multiplication
+    (in-tree ecdsa_{curve,fp,mod,points}.s were deleted in Phase G)
 
-P-384 is *stubbed* (see `project_p384_stubbed` memory note). The
-`ecdsa_*_384.asm` files exist but are not assembled in the ca65 build
-— they must be restored before real cert chains that require P-384.
+P-384 is *stubbed at the TLS layer* (see `project_p384_stubbed` memory
+note). The sibling `libs/nistcurves` P-384 primitives are buildable as
+an external overlay image (Phase C.3b, `make p384-overlay`) but the
+target has a pre-existing unresolved-symbol bug (`ec_base384_x/y` in
+points384_raw.s) — fix that before wiring P-384 into the TLS path.
 
 MEMORY requirements for a drop-in sibling library:
   - Code + rodata must load into the `CRYPTO` region at **$6000-$9FFF**
@@ -78,8 +83,18 @@ MEMORY requirements for a drop-in sibling library:
   - Zero-page usage is defined in `src/constants.inc` — fe25519 lives at
     `$2C-$37`, x25519 state at `$38-$3A`, ECDSA bignum at `$22-$3C`.
     These ranges are time-shared (fe25519 and ChaCha20 never overlap).
-  - REU Profile B is the baseline. `project_x25519_optimization` notes
-    that VICE needs `-reu -reusize 512` for the optimized X25519 tables.
+  - REU Profile B is the baseline. The shipped build does not currently
+    use REU banks 0-1 for optimised X25519 mul tables (the sibling
+    overlay integration in Phase C.1 was rolled back — see Known issues);
+    the in-tree x25519 implementation uses a smaller on-chip squaring
+    table in `TABLES_BSS`. Banks 4-7 are reserved for the P-384
+    precompute stashed by the `make p384-overlay` external-image
+    smoke test (Phase C.3b).
+  - `crypto_init` currently bootstraps `mul_tables_init` only. X25519
+    state and any per-run setup happens from the boot path in
+    `src/boot.s`. The overlay swap dispatcher
+    (`src/crypto/shared/crypto_swap.s`) is present but idle under the
+    shipped build.
 
 ## Networking backend ABI
 
@@ -212,8 +227,9 @@ see `tests/test_phase3_https_1mhz.py`). The flow, identical across both
 backends:
 
   - ClientHello → ServerHello (X25519 key share)
-  - EncryptedExtensions, Certificate, CertificateVerify (ECDSA-P256
-    verify against server.pem takes ~85 s wall-clock; see the ECDSA
+  - EncryptedExtensions, Certificate, CertificateVerify (sibling
+    c64-nist-curves P-256 ECDSA verify, Phase C.4 cc182f1; full
+    handshake measured at 81.9 s on U64E 48 MHz — see the ECDSA
     benchmark subsection)
   - Server Finished verified
   - Client Finished computed + sent under HS write key
@@ -259,6 +275,15 @@ Five latent bugs and three new ones were cleared to get here:
      delivered and the TLS reassembly buffer ended up gluing a prefix
      of record N onto bytes from record N+1. Replaced with a
      16-bit-safe copy loop that mirrors the UCI adapter.
+ 11. Phase C.4 (`cc182f1`) — replaced the in-tree P-256 primitives
+     (`ecdsa_{curve,fp,mod,points}.s`) with the sibling
+     `libs/nistcurves/` P-256 integration (`build/lib/nistcurves-p256.a`,
+     always-resident under both backends). `src/crypto/ecdsa_verify.s`
+     is now a thin dispatcher that packs the big-endian input struct
+     and calls `ecdsa_verify_256`. Handshake wall-clock on U64E 48 MHz
+     dropped to **81.9 s** end-to-end. The orphan in-tree primitives
+     and legacy ACME-era `ecdsa_*_384.asm` stubs were physically
+     deleted in Phase G.
 
 ### Known issues
 
@@ -290,23 +315,37 @@ Five latent bugs and three new ones were cleared to get here:
     `tools/uci/test_https_print_body.py` with a mixed-case response
     body.  `http_resp_buf` still holds raw ASCII — only the render
     pipeline is translated.
+  - X25519 REU overlay deferred (c64-x25519 #33). Phase C.1 (`6c9d2a3`)
+    integrated the sibling optimised X25519 as a REU overlay but hung
+    inside the Montgomery ladder under BACKEND=uci at 48 MHz; rolled
+    back in `b133ac7`. A retry against the v0.3.0 tag failed the same
+    way. X25519 stays in-tree until the upstream hang is resolved.
+  - `make p384-overlay` has a pre-existing unresolved-symbol bug:
+    `points384_raw.s` references `ec_base384_x` / `ec_base384_y`
+    which aren't exported by the current sibling build. Not a Phase C
+    regression — the target has never built cleanly — but should be
+    fixed before P-384 is actually wired into the TLS path. TLS-level
+    P-384 verify remains stubbed regardless (see `project_p384_stubbed`).
 
 ### ECDSA P-256 verify wall-clock
 
 `ecdsa_verify` of the RFC 6979 test vector on a U64E at 48 MHz turbo
-runs in ~85 s median (see `tools/uci/bench_ecdsa_u64e.py` for the
-protocol).  The full `tls_connect` handshake — which does one
-ECDSA verify over the CertificateVerify signature — takes ~110 s
-wall-clock end-to-end.  The remainder is network I/O + SHA-256 +
-X25519 + Finished HMACs + handshake state-machine overhead.
+runs in ~85 s median in the pre-Phase-C.4 benchmark (see
+`tools/uci/bench_ecdsa_u64e.py` for the protocol). The full
+`tls_connect` handshake — which does one ECDSA verify over the
+CertificateVerify signature — now takes **81.9 s** wall-clock
+end-to-end under Phase C.4's sibling `libs/nistcurves` P-256
+integration, down from ~110 s pre-integration. The remainder is
+network I/O + SHA-256 + X25519 + Finished HMACs + handshake
+state-machine overhead.
 
-~85 s does not fit a typical 10-30 s real-world server handshake
-window, so the current implementation is a blocker for arbitrary
-internet TLS targets that require ECDSA-P256 CertificateVerify.
+81.9 s still does not fit a typical 10-30 s real-world server
+handshake window, so this is a blocker for arbitrary internet TLS
+targets that require ECDSA-P256 CertificateVerify.
 It is fine for the local listener used by the e2e harness (600 s
-budget, ample headroom). The speedup path is a sibling-style
-optimized P-256 implementation (parallel to the `c64-x25519`
-effort) that can be dropped in through the Crypto ABI without
+budget, ample headroom). Further speedups live in the sibling
+`libs/nistcurves` repo — any drop through the Crypto ABI lands
+here as a submodule bump without
 touching TLS call sites.
 
 ### Design note — bounded timeouts must use wall-clock time
