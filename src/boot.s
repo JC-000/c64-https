@@ -11,13 +11,8 @@
         .export print_resp_body
 
         ; ---- exports: REU multiply table routines ----
-        ; Phase C.1: under BACKEND=uci the sibling c64-x25519 archive
-        ; provides `x25519_reu_mul_init` + `reu_fetch_mul_row` and the
-        ; in-tree stubs below are skipped.
-        .ifndef USE_X25519_SIBLING
         .export reu_mul_init
         .export reu_fetch_mul_row
-        .endif
 
         ; ---- exports: menu handlers ----
         .export do_net_init
@@ -119,16 +114,12 @@
         .import tls_hostname_len
 
         ; ---- imports: multiply / REU staging (data.asm) ----
-        ; Phase C.1: only the in-tree reu_mul_init (below) uses these.
-        ; Under UCI the sibling covers all REU init so skip the imports.
-        .ifndef USE_X25519_SIBLING
         .import mul_8x8
         .import mul_dma_lo
         .import mul_dma_hi
         .import mul_cached_a
         .import poly_prod_lo
         .import poly_prod_hi
-        .endif
 
 ; =============================================================================
 ; BASIC stub: 10 SYS 2061
@@ -201,10 +192,9 @@ start:
         jsr entropy_init
         jsr drbg_init_entropy
 
-        ; Phase C.1: shared crypto orchestrator. Under BACKEND=uci this
-        ; now drives x25519's sibling-library reu_mul_init and overlay
-        ; stash; under BACKEND=ip65 it's still a stub and the in-tree
-        ; sqtab_init / reu_mul_init below run.
+        ; Shared crypto orchestrator. Currently calls only the stubbed
+        ; mul_tables_init — the in-tree x25519 sqtab_init / reu_mul_init
+        ; below run unconditionally under both backends.
         jsr crypto_init
 
         ; build quarter-square multiply table (needed by Poly1305, fe25519, ECDSA)
@@ -215,9 +205,7 @@ start:
         lda $01
         and #%11111110
         sta $01
-        .ifndef USE_X25519_SIBLING
         jsr reu_mul_init
-        .endif
 
         ; Auto-initialize networking at boot so the banner shows the
         ; firmware-assigned IP without waiting for the user to press 'I'.
@@ -630,10 +618,6 @@ ascii_chrout:
 ; =============================================================================
 ; REU multiply table initialization (from c64-x25519 optimizations)
 ; =============================================================================
-; Phase C.1: under BACKEND=uci the sibling c64-x25519 archive provides
-; equivalent (and more complete) implementations of reu_mul_init and
-; reu_fetch_mul_row. The in-tree copies below stay for BACKEND=ip65 only.
-.ifndef USE_X25519_SIBLING
 
 ; =============================================================================
 ; reu_mul_init - Generate 256 full multiplication rows and stash in REU
@@ -750,8 +734,6 @@ reu_fetch_mul_row:
         lda #%10110001         ; execute + autoload + FETCH (REU->C64)
         sta reu_command
         rts
-
-.endif ; USE_X25519_SIBLING
 
 ; =============================================================================
 ; Strings (read-only)
@@ -894,7 +876,5 @@ http_path_root:
         .segment "BSS"
 
 net_initialized:        .res 1
-.ifndef USE_X25519_SIBLING
 reu_init_a:             .res 1
 reu_init_b:             .res 1
-.endif

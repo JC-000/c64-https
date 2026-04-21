@@ -17,11 +17,8 @@
 
 .export tcp_recv_buf
 
-; Phase C.1: promote the fe25519 ZP equates so tools/test_x25519.py can
-; resolve them via labels.txt. The addresses are identical in the
-; in-tree layout (src/constants.inc) and the sibling's layout
-; (zp_canon.inc, passed as -D to ca65 by libs/x25519/build.sh), so this
-; export works under both BACKEND=ip65 and BACKEND=uci.
+; Promote the fe25519 ZP equates so tools/test_x25519.py can resolve
+; them via labels.txt.
 .export fe_src1
 .export fe_src2
 .export fe_dst

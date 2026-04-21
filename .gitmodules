@@ -1,9 +1,6 @@
 [submodule "ip65"]
 	path = ip65
 	url = https://github.com/cc65/ip65.git
-[submodule "libs/x25519"]
-	path = libs/x25519
-	url = https://github.com/JC-000/c64-x25519.git
 [submodule "libs/nistcurves"]
 	path = libs/nistcurves
 	url = https://github.com/JC-000/c64-nist-curves.git

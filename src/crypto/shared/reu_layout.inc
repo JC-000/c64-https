@@ -18,20 +18,18 @@
 ; or by including this file.
 ; =============================================================================
 
-; --- x25519 mul tables (2 banks) ---
+; --- x25519 mul tables (2 banks, used by in-tree reu_mul_init in boot.s) ---
 .ifndef REU_X25519_MUL_TABLES_BASE
 REU_X25519_MUL_TABLES_BASE = $00000
 .endif
 
-; --- overlay storage (single bank; three 8 KB slots) ---
-; NOTE: offset $0000-$003F in bank 2 is reserved by the c64-x25519 sibling
-; as a 64-byte zero buffer for `reu_clear_wide` (DMA-zeros fe_wide on the
-; C64 side). Overlay images start at offset $0100 so they do not collide.
+; --- overlay storage (single bank; 8 KB slots for P-256 and P-384) ---
+; The x25519 overlay slot was removed after the Phase C.1 integration
+; was rolled back — in-tree x25519 is always-resident. Offset $0100
+; base kept for the remaining slots to match the external P-384 test
+; harness's stash layout.
 .ifndef REU_OVERLAY_STORE_BASE
 REU_OVERLAY_STORE_BASE     = $20100
-.endif
-.ifndef REU_OVERLAY_X25519
-REU_OVERLAY_X25519         = $20100
 .endif
 .ifndef REU_OVERLAY_P256
 REU_OVERLAY_P256           = $22100

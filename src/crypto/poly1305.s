@@ -19,14 +19,9 @@
 .export poly1305_init
 .export poly1305_clamp
 .export sqtab_init
-; Phase C.1: under BACKEND=uci the sibling c64-x25519 archive provides
-; equivalent mul_8x8 / poly_prod_lo / poly_prod_hi symbols that share the
-; same sqtab_lo/hi ($7800) storage, so avoid the duplicate export.
-.ifndef USE_X25519_SIBLING
 .export poly_prod_lo
 .export poly_prod_hi
 .export mul_8x8
-.endif
 .export poly1305_multiply
 .export poly1305_reduce
 .export poly1305_block

@@ -33,10 +33,6 @@ sqtab2_hi:
         .endrepeat
 
 ; --- mul_by_38 lookup tables ---
-; Phase C.1: under BACKEND=uci the sibling c64-x25519 archive provides
-; mul38_lo_tab/mul38_hi_tab, fe_p, x25_basepoint in its own DATA segment.
-; Skip the in-tree copies to avoid duplicate symbol definitions.
-.ifndef USE_X25519_SIBLING
 .export mul38_lo_tab
 .export mul38_hi_tab
 mul38_lo_tab:
@@ -63,7 +59,6 @@ fe_p:
 x25_basepoint:
         .byte 9
         .res 31, 0
-.endif
 
 ; =============================================================================
 ; Initialized mutable data (needs DATA segment — small defaults)
@@ -107,9 +102,6 @@ zp_save_buf:    .res 26         ; saves $02-$1B during ip65 calls
 
 .segment "TABLES_BSS"
 
-; Phase C.1: under BACKEND=uci the sibling provides mul_dma_lo/hi and
-; hardcodes sqtab_lo=$7800, sqtab_hi=$7a00. In-tree defs are skipped.
-.ifndef USE_X25519_SIBLING
 .align 256
 .export mul_dma_lo
 .export mul_dma_hi
@@ -122,7 +114,6 @@ mul_dma_hi:     .res 256        ; DMA target: hi bytes of a*b for current a
 .export sqtab_hi
 sqtab_lo:       .res 512
 sqtab_hi:       .res 512
-.endif
 
 .segment "BSS"
 
@@ -462,27 +453,20 @@ cc20_remain_hi: .res 1          ; high byte of 16-bit ChaCha20/Poly1305 length c
 ; -----------------------------------------------------------------------------
 ; fe25519 field arithmetic temporaries
 ; -----------------------------------------------------------------------------
-; Phase C.1: under BACKEND=uci the sibling c64-x25519 provides
-; fe25519_tmp1..4 (page-aligned for self-mod abs,Y) and
-; src/crypto/x25519_aliases.s re-exports them as fe_tmp1..4 via `:=`.
 .export fe_wide
-fe_wide:        .res 64         ; 512-bit product from multiply
-.ifndef USE_X25519_SIBLING
 .export fe_tmp1
 .export fe_tmp2
 .export fe_tmp3
 .export fe_tmp4
+fe_wide:        .res 64         ; 512-bit product from multiply
 fe_tmp1:        .res 32
 fe_tmp2:        .res 32
 fe_tmp3:        .res 32
 fe_tmp4:        .res 32
-.endif
 
 ; -----------------------------------------------------------------------------
 ; X25519 state
 ; -----------------------------------------------------------------------------
-; Phase C.1: sibling c64-x25519 provides these in its own DATA segment.
-.ifndef USE_X25519_SIBLING
 .export x25_scalar
 .export x25_u
 .export x25_result
@@ -513,7 +497,6 @@ x25_e:          .res 32
 .export mul_src2_buf
 mul_cached_a:   .res 1          ; cached src1[i] for inlined multiply
 mul_src2_buf:   .res 32         ; absolute copy of src2 for fast indexed access
-.endif
 
 ; -----------------------------------------------------------------------------
 ; ECDSA signature verification

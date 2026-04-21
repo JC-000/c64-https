@@ -1,8 +1,8 @@
 ; =============================================================================
 ; crypto_swap.s - Crypto overlay DMA dispatcher
 ;
-; Pages one of three 8 KB overlay images (x25519, P-256, P-384) from REU
-; bank 2 into the live CRYPTO_OVERLAY region. TLS call sites prefix each
+; Pages one of two 8 KB overlay images (P-256, P-384) from REU
+; bank 2 into the live CRYPTO_OVERLAY region. Call sites prefix each
 ; overlay-targeting primitive with `jsr crypto_swap_to_<overlay>`.
 ;
 ; Idempotent: re-entering with the same overlay already resident is a
@@ -12,9 +12,14 @@
 ; flag on exit. ~8 ms DMA latency at any CPU speed (REU bus runs at
 ; ~1 MHz regardless of turbo).
 ;
+; Phase C.1 rollback note: the x25519 overlay integration was removed
+; after it broke the TLS handshake at 48 MHz UCI. `crypto_swap_to_x25519`
+; no longer exists; in-tree x25519 in `src/crypto/x25519.s` is
+; always-resident. The remaining swap entry points exist for the
+; external P-384 smoke test (tools/test_p384_symbols.py).
+;
 ; `current_overlay`: 1 byte in CRYPTO_BSS (SHADOW_BSS-resident).
 ;   0 = none (uninitialized / swap_none)
-;   1 = x25519
 ;   2 = p256
 ;   3 = p384
 ;
@@ -25,14 +30,12 @@
         .include "constants.inc"        ; reu_* register equates
         .include "reu_layout.inc"
 
-        .export crypto_swap_to_x25519
         .export crypto_swap_to_p256
         .export crypto_swap_to_p384
         .export crypto_swap_none
         .export current_overlay
 
         ; Export REU layout equates once (guarded against multi-include).
-        .export REU_OVERLAY_X25519
         .export REU_OVERLAY_P256
         .export REU_OVERLAY_P384
         .export OVERLAY_SIZE
@@ -44,7 +47,6 @@
 ; Overlay IDs — must stay in sync with `current_overlay` comments.
 ; -----------------------------------------------------------------------------
 OV_NONE   = 0
-OV_X25519 = 1
 OV_P256   = 2
 OV_P384   = 3
 
@@ -53,22 +55,9 @@ OV_P384   = 3
 REU_CMD_REU_TO_C64 = $91
 
 ; -----------------------------------------------------------------------------
-; crypto_swap_to_x25519 / _p256 / _p384
+; crypto_swap_to_p256 / _p384
 ; -----------------------------------------------------------------------------
 .segment "LOADER_OVERFLOW"
-
-crypto_swap_to_x25519:
-        lda #OV_X25519
-        cmp current_overlay
-        beq swap_done_fast
-        pha
-        lda #<REU_OVERLAY_X25519
-        ldx #>REU_OVERLAY_X25519
-        ldy #^REU_OVERLAY_X25519
-        jsr do_swap
-        pla
-        sta current_overlay
-        rts
 
 crypto_swap_to_p256:
         lda #OV_P256

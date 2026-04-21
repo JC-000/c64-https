@@ -29,19 +29,22 @@ LD65FLAGS := -C $(CFG) -Ln build/labels.txt -m build/c64-https.map
 
 # Source inventory.
 TOP_SRCS    := $(wildcard src/*.s)
-# Crypto sources: wildcard-discovered, minus any files explicitly swapped
-# out under a sibling-lib integration. Phase C.1 drops in-tree
-# src/crypto/x25519.s + src/crypto/fe25519.s under BACKEND=uci in favour
-# of libs/x25519/.
+# Crypto sources: wildcard-discovered. In-tree src/crypto/x25519.s +
+# src/crypto/fe25519.s are used under both backends; the Phase C.1
+# libs/x25519/ overlay integration was rolled back after it broke the
+# TLS handshake under BACKEND=uci at 48 MHz — see the commit that
+# removed libs/x25519 for details.
 CRYPTO_SRCS_ALL := $(wildcard src/crypto/*.s)
 # Shared crypto infrastructure introduced in Phase C.0: canonical ZP map,
 # overlay swap dispatcher, init orchestrator, shared sqtab stub. Always
-# linked; sibling-lib integration (Phase C.1-.3) hangs off these.
+# linked; sibling-lib integration (Phase C.3) hangs off these.
 CRYPTO_SHARED_SRCS := $(wildcard src/crypto/shared/*.s)
 IP65_SRCS   := src/net/ip65/ip65_blob.s src/net/ip65/net.s src/net/ip65/net_banner.s src/net/ip65/exports.s
 UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s
 
-# Sibling-lib archive set. Phase C.1 adds the x25519 archive under UCI.
+# Sibling-lib archive set. Currently empty — Phase C.3's nistcurves-p384
+# archive is built as an external overlay image (see below), not linked
+# into the main PRG.
 SIBLING_LIB_ARCHIVES :=
 
 # Per-backend source + object selection.
@@ -50,12 +53,7 @@ NET_SRCS := $(IP65_SRCS)
 CRYPTO_SRCS := $(CRYPTO_SRCS_ALL)
 else ifeq ($(BACKEND),uci)
 NET_SRCS := $(UCI_SRCS)
-# Phase C.1: replace in-tree x25519.s + fe25519.s with libs/x25519/.
-# `USE_X25519_SIBLING` toggles every `.ifdef USE_X25519_SIBLING` guard
-# that skips the in-tree duplicates in data.s / boot.s / x25519_aliases.s.
-CRYPTO_SRCS := $(filter-out src/crypto/x25519.s src/crypto/fe25519.s,$(CRYPTO_SRCS_ALL))
-CA65FLAGS += -D USE_X25519_SIBLING=1
-SIBLING_LIB_ARCHIVES += build/lib/x25519.a
+CRYPTO_SRCS := $(CRYPTO_SRCS_ALL)
 # Phase C.3: add c64-nist-curves P-384 primitives as a REU overlay.
 # Variable-base P-384 point ops (double/add/jacobian-to-affine) only —
 # see tools/integration/build_nistcurves_p384.sh for the scope rationale.
@@ -112,15 +110,6 @@ link: $(PRG)
 build/%.o: src/%.s
 	@mkdir -p $(dir $@)
 	$(CA65) $(CA65FLAGS) -o $@ $<
-
-# Phase C.1: c64-x25519 sibling archive (libs/x25519/ submodule).
-# Builds only under BACKEND=uci per the SIBLING_LIB_ARCHIVES gate above;
-# ip65 builds continue to use the in-tree src/crypto/x25519.s + fe25519.s.
-# The build script lives in tools/integration/ (outside the submodule) to
-# keep the submodule's working tree clean.
-build/lib/x25519.a:
-	@mkdir -p build/lib
-	bash tools/integration/build_x25519.sh
 
 # Phase C.3: c64-nist-curves sibling archive (libs/nistcurves/ submodule).
 # Same gating as x25519: only linked under BACKEND=uci; ip65 continues
