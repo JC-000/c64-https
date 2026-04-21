@@ -34,7 +34,18 @@ TOP_SRCS    := $(wildcard src/*.s)
 # libs/x25519/ overlay integration was rolled back after it broke the
 # TLS handshake under BACKEND=uci at 48 MHz — see the commit that
 # removed libs/x25519 for details.
-CRYPTO_SRCS_ALL := $(wildcard src/crypto/*.s)
+# Phase C.4: the in-tree P-256 primitives (ecdsa_{curve,fp,mod,points}.s)
+# were replaced by the sibling `libs/nistcurves/` P-256 integration
+# (build/lib/nistcurves-p256.a). They remain on disk for reference but no
+# longer link under either backend. ecdsa_verify.s stays — rewritten as a
+# thin dispatcher that packs the BE struct + calls ecdsa_verify_256.
+# Phase G will physically delete the now-unused files.
+CRYPTO_SRCS_ALL := $(filter-out \
+    src/crypto/ecdsa_curve.s \
+    src/crypto/ecdsa_fp.s \
+    src/crypto/ecdsa_mod.s \
+    src/crypto/ecdsa_points.s, \
+    $(wildcard src/crypto/*.s))
 # Shared crypto infrastructure introduced in Phase C.0: canonical ZP map,
 # overlay swap dispatcher, init orchestrator, shared sqtab stub. Always
 # linked; sibling-lib integration (Phase C.3) hangs off these.
@@ -42,10 +53,11 @@ CRYPTO_SHARED_SRCS := $(wildcard src/crypto/shared/*.s)
 IP65_SRCS   := src/net/ip65/ip65_blob.s src/net/ip65/net.s src/net/ip65/net_banner.s src/net/ip65/exports.s
 UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s
 
-# Sibling-lib archive set. Currently empty — Phase C.3's nistcurves-p384
-# archive is built as an external overlay image (see below), not linked
-# into the main PRG.
-SIBLING_LIB_ARCHIVES :=
+# Sibling-lib archive set. Phase C.3's nistcurves-p384 archive remains an
+# external overlay image (see below), not linked into the main PRG.
+# Phase C.4 adds nistcurves-p256.a which IS linked in, always-resident,
+# for BOTH backends (replaces the in-tree ecdsa_{curve,fp,mod,points}.s).
+SIBLING_LIB_ARCHIVES := build/lib/nistcurves-p256.a
 
 # Per-backend source + object selection.
 ifeq ($(BACKEND),ip65)
@@ -91,7 +103,7 @@ LABELS := build/labels.txt
 all: $(PRG)
 
 ifeq ($(BACKEND),ip65)
-PRG_DEPS := $(ALL_OBJS) $(IP65_BIN)
+PRG_DEPS := $(ALL_OBJS) $(IP65_BIN) $(SIBLING_LIB_ARCHIVES)
 else ifeq ($(BACKEND),uci)
 PRG_DEPS := $(ALL_OBJS) $(SIBLING_LIB_ARCHIVES)
 else
@@ -118,6 +130,16 @@ build/%.o: src/%.s
 build/lib/nistcurves-p384.a:
 	@mkdir -p build/lib
 	bash tools/integration/build_nistcurves_p384.sh
+
+# Phase C.4: c64-nist-curves P-256 archive — replaces the in-tree ECDSA
+# P-256 primitives (ecdsa_{curve,fp,mod,points}.s) with the sibling's
+# variable-base scalar mul + packaged ecdsa_verify_256. Always-resident;
+# linked into the PRG under BOTH backends. See the build script for the
+# full stripped-symbol list and the dispatcher (src/crypto/ecdsa_verify.s)
+# for the 160-byte BE struct packing that bridges TLS to the sibling.
+build/lib/nistcurves-p256.a:
+	@mkdir -p build/lib
+	bash tools/integration/build_nistcurves_p256.sh
 
 # Phase C.3b: P-384 overlay IMAGE + labels for harness-time use only.
 # The production PRG does NOT link nistcurves-p384.a — this is smoke-test

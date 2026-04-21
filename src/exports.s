@@ -30,3 +30,11 @@
 .export cc20_data_ptr
 .export cc20_remain
 .export zp_ptr
+
+; Phase C.4: c64-nist-curves fp256.s references a handful of REU DMA
+; registers via `.import` (it was written to live in a linker-visible
+; symbol world). Promote the numeric equates from constants.inc so ld65
+; can resolve the sibling's imports.
+.export reu_reu_hi
+.export reu_reu_bank
+.export reu_command

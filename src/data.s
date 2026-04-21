@@ -496,7 +496,11 @@ x25_e:          .res 32
 .export mul_cached_a
 .export mul_src2_buf
 mul_cached_a:   .res 1          ; cached src1[i] for inlined multiply
-mul_src2_buf:   .res 32         ; absolute copy of src2 for fast indexed access
+mul_src2_buf:   .res 35         ; absolute copy of src2 for fast indexed access
+                                ; (32 bytes + 3 pad zeros so the sibling
+                                ; c64-nist-curves fp256 4x-unrolled mul can
+                                ; over-read past j=31 into zeros for its
+                                ; fast-skip fast path — Phase C.4)
 
 ; -----------------------------------------------------------------------------
 ; ECDSA signature verification
@@ -509,30 +513,28 @@ mul_src2_buf:   .res 32         ; absolute copy of src2 for fast indexed access
 .export ecdsa_sig_s
 .export ecdsa_pubkey_x
 .export ecdsa_pubkey_y
-.export ecdsa_verify_tmp
 ecdsa_curve_id: .res 1          ; 0=P-256, 1=P-384
-ecdsa_hash:     .res 48         ; message hash (32 for P-256, 48 for P-384)
-ecdsa_sig_r:    .res 48         ; signature r component
-ecdsa_sig_s:    .res 48         ; signature s component
-ecdsa_pubkey_x: .res 48         ; public key Q.x
-ecdsa_pubkey_y: .res 48         ; public key Q.y
-ecdsa_verify_tmp: .res 48       ; temporary for w
 
-; --- P-256 working buffers ---
-.export ev_u1
-.export ev_u2
-.export ev_point_save
-ev_u1:          .res 32         ; u1 = z * w mod n
-ev_u2:          .res 32         ; u2 = r * w mod n
-ev_point_save:  .res 96         ; saved Jacobian point (u1*G)
+; Phase C.4: for P-256, these five 32-byte BE buffers are laid out
+; contiguously in memory (r|s|h|Qx|Qy) so the dispatcher can hand
+; `ecdsa_sig_r` directly to the sibling's ecdsa_verify_256 as a 160-byte
+; packed input struct without an explicit pack step. Reshrunk from 48 B
+; to 32 B each; only P-256 is wired right now (P-384 is stubbed — when it
+; is re-integrated via a second sibling archive it will own its own
+; 240-byte BE input struct, likely reusing this layout scaled to 48 B).
+ecdsa_sig_r:    .res 32         ; signature r component (BE, struct +0)
+ecdsa_sig_s:    .res 32         ; signature s component (BE, struct +32)
+ecdsa_hash:     .res 32         ; message hash            (BE, struct +64)
+ecdsa_pubkey_x: .res 32         ; public key Q.x          (BE, struct +96)
+ecdsa_pubkey_y: .res 32         ; public key Q.y          (BE, struct +128)
 
-; --- P-384 working buffers ---
-.export ev_u1_384
-.export ev_u2_384
-.export ev_point_save_384
-ev_u1_384:      .res 48         ; u1 = z * w mod n (P-384)
-ev_u2_384:      .res 48         ; u2 = r * w mod n (P-384)
-ev_point_save_384: .res 144     ; saved Jacobian point (u1*G, P-384)
+; --- Legacy in-tree ECDSA scratch (ecdsa_verify_tmp, ev_u1, ev_u2,
+;     ev_point_save, ev_u1_384, ev_u2_384, ev_point_save_384) was
+;     reclaimed in Phase C.4.  The sibling c64-nist-curves
+;     `ecdsa_verify_256` now owns its own scratch inside the archive's
+;     BSS (ecdsa_w/u1/u2/u1_be/u2_be/u1g_x/u1g_y, fp_rev_buf), so the
+;     legacy ev_* labels are unused.  Phase G can reclaim the matching
+;     P-384 slots when ecdsa_verify_384 is re-integrated the same way.
 
 ; --- DER parsing temporaries ---
 .export ev_der_int_len
