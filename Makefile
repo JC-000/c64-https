@@ -36,16 +36,10 @@ TOP_SRCS    := $(wildcard src/*.s)
 # removed libs/x25519 for details.
 # Phase C.4: the in-tree P-256 primitives (ecdsa_{curve,fp,mod,points}.s)
 # were replaced by the sibling `libs/nistcurves/` P-256 integration
-# (build/lib/nistcurves-p256.a). They remain on disk for reference but no
-# longer link under either backend. ecdsa_verify.s stays — rewritten as a
-# thin dispatcher that packs the BE struct + calls ecdsa_verify_256.
-# Phase G will physically delete the now-unused files.
-CRYPTO_SRCS_ALL := $(filter-out \
-    src/crypto/ecdsa_curve.s \
-    src/crypto/ecdsa_fp.s \
-    src/crypto/ecdsa_mod.s \
-    src/crypto/ecdsa_points.s, \
-    $(wildcard src/crypto/*.s))
+# (build/lib/nistcurves-p256.a). The now-unused files were physically
+# deleted in Phase G. ecdsa_verify.s stays — rewritten as a thin
+# dispatcher that packs the BE struct + calls ecdsa_verify_256.
+CRYPTO_SRCS_ALL := $(wildcard src/crypto/*.s)
 # Shared crypto infrastructure introduced in Phase C.0: canonical ZP map,
 # overlay swap dispatcher, init orchestrator, shared sqtab stub. Always
 # linked; sibling-lib integration (Phase C.3) hangs off these.
