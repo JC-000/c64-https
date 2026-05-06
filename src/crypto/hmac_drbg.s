@@ -53,7 +53,11 @@
 .import sha256_block
 .import sha256_hash
 
-.segment "CRYPTO_CODE"
+; Phase C.4 fit: hmac_drbg occupies a separate aux-code segment so the
+; ip65 cfg can route it to NET_CODE tail while sha256 (larger) rides
+; NET_BSS_TAIL alongside TLS_CODE.  Under UCI both segments flow into
+; NET_CODE via identical cfg rules, preserving Phase C.2's behavior.
+.segment "CRYPTO_AUX_CODE2"
 
 ; =============================================================================
 ; hmac_sha256 - compute HMAC-SHA256

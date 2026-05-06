@@ -70,10 +70,11 @@
         ; ---- exports: local BSS ----
         .export net_initialized
 
-        ; ---- imports: entropy / DRBG / sqtab ----
+        ; ---- imports: entropy / DRBG / sqtab / crypto init ----
         .import entropy_init
         .import drbg_init_entropy
         .import sqtab_init
+        .import crypto_init
 
         ; ---- imports: network (backend adapter — ip65 or uci) ----
         .import net_init
@@ -190,6 +191,11 @@ start:
         ; initialize hardware entropy sources and seed DRBG
         jsr entropy_init
         jsr drbg_init_entropy
+
+        ; Shared crypto orchestrator. Currently calls only the stubbed
+        ; mul_tables_init — the in-tree x25519 sqtab_init / reu_mul_init
+        ; below run unconditionally under both backends.
+        jsr crypto_init
 
         ; build quarter-square multiply table (needed by Poly1305, fe25519, ECDSA)
         jsr sqtab_init

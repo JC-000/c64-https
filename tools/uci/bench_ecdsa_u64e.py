@@ -50,6 +50,7 @@ import traceback
 from pathlib import Path
 
 from c64_test_harness.backends.device_lock import DeviceLock
+from c64_test_harness.labels import Labels
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 from c64_test_harness.backends.ultimate64_helpers import (
@@ -97,14 +98,9 @@ KEEP_ON_PASS = os.environ.get("KEEP_DEBUG_ON_PASS", "0") == "1"
 
 
 def _load_labels() -> dict[str, int]:
-    labels: dict[str, int] = {}
-    for line in LABELS_PATH.read_text().splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[0] == "al" and parts[2].startswith("."):
-            name = parts[2][1:]
-            _, hex_addr = parts[1].split(":", 1)
-            labels[name] = int(hex_addr, 16)
-    return labels
+    # c64-test-harness Labels is a Mapping since 0.12.4 (JC-000/c64-test-harness#64)
+    # and parses both C: and non-C (REU/bank) label lines since #62.
+    return dict(Labels.from_file(LABELS_PATH))
 
 
 def _build_stub(labels: dict[str, int]) -> bytes:

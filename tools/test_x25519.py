@@ -676,13 +676,23 @@ def main():
     print(f"Random seed: {seed} (reproduce with --seed {seed})")
 
     # Build
-    print("\n=== Building ===")
-    subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
-    result = subprocess.run(["make"], capture_output=True, text=True,
-                            cwd=PROJECT_ROOT)
-    if result.returncode != 0:
-        print(f"Build failed:\n{result.stderr}")
-        sys.exit(1)
+    # BACKEND env var (ip65 or uci) selects the linker cfg. Defaults to
+    # ip65 so the legacy test path is unchanged; under uci the c64-x25519
+    # sibling archive (REU overlay) provides fe25519/x25519 instead of
+    # the in-tree sources.
+    backend = os.environ.get("BACKEND", "ip65")
+    make_args = [f"BACKEND={backend}"]
+    print(f"\n=== Building (BACKEND={backend}) ===")
+    if os.environ.get("C64_SKIP_BUILD") != "1":
+        subprocess.run(["make", "clean"] + make_args,
+                       capture_output=True, cwd=PROJECT_ROOT)
+        result = subprocess.run(["make"] + make_args, capture_output=True,
+                                text=True, cwd=PROJECT_ROOT)
+        if result.returncode != 0:
+            print(f"Build failed:\n{result.stderr}")
+            sys.exit(1)
+    else:
+        print("  C64_SKIP_BUILD=1 — reusing existing build artifacts")
 
     assert os.path.exists(PRG_PATH), f"{PRG_PATH} not found after build"
     print(f"  Build OK: {PRG_PATH}")
