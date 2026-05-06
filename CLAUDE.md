@@ -326,6 +326,16 @@ Five latent bugs and three new ones were cleared to get here:
     regression — the target has never built cleanly — but should be
     fixed before P-384 is actually wired into the TLS path. TLS-level
     P-384 verify remains stubbed regardless (see `project_p384_stubbed`).
+  - `ecdsa_verify` (P-256) rejects a known-good signature. Surfaced
+    2026-05-06 by `tools/test_x509.py` group 3 subtest 3c
+    ("ECDSA verify: valid signature (C=0)") on macOS once the BSD-sed
+    portability fixes unblocked the build. The C64 returns C=1 (invalid)
+    after ~60 s on a Python-pre-verified valid P-256 signature; tampered
+    signatures (subtest 3d) are correctly rejected, and all five input
+    buffers (hash, r, s, Qx, Qy) were confirmed Match=True in C64 memory
+    before the call, so the bug is in the verify path, not input
+    staging. Used by TLS handshake CertificateVerify; ECDHE/X25519
+    handshake is unaffected.
 
 ### ECDSA P-256 verify wall-clock
 
