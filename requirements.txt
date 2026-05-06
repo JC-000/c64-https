@@ -1,0 +1,2 @@
+# c64_test_harness is installed separately per the build instructions: `pip install -e ../c64-test-harness`.
+cryptography
