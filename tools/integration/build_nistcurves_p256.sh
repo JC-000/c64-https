@@ -102,22 +102,22 @@ cp "$LIB_SRC"/ecdsa256.s   "$STAGING/ecdsa256_raw.s"
 #     helpers + anchor base-address table + cm_* / sm256_* state vars
 # Keeps ec_point_double (line 60-410), ec_point_add (411-761),
 # ec_scalar_mul_var (1459-1609), ec_jacobian_to_affine (1610-end).
-sed -i '762,1458d' "$STAGING/points256_raw.s"
+sed -i '' '762,1458d' "$STAGING/points256_raw.s"
 
 # Strip exports + imports that only the removed bodies used.
-sed -i '/^\.export ec_precompute_256, ec_scalar_mul, ec_scalar_mul_var$/c\
+sed -i '' '/^\.export ec_precompute_256, ec_scalar_mul, ec_scalar_mul_var$/c\
 .export ec_scalar_mul_var' "$STAGING/points256_raw.s"
 # Anchor + Lim-Lee state imports
-sed -i '/^\.import ec_aff2g_256_x, ec_aff2g_256_y$/d' "$STAGING/points256_raw.s"
-sed -i '/^\.import ec_anchor[1-8]_x, ec_anchor[1-8]_x, ec_anchor[1-8]_x, ec_anchor[1-8]_x$/d' "$STAGING/points256_raw.s"
-sed -i '/^\.import ec_anchor[1-8]_y, ec_anchor[1-8]_y, ec_anchor[1-8]_y, ec_anchor[1-8]_y$/d' "$STAGING/points256_raw.s"
-sed -i '/^\.import ec_anchor.*$/d' "$STAGING/points256_raw.s"
-sed -i '/^\.import cm_k, mul_dma_lo$/d' "$STAGING/points256_raw.s"
-sed -i '/^\.import ec_sc_byte, ec_sc_mask$/d' "$STAGING/points256_raw.s"
+sed -i '' '/^\.import ec_aff2g_256_x, ec_aff2g_256_y$/d' "$STAGING/points256_raw.s"
+sed -i '' '/^\.import ec_anchor[1-8]_x, ec_anchor[1-8]_x, ec_anchor[1-8]_x, ec_anchor[1-8]_x$/d' "$STAGING/points256_raw.s"
+sed -i '' '/^\.import ec_anchor[1-8]_y, ec_anchor[1-8]_y, ec_anchor[1-8]_y, ec_anchor[1-8]_y$/d' "$STAGING/points256_raw.s"
+sed -i '' '/^\.import ec_anchor.*$/d' "$STAGING/points256_raw.s"
+sed -i '' '/^\.import cm_k, mul_dma_lo$/d' "$STAGING/points256_raw.s"
+sed -i '' '/^\.import ec_sc_byte, ec_sc_mask$/d' "$STAGING/points256_raw.s"
 # REU DMA register imports (only used by stripped REU anchor helpers)
-sed -i '/^\.import reu_c64_lo, reu_c64_hi, reu_reu_lo, reu_reu_hi$/d' "$STAGING/points256_raw.s"
-sed -i '/^\.import reu_reu_bank, reu_len_lo, reu_len_hi$/d' "$STAGING/points256_raw.s"
-sed -i '/^\.import reu_addr_ctrl, reu_command$/d' "$STAGING/points256_raw.s"
+sed -i '' '/^\.import reu_c64_lo, reu_c64_hi, reu_reu_lo, reu_reu_hi$/d' "$STAGING/points256_raw.s"
+sed -i '' '/^\.import reu_reu_bank, reu_len_lo, reu_len_hi$/d' "$STAGING/points256_raw.s"
+sed -i '' '/^\.import reu_addr_ctrl, reu_command$/d' "$STAGING/points256_raw.s"
 # ec_mulp / ec_sqrp are used by all three retained bodies - keep.
 # fp_tmp1 is used by ec_scalar_mul_var - keep.
 
@@ -292,7 +292,7 @@ DATA_EOF
 # The sibling uses `.segment "CODE"`, which under c64-https's cfg is the
 # LOADER region ($0801-$1FFF). We want this code in CRYPTO_RESIDENT.
 for src in fp256_raw mod256_raw points256_raw ecdsa256_raw; do
-    sed -i 's/^\.segment "CODE"/.segment "CRYPTO_CODE"/' "$STAGING/$src.s"
+    sed -i '' 's/^\.segment "CODE"/.segment "CRYPTO_CODE"/' "$STAGING/$src.s"
 done
 
 # --- Route DATA segment in data_p256_raw.s to CRYPTO_BSS. ---
@@ -300,7 +300,7 @@ done
 # only contains `.res` (zero-init) declarations, so CRYPTO_BSS is the
 # right home. Don't accidentally match anything inside a string or
 # comment: the data_p256_raw.s we emit has exactly one such directive.
-sed -i 's/^\.segment "DATA"$/.segment "CRYPTO_BSS"/' "$STAGING/data_p256_raw.s"
+sed -i '' 's/^\.segment "DATA"$/.segment "CRYPTO_BSS"/' "$STAGING/data_p256_raw.s"
 
 # Sanity: no leftover `.segment "CODE"` hunks outside the expected
 # pattern (the raw files should only have one CODE segment each).
