@@ -28,9 +28,12 @@ This is a per-clone setting and is intentionally not committed.
 ## Local forbidden-patterns config
 
 The `commit-msg` forbidden-pattern check reads from a file outside the
-repo, so the patterns themselves never enter public history.
+repo, so the patterns themselves never enter public history. The path
+is deliberately generic so a single config file is shared with any
+other repo's hook (and with a global `core.hooksPath` hook) on the
+same machine.
 
-- Default path: `$HOME/.config/git-hooks/c64-https-forbidden.txt`
+- Default path: `$HOME/.config/git-hooks/forbidden-patterns.txt`
 - Override:    set `$GIT_HOOKS_FORBIDDEN_FILE` to any readable path.
 - Format:      one POSIX ERE per line; blank lines and lines starting
                with `#` are ignored.
@@ -51,5 +54,5 @@ To install the example as the default config:
 
 ```sh
 mkdir -p ~/.config/git-hooks
-$EDITOR ~/.config/git-hooks/c64-https-forbidden.txt
+$EDITOR ~/.config/git-hooks/forbidden-patterns.txt
 ```

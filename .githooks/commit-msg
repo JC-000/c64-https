@@ -4,9 +4,10 @@
 # Two checks:
 #   1. Forbidden-pattern check, sourced from a local config file (not in
 #      the repo). Path is overridable via $GIT_HOOKS_FORBIDDEN_FILE; the
-#      default is $HOME/.config/git-hooks/c64-https-forbidden.txt. If the
-#      file is absent or unreadable the check is silently skipped, so a
-#      fresh clone keeps working until the developer opts in.
+#      default is $HOME/.config/git-hooks/forbidden-patterns.txt, the same
+#      generic-named file the global commit-msg hook reads. If the file
+#      is absent or unreadable the check is silently skipped, so a fresh
+#      clone keeps working until the developer opts in.
 #   2. Co-authored-by allow-list. Only the expected human noreply and the
 #      Anthropic Claude noreply are allowed in trailers.
 
@@ -16,7 +17,7 @@ msg_file="$1"
 
 # --- 1. Forbidden patterns (local config) -----------------------------------
 
-forbidden_file="${GIT_HOOKS_FORBIDDEN_FILE:-$HOME/.config/git-hooks/c64-https-forbidden.txt}"
+forbidden_file="${GIT_HOOKS_FORBIDDEN_FILE:-$HOME/.config/git-hooks/forbidden-patterns.txt}"
 
 if [ -r "$forbidden_file" ]; then
 	while IFS= read -r pattern || [ -n "$pattern" ]; do
