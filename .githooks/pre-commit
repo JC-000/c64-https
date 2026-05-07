@@ -1,0 +1,26 @@
+#!/bin/sh
+# pre-commit: enforce author/committer email identity for this repo.
+#
+# Both the author and committer email must match the expected GitHub
+# noreply address. Anything else is rejected.
+
+set -eu
+
+expected="3798556+JC-000@users.noreply.github.com"
+
+author_email=$(git var GIT_AUTHOR_IDENT | sed -n 's/.*<\(.*\)>.*/\1/p')
+committer_email=$(git var GIT_COMMITTER_IDENT | sed -n 's/.*<\(.*\)>.*/\1/p')
+
+if [ "$author_email" != "$expected" ]; then
+	printf 'pre-commit: author email "%s" does not match expected "%s"\n' \
+		"$author_email" "$expected" >&2
+	exit 1
+fi
+
+if [ "$committer_email" != "$expected" ]; then
+	printf 'pre-commit: committer email "%s" does not match expected "%s"\n' \
+		"$committer_email" "$expected" >&2
+	exit 1
+fi
+
+exit 0

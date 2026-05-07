@@ -1,0 +1,66 @@
+#!/bin/sh
+# commit-msg: validate the proposed commit message.
+#
+# Two checks:
+#   1. Forbidden-pattern check, sourced from a local config file (not in
+#      the repo). Path is overridable via $GIT_HOOKS_FORBIDDEN_FILE; the
+#      default is $HOME/.config/git-hooks/c64-https-forbidden.txt. If the
+#      file is absent or unreadable the check is silently skipped, so a
+#      fresh clone keeps working until the developer opts in.
+#   2. Co-authored-by allow-list. Only the expected human noreply and the
+#      Anthropic Claude noreply are allowed in trailers.
+
+set -eu
+
+msg_file="$1"
+
+# --- 1. Forbidden patterns (local config) -----------------------------------
+
+forbidden_file="${GIT_HOOKS_FORBIDDEN_FILE:-$HOME/.config/git-hooks/c64-https-forbidden.txt}"
+
+if [ -r "$forbidden_file" ]; then
+	while IFS= read -r pattern || [ -n "$pattern" ]; do
+		# skip blank lines
+		case "$pattern" in
+			'' ) continue ;;
+		esac
+		# skip comments (leading #, with optional whitespace)
+		case "$pattern" in
+			\#* | ' '*\#* | '	'*\#* ) continue ;;
+		esac
+		# Strip leading whitespace for the comment check above to be
+		# robust on indented comments too.
+		trimmed=$(printf '%s' "$pattern" | sed -e 's/^[[:space:]]*//')
+		case "$trimmed" in
+			'' ) continue ;;
+			\#* ) continue ;;
+		esac
+		if grep -iqE -- "$trimmed" "$msg_file"; then
+			printf 'commit-msg: message matches a forbidden pattern from local config — see %s\n' \
+				"$forbidden_file" >&2
+			exit 1
+		fi
+	done < "$forbidden_file"
+fi
+
+# --- 2. Co-authored-by allow-list -------------------------------------------
+
+allowed_human="3798556+JC-000@users.noreply.github.com"
+allowed_claude="noreply@anthropic.com"
+
+# Pull every Co-authored-by trailer email out of the message.
+coauthor_emails=$(grep -iE '^[[:space:]]*Co-authored-by:' "$msg_file" \
+	| sed -n 's/.*<\([^>]*\)>.*/\1/p' || true)
+
+if [ -n "$coauthor_emails" ]; then
+	echo "$coauthor_emails" | while IFS= read -r email; do
+		[ -z "$email" ] && continue
+		if [ "$email" != "$allowed_human" ] && [ "$email" != "$allowed_claude" ]; then
+			printf 'commit-msg: Co-authored-by "%s" is not in the allow-list\n' \
+				"$email" >&2
+			exit 1
+		fi
+	done || exit 1
+fi
+
+exit 0
