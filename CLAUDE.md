@@ -139,6 +139,29 @@ is **$C9**. See `src/net/uci/uci_regs.inc` for the full equate list
 `uci_read_data`, etc. No zero-page usage — all absolute addressing
 and self-modifying code.
 
+`uci_wait_idle` is wall-clock-bounded (5 s budget via CIA1 TOD) per
+the design note below. On timeout it returns C=1 with `net_last_error
+= UCI_ERR_WAIT_TIMEOUT`. The four callers (`net_dhcp_acquire`,
+`net_tcp_connect`, `net_tcp_send`, `net_tcp_close`) all `bcs` out to
+surface the failure rather than letting the C64 hang indefinitely on
+a wedged FPGA. `uci_push_wait` and `uci_end_cmd` are still unbounded
+and should be converted to the same TOD pattern if a wedge there is
+ever observed.
+
+### UCI error codes
+
+`src/net/uci/uci_errors.inc` enumerates the values surfaced via
+`net_last_error` and `net_tcp_state`. The most load-bearing:
+
+  - `UCI_ERR_NO_SOCKET` — `net_tcp_connect` got a short-read on the
+    OPEN_TCP response (no socket-id byte), so the firmware never
+    actually opened the TCP connection. `net_tcp_state` is set to
+    `UCI_TCP_CONNECT_FAIL` and C=1 is returned. Without this check
+    the C64 would commit to a phantom socket and push TLS bytes
+    into nowhere (see issue #36).
+  - `UCI_ERR_WAIT_TIMEOUT` — `uci_wait_idle` exhausted its 5 s budget
+    (see issue #37).
+
 ### DNS
 
 UCI firmware resolves hostnames internally during `TCP_CONNECT`. There
@@ -360,16 +383,24 @@ touching TLS call sites.
 
 ### Design note — bounded timeouts must use wall-clock time
 
-Any future robustness work on the UCI adapter's spin-wait helpers
-(`uci_wait_idle`, `uci_push_wait`, etc.) MUST use a wall-clock time
-source — CIA timer on stock C64, TOD clock on U64E — rather than a
-cycle-counted iteration budget. The fences around every UCI register
-access make per-iteration cost scale with CPU speed: a budget that is
-ample at 1 MHz collapses to far too short at 48 MHz because turbo
-scales CPU cycles but not the FPGA's wire-level operation durations.
-A prior attempt on branch `feat/net-drain-abi` split waits into
-fast/long tiers with cycle-count budgets and broke DHCP at turbo for
-exactly this reason; the branch was abandoned.
+Robustness work on the UCI adapter's spin-wait helpers (`uci_wait_idle`,
+`uci_push_wait`, etc.) MUST use a wall-clock time source — CIA timer
+on stock C64, TOD clock on U64E — rather than a cycle-counted iteration
+budget. The fences around every UCI register access make per-iteration
+cost scale with CPU speed: a budget that is ample at 1 MHz collapses
+to far too short at 48 MHz because turbo scales CPU cycles but not the
+FPGA's wire-level operation durations. A prior attempt on branch
+`feat/net-drain-abi` split waits into fast/long tiers with cycle-count
+budgets and broke DHCP at turbo for exactly this reason; the branch
+was abandoned.
+
+`uci_wait_idle` is the first helper to follow this pattern (issue #37).
+At entry it samples CIA1 TOD ($DC08-$DC0B) — read order is HOUR
+(latch) → MIN → SEC → TENTHS (unlatch) — and on each spin pass re-reads
+TENTHS, bailing with C=1 + `net_last_error = UCI_ERR_WAIT_TIMEOUT`
+after 50 transitions (~5 s wall-clock, independent of CPU turbo). State
+lives in two SMC bytes inside the routine to match the file's no-ZP
+convention. Use this as the template for any future bounded helper.
 
 ## Memory layout
 

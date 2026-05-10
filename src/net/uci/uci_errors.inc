@@ -12,11 +12,14 @@ UCI_ERR_CONNECT_FAIL   = $84    ; TCP_CONNECT returned an error bit
 UCI_ERR_SEND_FAIL      = $85    ; SOCKET_WRITE returned an error bit
 UCI_ERR_READ_FAIL      = $86    ; SOCKET_READ returned an error bit
 UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE wrote fewer bytes than requested
+UCI_ERR_NO_SOCKET      = $88    ; TCP_CONNECT response yielded no socket_id
+UCI_ERR_WAIT_TIMEOUT   = $89    ; uci_wait_idle exceeded its wall-clock budget
 
 ; TCP state values stored in net_tcp_state
 UCI_TCP_CLOSED         = $00    ; no active socket
 UCI_TCP_CONNECTED      = $01    ; connected, reads/writes valid
 UCI_TCP_ERROR          = $02    ; saw an error on a read — stop polling
+UCI_TCP_CONNECT_FAIL   = $03    ; TCP_CONNECT did not yield a usable socket
 
 ; UCI firmware data queue max per SOCKET_WRITE push (see uci_network.py)
 UCI_DATA_QUEUE_MAX     = 800

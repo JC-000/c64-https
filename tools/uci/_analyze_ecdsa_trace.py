@@ -21,6 +21,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from c64_test_harness import Labels
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASE = Path("/tmp/ecdsa_debug")
@@ -32,14 +34,9 @@ def _load_labels() -> dict[int, str]:
     if not labels_file.is_file():
         return {}
     out: dict[int, str] = {}
-    for line in labels_file.read_text().splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[0] == "al" and parts[2].startswith("."):
-            name = parts[2][1:]
-            _, hex_addr = parts[1].split(":", 1)
-            a = int(hex_addr, 16)
-            # Prefer the first (public) label if multiple map to same addr
-            out.setdefault(a, name)
+    for name, a in Labels.from_file(labels_file).items():
+        # Prefer the first (public) label if multiple map to same addr
+        out.setdefault(a, name)
     return out
 
 

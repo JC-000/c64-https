@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 
+from c64_test_harness import Labels
 from c64_test_harness.backends.device_lock import DeviceLock
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
@@ -44,14 +45,7 @@ DEFAULT_TIMEOUT  = 120.0
 
 
 def _load_labels() -> dict[str, int]:
-    labels: dict[str, int] = {}
-    for line in LABELS_PATH.read_text().splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[0] == "al" and parts[2].startswith("."):
-            name = parts[2][1:]
-            _, hex_addr = parts[1].split(":", 1)
-            labels[name] = int(hex_addr, 16)
-    return labels
+    return dict(Labels.from_file(LABELS_PATH))
 
 
 def _build_http_routine(labels: dict[str, int], hostname_len: int, port: int) -> bytes:

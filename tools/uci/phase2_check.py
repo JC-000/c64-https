@@ -31,6 +31,7 @@ import sys
 import time
 from pathlib import Path
 
+from c64_test_harness import Labels
 from c64_test_harness.backends.device_lock import DeviceLock
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
@@ -74,14 +75,10 @@ def load_label(name: str) -> int:
     Entries look like: `al C:BC4B .net_local_ip` — the `.name` token
     is unambiguous across backend cfgs.
     """
-    token = f".{name}"
-    for line in LABELS_PATH.read_text().splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[0] == "al" and parts[2] == token:
-            addr_tok = parts[1]  # "C:BC4B"
-            _, hex_addr = addr_tok.split(":", 1)
-            return int(hex_addr, 16)
-    raise KeyError(f"label {name!r} not found in {LABELS_PATH}")
+    labels = Labels.from_file(LABELS_PATH)
+    if name not in labels:
+        raise KeyError(f"label {name!r} not found in {LABELS_PATH}")
+    return labels[name]
 
 
 def is_plausible_private(ip: tuple[int, int, int, int]) -> bool:
