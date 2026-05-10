@@ -26,6 +26,10 @@
 ; one interface-index parameter). Later phases will extend as needed.
 
 .include "uci_regs.inc"
+.include "uci_errors.inc"
+
+; net_last_error lives in net.s's BSS — we set it on wait timeout (#37).
+.import net_last_error
 
 .export uci_abort
 .export uci_wait_idle
@@ -61,19 +65,69 @@ uci_abort:
         rts
 
 ; =============================================================================
-; uci_wait_idle — spin until STATE==0 AND CMD_BUSY==0
+; uci_wait_idle — spin until STATE==0 AND CMD_BUSY==0, with wall-clock cap
 ; UCI_STAT_STATE ($30) covers the state field; CMD_BUSY ($01) is bit 0.
 ; ORing them (MASK $31) and looping while nonzero gives "fully idle".
+;
+; Issue #37 — the historical unbounded spin converts an FPGA wedge into a
+; 600 s test sentinel timeout. The cap below uses CIA1 TOD (CIA_TOD_TENTHS,
+; ticks at 10 Hz) — the only clock that runs at the same wall-clock rate
+; regardless of CPU turbo speed. Cycle-counted budgets do NOT work here:
+; the per-iteration cost scales with turbo (each fence is ~38 us of FPGA
+; wall time but only a few CPU cycles at 48 MHz), so a budget tuned at
+; 1 MHz collapses at 48 MHz (and vice versa). A prior attempt on
+; feat/net-drain-abi shipped cycle-counted budgets and broke turbo DHCP
+; for exactly this reason.
+;
+; CIA TOD read protocol: reading the HOUR register latches the four
+; registers atomically; reading the TENTHS register unlatches them.
+; We only need TENTHS for our 5-second budget, but we still latch+unlatch
+; properly so we don't disturb other code that might be reading TOD.
+;
+; Budget: UCI_WAIT_IDLE_BUDGET_TENTHS (50 = 5 s). On expiry: set
+; net_last_error = UCI_ERR_WAIT_TIMEOUT, return C=1.
+;
+; Output: C=0 on idle, C=1 on timeout.
 ; Clobbers: A
 ; =============================================================================
+CIA_TOD_TENTHS = $DC08
+CIA_TOD_HOUR   = $DC0B
+UCI_WAIT_IDLE_BUDGET_TENTHS = 50      ; 5 seconds at 10 Hz
+
 uci_wait_idle:
+        ; Sample initial TENTHS for delta-tracking. Latch via HOUR,
+        ; release via TENTHS. We don't care about the HOUR value itself.
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        sta @wi_last_tenths
+        lda #$00
+        sta @wi_elapsed
+@wi_loop:
         lda UCI_STATUS
         uci_fence                   ; settle read before testing bits
         and #(UCI_STAT_STATE | UCI_STAT_CMD_BUSY)   ; $31
         beq @idle_done
-        jmp uci_wait_idle           ; long branch: fence too wide for BNE
-@idle_done:
+
+        ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        cmp @wi_last_tenths
+        beq @wi_loop                ; no change — keep spinning
+        sta @wi_last_tenths
+        inc @wi_elapsed
+        lda @wi_elapsed
+        cmp #UCI_WAIT_IDLE_BUDGET_TENTHS
+        bcc @wi_loop                ; under budget — continue
+        ; Timeout
+        lda #UCI_ERR_WAIT_TIMEOUT
+        sta net_last_error
+        sec
         rts
+@idle_done:
+        clc
+        rts
+@wi_last_tenths: .byte 0
+@wi_elapsed:     .byte 0
 
 ; =============================================================================
 ; uci_wait_not_busy — spin until CMD_BUSY==0 (ignore STATE)

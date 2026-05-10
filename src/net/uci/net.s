@@ -313,6 +313,7 @@ net_poll:
 ; =============================================================================
 net_dhcp_acquire:
         jsr uci_wait_idle
+        bcs @dhcp_wait_to             ; FPGA wedged — bail with C=1
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -332,6 +333,7 @@ net_dhcp_acquire:
 
         lda #UCI_ERR_CMD_FAILED
         sta net_last_error
+@dhcp_wait_to:
         sec
         rts
 
@@ -399,6 +401,14 @@ net_tcp_connect:
         stx uci_connect_port_hi
 
         jsr uci_wait_idle
+        bcc :+
+        ; FPGA wedged before we even queued anything — surface the timeout
+        ; (net_last_error already set) with the connect-fail tcp_state.
+        lda #UCI_TCP_CONNECT_FAIL
+        sta net_tcp_state
+        sec
+        rts
+:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -446,6 +456,10 @@ net_tcp_connect:
 
 @tc_no_err:
         ; Read 1-byte socket_id response.
+        ; Pre-zero uci_socket_id so a short-read leaves a known sentinel
+        ; (uci_read_resp_bytes only writes the bytes it actually receives).
+        lda #$00
+        sta uci_socket_id
         lda #<uci_socket_id
         sta uci_resp_dst
         lda #>uci_socket_id
@@ -458,9 +472,27 @@ net_tcp_connect:
         jsr uci_drain_status
         jsr uci_ack
 
+        ; Validate the response: firmware must have returned at least 1
+        ; byte (uci_resp_count) AND a non-zero socket_id. Issue #36 — at
+        ; least one observed U64E firmware path returns no payload while
+        ; clearing the error bit, leaving uci_socket_id = 0 and us writing
+        ; into a phantom socket. Convert that into a clean failure.
+        lda uci_resp_count
+        beq @tc_no_socket
+        lda uci_socket_id
+        beq @tc_no_socket
+
         lda #UCI_TCP_CONNECTED
         sta net_tcp_state
         clc
+        rts
+
+@tc_no_socket:
+        lda #UCI_ERR_NO_SOCKET
+        sta net_last_error
+        lda #UCI_TCP_CONNECT_FAIL
+        sta net_tcp_state
+        sec
         rts
 
 ; =============================================================================
@@ -519,6 +551,12 @@ net_tcp_send:
 
 @begin_chunk:
         jsr uci_wait_idle
+        bcc :+
+        ; FPGA wedged mid-send — surface as send-fail (net_last_error already
+        ; set to UCI_ERR_WAIT_TIMEOUT inside uci_wait_idle).
+        sec
+        rts
+:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -646,6 +684,13 @@ net_tcp_send:
 ; =============================================================================
 net_tcp_close:
         jsr uci_wait_idle
+        bcc :+
+        ; FPGA wedged on close — force CLOSED state and bail. Best-effort
+        ; semantics already match the existing close path (no return code).
+        lda #UCI_TCP_CLOSED
+        sta net_tcp_state
+        rts
+:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
