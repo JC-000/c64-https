@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__serena__search_for_pattern",
+      "mcp__serena__read_file",
+      "Bash(security find-identity *)",
+      "Bash(git fetch *)",
+      "Bash(git pull *)",
+      "Bash(git add *)",
+      "Bash(git commit)",
+      "Bash(git commit *)",
+      "Bash(git stash)",
+      "Bash(git stash push *)",
+      "Bash(git stash pop *)",
+      "Bash(git stash apply *)",
+      "Bash(git merge --ff-only *)",
+      "Bash(git switch *)",
+      "Bash(git cherry-pick *)",
+      "Bash(git submodule update *)",
+      "Bash(git submodule sync *)",
+      "mcp__serena__activate_project",
+      "mcp__serena__check_onboarding_performed",
+      "mcp__serena__create_text_file",
+      "mcp__serena__delete_memory",
+      "mcp__serena__edit_memory",
+      "mcp__serena__execute_shell_command",
+      "mcp__serena__find_file",
+      "mcp__serena__find_referencing_symbols",
+      "mcp__serena__find_symbol",
+      "mcp__serena__get_current_config",
+      "mcp__serena__get_symbols_overview",
+      "mcp__serena__initial_instructions",
+      "mcp__serena__insert_before_symbol",
+      "mcp__serena__list_dir",
+      "mcp__serena__list_memories",
+      "mcp__serena__onboarding",
+      "mcp__serena__read_memory",
+      "mcp__serena__replace_content",
+      "mcp__serena__replace_symbol_body",
+      "mcp__serena__write_memory"
+    ]
+  }
+}

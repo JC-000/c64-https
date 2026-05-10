@@ -4,12 +4,9 @@ build/
 ip65-build/*.o
 ip65-build/*.bin
 ip65-build/*.map
-.claude/
-# Serena: ignore regenerable/local state, track project.yml + memories
-.serena/cache/
-.serena/logs/
-.serena/hook_data/
-.serena/project.local.yml
+.claude/*
+!.claude/settings.json
 tools/https_e2e/certs/
 tools/diag_4de0_*.py
 tools/diag_read_live.py
+.serena/
