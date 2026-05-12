@@ -349,16 +349,23 @@ Five latent bugs and three new ones were cleared to get here:
     regression — the target has never built cleanly — but should be
     fixed before P-384 is actually wired into the TLS path. TLS-level
     P-384 verify remains stubbed regardless (see `project_p384_stubbed`).
-  - `ecdsa_verify` (P-256) rejects a known-good signature. Surfaced
-    2026-05-06 by `tools/test_x509.py` group 3 subtest 3c
-    ("ECDSA verify: valid signature (C=0)") on macOS once the BSD-sed
-    portability fixes unblocked the build. The C64 returns C=1 (invalid)
-    after ~60 s on a Python-pre-verified valid P-256 signature; tampered
-    signatures (subtest 3d) are correctly rejected, and all five input
-    buffers (hash, r, s, Qx, Qy) were confirmed Match=True in C64 memory
-    before the call, so the bug is in the verify path, not input
-    staging. Used by TLS handshake CertificateVerify; ECDHE/X25519
-    handshake is unaffected.
+  - **VICE harness gotcha**: any test that exercises sibling
+    `libs/nistcurves` P-256 primitives (`fp_mul`, `fp_inv`,
+    `ec_scalar_mul_var`, `ecdsa_verify_256`, ...) MUST launch VICE with
+    `-reu`. The sibling's `fp_mul` fetches 8x8 multiply rows from REU
+    banks 0/1 (populated by `src/boot.s::reu_mul_init`). Without `-reu`,
+    the row fetch silently no-ops and `mul_dma_lo/hi` at $BA00/$BB00
+    stays stuck at `reu_mul_init`'s final-iteration residue (a=255), so
+    every `fp_mul` returns `a*255*b mod p` instead of `a*b mod p`.
+    Cascade: wrong `w=s^-1 mod n`, wrong `u1`/`u2`, wrong computed `R`,
+    `R.x != r`, verify returns C=1. Pattern is fixed in
+    `tools/test_x509.py:769` and `tools/test_ecdsa_kat_oracle.py:293`;
+    mirror this in any new VICE-driven test for P-256:
+    `ViceConfig(..., extra_args=["-reu", "-reusize", "512"])`. The same
+    pattern is already in `tools/test_x25519.py:722`,
+    `tools/bench_x25519.py:138`, `tools/test_p384_symbols.py:370`. The
+    UCI path is unaffected because the U64E hardware has REU enabled by
+    default; the symptom was VICE-only.
 
 ### ECDSA P-256 verify wall-clock
 
@@ -374,7 +381,21 @@ state-machine overhead.
 
 81.9 s still does not fit a typical 10-30 s real-world server
 handshake window, so this is a blocker for arbitrary internet TLS
-targets that require ECDSA-P256 CertificateVerify.
+targets that require ECDSA-P256 CertificateVerify. Note: the earlier
+"`ecdsa_verify` rejects a known-good signature" entry in this section
+turned out to be a VICE harness misconfiguration (missing `-reu`), not
+a verify-path bug — see "VICE harness gotcha" in the Known issues
+list. With `-reu` enabled, `tools/test_x509.py` 3c PASSes cleanly in
+~60 s wall-clock under VICE warp.
+
+Under the v0.2.0 submodule pin the U64E 48 MHz handshake measures
+**86.7 s** end-to-end (re-measured 2026-05-12, `tools/uci/test_https_local`,
+local listener). The +4.8 s vs the 81.9 s v0.1.0-10-gdfdfb59 baseline
+above is attributable to v0.2.0's defensive REU register inits at
+`fp_mul`/`fp_sqr`/`ec_scalar_mul_var`/`fp_inv`/`ecdsa_verify_256` proc
+entry (release notes "Security/correctness defences" — +6 cy/call;
+the wall-clock impact compounds across the tens of thousands of
+field-mul/sqr calls in the scalar mult).
 It is fine for the local listener used by the e2e harness (600 s
 budget, ample headroom). Further speedups live in the sibling
 `libs/nistcurves` repo — any drop through the Crypto ABI lands

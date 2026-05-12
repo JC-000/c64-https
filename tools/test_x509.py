@@ -765,8 +765,14 @@ def main():
     if slow_count > 0:
         print(f"  Estimated total time: {slow_count * 6}-{slow_count * 16} minutes")
 
-    # Launch VICE via ViceInstanceManager (safe port allocation)
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    # Launch VICE via ViceInstanceManager (safe port allocation).
+    # -reu is required: the sibling c64-nist-curves fp_mul fetches 8x8
+    # multiply rows from REU banks 0/1 (see src/boot.s reu_mul_init). Without
+    # -reu the row fetch silently no-ops and mul_dma_lo/hi stays stuck at
+    # reu_mul_init's final-iteration residue (a=255), so every fp_mul
+    # returns a*255*b instead of a*b. Pattern mirrors tools/test_x25519.py.
+    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
+                        extra_args=["-reu", "-reusize", "512"])
 
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
