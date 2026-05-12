@@ -102,7 +102,7 @@ cp "$LIB_SRC"/ecdsa256.s   "$STAGING/ecdsa256_raw.s"
 #     helpers + anchor base-address table + cm_* / sm256_* state vars
 # Keeps ec_point_double (line 60-410), ec_point_add (411-761),
 # ec_scalar_mul_var (1459-1609), ec_jacobian_to_affine (1610-end).
-sed -i '' '762,1458d' "$STAGING/points256_raw.s"
+sed -i '' '762,1467d' "$STAGING/points256_raw.s"
 
 # Strip exports + imports that only the removed bodies used.
 sed -i '' '/^\.export ec_precompute_256, ec_scalar_mul, ec_scalar_mul_var$/c\
@@ -114,10 +114,16 @@ sed -i '' '/^\.import ec_anchor[1-8]_y, ec_anchor[1-8]_y, ec_anchor[1-8]_y, ec_a
 sed -i '' '/^\.import ec_anchor.*$/d' "$STAGING/points256_raw.s"
 sed -i '' '/^\.import cm_k, mul_dma_lo$/d' "$STAGING/points256_raw.s"
 sed -i '' '/^\.import ec_sc_byte, ec_sc_mask$/d' "$STAGING/points256_raw.s"
-# REU DMA register imports (only used by stripped REU anchor helpers)
-sed -i '' '/^\.import reu_c64_lo, reu_c64_hi, reu_reu_lo, reu_reu_hi$/d' "$STAGING/points256_raw.s"
+# REU DMA register imports. v0.2.0 added a "defensive REU register init"
+# block at the top of ec_scalar_mul_var (lines 753-757) that touches
+# reu_reu_lo + reu_addr_ctrl, so those two must stay imported even though
+# ec_scalar_mul_var is the only retained body. The rest are only used by
+# the stripped REU anchor helpers and Lim-Lee comb.
+sed -i '' '/^\.import reu_c64_lo, reu_c64_hi, reu_reu_lo, reu_reu_hi$/c\
+.import reu_reu_lo' "$STAGING/points256_raw.s"
 sed -i '' '/^\.import reu_reu_bank, reu_len_lo, reu_len_hi$/d' "$STAGING/points256_raw.s"
-sed -i '' '/^\.import reu_addr_ctrl, reu_command$/d' "$STAGING/points256_raw.s"
+sed -i '' '/^\.import reu_addr_ctrl, reu_command$/c\
+.import reu_addr_ctrl' "$STAGING/points256_raw.s"
 # ec_mulp / ec_sqrp are used by all three retained bodies - keep.
 # fp_tmp1 is used by ec_scalar_mul_var - keep.
 
@@ -288,6 +294,24 @@ ecdsa_u1g_y:    .res 32, 0      ; LE affine Y of u1*G
 fp_rev_buf:     .res 32, 0
 DATA_EOF
 
+# --- Emit minimal REU register equates ---
+# v0.2.0 added a "defensive REU register init" block at the top of
+# ec_scalar_mul_var (and also in fp256/ecdsa256 modular-inverse paths)
+# that touches reu_reu_lo + reu_addr_ctrl. The sibling's constants.s
+# provides these but also exports VIC/CIA/KERNAL equates that would
+# collide with c64-https's in-tree definitions, so we emit a minimal
+# equate file with only what the retained bodies actually reference.
+cat > "$STAGING/reu_equates_raw.s" <<'REU_EOF'
+.setcpu "6502"
+
+; Minimal REU hardware register equates used by retained P-256 bodies
+; in v0.2.0 (defensive REU register init in ec_scalar_mul_var, fp_inv,
+; ecdsa inverse). Mirror of values in libs/nistcurves/src/constants.s.
+.export reu_reu_lo, reu_addr_ctrl
+reu_reu_lo    = $df04
+reu_addr_ctrl = $df0a
+REU_EOF
+
 # --- Route CODE segments in the raw .s files to CRYPTO_CODE. ---
 # The sibling uses `.segment "CODE"`, which under c64-https's cfg is the
 # LOADER region ($0801-$1FFF). We want this code in CRYPTO_RESIDENT.
@@ -324,7 +348,7 @@ mkdir -p "$OBJ_DIR" "$OUT_DIR"
     "${ZP_DEFINES[@]}" \
     -o "$OBJ_DIR/zp_config.o" "$STAGING/zp_config.s"
 
-for src in fp256_raw mod256_raw points256_raw ecdsa256_raw curve256_raw data_p256_raw; do
+for src in fp256_raw mod256_raw points256_raw ecdsa256_raw curve256_raw data_p256_raw reu_equates_raw; do
     "$CA65" \
         -I "$STAGING" \
         -I "$PROJECT_ROOT/src/crypto/shared" \
@@ -340,12 +364,13 @@ rm -f "$ARCHIVE"
     "$OBJ_DIR/points256_raw.o" \
     "$OBJ_DIR/ecdsa256_raw.o" \
     "$OBJ_DIR/curve256_raw.o" \
-    "$OBJ_DIR/data_p256_raw.o"
+    "$OBJ_DIR/data_p256_raw.o" \
+    "$OBJ_DIR/reu_equates_raw.o"
 
 # --- Per-source byte counts ---
 {
     echo "# nistcurves-p256.a per-source byte counts (ca65 .o file sizes)"
-    for src in zp_config fp256_raw mod256_raw points256_raw ecdsa256_raw curve256_raw data_p256_raw; do
+    for src in zp_config fp256_raw mod256_raw points256_raw ecdsa256_raw curve256_raw data_p256_raw reu_equates_raw; do
         bytes=$(wc -c < "$OBJ_DIR/$src.o")
         printf '%-24s %d bytes (.o)\n' "$src" "$bytes"
     done

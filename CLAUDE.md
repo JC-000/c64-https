@@ -387,6 +387,15 @@ turned out to be a VICE harness misconfiguration (missing `-reu`), not
 a verify-path bug — see "VICE harness gotcha" in the Known issues
 list. With `-reu` enabled, `tools/test_x509.py` 3c PASSes cleanly in
 ~60 s wall-clock under VICE warp.
+
+Under the v0.2.0 submodule pin the U64E 48 MHz handshake measures
+**86.7 s** end-to-end (re-measured 2026-05-12, `tools/uci/test_https_local`,
+local listener). The +4.8 s vs the 81.9 s v0.1.0-10-gdfdfb59 baseline
+above is attributable to v0.2.0's defensive REU register inits at
+`fp_mul`/`fp_sqr`/`ec_scalar_mul_var`/`fp_inv`/`ecdsa_verify_256` proc
+entry (release notes "Security/correctness defences" — +6 cy/call;
+the wall-clock impact compounds across the tens of thousands of
+field-mul/sqr calls in the scalar mult).
 It is fine for the local listener used by the e2e harness (600 s
 budget, ample headroom). Further speedups live in the sibling
 `libs/nistcurves` repo — any drop through the Crypto ABI lands
