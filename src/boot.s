@@ -11,8 +11,18 @@
         .export print_resp_body
 
         ; ---- exports: REU multiply table routines ----
+        ; Phase C.5: under USE_X25519_SIBLING=1 the sibling's
+        ; libs/x25519/src/x25519_init.s owns reu_mul_init +
+        ; reu_fetch_mul_row + reu_fetch_doubled_row + reu_clear_wide.
+        ; The in-tree definitions below are guarded out to avoid
+        ; duplicate-symbol errors at link time; the boot caller below
+        ; imports `reu_mul_init` from the sibling archive instead.
+        .ifdef USE_X25519_SIBLING
+        .import reu_mul_init
+        .else
         .export reu_mul_init
         .export reu_fetch_mul_row
+        .endif
 
         ; ---- exports: menu handlers ----
         .export do_net_init
@@ -619,6 +629,14 @@ ascii_chrout:
 ; REU multiply table initialization (from c64-x25519 optimizations)
 ; =============================================================================
 
+; Phase C.5: in-tree reu_mul_init / reu_fetch_mul_row are guarded out
+; under USE_X25519_SIBLING=1. The sibling's libs/x25519/src/x25519_init.s
+; supplies a richer initializer that also populates REU banks 2-5 with
+; the zero block + doubled tables required by the sibling's
+; fe25519_sqr. Calling the in-tree version would leave those banks
+; unset and corrupt every fe25519_sqr.
+.ifndef USE_X25519_SIBLING
+
 ; =============================================================================
 ; reu_mul_init - Generate 256 full multiplication rows and stash in REU
 ;
@@ -734,6 +752,8 @@ reu_fetch_mul_row:
         lda #%10110001         ; execute + autoload + FETCH (REU->C64)
         sta reu_command
         rts
+
+.endif ; .ifndef USE_X25519_SIBLING (in-tree reu_mul_init / reu_fetch_mul_row)
 
 ; =============================================================================
 ; Strings (read-only)
@@ -876,5 +896,9 @@ http_path_root:
         .segment "BSS"
 
 net_initialized:        .res 1
+; Phase C.5: reu_init_a/b are state for the in-tree reu_mul_init loop.
+; Sibling's reu_mul_init keeps its own state.
+.ifndef USE_X25519_SIBLING
 reu_init_a:             .res 1
 reu_init_b:             .res 1
+.endif

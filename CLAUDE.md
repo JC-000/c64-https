@@ -51,7 +51,11 @@ Public symbols (calling conventions are AX=pointer-low/high-byte except
 where noted, buffers provided by caller, keys/IVs passed via fixed
 buffers in the crypto BSS — see per-module headers for details):
 
-  X25519 / field arithmetic  (in-tree; c64-x25519 overlay deferred, see #33)
+  X25519 / field arithmetic
+    Default: in-tree `src/crypto/{x25519,fe25519}.s`.
+    Opt-in: sibling `libs/x25519@v0.4.0` via `make USE_X25519_SIBLING=1`
+    (UCI backend only — see Known issues for the ip65 fit blocker; Phase
+    C.5). Sibling and in-tree both expose the same ABI:
     x25519_scalarmult     — X25519 scalar × point, 32-byte buffers
     fe25519_mul, fe25519_sqr, fe25519_inv
 
@@ -338,11 +342,31 @@ Five latent bugs and three new ones were cleared to get here:
     `tools/uci/test_https_print_body.py` with a mixed-case response
     body.  `http_resp_buf` still holds raw ASCII — only the render
     pipeline is translated.
-  - X25519 REU overlay deferred (c64-x25519 #33). Phase C.1 (`6c9d2a3`)
-    integrated the sibling optimised X25519 as a REU overlay but hung
-    inside the Montgomery ladder under BACKEND=uci at 48 MHz; rolled
-    back in `b133ac7`. A retry against the v0.3.0 tag failed the same
-    way. X25519 stays in-tree until the upstream hang is resolved.
+  - **X25519 sibling (Phase C.5)** — `make USE_X25519_SIBLING=1` builds
+    against `libs/x25519@v0.4.0`. Default is OFF; the in-tree
+    implementation remains the shipped default until the flag flip is
+    decided. The Phase C.1 hang and v0.3.0 retry rollback are both
+    closed by upstream PR #36 + v0.4.0 H2 (defensive REU register init
+    at every `x25519_scalarmult` / `fe25519_mul` / `_sqr` / `_mul_a24`
+    / `_inv` entry — eliminates the `do_swap` residue confound on
+    `$DF04`/`$DF0A` that produced the wrong-result symptom). Verified
+    on U64E at 48 MHz: HTTPS handshake completes in ~101 s
+    (vs ~87 s under in-tree X25519; the +14 s is consistent with
+    v0.4.0's release-notes-documented +27 % scalarmult cost over v0.3.0
+    for the L1-L29 CT closures). **ip65 backend overflows
+    CRYPTO_RESIDENT by 1 KB under the flag** — UCI is the supported
+    path; ip65 fit is a separate cfg-restructure follow-up. See
+    `tools/integration/build_x25519.sh` for the staging layout.
+  - **CRYPTO_OVERLAY address collision lesson**: under the Phase C.5
+    flag, `X25519_RODATA` + `X25519_BSS` live at `$4200-$50FF`.
+    Any test harness that DMA-injects a 6502 stub or scratch into
+    `CRYPTO_OVERLAY` must avoid that range. `tools/uci/test_https_local.py`
+    historically placed `ROUTINE_ADDR=$4200` (+ 5 sibling addresses up
+    to `$4542`) inside that range and silently corrupted `x25_basepoint`,
+    `fe_p`, `mul38_*_tab`, and `sqr_lo/hi` — every `fe25519_mul`/`_sqr`
+    then produced garbage and X25519 emitted wrong-but-deterministic
+    output. Fixed by relocating to `$5100-$5442` (past the X25519_BSS
+    tail). New harnesses that touch CRYPTO_OVERLAY: prefer `$5100+`.
   - `make p384-overlay` has a pre-existing unresolved-symbol bug:
     `points384_raw.s` references `ec_base384_x` / `ec_base384_y`
     which aren't exported by the current sibling build. Not a Phase C

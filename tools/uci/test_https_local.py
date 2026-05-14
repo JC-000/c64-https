@@ -117,12 +117,24 @@ LABELS_PATH = REPO_ROOT / "build" / "labels.txt"
 CERT_PATH = REPO_ROOT / "tools" / "https_e2e" / "certs" / "server.pem"
 KEY_PATH = REPO_ROOT / "tools" / "https_e2e" / "certs" / "server.key"
 
-ROUTINE_ADDR     = 0x4200
-HOST_STR_ADDR    = 0x4400
-PATH_STR_ADDR    = 0x4440
-SENTINEL_ADDR    = 0x4540
-PROGRESS_ADDR    = 0x4541
-CARRY_FLAG_ADDR  = 0x4542
+# NOTE: ROUTINE_ADDR and friends MUST sit in a region that does NOT
+# collide with the production CRYPTO_OVERLAY layout.  Under
+# USE_X25519_SIBLING=1 the sibling X25519 rodata + bss buffers occupy
+# $4200-$50FF (see cfg/c64-https-uci.cfg X25519_RODATA / X25519_BSS).
+# Placing the DMA routine at $4200 (the historical value) silently
+# clobbered x25_basepoint, fe_p, mul38_lo_tab, etc., producing wrong
+# X25519 output during the TLS handshake.
+#
+# CRYPTO_OVERLAY runs $4200-$5FFF.  X25519 segments occupy the first
+# $F00 = 3840 bytes ($4200-$50FF).  $5100-$5FFF (3840 bytes) is free
+# for the harness.  The trampoline + sentinels fit in <256 bytes so
+# we use $5100 onward.
+ROUTINE_ADDR     = 0x5100
+HOST_STR_ADDR    = 0x5300
+PATH_STR_ADDR    = 0x5340
+SENTINEL_ADDR    = 0x5440
+PROGRESS_ADDR    = 0x5441
+CARRY_FLAG_ADDR  = 0x5442
 
 SENTINEL_VALUE   = 0xAA
 

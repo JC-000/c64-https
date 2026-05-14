@@ -20,6 +20,16 @@ VICE      ?= x64sc
 BACKEND   ?= ip65
 CFG       := cfg/c64-https-$(BACKEND).cfg
 
+# --- Sibling X25519 integration (Phase C.5, c64-x25519 v0.4.0) ---
+# `USE_X25519_SIBLING=1` swaps in `build/lib/x25519.a` for the in-tree
+# `src/crypto/fe25519.s` + `src/crypto/x25519.s` + in-tree X25519 data
+# buffers from `src/data.s`. Default OFF — the in-tree implementation
+# stays the shipped default until the supervisor + validator sign off
+# on the sibling drop-in. The flag is read at link time; both code
+# paths coexist on the branch so an A/B comparison is `make` vs
+# `make USE_X25519_SIBLING=1`.
+USE_X25519_SIBLING ?= 0
+
 IP65_DIR     := ip65
 IP65_BUILD   := ip65-build
 IP65_BIN     := $(IP65_BUILD)/ip65-c64.bin
@@ -53,13 +63,33 @@ UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s
 # for BOTH backends (replaces the in-tree ecdsa_{curve,fp,mod,points}.s).
 SIBLING_LIB_ARCHIVES := build/lib/nistcurves-p256.a
 
+# Phase C.5 (USE_X25519_SIBLING=1): c64-x25519 v0.4.0 sibling, always-resident,
+# replaces in-tree fe25519.s + x25519.s + X25519 buffers in src/data.s.
+# Off by default.
+ifeq ($(USE_X25519_SIBLING),1)
+SIBLING_LIB_ARCHIVES += build/lib/x25519.a
+# Propagate the flag to ca65 so src/data.s suppresses the in-tree X25519
+# buffer declarations (the sibling's data_x25519_raw.s provides them).
+CA65FLAGS += -D USE_X25519_SIBLING=1
+endif
+
+# Phase C.5: under USE_X25519_SIBLING=1, evict the in-tree X25519
+# implementation from the link line — the sibling archive
+# (build/lib/x25519.a) provides byte-compatible exports for x25519_*
+# and a richer fe25519_* surface than the in-tree fe_* symbols.
+ifeq ($(USE_X25519_SIBLING),1)
+CRYPTO_SRCS_EFFECTIVE := $(filter-out src/crypto/fe25519.s src/crypto/x25519.s,$(CRYPTO_SRCS_ALL))
+else
+CRYPTO_SRCS_EFFECTIVE := $(CRYPTO_SRCS_ALL)
+endif
+
 # Per-backend source + object selection.
 ifeq ($(BACKEND),ip65)
 NET_SRCS := $(IP65_SRCS)
-CRYPTO_SRCS := $(CRYPTO_SRCS_ALL)
+CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
 else ifeq ($(BACKEND),uci)
 NET_SRCS := $(UCI_SRCS)
-CRYPTO_SRCS := $(CRYPTO_SRCS_ALL)
+CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
 # Phase C.3: add c64-nist-curves P-384 primitives as a REU overlay.
 # Variable-base P-384 point ops (double/add/jacobian-to-affine) only —
 # see tools/integration/build_nistcurves_p384.sh for the scope rationale.
@@ -134,6 +164,17 @@ build/lib/nistcurves-p384.a:
 build/lib/nistcurves-p256.a:
 	@mkdir -p build/lib
 	bash tools/integration/build_nistcurves_p256.sh
+
+# Phase C.5: c64-x25519 v0.4.0 X25519 archive — replaces the in-tree
+# fe25519.s + x25519.s + X25519 buffer declarations in src/data.s when
+# USE_X25519_SIBLING=1. Linked into the PRG under BOTH backends. The
+# sibling's reu_mul_init is called from src/boot.s in place of the
+# in-tree REU mul table generator; sqtab_init is still served by the
+# in-tree src/crypto/poly1305.s (sibling's mul_8x8.s is excluded from
+# the archive to avoid duplicate-symbol with poly1305's mul_8x8).
+build/lib/x25519.a:
+	@mkdir -p build/lib
+	bash tools/integration/build_x25519.sh
 
 # Phase C.3b: P-384 overlay IMAGE + labels for harness-time use only.
 # The production PRG does NOT link nistcurves-p384.a — this is smoke-test
