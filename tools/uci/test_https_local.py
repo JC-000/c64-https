@@ -82,6 +82,8 @@ from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
 from c64_test_harness.labels import Labels
 
+from _memory_policy import build_policy_and_arbiter
+
 
 DEBUG_CAPTURE_ENABLED = os.environ.get("DEBUG_CAPTURE", "1") != "0"
 UCI_DEBUG_BASE_DIR = Path(
@@ -125,16 +127,30 @@ KEY_PATH = REPO_ROOT / "tools" / "https_e2e" / "certs" / "server.key"
 # clobbered x25_basepoint, fe_p, mul38_lo_tab, etc., producing wrong
 # X25519 output during the TLS handshake.
 #
-# CRYPTO_OVERLAY runs $4200-$5FFF.  X25519 segments occupy the first
-# $F00 = 3840 bytes ($4200-$50FF).  $5100-$5FFF (3840 bytes) is free
-# for the harness.  The trampoline + sentinels fit in <256 bytes so
-# we use $5100 onward.
-ROUTINE_ADDR     = 0x5100
-HOST_STR_ADDR    = 0x5300
-PATH_STR_ADDR    = 0x5340
-SENTINEL_ADDR    = 0x5440
-PROGRESS_ADDR    = 0x5441
-CARRY_FLAG_ADDR  = 0x5442
+# These scratch addresses used to be hardcoded ($4200 originally, then
+# $5100 to dodge the X25519 RODATA/BSS span under
+# USE_X25519_SIBLING=1).  The hardcoded layout was the antipattern that
+# made the X25519 collision possible in the first place — silently
+# wrong-but-deterministic crypto output, with no diagnostic until the
+# TLS handshake failed half a minute later.
+#
+# They are now assigned by a :class:`MemoryArbiter` (see
+# ``tools/uci/_memory_policy.py``) at runtime, after we have read
+# ``build/labels.txt`` and built a :class:`MemoryPolicy` reflecting the
+# *current* build's memory map (BACKEND + USE_X25519_SIBLING are
+# observed via the segment markers ld65 emits).  The transport's
+# memory_policy will then catch any future stray write into a
+# c64-https segment before the byte crosses the wire.
+#
+# Sizes are conservative — the trampoline is ~110 B today; we allow
+# 256 B for headroom.  HOST/PATH strings are ASCII-NUL-terminated and
+# fit easily inside their 64-byte slots.
+ROUTINE_ADDR: int = -1     # arbiter.alloc(256, name="trampoline")
+HOST_STR_ADDR: int = -1    # arbiter.alloc(64,  name="host_str")
+PATH_STR_ADDR: int = -1    # arbiter.alloc(64,  name="path_str")
+SENTINEL_ADDR: int = -1    # arbiter.alloc(1,   name="sentinel")
+PROGRESS_ADDR: int = -1    # arbiter.alloc(1,   name="progress")
+CARRY_FLAG_ADDR: int = -1  # arbiter.alloc(1,   name="carry_flag")
 
 SENTINEL_VALUE   = 0xAA
 
@@ -1007,6 +1023,29 @@ def main() -> int:
     for n in sorted(required):
         print(f"  {n:22s} = ${labels[n]:04X}")
 
+    # --- Memory policy + arbiter: derive scratch addresses from the
+    # current build's segment layout instead of hardcoding them.  The
+    # policy reserves every PRG segment found in labels.txt; the
+    # arbiter then allocates inside CRYPTO_OVERLAY's unused tail
+    # ($5100-$5FFF under USE_X25519_SIBLING=1, $4200-$5FFF when the
+    # flag is off).  Transport hookup happens after the transport is
+    # constructed inside the try-block below.
+    global ROUTINE_ADDR, HOST_STR_ADDR, PATH_STR_ADDR
+    global SENTINEL_ADDR, PROGRESS_ADDR, CARRY_FLAG_ADDR
+    memory_policy, arbiter = build_policy_and_arbiter(LABELS_PATH, PRG_PATH)
+    ROUTINE_ADDR    = arbiter.alloc(256, name="trampoline")
+    HOST_STR_ADDR   = arbiter.alloc(64,  name="host_str")
+    PATH_STR_ADDR   = arbiter.alloc(64,  name="path_str")
+    SENTINEL_ADDR   = arbiter.alloc(1,   name="sentinel")
+    PROGRESS_ADDR   = arbiter.alloc(1,   name="progress")
+    CARRY_FLAG_ADDR = arbiter.alloc(1,   name="carry_flag")
+    print(
+        f"\nMemoryPolicy reserved {len(memory_policy.reserved_regions)}"
+        f" region(s); arbiter allocations:"
+    )
+    for base, last, note in arbiter.allocations:
+        print(f"  ${base:04X}-${last:04X}  {note}")
+
     test_host_ip = _detect_local_ip(HOST)
     print(f"\nDev host LAN IP : {test_host_ip}")
     print(f"Cert / key      : {CERT_PATH} / {KEY_PATH}")
@@ -1082,6 +1121,12 @@ def main() -> int:
     try:
         client = Ultimate64Client(host=HOST, timeout=15.0)
         transport = Ultimate64Transport(host=HOST, timeout=15.0, client=client)
+        # Attach the c64-https-aware MemoryPolicy.  Every subsequent
+        # transport.write_memory(...) is checked against the policy
+        # *before* the byte crosses the wire — a collision into a
+        # reserved segment now raises MemoryPolicyError instead of
+        # silently corrupting C64 RAM.
+        transport.memory_policy = memory_policy
 
         print("Enabling UCI...")
         enable_uci(client)
