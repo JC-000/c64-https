@@ -25,18 +25,21 @@ from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
 
+from _memory_policy import build_policy_and_arbiter
+
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRG_PATH = REPO_ROOT / "build" / "c64-https.prg"
 LABELS_PATH = REPO_ROOT / "build" / "labels.txt"
 
-ROUTINE_ADDR     = 0x4200
-HOST_STR_ADDR    = 0x4400
-PATH_STR_ADDR    = 0x4440
-SENTINEL_ADDR    = 0x4540
-PROGRESS_ADDR    = 0x4541
-CARRY_FLAG_ADDR  = 0x4542
+# Arbiter-allocated at runtime; see tools/uci/_memory_policy.py.
+ROUTINE_ADDR: int = -1
+HOST_STR_ADDR: int = -1
+PATH_STR_ADDR: int = -1
+SENTINEL_ADDR: int = -1
+PROGRESS_ADDR: int = -1
+CARRY_FLAG_ADDR: int = -1
 
 SENTINEL_VALUE   = 0xBB
 LIVE_HOSTNAME    = "www.zimmers.net"
@@ -220,6 +223,22 @@ def main() -> int:
     for n in sorted(required):
         print(f"  {n:20s} = ${labels[n]:04X}")
 
+    global ROUTINE_ADDR, HOST_STR_ADDR, PATH_STR_ADDR
+    global SENTINEL_ADDR, PROGRESS_ADDR, CARRY_FLAG_ADDR
+    memory_policy, arbiter = build_policy_and_arbiter(LABELS_PATH, PRG_PATH)
+    ROUTINE_ADDR    = arbiter.alloc(256, name="trampoline")
+    HOST_STR_ADDR   = arbiter.alloc(64,  name="host_str")
+    PATH_STR_ADDR   = arbiter.alloc(64,  name="path_str")
+    SENTINEL_ADDR   = arbiter.alloc(1,   name="sentinel")
+    PROGRESS_ADDR   = arbiter.alloc(1,   name="progress")
+    CARRY_FLAG_ADDR = arbiter.alloc(1,   name="carry_flag")
+    print(
+        f"MemoryPolicy reserved {len(memory_policy.reserved_regions)}"
+        f" region(s); arbiter allocations:"
+    )
+    for base, last, note in arbiter.allocations:
+        print(f"  ${base:04X}-${last:04X}  {note}")
+
     print(f"\nTarget          : {LIVE_HOSTNAME}:{LIVE_PORT}")
 
     hostname_bytes = LIVE_HOSTNAME.encode("ascii")
@@ -242,6 +261,7 @@ def main() -> int:
     try:
         client = Ultimate64Client(host=HOST, timeout=15.0)
         transport = Ultimate64Transport(host=HOST, timeout=15.0, client=client)
+        transport.memory_policy = memory_policy
 
         print("Enabling UCI...")
         enable_uci(client)

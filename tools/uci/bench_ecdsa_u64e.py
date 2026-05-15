@@ -65,6 +65,8 @@ from c64_test_harness.backends.u64_debug_capture import (
 from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
 
+from _memory_policy import build_policy_and_arbiter
+
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -77,11 +79,16 @@ VECTORS_PATH = Path(
     )
 )
 
-ROUTINE_ADDR   = 0x4200
-RUN_SENTINEL   = 0x4540      # $AA = running, cleared after done
-DONE_SENTINEL  = 0x4541      # $55 = routine completed
-CARRY_BYTE     = 0x4542      # P register captured via PHP/PLA
-PROGRESS_BYTE  = 0x4543      # last reached progress marker
+# Scratch addresses are arbiter-allocated at runtime (see main()) so the
+# bench never collides with X25519_RODATA/BSS under USE_X25519_SIBLING=1
+# or with any future CRYPTO_OVERLAY-resident segment.  The historical
+# values were $4200 (ROUTINE_ADDR) + $4540-$4543 — *inside* the
+# X25519_RODATA + X25519_BSS span under the sibling flag.
+ROUTINE_ADDR: int = -1   # arbiter.alloc(320, name="ecdsa_stub")
+RUN_SENTINEL: int = -1   # arbiter.alloc(1,   name="run_sentinel")
+DONE_SENTINEL: int = -1  # arbiter.alloc(1,   name="done_sentinel")
+CARRY_BYTE: int = -1     # arbiter.alloc(1,   name="carry_byte")
+PROGRESS_BYTE: int = -1  # arbiter.alloc(1,   name="progress_byte")
 
 RUN_VALUE  = 0xAA
 DONE_VALUE = 0x55
@@ -376,6 +383,26 @@ def main() -> int:
     vectors = json.loads(VECTORS_PATH.read_text())["vectors"]
     print(f"Loaded {len(vectors)} vectors")
 
+    # --- Memory policy + arbiter: replace the hardcoded $4200-$4543
+    # scratch addresses (which silently overlapped X25519_RODATA/BSS
+    # under USE_X25519_SIBLING=1) with arbiter-allocated ones derived
+    # from build/labels.txt.  The transport is created inside the
+    # try-block below; we attach the policy there.
+    global ROUTINE_ADDR, RUN_SENTINEL, DONE_SENTINEL
+    global CARRY_BYTE, PROGRESS_BYTE
+    memory_policy, arbiter = build_policy_and_arbiter(LABELS_PATH, PRG_PATH)
+    ROUTINE_ADDR  = arbiter.alloc(320, name="ecdsa_stub")
+    RUN_SENTINEL  = arbiter.alloc(1,   name="run_sentinel")
+    DONE_SENTINEL = arbiter.alloc(1,   name="done_sentinel")
+    CARRY_BYTE    = arbiter.alloc(1,   name="carry_byte")
+    PROGRESS_BYTE = arbiter.alloc(1,   name="progress_byte")
+    print(
+        f"MemoryPolicy reserved {len(memory_policy.reserved_regions)}"
+        f" region(s); arbiter allocations:"
+    )
+    for base, last, note in arbiter.allocations:
+        print(f"  ${base:04X}-${last:04X}  {note}")
+
     stub = _build_stub(labels)
     prg = PRG_PATH.read_bytes()
     run_dir: Path | None = None
@@ -399,6 +426,10 @@ def main() -> int:
     try:
         client = Ultimate64Client(host=HOST, timeout=60.0)
         transport = Ultimate64Transport(host=HOST, timeout=60.0, client=client)
+        # MemoryPolicy guard: any subsequent write_memory(addr, ...)
+        # that overlaps a reserved c64-https segment raises before
+        # crossing the wire.
+        transport.memory_policy = memory_policy
 
         print("Enabling UCI...")
         enable_uci(client)

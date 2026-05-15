@@ -4,3 +4,7 @@
 [submodule "libs/nistcurves"]
 	path = libs/nistcurves
 	url = https://github.com/JC-000/c64-nist-curves.git
+[submodule "libs/x25519"]
+	path = libs/x25519
+	url = https://github.com/JC-000/c64-x25519.git
+	branch = master

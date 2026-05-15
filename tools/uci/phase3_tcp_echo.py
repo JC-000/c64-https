@@ -42,25 +42,29 @@ from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
 
+from _memory_policy import build_policy_and_arbiter
+
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRG_PATH = REPO_ROOT / "build" / "c64-https.prg"
 LABELS_PATH = REPO_ROOT / "build" / "labels.txt"
 
-ROUTINE_ADDR     = 0x4200
-HOST_BUF_ADDR    = 0x4400   # mirrors uci_host_buf — routine will also
-                            # stage via net_dns_resolve so the adapter
-                            # canonicalizes the copy itself.
-TEST_STRING_ADDR = 0x4440
-RESULT_BUF_ADDR  = 0x4500
-SENTINEL_ADDR    = 0x4540
-PROGRESS_ADDR    = 0x4541
-CONNECT_CARRY_ADDR = 0x4542
-SEND_CARRY_ADDR    = 0x4543
-RESULT_LEN_ADDR    = 0x4544
-POLL_COUNT_ADDR    = 0x4545
-RECV_BYTES_ADDR    = 0x4500
+# Scratch addresses arbiter-allocated in main().  RECV_BYTES_ADDR
+# aliases RESULT_BUF_ADDR (both point at the same drained-bytes
+# buffer) — only one allocation is made; the alias is just a
+# Python-name convenience kept from the original layout.
+ROUTINE_ADDR: int = -1
+HOST_BUF_ADDR: int = -1
+TEST_STRING_ADDR: int = -1
+RESULT_BUF_ADDR: int = -1
+SENTINEL_ADDR: int = -1
+PROGRESS_ADDR: int = -1
+CONNECT_CARRY_ADDR: int = -1
+SEND_CARRY_ADDR: int = -1
+RESULT_LEN_ADDR: int = -1
+POLL_COUNT_ADDR: int = -1
+RECV_BYTES_ADDR: int = -1
 
 SENTINEL_VALUE = 0x42
 ECHO_PORT      = 7777
@@ -325,6 +329,29 @@ def main() -> int:
     for n in required:
         print(f"  {n:18s} = ${labels[n]:04X}")
 
+    global ROUTINE_ADDR, HOST_BUF_ADDR, TEST_STRING_ADDR, RESULT_BUF_ADDR
+    global SENTINEL_ADDR, PROGRESS_ADDR, CONNECT_CARRY_ADDR
+    global SEND_CARRY_ADDR, RESULT_LEN_ADDR, POLL_COUNT_ADDR, RECV_BYTES_ADDR
+    memory_policy, arbiter = build_policy_and_arbiter(LABELS_PATH, PRG_PATH)
+    ROUTINE_ADDR       = arbiter.alloc(256, name="trampoline")
+    HOST_BUF_ADDR      = arbiter.alloc(64,  name="host_buf")
+    TEST_STRING_ADDR   = arbiter.alloc(32,  name="test_string")
+    RESULT_BUF_ADDR    = arbiter.alloc(128, name="result_buf")
+    RECV_BYTES_ADDR    = RESULT_BUF_ADDR  # alias — both names refer to the
+                                          # drained-bytes buffer
+    SENTINEL_ADDR      = arbiter.alloc(1,   name="sentinel")
+    PROGRESS_ADDR      = arbiter.alloc(1,   name="progress")
+    CONNECT_CARRY_ADDR = arbiter.alloc(1,   name="connect_carry")
+    SEND_CARRY_ADDR    = arbiter.alloc(1,   name="send_carry")
+    RESULT_LEN_ADDR    = arbiter.alloc(1,   name="result_len")
+    POLL_COUNT_ADDR    = arbiter.alloc(1,   name="poll_count")
+    print(
+        f"MemoryPolicy reserved {len(memory_policy.reserved_regions)}"
+        f" region(s); arbiter allocations:"
+    )
+    for base, last, note in arbiter.allocations:
+        print(f"  ${base:04X}-${last:04X}  {note}")
+
     test_host_ip = _detect_local_ip(HOST)
     print(f"Dev host LAN IP : {test_host_ip}")
     print(f"Echo port       : {ECHO_PORT}")
@@ -366,6 +393,7 @@ def main() -> int:
     try:
         client = Ultimate64Client(host=HOST, timeout=15.0)
         transport = Ultimate64Transport(host=HOST, timeout=15.0, client=client)
+        transport.memory_policy = memory_policy
 
         print("Enabling UCI (Command Interface)...")
         enable_uci(client)

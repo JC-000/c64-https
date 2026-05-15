@@ -48,6 +48,23 @@ REU_P256_PRECOMPUTE_BASE   = $30000
 REU_P384_PRECOMPUTE_BASE   = $40000
 .endif
 
+; --- Phase C.5 collision note (USE_X25519_SIBLING=1) ---
+; The sibling c64-x25519 v0.4.0 reu_mul_init populates banks 3, 4, and 5
+; with its own doubled-product and 17th-bit-carry tables for fe25519_sqr.
+; Banks 3 / 4 / 5 are also nominally reserved here for P-256 precompute
+; (bank 3) and P-384 precompute (banks 4-5). The collision is THEORETICAL
+; under the current TLS path:
+;   - P-256 always uses ec_scalar_mul_var (variable-base) which does not
+;     touch REU_P256_PRECOMPUTE_BASE.
+;   - P-384 is stubbed at the TLS layer (see project_p384_stubbed memory
+;     note); the smoke-test overlay loader uses banks 4-5 only at test
+;     time, not in the production handshake.
+; If either P-256 fixed-base scalar mul or P-384 precompute is ever
+; wired into the production TLS path while USE_X25519_SIBLING=1, the
+; sibling's banks 3-5 tables get clobbered and X25519 silently corrupts.
+; Resolve at that time by relocating one or the other (the sibling's
+; cfg/x25519.cfg pins these via SYMBOLS — downstream override available).
+
 ; --- overlay slot size (bytes) ---
 ; Each overlay image occupies exactly this many bytes in the REU store and
 ; is DMA'd into the live CRYPTO_OVERLAY region at runtime.
