@@ -62,7 +62,8 @@ rm -rf "$SCRATCH"
 mkdir -p "$SCRATCH"
 cp "$ARCHIVE" "$SCRATCH/"
 (cd "$SCRATCH" && "$AR65" x "$(basename "$ARCHIVE")" \
-    zp_config.o fp384_raw.o mod384_raw.o points384_raw.o data_raw.o)
+    zp_config.o fp384_raw.o mod384_raw.o points384_raw.o curve384_raw.o \
+    sha384_raw.o ecdsa384_raw.o ec_scalar_mul_384_shim_raw.o data_raw.o)
 
 # Try to pick up x25519-sibling addresses from the main build's labels.txt
 # so references resolve to the real runtime locations. If the main build
@@ -133,11 +134,17 @@ DBG_OUT="${BIN_OUT%.bin}.dbg"
     "$SCRATCH/fp384_raw.o" \
     "$SCRATCH/mod384_raw.o" \
     "$SCRATCH/points384_raw.o" \
+    "$SCRATCH/curve384_raw.o" \
+    "$SCRATCH/sha384_raw.o" \
+    "$SCRATCH/ecdsa384_raw.o" \
+    "$SCRATCH/ec_scalar_mul_384_shim_raw.o" \
     "$SCRATCH/data_raw.o"
 
 # Normalise labels to VICE format (al C:XXXX .name) so c64-test-harness's
 # Labels.from_file() reader accepts it identically to build/labels.txt.
-sed -i 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' "$LABELS_OUT"
+# BSD-sed compat: macOS sed requires `-i ''` (empty extension); GNU sed
+# accepts both forms.
+sed -i '' 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' "$LABELS_OUT"
 
 # ld65 writes the DATA segment bytes (RESIDENT region at $7C00) into the
 # output file too, even though RESIDENT has no `file = %O` — so the raw
