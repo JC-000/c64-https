@@ -87,13 +87,17 @@ MEMORY requirements for a drop-in sibling library:
   - Zero-page usage is defined in `src/constants.inc` — fe25519 lives at
     `$2C-$37`, x25519 state at `$38-$3A`, ECDSA bignum at `$22-$3C`.
     These ranges are time-shared (fe25519 and ChaCha20 never overlap).
-  - REU Profile B is the baseline. The shipped build does not currently
-    use REU banks 0-1 for optimised X25519 mul tables (the sibling
-    overlay integration in Phase C.1 was rolled back — see Known issues);
-    the in-tree x25519 implementation uses a smaller on-chip squaring
-    table in `TABLES_BSS`. Banks 4-7 are reserved for the P-384
-    precompute stashed by the `make p384-overlay` external-image
-    smoke test (Phase C.3b).
+  - REU Profile B is the baseline. Under the default build the in-tree
+    x25519 implementation uses a smaller on-chip squaring table in
+    `TABLES_BSS` and leaves REU banks 0-1 free. Under
+    `USE_X25519_SIBLING=1` (Phase C.5) the sibling's `reu_mul_init`
+    populates REU banks 0-5 with mul / doubled / 17-bit-carry tables;
+    banks 3-5 nominally collide with the P-256 / P-384 precompute
+    reservations in `src/crypto/shared/reu_layout.inc` but the
+    collision is theoretical only (P-256 uses `ec_scalar_mul_var` with
+    no precompute; P-384 is stubbed at the TLS layer). Banks 6-7 stay
+    reserved for the `make p384-overlay` external-image smoke test
+    (Phase C.3b).
   - `crypto_init` currently bootstraps `mul_tables_init` only. X25519
     state and any per-run setup happens from the boot path in
     `src/boot.s`. The overlay swap dispatcher
@@ -357,16 +361,17 @@ Five latent bugs and three new ones were cleared to get here:
     CRYPTO_RESIDENT by 1 KB under the flag** — UCI is the supported
     path; ip65 fit is a separate cfg-restructure follow-up. See
     `tools/integration/build_x25519.sh` for the staging layout.
-  - **CRYPTO_OVERLAY address collision lesson**: under the Phase C.5
-    flag, `X25519_RODATA` + `X25519_BSS` live at `$4200-$50FF`.
-    Any test harness that DMA-injects a 6502 stub or scratch into
-    `CRYPTO_OVERLAY` must avoid that range. `tools/uci/test_https_local.py`
-    historically placed `ROUTINE_ADDR=$4200` (+ 5 sibling addresses up
-    to `$4542`) inside that range and silently corrupted `x25_basepoint`,
-    `fe_p`, `mul38_*_tab`, and `sqr_lo/hi` — every `fe25519_mul`/`_sqr`
-    then produced garbage and X25519 emitted wrong-but-deterministic
-    output. Fixed by relocating to `$5100-$5442` (past the X25519_BSS
-    tail). New harnesses that touch CRYPTO_OVERLAY: prefer `$5100+`.
+  - **CRYPTO_OVERLAY collisions are now caught by MemoryPolicy.** All
+    `tools/uci/*.py` test scripts derive their scratch DMA addresses
+    from a `MemoryArbiter` backed by a c64-https-aware `MemoryPolicy`
+    (factory in `tools/uci/_memory_policy.py`, parses ld65 segment
+    markers from `build/labels.txt`). The harness's transport-layer
+    write guard (c64-test-harness PR #95) raises `MemoryPolicyError`
+    before any byte hits the wire on a region collision. New
+    `tools/uci/` scripts should reuse `build_policy_and_arbiter()`
+    rather than hardcoding addresses. The migration left
+    `unknown_policy=WARN` so writes outside declared segments surface
+    as `UserWarning`; tightening to `DENY` is a follow-up.
   - `make p384-overlay` has a pre-existing unresolved-symbol bug:
     `points384_raw.s` references `ec_base384_x` / `ec_base384_y`
     which aren't exported by the current sibling build. Not a Phase C
