@@ -1,0 +1,76 @@
+Test certificates for the https_e2e listener
+=============================================
+
+These are self-signed certs used by the local TLS 1.3 listener
+(`https_listener.py`) for end-to-end testing of the c64-https client
+against `www.foo.bar`. They are NOT trust-anchors for anything; do not
+deploy them anywhere real.
+
+Two cert profiles are supported:
+
+  server.pem      / server.key       -- P-256 (secp256r1 / prime256v1),
+                                        ecdsa-with-SHA256
+  server-p384.pem / server-p384.key  -- P-384 (secp384r1),
+                                        ecdsa-with-SHA384
+
+CN is `www.foo.bar` and SAN covers `foo.bar` + `www.foo.bar` for both.
+Validity is 10 years from generation.
+
+The cert files themselves are gitignored (see the repo `.gitignore`);
+they are generated on demand by the listener.
+
+Auto-generation (default path)
+------------------------------
+
+Both pairs are auto-generated lazily by `https_listener._ensure_certs_*()`
+the first time the listener is started under each profile, using the
+Python `cryptography` package. To force regeneration, delete the
+files and start the listener once with the matching `cert_profile`.
+
+Manual regeneration with openssl
+--------------------------------
+
+If you need to (re)create the P-384 pair without invoking the
+listener (e.g. for debugging with `openssl s_client` directly), the
+following openssl invocation produces the same cert:
+
+    cat > /tmp/p384_san.cnf <<'EOF'
+    [req]
+    distinguished_name = dn
+    prompt = no
+    x509_extensions = v3_ext
+
+    [dn]
+    CN = www.foo.bar
+
+    [v3_ext]
+    subjectAltName = DNS:foo.bar, DNS:www.foo.bar
+    EOF
+
+    openssl ecparam -name secp384r1 -genkey -noout \
+        -out tools/https_e2e/certs/server-p384.key
+
+    openssl req -new -x509 \
+        -key tools/https_e2e/certs/server-p384.key \
+        -out tools/https_e2e/certs/server-p384.pem \
+        -days 3650 -sha384 -config /tmp/p384_san.cnf
+
+The P-256 pair can be (re)created the same way with
+`-name prime256v1` and `-sha256` — but the listener's auto-generator
+is the canonical source.
+
+Selecting which cert the listener presents
+------------------------------------------
+
+`start_https_listener()` accepts a `cert_profile` keyword argument:
+
+    cert_profile="p256"  (default) -> server.pem      / server.key
+    cert_profile="p384"            -> server-p384.pem / server-p384.key
+
+The same selection can be made via the `HTTPS_LISTENER_CERT_PROFILE`
+environment variable (`p256` or `p384`). The kwarg wins if both are
+set. Default is unchanged (P-256) so existing tests are unaffected.
+
+When `cert_profile="p384"`, the listener also pins the ECDH curve to
+`secp384r1` so the key exchange and the certificate are on the same
+curve.
