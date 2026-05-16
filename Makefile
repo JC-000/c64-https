@@ -97,8 +97,14 @@ CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
 # the SHA blob).  Adds a build-order dep on the .bin files; a missing
 # .bin causes the .incbin to fail, so we extend PRG_DEPS below.
 ifneq ($(USE_X25519_SIBLING),1)
-USE_OVERLAY_P384_EMBED := 1
+# Phase 5 Fix D: respect a command-line USE_OVERLAY_P384_EMBED=0 so the
+# bootstrap rule below can do a no-overlay-embed prelim link to break
+# the overlay-bin <-> labels.txt cycle on a clean tree.  Default is
+# still 1 unless the operator explicitly disables it.
+USE_OVERLAY_P384_EMBED ?= 1
+ifeq ($(USE_OVERLAY_P384_EMBED),1)
 CA65FLAGS += -D USE_OVERLAY_P384_EMBED=1
+endif
 endif
 # Phase C.3: add c64-nist-curves P-384 primitives as a REU overlay.
 # Variable-base P-384 point ops (double/add/jacobian-to-affine) only —
@@ -165,6 +171,24 @@ $(PRG): $(PRG_DEPS)
 	# so the c64-test-harness Labels.from_file() reader can parse it.
 	sed -i '' 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(LABELS)
 
+# Phase 5 Fix D: $(LABELS) is normally a side-effect of the $(PRG)
+# link recipe; we don't add an explicit rule.  The overlay-bin rule
+# below has an order-only dep on $(LABELS) so its lookup_label()
+# resolves the main PRG's runtime mul_dma_lo / mul_dma_hi /
+# mul_cached_a / reu_fetch_mul_row to real addresses (was: silent
+# $0000 fallback that produced a curve overlay whose fp_mul_384
+# read/wrote $0000 and silently corrupted downstream state).
+#
+# Bootstrap workflow (clean tree under USE_OVERLAY_P384_EMBED=1):
+#   make BACKEND=uci USE_OVERLAY_P384_EMBED=0    # produce labels.txt
+#   make BACKEND=uci                              # real link with overlays
+# After this two-step bootstrap, plain `make BACKEND=uci` rebuilds
+# incrementally without intervention.  The script
+# tools/integration/build_nistcurves_p384_bin.sh prints a clear error
+# pointing at this two-step procedure if it runs without labels.txt
+# (vs the old silent $0000 stub fallback).
+
+
 link: $(PRG)
 
 build/%.o: src/%.s
@@ -212,10 +236,22 @@ build/lib/x25519.a:
 # All four outputs (two .bins + two labels files) are produced by a
 # single script invocation; the rule lists all four targets so make
 # only runs the script once even when several are stale.
+#
+# Phase 5 Fix D: build/labels.txt is an ORDER-ONLY dependency.  The
+# overlay-bin script's lookup_label() reads build/labels.txt to resolve
+# mul_dma_lo / mul_dma_hi / mul_cached_a / reu_fetch_mul_row to the
+# main PRG's runtime addresses (so the curve overlay's fp_mul_384
+# reads/writes the right $BA00 / $BB00 / etc. cells).  On a clean
+# build, build/labels.txt doesn't exist yet when this rule runs and the
+# script falls back to $0000 stubs - silently producing an overlay
+# image whose fp_mul_384 reads from $0000.  Order-only ('|') ensures
+# labels.txt exists before the script runs but doesn't trigger an
+# overlay rebuild on every main-PRG link.
 build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin build/labels-p384-sha384.txt build/labels-p384-curve.txt: \
 		build/lib/nistcurves-p384-sha384.a build/lib/nistcurves-p384-curve.a \
 		cfg/p384-overlay-sha384.cfg cfg/p384-overlay-curve.cfg \
-		tools/integration/build_nistcurves_p384_bin.sh
+		tools/integration/build_nistcurves_p384_bin.sh \
+		| build/labels.txt
 	bash tools/integration/build_nistcurves_p384_bin.sh
 
 .PHONY: p384-overlay
@@ -235,8 +271,15 @@ build/p384_overlay_equates.inc: build/labels-p384-sha384.txt build/labels-p384-c
 
 # The dispatcher .o now depends on the generated equates file (via
 # .include) AND on the overlay .bin files (PRG_DEPS already lists those
-# under USE_OVERLAY_P384_EMBED).
+# under USE_OVERLAY_P384_EMBED).  Phase 5 Fix D: gate the .inc dep on
+# USE_OVERLAY_P384_EMBED so the bootstrap rule for $(LABELS) (which
+# sub-makes with USE_OVERLAY_P384_EMBED=0) can skip rebuilding the .inc
+# from labels-p384-* (those depend on overlay-bins which depend on
+# $(LABELS) -- cycle).  The bootstrap pre-creates a placeholder .inc
+# before sub-making.
+ifeq ($(USE_OVERLAY_P384_EMBED),1)
 build/crypto/ecdsa_verify_384.o: build/p384_overlay_equates.inc
+endif
 
 # Build ip65 object libraries from the submodule. Only needed if the ip65
 # submodule changes; the prebuilt blob is committed to ip65-build/.

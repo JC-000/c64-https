@@ -103,7 +103,30 @@
 ; moves sha384_init off $4200 or pushes ecdsa_inputs_384 outside $C000+).
 ; -----------------------------------------------------------------------------
 
+; Phase 5 Fix D: gate the .include on USE_OVERLAY_P384_EMBED so the
+; dispatcher .o can compile during the bootstrap labels-only link
+; (USE_OVERLAY_P384_EMBED=0) before the overlay-bins exist and the
+; generated equates .inc has been produced.  Under
+; USE_OVERLAY_P384_EMBED=0 the dispatcher entry isn't actually
+; reachable from the boot path (p384_overlay_blobs.s is empty so
+; reu_p384_overlay_init is inert; tls_handle_cert_verify will still
+; route here for sig_scheme=0x0503 but the call would land on a
+; non-populated overlay slot — production builds always run with
+; USE_OVERLAY_P384_EMBED=1).  Stub equates suffice to satisfy the
+; assembler when the .inc is absent.
+.ifdef USE_OVERLAY_P384_EMBED
         .include "p384_overlay_equates.inc"
+.else
+        ; Stub equates for the labels-only bootstrap link.  Values are
+        ; deliberately within the legal slot range so the .asserts pass
+        ; even though they don't point at real overlay code.
+sha384_init      = $4200
+sha384_update    = $4200
+sha384_final     = $4200
+sha384_digest    = $C000
+ecdsa_verify_384 = $4200
+ecdsa_inputs_384 = $C000
+.endif
 
 ; Build-time pins.  CRYPTO_OVERLAY is $4200..$5FFF and overlay DATA
 ; resides at $C000..$CFFF (TCP_BUF, idle during crypto).  If a regenerated

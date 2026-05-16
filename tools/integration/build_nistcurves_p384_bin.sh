@@ -85,30 +85,50 @@ if [ ! -f "$ARCHIVE_SHA" ] || [ ! -f "$ARCHIVE_CURVE" ]; then
     exit 1
 fi
 
-# Try to pick up x25519-sibling addresses from the main build's labels.txt
-# so references resolve to the real runtime locations.  If the main build
-# hasn't happened yet, stub them to $0000 — the overlay binary doesn't
-# actually dereference these; only labels.txt addresses would be wrong,
-# and we strip them below anyway.
+# Pick up main-PRG addresses for mul_dma_lo / mul_dma_hi / mul_cached_a /
+# reu_fetch_mul_row so the curve overlay's fp_mul_384 reads/writes the
+# right runtime cells (e.g. mul_dma_lo at $BA00 in the main PRG's
+# TABLES_BSS).  These symbols belong to the main PRG, not to the overlay
+# itself; the overlay's fp_mul_384 was assembled against `.import`s for
+# them and ld65 needs `--define`'d addresses to resolve them at overlay
+# link time.
+#
+# Phase 5 Fix D: if build/labels.txt is missing OR any required symbol is
+# missing from it, ABORT with a clear error rather than silently falling
+# back to $0000 stubs (which used to produce a curve overlay whose
+# fp_mul_384 read/wrote $0000/$0001 — silent corruption with no obvious
+# symptom downstream).  The Makefile lists build/labels.txt as an
+# order-only dep on the overlay-bin target so the main PRG's labels are
+# present by the time this script runs in normal incremental builds; on
+# a clean tree the user must build the main PRG first (which builds
+# overlay-bins as a transitive dep — the cycle resolves on the second
+# pass).
 MAIN_LABELS="$PROJECT_ROOT/build/labels.txt"
+if [ ! -f "$MAIN_LABELS" ]; then
+    echo "ERROR: $MAIN_LABELS not found." >&2
+    echo "  The overlay-bin link needs the main PRG's runtime addresses for" >&2
+    echo "  mul_dma_lo / mul_dma_hi / mul_cached_a / reu_fetch_mul_row." >&2
+    echo "  Run 'make' (or 'make BACKEND=uci') once first to produce" >&2
+    echo "  build/labels.txt, then re-run 'make p384-overlay'." >&2
+    exit 3
+fi
+
 lookup_label () {
     local name="$1"
-    local fallback="$2"
-    if [ -f "$MAIN_LABELS" ]; then
-        local hex
-        hex=$(grep -E " \.${name}\$" "$MAIN_LABELS" | head -n1 | awk '{print $2}' | sed 's|^C:||')
-        if [ -n "$hex" ]; then
-            printf '$%s' "$hex"
-            return
-        fi
+    local hex
+    hex=$(grep -E " \.${name}\$" "$MAIN_LABELS" | head -n1 | awk '{print $2}' | sed 's|^C:||')
+    if [ -z "$hex" ]; then
+        echo "ERROR: required symbol '$name' missing from $MAIN_LABELS" >&2
+        echo "  Did the main PRG link complete successfully?  See build/c64-https.map." >&2
+        exit 4
     fi
-    printf '%s' "$fallback"
+    printf '$%s' "$hex"
 }
 
-DEF_MUL_CACHED_A=$(lookup_label mul_cached_a '$0000')
-DEF_MUL_DMA_LO=$(lookup_label mul_dma_lo   '$0000')
-DEF_MUL_DMA_HI=$(lookup_label mul_dma_hi   '$0000')
-DEF_REU_FETCH_MUL_ROW=$(lookup_label reu_fetch_mul_row '$0000')
+DEF_MUL_CACHED_A=$(lookup_label mul_cached_a)
+DEF_MUL_DMA_LO=$(lookup_label mul_dma_lo)
+DEF_MUL_DMA_HI=$(lookup_label mul_dma_hi)
+DEF_REU_FETCH_MUL_ROW=$(lookup_label reu_fetch_mul_row)
 
 # poly_prod_lo / poly_prod_hi: 2-byte mul_8x8 output register.  The x25519
 # sibling emits these INSIDE OVERLAY_X25519 ($42A0) — unusable when our
