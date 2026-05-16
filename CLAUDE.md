@@ -16,8 +16,11 @@ Dependencies:
   - VICE (`x64sc`) only for `make run` / the test harness
 
 Targets:
-  - `make`              — default, produces `build/c64-https.prg`
-                          and `build/labels.txt` (VICE label format)
+  - `make`              — default, produces `build/c64-https.prg`,
+                          `build/labels.txt` (VICE label format), and
+                          `build/c64-https.dbg` (cc65 debug info,
+                          consumable by VICE's monitor + diagnostic
+                          agents; P-384 overlay gets a `.dbg` sidecar too)
   - `make clean`        — remove build artifacts
   - `make run`          — autostart the PRG in VICE
   - `make ip65-libs`    — rebuild ip65 object libraries from the submodule

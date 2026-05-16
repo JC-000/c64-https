@@ -101,11 +101,18 @@ mkdir -p "$OUT_DIR"
 
 # Link. ld65 -Ln emits labels in the old ca65 format; the main Makefile
 # rewrites `al 00XXXX .name` to `al C:XXXX .name` via sed. Mirror that.
+# Sidecar .dbg path derived from the .bin path (build/lib/overlay-p384.dbg).
+# Pairs with the `-g` ca65 flag added in build_nistcurves_p384.sh so ld65
+# can merge per-source line/symbol records.  Does not affect the padded
+# .bin image bytes.
+DBG_OUT="${BIN_OUT%.bin}.dbg"
+
 "$LD65" \
     -C "$CFG" \
     -o "$BIN_OUT" \
     -Ln "$LABELS_OUT" \
     -m "$MAP_OUT" \
+    --dbgfile "$DBG_OUT" \
     --define reu_status=\$df00 \
     --define reu_command=\$df01 \
     --define reu_c64_lo=\$df02 \
