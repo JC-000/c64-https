@@ -66,12 +66,14 @@ import time
 import traceback
 from pathlib import Path
 
-from c64_test_harness.backends.device_lock import DeviceLock
+from c64_test_harness.backends.device_lock import DeviceLock, DeviceLockTimeout
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 from c64_test_harness.backends.ultimate64_helpers import (
     set_turbo_mhz,
     set_debug_stream_mode,
+    runner_health_check,
+    Ultimate64RunnerStuckError,
     DEBUG_MODE_6510,
 )
 from c64_test_harness.backends.u64_debug_capture import (
@@ -1110,10 +1112,26 @@ def main() -> int:
     prg = PRG_PATH.read_bytes()
 
     lock = DeviceLock(HOST)
-    if not lock.acquire(timeout=60.0):
-        print(f"ERROR: could not acquire DeviceLock({HOST})", file=sys.stderr)
-        return 3
-    print(f"Acquired DeviceLock({HOST})")
+    try:
+        # acquire_or_raise (c64-test-harness PR #88) replaces the legacy
+        # bare-bool acquire+if pattern. On timeout it gathers holder
+        # PID/liveness, lockfile age, and a quick REST reachability probe
+        # and raises DeviceLockTimeout with a diagnostic message that
+        # disambiguates "queued behind healthy holder" from
+        # "wedged / stale / unreachable" -- supervisors and humans need
+        # this signal to know whether to wait, kill the holder, or call
+        # for a recover() (the last requires explicit user authorization,
+        # never automated here).
+        lock.acquire_or_raise(timeout=120.0)
+    except DeviceLockTimeout as exc:
+        print(f"[fatal] DeviceLock({HOST}): {exc}", file=sys.stderr)
+        return 2
+    # Surface queue/holder metadata on kickoff so the supervisor log
+    # has the same diagnostic shape as the timeout path. read_info()
+    # returns the lockfile JSON dict (or None when the lockfile vanished
+    # between acquire and this read, which is harmless).
+    info = lock.read_info()
+    print(f"Acquired DeviceLock({HOST}); holder info: {info!r}")
 
     # --- Per-run debug artifact directory + rotation ---
     run_dir: Path | None = None
@@ -1144,6 +1162,28 @@ def main() -> int:
         print("Enabling UCI...")
         enable_uci(client)
         uci_enabled = True
+
+        # Pre-detect the firmware "Cannot open file" wedged-runner state
+        # (c64-test-harness PR #88 / runner_health_check). When the U64E
+        # runner subsystem is stuck, every subsequent client.run_prg(...)
+        # returns the same 404-ish failure shape, and the test would
+        # otherwise blow ~10 minutes timing out at the sentinel poll
+        # before surfacing it. The helper sends a tiny no-op PRG and
+        # raises Ultimate64RunnerStuckError on the wedge signature; we
+        # do NOT call recover() (that's a state-changing action that
+        # requires explicit user authorization), just surface and exit.
+        try:
+            runner_health_check(client)
+        except Ultimate64RunnerStuckError as exc:
+            print(
+                f"[fatal] U64E runner wedged at {HOST}: {exc}",
+                file=sys.stderr,
+            )
+            print(
+                "[fatal] supervisor: investigate / authorize recover()",
+                file=sys.stderr,
+            )
+            return 3
 
         print("Resetting machine...")
         client.reset()
