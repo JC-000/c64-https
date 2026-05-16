@@ -21,19 +21,30 @@
 ;      (r|s|h|Qx|Qy contiguous 32 B each) prevents a simple resize, so
 ;      Phase 4a copies whatever the cert handler left at offsets
 ;      pubkey_x..pubkey_x+47 and pubkey_y..pubkey_y+47 -- the bytes are
-;      partially-corrupt for P-384 but that is no worse than the
-;      SHA-384 transcript placeholder below; both correctness fixes
-;      land together in Phase 5.
-;   3. Build the TLS 1.3 §4.4.3 signed-content blob (146 bytes) at
+;      partially-corrupt for P-384.  Fix B (next commit) lands the
+;      separate _384 slots.
+;   3. Build the TLS 1.3 §4.4.3 signed-content blob (130 bytes) at
 ;      $CA00 in tcp_recv_buf scratch RAM:
 ;        [0..63]    64 spaces (0x20)
 ;        [64..96]   "TLS 1.3, server CertificateVerify" (33 bytes)
 ;        [97]       0x00 separator
-;        [98..145]  transcript hash (48 bytes)
+;        [98..129]  transcript hash (32 bytes — SHA-256)
 ;      tcp_recv_buf is idle during crypto and the chosen window
-;      ($CA00..$CA91) sits well above both overlays' resident DATA
+;      ($CA00..$CA81) sits well above both overlays' resident DATA
 ;      ranges (SHA overlay ends at $C411, curve overlay at $C9F7) so
 ;      it survives the swap.
+;
+;      Phase 5 Fix A: blob length is 130 bytes, not 146.  RFC 8446
+;      §4.4.1 specifies the transcript-hash uses the negotiated cipher
+;      suite's hash function — c64-https only negotiates
+;      TLS_AES_128_GCM_SHA256, so the transcript is always 32 B SHA-256
+;      regardless of the signature scheme.  The 46+33+1+32 = 130 layout
+;      is what the server signed; padding to 48 B for SHA-384's digest
+;      width would feed the verifier a different message than the one
+;      the server hashed.  SHA-384(blob) still produces a 48 B digest
+;      that is spliced into ecdsa_inputs_384[96..143] (h slot) — the
+;      hash function and digest size for the signature itself are
+;      independent from the transcript-hash function.
 ;   4. crypto_swap_to_p384_sha384 -> sha384_init / update / final.
 ;      sha384_digest (48 B BE) lands at $C3E1 in the SHA overlay's
 ;      resident DATA.
@@ -41,17 +52,15 @@
 ;   6. crypto_swap_to_p384_curve -> ecdsa_verify_384.
 ;      C=0 valid / C=1 invalid -- propagated to caller.
 ;
-; Phase 4a CAVEAT: c64-https currently runs only a SHA-256 transcript
-; (tls_transcript, 32 B).  A real TLS 1.3 secp384r1+SHA-384
-; CertificateVerify wants a SHA-384 transcript, which is not yet
-; produced anywhere in the TLS state machine.  Until a SHA-384
-; transcript path lands, Step 3 zero-pads the 32-B SHA-256 transcript
-; up to 48 B for shape -- the dispatcher will route end-to-end and
-; return C=1 for any real signature, but the crypto_swap +
-; ecdsa_verify_384 mechanism is exercised.  Phase 5 owns wiring up a
-; proper SHA-384 transcript and is expected to flip the source from
-; tls_transcript to a tls_transcript_384 (or equivalent) without
-; touching this file's structure.
+; Phase 5 note: c64-https only negotiates TLS_AES_128_GCM_SHA256, so
+; the TLS 1.3 transcript-hash function is always SHA-256 (RFC 8446
+; §4.4.1 ties transcript-hash to the cipher suite's hash, not to the
+; signature_algorithm).  The signed-content blob therefore embeds a
+; 32 B SHA-256 transcript verbatim (no padding), totalling 130 bytes.
+; SHA-384 then hashes the 130 B blob and produces a 48 B digest that
+; goes into ecdsa_inputs_384's h slot for the P-384 verifier.  The
+; previous Phase 4a draft (146 B blob with the 32 B transcript zero-
+; padded to 48 B) is superseded by Phase 5 Fix A.
 ;
 ; Overlay-resident symbols: the sibling overlay images
 ; (overlay-p384-sha384.bin / overlay-p384-curve.bin) are NOT linked
@@ -112,13 +121,15 @@ sha_src         = $3D                  ; 2 B pointer to message bytes
 sha_len         = $3F                  ; 2 B 16-bit length
 
 ; -----------------------------------------------------------------------------
-; Signed-content blob staging address.  146 B in tcp_recv_buf scratch.
+; Signed-content blob staging address.  130 B in tcp_recv_buf scratch
+; ($CA00..$CA81).  Phase 5 Fix A: shrunk from 146 B because the TLS 1.3
+; transcript-hash is SHA-256 (32 B) not SHA-384 (48 B); see file header.
 ; -----------------------------------------------------------------------------
 SIGNED_BLOB_ADDR = $CA00
-SIGNED_BLOB_LEN  = 146                  ; 64 + 33 + 1 + 48 (RFC 8446 §4.4.3)
+SIGNED_BLOB_LEN  = 130                  ; 64 + 33 + 1 + 32 (RFC 8446 §4.4.3)
 
-; Compile-time assertion: 64-space pad + label + sep + SHA-384 digest = 146.
-.assert (64 + 33 + 1 + 48) = SIGNED_BLOB_LEN, error, "P-384 signed-content blob length"
+; Compile-time assertion: 64-space pad + label + sep + SHA-256 transcript = 130.
+.assert (64 + 33 + 1 + 32) = SIGNED_BLOB_LEN, error, "P-384 signed-content blob length"
 
 
         .segment "CRYPTO_AUX_CODE"
@@ -210,22 +221,19 @@ ecdsa_verify_384_tls:
         lda #$00
         sta SIGNED_BLOB_ADDR+97
 
-        ; [98..145] transcript hash (48 B).  Phase 4a placeholder: copy
-        ; the 32-byte SHA-256 tls_transcript and zero-fill the
-        ; remaining 16 bytes -- shape only; verify will return C=1
-        ; against any real server until a SHA-384 transcript lands.
+        ; [98..129] transcript hash (32 B SHA-256).  Phase 5 Fix A:
+        ; copy the 32 B SHA-256 tls_transcript verbatim — no padding.
+        ; The TLS 1.3 transcript-hash is bound to the cipher suite
+        ; (SHA-256 via TLS_AES_128_GCM_SHA256), independent from the
+        ; signature_algorithm's hash (SHA-384 here).  Padding to 48 B
+        ; would feed the verifier a different message than the server
+        ; signed.
         ldx #31
 @copy_xcript:
         lda tls_transcript,x
         sta SIGNED_BLOB_ADDR+98,x
         dex
         bpl @copy_xcript
-        lda #0
-        ldx #15
-@pad_xcript:
-        sta SIGNED_BLOB_ADDR+98+32,x
-        dex
-        bpl @pad_xcript
 
         ; -----------------------------------------------------------------
         ; Step 4: swap in SHA-384 overlay and hash the blob.
