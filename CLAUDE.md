@@ -147,18 +147,28 @@ is **$C9**. See `src/net/uci/uci_regs.inc` for the full equate list
 `uci_read_resp_bytes`, etc. No zero-page usage — all absolute
 addressing and self-modifying code.
 
-`uci_wait_idle` and `uci_wait_not_busy` are both wall-clock-bounded
-(5 s budget via CIA1 TOD) per the design note below. On timeout they
-return C=1 with `net_last_error = UCI_ERR_WAIT_TIMEOUT`. All
-`uci_wait_idle` callers (`net_dhcp_acquire`, `net_tcp_connect`,
-`net_tcp_send`, `net_tcp_close`) and all `uci_wait_not_busy` /
-`uci_push_wait` callers (`net_poll`, `net_dhcp_acquire`,
-`net_tcp_connect`, `net_tcp_send`, `net_tcp_close`) `bcs` out to
-surface the failure rather than letting the C64 hang indefinitely on
-a wedged FPGA. `uci_push_wait` inherits the bound via its tail-call
-to `uci_wait_not_busy`. The `uci_wait_not_busy` conversion was driven
-by a Phase 5 wedge observed in CertVerify recv on real U64E hardware
-that converted a wedge into a 1843 s test sentinel timeout.
+`uci_wait_idle`, `uci_wait_not_busy`, `uci_drain_resp`, and
+`uci_drain_status` are all wall-clock-bounded (5 s budget via CIA1
+TOD) per the design note below. On timeout they return C=1 with
+`net_last_error = UCI_ERR_WAIT_TIMEOUT`. All `uci_wait_idle` callers
+(`net_dhcp_acquire`, `net_tcp_connect`, `net_tcp_send`,
+`net_tcp_close`) and all `uci_wait_not_busy` / `uci_push_wait`
+callers (`net_poll`, `net_dhcp_acquire`, `net_tcp_connect`,
+`net_tcp_send`, `net_tcp_close`) `bcs` out to surface the failure
+rather than letting the C64 hang indefinitely on a wedged FPGA. All
+13 `uci_drain_resp` / `uci_drain_status` call sites in `net.s` also
+`bcs` out — on timeout the routine skips its companion drain + ack,
+forces the appropriate `net_tcp_state` (ERROR for poll paths,
+CONNECT_FAIL for connect, CLOSED for close, untouched for DHCP/send
+which use C=1 as their fail sentinel), and returns. `uci_push_wait`
+inherits the bound via its tail-call to `uci_wait_not_busy`. The
+`uci_wait_not_busy` conversion was driven by a Phase 5 wedge observed
+in CertVerify recv on real U64E hardware that converted a wedge into
+a 1843 s test sentinel timeout; the drain conversion (Phase 5j)
+closed the secondary risk that `net_tcp_send` / `net_poll` /
+`net_tcp_close` could still wedge in `uci_drain_resp` /
+`uci_drain_status` post-SOCKET_WRITE if firmware ever left DATA_AV /
+STAT_AV asserted.
 
 ### UCI error codes
 
@@ -491,7 +501,8 @@ at `tools/https_e2e/certs/server-p384.{pem,key}`.
 ### Design note — bounded timeouts must use wall-clock time
 
 Robustness work on the UCI adapter's spin-wait helpers (`uci_wait_idle`,
-`uci_wait_not_busy`, etc.) MUST use a wall-clock time source — CIA timer
+`uci_wait_not_busy`, `uci_drain_resp`, `uci_drain_status`, etc.) MUST
+use a wall-clock time source — CIA timer
 on stock C64, TOD clock on U64E — rather than a cycle-counted iteration
 budget. The fences around every UCI register access make per-iteration
 cost scale with CPU speed: a budget that is ample at 1 MHz collapses
@@ -518,6 +529,16 @@ caller sites (`net_poll`, `net_dhcp_acquire`, `net_tcp_connect`,
 out on C=1 to surface the timeout. `uci_push_wait` inherits the bound
 via its tail-`jmp` into `uci_wait_not_busy` and needs no separate
 conversion.
+
+`uci_drain_resp` and `uci_drain_status` followed in Phase 5j to close
+the symmetric risk on the response-drain side: `net_tcp_send` /
+`net_poll` / `net_tcp_close` all call drains after their respective
+SOCKET_WRITE / POLL_DATA / SOCKET_CLOSE responses, and if firmware
+ever leaves DATA_AV / STAT_AV asserted post-response the old
+unbounded `jmp <self>` loops would wedge the C64 with no wall-clock
+escape. Same 5 s budget, same error code, same SMC-byte state
+convention. All 13 call sites in `net.s` `bcs` out on C=1 to skip
+the companion drain + ack and force the appropriate exit state.
 
 ## Memory layout
 
