@@ -80,6 +80,24 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 test_https_local.CERT_PATH = _REPO_ROOT / "tools" / "https_e2e" / "certs" / "server-p384.pem"
 test_https_local.KEY_PATH  = _REPO_ROOT / "tools" / "https_e2e" / "certs" / "server-p384.key"
 
+
+# --------------------------------------------------------------------------
+# Memory arbiter override for the P-384 build.
+#
+# Under the production P-384 UCI build CRYPTO_OVERLAY ($4200-$5FFF) is
+# fully occupied at PRG-load time (OVERLAY_BLOB_SHA384) and is the
+# active overlay swap slot at runtime, so the default
+# CRYPTO_OVERLAY-scoped arbiter window finds no free range and raises
+# MemoryArbiterError. The parent test_https_local.py now defaults to
+# ``build_policy_and_arbiter_with_overlay_carveout`` (which carves
+# harness scratch from the NET_CODE zero-fill tail $3xxx-$3FFF), so
+# the P-384 sibling inherits the correct arbiter window automatically —
+# no override needed here. The inline ``_p384_build_policy_and_arbiter``
+# monkey-patch that previously lived in this file was factored into
+# ``_memory_policy.build_policy_and_arbiter_with_overlay_carveout`` and
+# adopted as the default in PR #...
+# --------------------------------------------------------------------------
+
 # Sanity check that the certs exist before delegating to main().
 if not test_https_local.CERT_PATH.is_file():
     print(
