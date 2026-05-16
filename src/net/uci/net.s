@@ -139,6 +139,14 @@ net_poll:
         rts
 @do_poll:
         jsr uci_wait_not_busy
+        bcc :+
+        ; FPGA wedged before we could push SOCKET_READ — net_last_error is
+        ; already UCI_ERR_WAIT_TIMEOUT. Force tcp_state to ERROR so the
+        ; HTTP/TLS layer stops polling on this socket.
+        lda #UCI_TCP_ERROR
+        sta net_tcp_state
+        rts
+:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -156,6 +164,14 @@ net_poll:
         jsr uci_put_byte
 
         jsr uci_push_wait
+        bcc :+
+        ; FPGA wedged waiting for SOCKET_READ response — net_last_error is
+        ; already UCI_ERR_WAIT_TIMEOUT. Force tcp_state to ERROR so the
+        ; HTTP/TLS layer stops polling on this socket.
+        lda #UCI_TCP_ERROR
+        sta net_tcp_state
+        rts
+:
 
         jsr uci_check_err
         bcc @no_err
@@ -327,6 +343,8 @@ net_dhcp_acquire:
         jsr uci_put_byte
 
         jsr uci_push_wait
+        bcs @dhcp_wait_to       ; FPGA wedged after PUSH_CMD — bail with C=1
+                                ; (net_last_error already UCI_ERR_WAIT_TIMEOUT)
 
         jsr uci_check_err
         bcc @no_err
@@ -442,6 +460,15 @@ net_tcp_connect:
         uci_fence
 
         jsr uci_push_wait
+        bcc :+
+        ; FPGA wedged waiting for TCP_CONNECT response — net_last_error is
+        ; already UCI_ERR_WAIT_TIMEOUT. Force tcp_state to CONNECT_FAIL so
+        ; callers don't try to use a phantom socket.
+        lda #UCI_TCP_CONNECT_FAIL
+        sta net_tcp_state
+        sec
+        rts
+:
 
         jsr uci_check_err
         bcc @tc_no_err
@@ -603,6 +630,12 @@ net_tcp_send:
 
 @sb_push:
         jsr uci_push_wait
+        bcc :+
+        ; FPGA wedged waiting for SOCKET_WRITE response — net_last_error is
+        ; already UCI_ERR_WAIT_TIMEOUT. Bail with C=1.
+        sec
+        rts
+:
 
         jsr uci_check_err
         bcc @sb_no_err
@@ -702,6 +735,13 @@ net_tcp_close:
         jsr uci_put_byte
 
         jsr uci_push_wait
+        bcc :+
+        ; FPGA wedged on close — force CLOSED state and bail. Best-effort
+        ; semantics: skip drains (FIFO state is undefined when wedged).
+        lda #UCI_TCP_CLOSED
+        sta net_tcp_state
+        rts
+:
         jsr uci_check_err       ; clear latched error if any
         jsr uci_drain_resp
         jsr uci_drain_status

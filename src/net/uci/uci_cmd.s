@@ -9,8 +9,8 @@
 ; Exported primitives (see the per-routine headers for calling conventions):
 ;
 ;   uci_abort          — flush the state machine (write ABORT + short delay)
-;   uci_wait_idle      — spin until (STATE==0 AND CMD_BUSY==0)
-;   uci_wait_not_busy  — spin until CMD_BUSY==0
+;   uci_wait_idle      — spin until (STATE==0 AND CMD_BUSY==0); TOD-bounded
+;   uci_wait_not_busy  — spin until CMD_BUSY==0; TOD-bounded
 ;   uci_begin_cmd      — A = target id; writes target to UCI_CMD_DATA
 ;   uci_put_byte       — A = parameter byte; writes to UCI_CMD_DATA
 ;   uci_push_wait      — writes PUSH_CMD, then uci_wait_not_busy
@@ -28,7 +28,8 @@
 .include "uci_regs.inc"
 .include "uci_errors.inc"
 
-; net_last_error lives in net.s's BSS — we set it on wait timeout (#37).
+; net_last_error lives in net.s's BSS — we set it on wait timeout
+; (#37 for uci_wait_idle; Phase 5 wedge for uci_wait_not_busy).
 .import net_last_error
 
 .export uci_abort
@@ -130,19 +131,56 @@ uci_wait_idle:
 @wi_elapsed:     .byte 0
 
 ; =============================================================================
-; uci_wait_not_busy — spin until CMD_BUSY==0 (ignore STATE)
+; uci_wait_not_busy — spin until CMD_BUSY==0 (ignore STATE), wall-clock bounded
 ; Called after writing PUSH_CMD while response data / status is still being
 ; prepared — STATE is allowed to be nonzero here.
+;
+; Phase 5 wedge (CertVerify recv on U64E at 10.43.23.81, May 2026) — the
+; historical unbounded spin converted an FPGA wedge into a 1843 s test
+; sentinel timeout. Per the parent CLAUDE.md "Design note — bounded
+; timeouts must use wall-clock time", convert to the same CIA1 TOD pattern
+; used by uci_wait_idle (issue #37). Same 5 s budget, same error code,
+; same SMC-byte state convention (no ZP).
+;
+; Output: C=0 on not-busy, C=1 on timeout (net_last_error = UCI_ERR_WAIT_TIMEOUT).
 ; Clobbers: A
 ; =============================================================================
 uci_wait_not_busy:
+        ; Sample initial TENTHS for delta-tracking. Latch via HOUR,
+        ; release via TENTHS. We don't care about the HOUR value itself.
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        sta @wnb_last_tenths
+        lda #$00
+        sta @wnb_elapsed
+@wnb_loop:
         lda UCI_STATUS
         uci_fence                   ; settle read before testing bits
         and #UCI_STAT_CMD_BUSY
-        beq @busy_done
-        jmp uci_wait_not_busy       ; long branch: fence too wide for BNE
-@busy_done:
+        beq @wnb_done
+
+        ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        cmp @wnb_last_tenths
+        beq @wnb_loop_long          ; no change — keep spinning
+        sta @wnb_last_tenths
+        inc @wnb_elapsed
+        lda @wnb_elapsed
+        cmp #UCI_WAIT_IDLE_BUDGET_TENTHS
+        bcc @wnb_loop_long          ; under budget — continue
+        ; Timeout
+        lda #UCI_ERR_WAIT_TIMEOUT
+        sta net_last_error
+        sec
         rts
+@wnb_loop_long:
+        jmp @wnb_loop               ; long branch: fence too wide for BCC/BEQ
+@wnb_done:
+        clc
+        rts
+@wnb_last_tenths: .byte 0
+@wnb_elapsed:     .byte 0
 
 ; =============================================================================
 ; uci_begin_cmd — entry: A = target id (e.g. UCI_TARGET_NETWORK = $03)
