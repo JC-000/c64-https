@@ -146,18 +146,22 @@ is **$C9**. See `src/net/uci/uci_regs.inc` for the full equate list
 ### UCI command primitives
 
 `src/net/uci/uci_cmd.s` provides shared subroutines used by `net.s`:
-`uci_wait_idle`, `uci_begin_cmd`, `uci_push_wait`, `uci_end_cmd`,
-`uci_read_data`, etc. No zero-page usage — all absolute addressing
-and self-modifying code.
+`uci_wait_idle`, `uci_wait_not_busy`, `uci_begin_cmd`, `uci_push_wait`,
+`uci_read_resp_bytes`, etc. No zero-page usage — all absolute
+addressing and self-modifying code.
 
-`uci_wait_idle` is wall-clock-bounded (5 s budget via CIA1 TOD) per
-the design note below. On timeout it returns C=1 with `net_last_error
-= UCI_ERR_WAIT_TIMEOUT`. The four callers (`net_dhcp_acquire`,
-`net_tcp_connect`, `net_tcp_send`, `net_tcp_close`) all `bcs` out to
+`uci_wait_idle` and `uci_wait_not_busy` are both wall-clock-bounded
+(5 s budget via CIA1 TOD) per the design note below. On timeout they
+return C=1 with `net_last_error = UCI_ERR_WAIT_TIMEOUT`. All
+`uci_wait_idle` callers (`net_dhcp_acquire`, `net_tcp_connect`,
+`net_tcp_send`, `net_tcp_close`) and all `uci_wait_not_busy` /
+`uci_push_wait` callers (`net_poll`, `net_dhcp_acquire`,
+`net_tcp_connect`, `net_tcp_send`, `net_tcp_close`) `bcs` out to
 surface the failure rather than letting the C64 hang indefinitely on
-a wedged FPGA. `uci_push_wait` and `uci_end_cmd` are still unbounded
-and should be converted to the same TOD pattern if a wedge there is
-ever observed.
+a wedged FPGA. `uci_push_wait` inherits the bound via its tail-call
+to `uci_wait_not_busy`. The `uci_wait_not_busy` conversion was driven
+by a Phase 5 wedge observed in CertVerify recv on real U64E hardware
+that converted a wedge into a 1843 s test sentinel timeout.
 
 ### UCI error codes
 
@@ -490,7 +494,7 @@ at `tools/https_e2e/certs/server-p384.{pem,key}`.
 ### Design note — bounded timeouts must use wall-clock time
 
 Robustness work on the UCI adapter's spin-wait helpers (`uci_wait_idle`,
-`uci_push_wait`, etc.) MUST use a wall-clock time source — CIA timer
+`uci_wait_not_busy`, etc.) MUST use a wall-clock time source — CIA timer
 on stock C64, TOD clock on U64E — rather than a cycle-counted iteration
 budget. The fences around every UCI register access make per-iteration
 cost scale with CPU speed: a budget that is ample at 1 MHz collapses
@@ -500,13 +504,23 @@ FPGA's wire-level operation durations. A prior attempt on branch
 budgets and broke DHCP at turbo for exactly this reason; the branch
 was abandoned.
 
-`uci_wait_idle` is the first helper to follow this pattern (issue #37).
+`uci_wait_idle` was the first helper to follow this pattern (issue #37).
 At entry it samples CIA1 TOD ($DC08-$DC0B) — read order is HOUR
 (latch) → MIN → SEC → TENTHS (unlatch) — and on each spin pass re-reads
 TENTHS, bailing with C=1 + `net_last_error = UCI_ERR_WAIT_TIMEOUT`
 after 50 transitions (~5 s wall-clock, independent of CPU turbo). State
 lives in two SMC bytes inside the routine to match the file's no-ZP
 convention. Use this as the template for any future bounded helper.
+
+`uci_wait_not_busy` was converted to the same pattern after a Phase 5
+wedge in CertVerify recv on real U64E hardware — the unbounded spin
+turned an FPGA wedge into a 1843 s test sentinel timeout. Same 5 s
+budget, same error code, same SMC-byte state convention. All six
+caller sites (`net_poll`, `net_dhcp_acquire`, `net_tcp_connect`,
+`net_tcp_send`, `net_tcp_close` direct + via `uci_push_wait`) `bcs`
+out on C=1 to surface the timeout. `uci_push_wait` inherits the bound
+via its tail-`jmp` into `uci_wait_not_busy` and needs no separate
+conversion.
 
 ## Memory layout
 
