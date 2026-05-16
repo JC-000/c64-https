@@ -107,7 +107,12 @@ CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
 # integration can be re-enabled by uncommenting the two lines below once
 # the cfg is extended.
 #CA65FLAGS += -D USE_NISTCURVES_P384=1
-#SIBLING_LIB_ARCHIVES += build/lib/nistcurves-p384.a
+# Phase 1.5 split the monolithic nistcurves-p384.a into two halves
+# (nistcurves-p384-sha384.a + nistcurves-p384-curve.a) since the
+# combined image overflowed the live 7.5 KB CRYPTO_OVERLAY slot.
+# Either-of approach for the production wire-up will be Phase 4a.
+#SIBLING_LIB_ARCHIVES += build/lib/nistcurves-p384-sha384.a
+#SIBLING_LIB_ARCHIVES += build/lib/nistcurves-p384-curve.a
 else
 $(error Unknown BACKEND=$(BACKEND); expected ip65 or uci)
 endif
@@ -148,10 +153,10 @@ build/%.o: src/%.s
 	$(CA65) $(CA65FLAGS) -o $@ $<
 
 # Phase C.3: c64-nist-curves sibling archive (libs/nistcurves/ submodule).
-# Same gating as x25519: only linked under BACKEND=uci; ip65 continues
-# without P-384 entirely. Exports only the variable-base primitives
-# (see the build script for the excluded symbols and why).
-build/lib/nistcurves-p384.a:
+# Phase 1.5 split: produces TWO archives, one per overlay half. The
+# script writes both with a single invocation; the second target is a
+# pseudo-rule that piggybacks on the first.
+build/lib/nistcurves-p384-sha384.a build/lib/nistcurves-p384-curve.a:
 	@mkdir -p build/lib
 	bash tools/integration/build_nistcurves_p384.sh
 
@@ -176,18 +181,27 @@ build/lib/x25519.a:
 	@mkdir -p build/lib
 	bash tools/integration/build_x25519.sh
 
-# Phase C.3b: P-384 overlay IMAGE + labels for harness-time use only.
-# The production PRG does NOT link nistcurves-p384.a — this is smoke-test
-# infrastructure. tools/test_p384_symbols.py loads overlay-p384.bin into
-# REU at test time via a trampoline, then calls crypto_swap_to_p384 to
-# page it into the live slot. Keeps the main PRG size unchanged.
+# Phase C.3b / Phase 1.5 split: P-384 overlay IMAGES + labels for
+# harness-time use only.  The production PRG does NOT link
+# nistcurves-p384-{sha384,curve}.a — these are smoke-test infrastructure.
+# A future Phase 3 / Phase 4a harness will load both .bins into REU at
+# test time, then DMA them into the live slot via two new swap entry
+# points (crypto_swap_to_p384_sha384 / crypto_swap_to_p384_curve);
+# the existing crypto_swap_to_p384 entry point is now stale -- see the
+# comment block at the top of src/crypto/shared/crypto_swap.s.
 #
-# Both outputs live below build/; depend on the archive being built first.
-build/lib/overlay-p384.bin build/labels-p384.txt: build/lib/nistcurves-p384.a cfg/p384-overlay.cfg tools/integration/build_nistcurves_p384_bin.sh
+# All four outputs (two .bins + two labels files) are produced by a
+# single script invocation; the rule lists all four targets so make
+# only runs the script once even when several are stale.
+build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin build/labels-p384-sha384.txt build/labels-p384-curve.txt: \
+		build/lib/nistcurves-p384-sha384.a build/lib/nistcurves-p384-curve.a \
+		cfg/p384-overlay-sha384.cfg cfg/p384-overlay-curve.cfg \
+		tools/integration/build_nistcurves_p384_bin.sh
 	bash tools/integration/build_nistcurves_p384_bin.sh
 
 .PHONY: p384-overlay
-p384-overlay: build/lib/overlay-p384.bin build/labels-p384.txt
+p384-overlay: build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin \
+              build/labels-p384-sha384.txt build/labels-p384-curve.txt
 
 # Build ip65 object libraries from the submodule. Only needed if the ip65
 # submodule changes; the prebuilt blob is committed to ip65-build/.

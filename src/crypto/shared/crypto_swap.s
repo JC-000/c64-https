@@ -25,6 +25,89 @@
 ;
 ; `CRYPTO_OVERLAY_START` is defined by the linker (cfg `MEMORY { }`
 ; `define = yes` on the CRYPTO_OVERLAY region — see cfg/c64-https-*.cfg).
+;
+; -----------------------------------------------------------------------------
+; Phase 1.5 split-overlay design (P-384 path) -- INFORMATIONAL ONLY
+; -----------------------------------------------------------------------------
+; Phase 1b's monolithic P-384 overlay (12.5 KB) overflowed the live UCI
+; CRYPTO_OVERLAY slot (7,680 B at $4200-$5FFF).  The fix is functional:
+; split the P-384 image into two halves along the SHA / curve boundary,
+; each fitting the slot, and load them in sequence.
+;
+; Phase 1.5 emits the two .bin files; Phase 3 will extend this dispatcher
+; with two new entry points (do NOT add them yet -- this comment is
+; informational only).  The four overlay states the dispatcher will need
+; to track:
+;
+;     0 = OV_NONE        (uninitialized / swap_none)
+;     2 = OV_P256        (existing — unchanged)
+;     4 = OV_P384_SHA384 (NEW — sha384.s code + IV/K[80] RODATA)
+;     5 = OV_P384_CURVE  (NEW — fp384/mod384/points384/curve384/
+;                         ecdsa_verify_384/shim)
+;
+; The legacy state 3 (OV_P384, monolithic) is now stale and will be
+; removed by Phase 3 along with the existing crypto_swap_to_p384 entry
+; point (the only consumer is tools/test_p384_symbols.py, which will
+; be rewritten to drive the two halves in sequence).
+;
+; REU storage (see src/crypto/shared/reu_layout.inc):
+;   REU_OVERLAY_P384_SHA384 = $60000  (bank 6)
+;   REU_OVERLAY_P384_CURVE  = $70000  (bank 7)
+;
+; TLS-side call sequence (Phase 4a will implement the dispatcher):
+;     ; --- 1. Hash the handshake transcript ---
+;     jsr crypto_swap_to_p384_sha384
+;     jsr sha384_init
+;     ldx #<transcript ; ldy #>transcript ; jsr setup_sha_src/sha_len
+;     jsr sha384_update      ; (one or more times)
+;     jsr sha384_final       ; sha384_digest now holds the 48 B BE digest
+;
+;     ; --- 2. Splice the digest into the resident BE input struct ---
+;     ;       (resident DATA at $C000 survives the swap window)
+;     ldy #47
+; @cp: lda sha384_digest,y
+;      sta ecdsa_inputs_384+96,y
+;      dey
+;      bpl @cp
+;
+;     ; --- 3. Swap in the curve / verify overlay and call verify ---
+;     jsr crypto_swap_to_p384_curve
+;     lda #<ecdsa_inputs_384
+;     ldx #>ecdsa_inputs_384
+;     jsr ecdsa_verify_384
+;     ; C=0 VALID, C=1 INVALID/malformed
+;
+; Resident DATA invariants (Phase 1b -- Phase 1.5 preserves these):
+;     - sha384_digest (48 B) lives in the SHA archive's resident DATA;
+;       written by sha384_final, read by the TLS-side splice loop above.
+;     - ecdsa_inputs_384 (240 B BE struct: r|s|h|Qx|Qy each 48 B) lives
+;       in the curve archive's resident DATA; TLS pre-fills r/s/Qx/Qy,
+;       splices h from sha384_digest, then calls ecdsa_verify_384.
+;     - All other ec384_* / fp384_* / ecdsa384_* RW buffers and the
+;       sha_state / sha_w / sha_block_* SHA-384 state ALSO live in
+;       resident DATA (CRYPTO_RESIDENT, $C000-$EFFF in the standalone
+;       cfgs; CRYPTO_RESIDENT in the live UCI cfg).  Resident DATA
+;       footprint is unchanged from Phase 1b's 3,541 B.
+;
+; ZP save/restore obligation (Phase 4a):
+;     Phase 1.5 moves the sibling's SHA-384 streaming pointer slots
+;     out of their default $04-$0B (which collide with c64-https's
+;     canonical $04-$09 = w32_* ChaCha20/Poly1305 and $0A-$0D =
+;     sha_temp1 SHA-256) into a free contiguous block at $3D-$44:
+;         sha_src    = $3D / $3E
+;         sha_len    = $3F / $40
+;         sha_w_ptr  = $41 / $42
+;         sha_w_ptr2 = $43 / $44
+;     These slots are demonstrably unused by any other crypto / TLS /
+;     ip65 / UCI / fe25519 / x25519 / ECDSA-bignum path during the
+;     SHA-384 call window, so NO save/restore is required around the
+;     SHA window.  Phase 4a's TLS dispatcher MAY clobber $3D-$44
+;     freely while sha384_init/update/final is in flight.
+;
+;     If a future change introduces a competing user of $3D-$44, the
+;     dispatcher must save/restore those eight bytes around the SHA
+;     window OR move SHA-384 to a different free slot.  The choice
+;     of $3D-$44 is documented in tools/integration/build_nistcurves_p384.sh.
 ; =============================================================================
 
         .include "constants.inc"        ; reu_* register equates

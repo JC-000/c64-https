@@ -43,9 +43,39 @@ REU_OVERLAY_P384           = $24100
 REU_P256_PRECOMPUTE_BASE   = $30000
 .endif
 
-; --- P-384 precompute (4 banks) ---
+; --- P-384 precompute (4 banks at $40000-$5FFFF) ---
+; Banks 4-5 are reserved for any future Lim-Lee-style precompute table
+; for P-384 fixed-base scalar mul.  Currently unused: the Phase 1b/1.5
+; overlay strips the Lim-Lee body and replaces it with a shim that
+; tail-calls ec_scalar_mul_var_384 (no precompute).
 .ifndef REU_P384_PRECOMPUTE_BASE
 REU_P384_PRECOMPUTE_BASE   = $40000
+.endif
+
+; --- P-384 split-overlay storage (Phase 1.5) ---
+; Phase 1b's monolithic OVERLAY_P384 (12.5 KB) overflowed the live UCI
+; CRYPTO_OVERLAY slot (7.5 KB).  The fix: two halves, loaded one at a
+; time on demand.  Bank 6 holds the SHA-384 hash code; bank 7 holds the
+; curve / verify code.  Each image is padded to OVERLAY_SIZE (8 KB) for
+; DMA alignment; actual code is < 7,680 B per half (fits the live slot).
+;
+; Layout (REU 24-bit address):
+;   $60000-$6FFFF  bank 6 (64 KB)  REU_OVERLAY_P384_SHA384
+;                                  (8 KB image; remaining 56 KB headroom)
+;   $70000-$7FFFF  bank 7 (64 KB)  REU_OVERLAY_P384_CURVE
+;                                  (8 KB image; remaining 56 KB headroom)
+;
+; The TLS path (Phase 4a) drives the two halves in sequence:
+;   1. crypto_swap_to_p384_sha384 -> sha384_init/update/final
+;   2. crypto_swap_to_p384_curve  -> ecdsa_verify_384 (digest pre-staged
+;                                    in resident DATA at ecdsa_inputs_384[96..143])
+; Phase 3 will add the swap entry points; the existing
+; crypto_swap_to_p384 (single-image) is now stale.
+.ifndef REU_OVERLAY_P384_SHA384
+REU_OVERLAY_P384_SHA384    = $60000
+.endif
+.ifndef REU_OVERLAY_P384_CURVE
+REU_OVERLAY_P384_CURVE     = $70000
 .endif
 
 ; --- Phase C.5 collision note (USE_X25519_SIBLING=1) ---
