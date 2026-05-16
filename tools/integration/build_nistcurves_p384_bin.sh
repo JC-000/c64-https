@@ -178,11 +178,19 @@ link_one () {
         obj_args+=("$scratch/$m")
     done
 
+    # Sidecar .dbg path: build/lib/overlay-p384-{sha384,curve}.dbg.
+    # Pairs with the `-g` ca65 flag added in build_nistcurves_p384.sh so
+    # ld65 can merge per-source line/symbol records.  Does not affect the
+    # padded .bin image bytes.
+    local dbg_out
+    dbg_out="${bin_out%.bin}.dbg"
+
     "$LD65" \
         -C "$cfg" \
         -o "$bin_out" \
         -Ln "$labels_out" \
         -m "$map_out" \
+        --dbgfile "$dbg_out" \
         --define reu_status=\$df00 \
         --define reu_command=\$df01 \
         --define reu_c64_lo=\$df02 \

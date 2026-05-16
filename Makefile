@@ -35,7 +35,7 @@ IP65_BUILD   := ip65-build
 IP65_BIN     := $(IP65_BUILD)/ip65-c64.bin
 
 CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net/$(BACKEND) -I build --debug-info
-LD65FLAGS := -C $(CFG) -Ln build/labels.txt -m build/c64-https.map
+LD65FLAGS := -C $(CFG) -Ln build/labels.txt -m build/c64-https.map --dbgfile build/c64-https.dbg
 
 # Source inventory.
 TOP_SRCS    := $(wildcard src/*.s)

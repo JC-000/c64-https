@@ -506,7 +506,11 @@ mkdir -p "$OBJ_DIR" "$OUT_DIR"
 # replaced by c64-https's canonical ZP map (with the Phase 1.5 SHA-384
 # slot moves).  The other source files use `.importzp` to pull these
 # equates from the linker-resolved zp_config.o.
+# `-g` embeds cc65 debug info into each .o; the overlay ld65 invocations
+# in build_nistcurves_p384_bin.sh merge it into build/lib/overlay-p384-*.dbg
+# sidecars.  Does not change emitted code bytes.
 "$CA65" \
+    -g \
     -I "$STAGING" \
     -I "$PROJECT_ROOT/src/crypto/shared" \
     "${ZP_DEFINES[@]}" \
@@ -520,6 +524,7 @@ for src in fp384_raw mod384_raw points384_raw curve384_raw \
            sha384_raw ecdsa384_raw ec_scalar_mul_384_shim_raw \
            data_curve_raw data_sha_raw; do
     "$CA65" \
+        -g \
         -I "$STAGING" \
         -I "$PROJECT_ROOT/src/crypto/shared" \
         -o "$OBJ_DIR/$src.o" "$STAGING/$src.s"

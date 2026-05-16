@@ -342,7 +342,11 @@ mkdir -p "$OBJ_DIR" "$OUT_DIR"
 
 # zp_config.s is the single point of truth for ZP equates; we apply -D
 # overrides so sibling defaults get replaced with c64-https's canonical map.
+# `-g` embeds cc65 debug info into the .o files so the final ld65 --dbgfile
+# (driven from the top-level Makefile) can merge per-source line/symbol
+# records into build/c64-https.dbg.  Does not change emitted code bytes.
 "$CA65" \
+    -g \
     -I "$STAGING" \
     -I "$PROJECT_ROOT/src/crypto/shared" \
     "${ZP_DEFINES[@]}" \
@@ -350,6 +354,7 @@ mkdir -p "$OBJ_DIR" "$OUT_DIR"
 
 for src in fp256_raw mod256_raw points256_raw ecdsa256_raw curve256_raw data_p256_raw reu_equates_raw; do
     "$CA65" \
+        -g \
         -I "$STAGING" \
         -I "$PROJECT_ROOT/src/crypto/shared" \
         -o "$OBJ_DIR/$src.o" "$STAGING/$src.s"

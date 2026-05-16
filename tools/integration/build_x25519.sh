@@ -326,7 +326,11 @@ rm -rf "$OBJ_DIR"
 mkdir -p "$OBJ_DIR" "$OUT_DIR"
 
 for src in fe25519_raw x25519_raw x25519_init_raw data_x25519_bss_raw data_x25519_rodata_raw; do
+    # `-g` embeds cc65 debug info; ld65 --dbgfile (top-level Makefile)
+    # merges per-source line/symbol records into build/c64-https.dbg.
+    # Does not change emitted code bytes.
     "$CA65" \
+        -g \
         -I "$STAGING" \
         "${ZP_DEFINES[@]}" \
         -o "$OBJ_DIR/$src.o" "$STAGING/$src.s"
