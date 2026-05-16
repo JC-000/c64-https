@@ -34,7 +34,7 @@ IP65_DIR     := ip65
 IP65_BUILD   := ip65-build
 IP65_BIN     := $(IP65_BUILD)/ip65-c64.bin
 
-CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net/$(BACKEND) --debug-info
+CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net/$(BACKEND) -I build --debug-info
 LD65FLAGS := -C $(CFG) -Ln build/labels.txt -m build/c64-https.map
 
 # Source inventory.
@@ -154,6 +154,7 @@ endif
 # src/crypto/shared/p384_overlay_blobs.s tries to read them.
 ifeq ($(USE_OVERLAY_P384_EMBED),1)
 PRG_DEPS += build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin
+PRG_DEPS += build/p384_overlay_equates.inc
 build/crypto/shared/p384_overlay_blobs.o: build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin
 endif
 
@@ -220,6 +221,22 @@ build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin build/labels-
 .PHONY: p384-overlay
 p384-overlay: build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin \
               build/labels-p384-sha384.txt build/labels-p384-curve.txt
+
+# Phase 5 Fix C: regenerate the P-384 overlay-resident symbol equates
+# (build/p384_overlay_equates.inc) from the overlay labels files so the
+# TLS-side dispatcher (src/crypto/ecdsa_verify_384.s) picks up address
+# changes via .include, with .assert pins catching drift.  Whenever
+# either labels file is rebuilt, the .inc regenerates and the
+# dispatcher .o is forced to rebuild.
+build/p384_overlay_equates.inc: build/labels-p384-sha384.txt build/labels-p384-curve.txt \
+                                tools/integration/gen_p384_overlay_equates.sh
+	bash tools/integration/gen_p384_overlay_equates.sh \
+	    build/labels-p384-sha384.txt build/labels-p384-curve.txt $@
+
+# The dispatcher .o now depends on the generated equates file (via
+# .include) AND on the overlay .bin files (PRG_DEPS already lists those
+# under USE_OVERLAY_P384_EMBED).
+build/crypto/ecdsa_verify_384.o: build/p384_overlay_equates.inc
 
 # Build ip65 object libraries from the submodule. Only needed if the ip65
 # submodule changes; the prebuilt blob is committed to ip65-build/.
