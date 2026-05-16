@@ -163,31 +163,20 @@ tls_build_client_hello:
         iny                             ; 8 bytes written
 
         ; --- Extension 3: signature_algorithms (0x000D) ---
-        ; 00 0d 00 04 00 02 04 03
-        lda #$00
+        ; 00 0d 00 06 00 04 04 03 05 03
+        ; Two schemes advertised: ecdsa_secp256r1_sha256 (0x0403)
+        ; and ecdsa_secp384r1_sha384 (0x0503).  Inner list length = 4
+        ; (two 2-byte schemes); extension data length = 6.  Table-driven
+        ; to keep LOADER from overflowing — adding two more LDA/STA/INY
+        ; triples directly costs 12 B that the segment doesn't have.
+        ldx #0
+@sig_algs_ext_loop:
+        lda sig_algs_ext_data,x
         sta tls_rec_buf,y
         iny
-        lda #$0d
-        sta tls_rec_buf,y
-        iny
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$04
-        sta tls_rec_buf,y
-        iny
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$02
-        sta tls_rec_buf,y
-        iny
-        lda #$04
-        sta tls_rec_buf,y
-        iny
-        lda #$03
-        sta tls_rec_buf,y
-        iny                             ; 8 bytes written
+        inx
+        cpx #10
+        bne @sig_algs_ext_loop          ; 10 bytes written
 
         ; --- Extension 4: key_share (0x0033) ---
         ; 00 33 00 26 00 24 00 1d 00 20 [32 bytes pubkey]
@@ -596,3 +585,19 @@ sh_found_ks:   .res 1
 
 tls_hostname:      .res 64
 tls_hostname_len:  .res 1
+
+
+; =============================================================================
+; signature_algorithms extension payload (TLS 1.3, two ECDSA schemes).
+; Lives in RODATA to keep the LOADER segment from overflowing — emitting
+; ten LDA/STA/INY triples in CODE costs 60 B vs ~24 B (table + 7-insn
+; copy loop).
+; =============================================================================
+.segment "RODATA"
+
+sig_algs_ext_data:
+        .byte $00, $0d                  ; extension type = signature_algorithms
+        .byte $00, $06                  ; extension data length = 6
+        .byte $00, $04                  ; supported_signature_algorithms length = 4
+        .byte $04, $03                  ; ecdsa_secp256r1_sha256
+        .byte $05, $03                  ; ecdsa_secp384r1_sha384
