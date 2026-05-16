@@ -13,7 +13,10 @@
 ;
 ; Output: C=0 signature VALID, C=1 INVALID or unsupported curve.
 ;
-; P-384 dispatch remains stubbed (see project_p384_stubbed memory note).
+; Phase 4a: P-384 dispatch jumps to ecdsa_verify_384_tls in
+; src/crypto/ecdsa_verify_384.s, which composes the dual-overlay swap
+; (sha384 -> curve) plus sibling ecdsa_verify_384.  See that file's
+; header for the per-step contract and the SHA-384 transcript caveat.
 ; =============================================================================
 
 .include "constants.inc"
@@ -23,6 +26,9 @@
 .import ec_scalar_mul_var
 .import ec_gx256, ec_gy256
 .import ec_base_x, ec_base_y
+
+; --- Phase 4a: P-384 TLS dispatcher (src/crypto/ecdsa_verify_384.s) ---
+.import ecdsa_verify_384_tls
 
 ; --- State buffers (in-tree data.s) ---
 .import ecdsa_curve_id
@@ -55,9 +61,10 @@ ecdsa_verify:
         ; redundant and has been removed to save bytes.
         lda ecdsa_curve_id
         beq @p256
-        ; P-384 verify still stubbed (project_p384_stubbed).
-        sec
-        rts
+        ; Phase 4a: P-384 dispatcher composes the dual-overlay swap
+        ; (sha384 -> curve) + sibling ecdsa_verify_384.  Tail-call so
+        ; the dispatcher's carry return propagates as our return.
+        jmp ecdsa_verify_384_tls
 
 @p256:
         ; The TLS-populated ecdsa_sig_r, ecdsa_sig_s, ecdsa_hash,
