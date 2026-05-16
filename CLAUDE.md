@@ -20,7 +20,7 @@ Targets:
                           `build/labels.txt` (VICE label format), and
                           `build/c64-https.dbg` (cc65 debug info,
                           consumable by VICE's monitor + diagnostic
-                          agents; P-384 overlay gets a `.dbg` sidecar too)
+                          agents; P-384 overlays get `.dbg` sidecars too)
   - `make clean`        — remove build artifacts
   - `make run`          — autostart the PRG in VICE
   - `make ip65-libs`    — rebuild ip65 object libraries from the submodule
