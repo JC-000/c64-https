@@ -82,7 +82,10 @@ from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
 from c64_test_harness.labels import Labels
 
-from _memory_policy import build_policy_and_arbiter
+from _memory_policy import (
+    build_policy_and_arbiter,
+    build_policy_and_arbiter_with_overlay_carveout,
+)
 
 
 DEBUG_CAPTURE_ENABLED = os.environ.get("DEBUG_CAPTURE", "1") != "0"
@@ -1026,13 +1029,23 @@ def main() -> int:
     # --- Memory policy + arbiter: derive scratch addresses from the
     # current build's segment layout instead of hardcoding them.  The
     # policy reserves every PRG segment found in labels.txt; the
-    # arbiter then allocates inside CRYPTO_OVERLAY's unused tail
-    # ($5100-$5FFF under USE_X25519_SIBLING=1, $4200-$5FFF when the
-    # flag is off).  Transport hookup happens after the transport is
-    # constructed inside the try-block below.
+    # arbiter then allocates inside the NET_CODE zero-fill tail
+    # ($3xxx-$3FFF), carved out via
+    # ``build_policy_and_arbiter_with_overlay_carveout``. Previously this
+    # used ``build_policy_and_arbiter`` (CRYPTO_OVERLAY window), but
+    # Phase 5's overlay-blob landings fill CRYPTO_OVERLAY end-to-end
+    # ($4200-$5FFF) and the arbiter could no longer find a slot. The
+    # overlay-carveout helper steals the NET_CODE tail (declared
+    # ``fill = yes`` in the cfg, used only up to $3xxx by the adapter
+    # and relocated TLS/crypto-aux code) instead, which has ~1.6 KB of
+    # safe RAM under both the P-256 and P-384 builds.
+    # Transport hookup happens after the transport is constructed
+    # inside the try-block below.
     global ROUTINE_ADDR, HOST_STR_ADDR, PATH_STR_ADDR
     global SENTINEL_ADDR, PROGRESS_ADDR, CARRY_FLAG_ADDR
-    memory_policy, arbiter = build_policy_and_arbiter(LABELS_PATH, PRG_PATH)
+    memory_policy, arbiter = build_policy_and_arbiter_with_overlay_carveout(
+        LABELS_PATH, PRG_PATH,
+    )
     ROUTINE_ADDR    = arbiter.alloc(256, name="trampoline")
     HOST_STR_ADDR   = arbiter.alloc(64,  name="host_str")
     PATH_STR_ADDR   = arbiter.alloc(64,  name="path_str")
