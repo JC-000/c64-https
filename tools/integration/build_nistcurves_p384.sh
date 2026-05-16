@@ -506,9 +506,9 @@ mkdir -p "$OBJ_DIR" "$OUT_DIR"
 # replaced by c64-https's canonical ZP map (with the Phase 1.5 SHA-384
 # slot moves).  The other source files use `.importzp` to pull these
 # equates from the linker-resolved zp_config.o.
-# `-g` embeds cc65 debug info into each .o; the overlay ld65 invocation
-# in build_nistcurves_p384_bin.sh merges it into build/lib/overlay-p384.dbg.
-# Does not change emitted code bytes.
+# `-g` embeds cc65 debug info into each .o; the overlay ld65 invocations
+# in build_nistcurves_p384_bin.sh merge it into build/lib/overlay-p384-*.dbg
+# sidecars.  Does not change emitted code bytes.
 "$CA65" \
     -g \
     -I "$STAGING" \
