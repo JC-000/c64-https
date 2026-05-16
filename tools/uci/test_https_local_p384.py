@@ -28,10 +28,14 @@ Environment variables (same as test_https_local.py):
   TURBO_MHZ             - C64 CPU MHz (default 48)
   HTTPS_PORT            - listener port (default 443; falls back to 4433)
   SENTINEL_POLL_TIMEOUT - C64-side sentinel poll budget (default
-                          1800 * _TIMEOUT_SCALE = 30 min at 48 MHz; the
-                          ECDSA-P384 verify can take 4-7 min and the
-                          handshake includes one verify so this gives
-                          ample slack against handshake stalls)
+                          5400 * _TIMEOUT_SCALE = 90 min at 48 MHz; per
+                          the Phase 5i diagnostic of artifact
+                          /tmp/uci_https_debug/20260516_152824/, the
+                          handshake actually progresses through Server
+                          Finished decrypt within ~1812 s (tls_read_seq=4
+                          + tls_rec_buf shows freshly-written Finished),
+                          but Client Finished + HTTP exchange need
+                          additional time. 90 min gives ample slack.)
   ACCEPT_TIMEOUT        - server-side accept + handshake budget (same
                           default as SENTINEL_POLL_TIMEOUT)
   DEBUG_CAPTURE         - 0 to disable 6510 bus capture (default on)
@@ -57,14 +61,17 @@ from pathlib import Path
 # `os.environ.get(...)` calls pick them up.
 # --------------------------------------------------------------------------
 
-# Default to a 30 min budget if the user hasn't overridden it.  The
-# P-384 verify (one per handshake) dominates wall-clock; pre-Phase-C.4
-# numbers for P-256 measured ~85 s for ecdsa_verify alone, and the
-# P-384 cost is ~5x for the scalar mult (larger field, same primitives).
-# Conservative 30 min covers stalls and gives the operator clear room
-# above the expected 4-7 min handshake.
-os.environ.setdefault("SENTINEL_POLL_TIMEOUT", "1800")
-os.environ.setdefault("ACCEPT_TIMEOUT", "1800")
+# Default to a 90 min budget if the user hasn't overridden it.  Phase 5i
+# diagnostic (artifact /tmp/uci_https_debug/20260516_152824/) showed the
+# handshake actually progressing through Server Finished decrypt within
+# ~1812 s — i.e. the 30 min budget previously used had insufficient
+# slack for the remaining Client Finished + HTTP exchange steps.
+# tls_read_seq=4 + tls_rec_buf containing freshly-written Server Finished
+# confirms the ECDSA-P384 verify SUCCEEDED and read_seq advanced past it.
+# Bumping to 90 min gives the C64 ample time to complete the handshake
+# and the subsequent HTTP exchange.
+os.environ.setdefault("SENTINEL_POLL_TIMEOUT", "5400")
+os.environ.setdefault("ACCEPT_TIMEOUT", "5400")
 
 # Now import the parent module — it will pick up the timeout env vars
 # above, and we patch CERT_PATH / KEY_PATH below before main() runs.
