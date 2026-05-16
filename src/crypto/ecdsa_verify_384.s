@@ -13,16 +13,13 @@
 ;   2. Copy the 48-byte big-endian server pubkey (X then Y) into
 ;      ecdsa_inputs_384 slots +144 and +192.
 ;
-;      Phase 4a CAVEAT: ecdsa_pubkey_x and ecdsa_pubkey_y in data.s are
-;      currently 32 B each (sized for P-256).  src/tls_cert.s's cert
-;      handler nominally writes 48 B per coordinate when
-;      ecdsa_sig_len = 48, which overruns into adjacent BSS slots.  The
-;      P-256 packed-struct invariant for ecdsa_verify_256
-;      (r|s|h|Qx|Qy contiguous 32 B each) prevents a simple resize, so
-;      Phase 4a copies whatever the cert handler left at offsets
-;      pubkey_x..pubkey_x+47 and pubkey_y..pubkey_y+47 -- the bytes are
-;      partially-corrupt for P-384.  Fix B (next commit) lands the
-;      separate _384 slots.
+;      Phase 5 Fix B: src/data.s defines separate 48 B slots
+;      ecdsa_pubkey_x_384 and ecdsa_pubkey_y_384 in CRYPTO_BSS;
+;      src/tls_cert.s's cert handler dispatches on ecdsa_curve_id and
+;      writes the P-384 pubkey into those slots when the leaf cert
+;      advertises secp384r1.  The dispatcher reads from the _384 slots
+;      for the verify input, leaving the contiguous 32 B P-256 packed
+;      struct (r|s|h|Qx|Qy) intact for ecdsa_verify_256.
 ;   3. Build the TLS 1.3 §4.4.3 signed-content blob (130 bytes) at
 ;      $CA00 in tcp_recv_buf scratch RAM:
 ;        [0..63]    64 spaces (0x20)
@@ -85,8 +82,8 @@
         ; --- TLS-side state we read ---
         .import tls_rec_buf            ; CertificateVerify message buffer
         .import tls_transcript         ; 32 B running SHA-256 transcript
-        .import ecdsa_pubkey_x         ; 48 B server pubkey X (extended Phase 4a)
-        .import ecdsa_pubkey_y         ; 48 B server pubkey Y (extended Phase 4a)
+        .import ecdsa_pubkey_x_384     ; 48 B server pubkey X (Phase 5 Fix B)
+        .import ecdsa_pubkey_y_384     ; 48 B server pubkey Y (Phase 5 Fix B)
 
         ; --- Overlay swap entry points (in main PRG, always-resident) ---
         .import crypto_swap_to_p384_sha384
@@ -144,8 +141,8 @@ SIGNED_BLOB_LEN  = 130                  ; 64 + 33 + 1 + 32 (RFC 8446 §4.4.3)
 ;   tls_rec_buf+4..5    signature_scheme = 0x0503
 ;   tls_rec_buf+6..7    16-bit signature length (BE; high byte = 0)
 ;   tls_rec_buf+8..     DER-encoded ECDSA signature (SEQUENCE { r, s })
-;   ecdsa_pubkey_x      48 B server pubkey X (BE, from cert)
-;   ecdsa_pubkey_y      48 B server pubkey Y (BE, from cert)
+;   ecdsa_pubkey_x_384  48 B server pubkey X (BE, from cert; Phase 5 Fix B)
+;   ecdsa_pubkey_y_384  48 B server pubkey Y (BE, from cert; Phase 5 Fix B)
 ;   tls_transcript      32 B SHA-256 transcript (Phase 4a placeholder --
 ;                       see CAVEAT in file header)
 ;
@@ -186,14 +183,14 @@ ecdsa_verify_384_tls:
         ; -----------------------------------------------------------------
         ldx #47
 @copy_qx:
-        lda ecdsa_pubkey_x,x
+        lda ecdsa_pubkey_x_384,x
         sta ecdsa_inputs_384+144,x
         dex
         bpl @copy_qx
 
         ldx #47
 @copy_qy:
-        lda ecdsa_pubkey_y,x
+        lda ecdsa_pubkey_y_384,x
         sta ecdsa_inputs_384+192,x
         dex
         bpl @copy_qy
