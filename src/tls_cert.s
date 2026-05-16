@@ -47,6 +47,11 @@
         .import ecdsa_sig_len
         .import ecdsa_pubkey_x
         .import ecdsa_pubkey_y
+        ; Phase 5 Fix B: separate 48 B P-384 pubkey slots so the cert
+        ; handler doesn't overrun the 32 B P-256 slots when the leaf
+        ; cert advertises secp384r1.
+        .import ecdsa_pubkey_x_384
+        .import ecdsa_pubkey_y_384
 
         ; Debug progress byte repurposed from tls_record_io.s's existing label.
         ; Used by tls_handle_cert_verify to mark which stage we reached so a
@@ -456,17 +461,34 @@ x509_extract_pubkey:
         adc zp_ptr+1
         sta zp_ptr+1
 
-        ; Copy X coordinate to ecdsa_pubkey_x
+        ; Copy X coordinate.  Phase 5 Fix B: dispatch on ecdsa_curve_id
+        ; to the correctly-sized BSS slot — P-256 32 B slot stays
+        ; ecdsa_pubkey_x; P-384 48 B slot is ecdsa_pubkey_x_384 (the
+        ; P-256 buffer would only hold 32 of the 48 bytes and the
+        ; remaining 16 would clobber the next BSS variable).
         lda ecdsa_sig_len           ; 32 or 48
         sta zp_count
+        lda ecdsa_curve_id
+        beq @copy_x_p256
+        ; --- P-384 ---
         ldy #0
-@copy_x:
+@copy_x_p384:
+        lda (zp_ptr),y
+        sta ecdsa_pubkey_x_384,y
+        iny
+        cpy zp_count
+        bne @copy_x_p384
+        jmp @advance_past_x
+@copy_x_p256:
+        ldy #0
+@copy_x_p256_loop:
         lda (zp_ptr),y
         sta ecdsa_pubkey_x,y
         iny
         cpy zp_count
-        bne @copy_x
+        bne @copy_x_p256_loop
 
+@advance_past_x:
         ; Advance zp_ptr past X
         lda zp_count
         clc
@@ -476,15 +498,27 @@ x509_extract_pubkey:
         adc zp_ptr+1
         sta zp_ptr+1
 
-        ; Copy Y coordinate to ecdsa_pubkey_y
+        ; Copy Y coordinate.  Same dispatch as X.
+        lda ecdsa_curve_id
+        beq @copy_y_p256
         ldy #0
-@copy_y:
+@copy_y_p384:
+        lda (zp_ptr),y
+        sta ecdsa_pubkey_y_384,y
+        iny
+        cpy zp_count
+        bne @copy_y_p384
+        jmp @copy_y_done
+@copy_y_p256:
+        ldy #0
+@copy_y_p256_loop:
         lda (zp_ptr),y
         sta ecdsa_pubkey_y,y
         iny
         cpy zp_count
-        bne @copy_y
+        bne @copy_y_p256_loop
 
+@copy_y_done:
         ; Success
         clc
         rts
