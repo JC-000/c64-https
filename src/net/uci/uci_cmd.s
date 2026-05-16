@@ -18,8 +18,10 @@
 ;   uci_read_resp_bytes— drain DATA_AV bytes to caller-provided buffer
 ;                        (caller fills uci_resp_dst/uci_resp_max beforehand;
 ;                         uci_resp_count returned; Y = count)
-;   uci_drain_resp     — drain remaining DATA_AV bytes to nowhere, ACKing each
-;   uci_drain_status   — drain remaining STAT_AV bytes to nowhere, ACKing each
+;   uci_drain_resp     — drain remaining DATA_AV bytes to nowhere, ACKing
+;                        each; TOD-bounded (5 s wall-clock)
+;   uci_drain_status   — drain remaining STAT_AV bytes to nowhere, ACKing
+;                        each; TOD-bounded (5 s wall-clock)
 ;   uci_ack            — single NEXT_DATA pulse
 ;
 ; Phase 2 only needs enough machinery for GET_IPADDR (12-byte response,
@@ -335,13 +337,32 @@ uci_read_resp_bytes:
 ; Used after uci_read_resp_bytes when the caller only wanted the first N bytes
 ; of a potentially longer response. Reads UCI_RESP_DATA (forcing the FIFO to
 ; advance on firmwares that require a read), then pulses NEXT_DATA.
+;
+; Phase 5j — wall-clock-bounded via CIA1 TOD (5 s budget, mirrors
+; uci_wait_idle / uci_wait_not_busy from issue #37 and Phase 5b).
+; Secondary-risk fix per CLAUDE.md Phase 5j brief: net_tcp_send /
+; net_poll / net_tcp_close all call drains after a SOCKET_WRITE or
+; POLL_DATA; if firmware ever leaves DATA_AV asserted post-SOCKET_WRITE
+; the unbounded `jmp` loop wedges with no wall-clock escape.
+;
+; Output: C=0 on drain complete, C=1 on timeout
+;         (net_last_error = UCI_ERR_WAIT_TIMEOUT).
 ; Clobbers: A
 ; =============================================================================
 uci_drain_resp:
+        ; Sample initial TENTHS for delta-tracking. Latch via HOUR,
+        ; release via TENTHS.
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        sta @drn_last_tenths
+        lda #$00
+        sta @drn_elapsed
+@drn_loop:
         lda UCI_STATUS
         uci_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
         bne @drn_have
+        clc
         rts
 @drn_have:
         lda UCI_RESP_DATA
@@ -349,18 +370,52 @@ uci_drain_resp:
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
         uci_fence
-        jmp uci_drain_resp
+
+        ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        cmp @drn_last_tenths
+        beq @drn_loop_long          ; no change — keep draining
+        sta @drn_last_tenths
+        inc @drn_elapsed
+        lda @drn_elapsed
+        cmp #UCI_WAIT_IDLE_BUDGET_TENTHS
+        bcc @drn_loop_long          ; under budget — continue
+        ; Timeout
+        lda #UCI_ERR_WAIT_TIMEOUT
+        sta net_last_error
+        sec
+        rts
+@drn_loop_long:
+        jmp @drn_loop               ; long branch: fence too wide for BEQ/BCC
+@drn_last_tenths: .byte 0
+@drn_elapsed:     .byte 0
 
 ; =============================================================================
 ; uci_drain_status — ACK remaining status string bytes until STAT_AV is clear.
 ; Phase 2 discards the status string; later phases may want to capture it.
+;
+; Phase 5j — wall-clock-bounded via CIA1 TOD (5 s budget, mirrors
+; uci_drain_resp above).
+;
+; Output: C=0 on drain complete, C=1 on timeout
+;         (net_last_error = UCI_ERR_WAIT_TIMEOUT).
 ; Clobbers: A
 ; =============================================================================
 uci_drain_status:
+        ; Sample initial TENTHS for delta-tracking. Latch via HOUR,
+        ; release via TENTHS.
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        sta @dst_last_tenths
+        lda #$00
+        sta @dst_elapsed
+@dst_loop:
         lda UCI_STATUS
         uci_fence                   ; settle before testing STAT_AV
         and #UCI_STAT_STAT_AV
         bne @dst_have
+        clc
         rts
 @dst_have:
         lda UCI_STATUS_DATA
@@ -368,7 +423,26 @@ uci_drain_status:
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
         uci_fence
-        jmp uci_drain_status
+
+        ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        cmp @dst_last_tenths
+        beq @dst_loop_long          ; no change — keep draining
+        sta @dst_last_tenths
+        inc @dst_elapsed
+        lda @dst_elapsed
+        cmp #UCI_WAIT_IDLE_BUDGET_TENTHS
+        bcc @dst_loop_long          ; under budget — continue
+        ; Timeout
+        lda #UCI_ERR_WAIT_TIMEOUT
+        sta net_last_error
+        sec
+        rts
+@dst_loop_long:
+        jmp @dst_loop               ; long branch: fence too wide for BEQ/BCC
+@dst_last_tenths: .byte 0
+@dst_elapsed:     .byte 0
 
 ; =============================================================================
 ; Control block for uci_read_resp_bytes — lives in UCI_BSS so no ZP is needed
