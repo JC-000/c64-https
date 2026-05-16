@@ -272,6 +272,28 @@ backends:
   - `http_status = 200`, `http_resp_buf = "HELLO FROM TLS SERVER"`,
     `http_resp_len = 21`
 
+**ECDSA P-384 also wired end-to-end (Phase 5).** The TLS dispatcher
+now negotiates `ecdsa_secp384r1_sha384` (0x0503) alongside the existing
+P-256/SHA-256 path; on a 0x0503 CertificateVerify it routes through
+`src/crypto/ecdsa_verify_384.s`, which composes the dual-overlay swap
+(SHA-384 overlay → ECDSA-P384 curve overlay) plus the sibling's
+`ecdsa_verify_384` to verify the server's signature. The
+`tls_handle_certificate` cert handler dispatches on `ecdsa_curve_id`
+and writes the 48 B P-384 pubkey into the dedicated
+`ecdsa_pubkey_x_384` / `_y_384` slots in CRYPTO_BSS (Phase 5 Fix B).
+The CertificateVerify signed-content blob is 130 B (RFC 8446 §4.4.3:
+64-space pad + 33 B context + 1 B sep + 32 B SHA-256 transcript;
+the transcript-hash function stays SHA-256 because c64-https
+negotiates only TLS_AES_128_GCM_SHA256 — Phase 5 Fix A). The
+end-to-end test is `tools/uci/test_https_local_p384.py` (mirrors
+`test_https_local.py` with P-384 cert profile via swapping CERT_PATH
+/ KEY_PATH to `tools/https_e2e/certs/server-p384.{pem,key}`); see the
+"ECDSA P-384 verify wall-clock" subsection for the wall-clock
+expectation. Negotiation plumbing test
+`tools/test_tls_p384_negotiation.py` confirms ClientHello advertises
+both 0x0403 + 0x0503 and the dispatcher reaches the P-384 path on
+0x0503 CertificateVerify (2/2 PASS as of Phase 5).
+
 ### Summary of recent fixes (post-PR23 branch)
 
 Five latent bugs and three new ones were cleared to get here:
@@ -430,6 +452,37 @@ budget, ample headroom). Further speedups live in the sibling
 `libs/nistcurves` repo — any drop through the Crypto ABI lands
 here as a submodule bump without
 touching TLS call sites.
+
+### ECDSA P-384 verify wall-clock
+
+Not yet measured end-to-end. The U64E test host was unreachable from
+the dev machine when Phase 5's e2e wiring landed (DeviceLock
+unavailable; ping/TCP both unreachable to the default
+192.168.1.81). Run `tools/uci/test_https_local_p384.py` from a host
+with U64E LAN access to capture the number; the script defaults to a
+30 minute wall-clock budget (`SENTINEL_POLL_TIMEOUT=1800` /
+`ACCEPT_TIMEOUT=1800`) — expect 4-7 minutes per handshake at 48 MHz
+turbo, dominated by:
+
+  - one ECDSA-P384 verify (sibling `libs/nistcurves`
+    `ecdsa_verify_384`); P-256 measures 81.9 s, the P-384 cost is
+    ~5x because the field is 1.5x wider and the scalar mul does
+    proportionally more `fp_mul` / `fp_sqr` calls — extrapolate
+    ~400 s = ~7 min ceiling
+  - one SHA-384 hash over the 130 B signed-content blob (negligible
+    vs the verify)
+  - the dual-overlay swap dance (sha384 overlay swap-in →
+    sha384_init/update/final → curve overlay swap-in → verify); each
+    swap is 2 REU DMAs at ~16 ms wallclock — also negligible
+  - X25519 + Finished HMACs + state-machine overhead (~6-7 s
+    across the rest of the handshake, per the P-256 baseline)
+
+Once measured, drop the wall-clock here. Phase 4 cert-profile flag
+in the local listener (`HTTPS_LISTENER_CERT_PROFILE=p384` or the
+`cert_profile="p384"` kwarg to `start_https_listener`) is the
+upstream selector; `tools/uci/test_https_local_p384.py` inlines its
+own listener (matching `test_https_local.py`'s pattern) and points it
+at `tools/https_e2e/certs/server-p384.{pem,key}`.
 
 ### Design note — bounded timeouts must use wall-clock time
 
