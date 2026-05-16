@@ -90,6 +90,16 @@ CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
 else ifeq ($(BACKEND),uci)
 NET_SRCS := $(UCI_SRCS)
 CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
+# Phase 3: embed the two P-384 split overlay blobs in the PRG so boot
+# can populate REU banks 6/7 at startup.  Gated to UCI (ip65 has no
+# room for the SHA blob in main RAM) and to !USE_X25519_SIBLING (the
+# sibling rodata occupies CRYPTO_OVERLAY at PRG load time, displacing
+# the SHA blob).  Adds a build-order dep on the .bin files; a missing
+# .bin causes the .incbin to fail, so we extend PRG_DEPS below.
+ifneq ($(USE_X25519_SIBLING),1)
+USE_OVERLAY_P384_EMBED := 1
+CA65FLAGS += -D USE_OVERLAY_P384_EMBED=1
+endif
 # Phase C.3: add c64-nist-curves P-384 primitives as a REU overlay.
 # Variable-base P-384 point ops (double/add/jacobian-to-affine) only —
 # see tools/integration/build_nistcurves_p384.sh for the scope rationale.
@@ -137,6 +147,14 @@ else ifeq ($(BACKEND),uci)
 PRG_DEPS := $(ALL_OBJS) $(SIBLING_LIB_ARCHIVES)
 else
 PRG_DEPS := $(ALL_OBJS)
+endif
+
+# Phase 3: when USE_OVERLAY_P384_EMBED is on, add the two .bin files
+# to PRG_DEPS so make builds them before the .incbin in
+# src/crypto/shared/p384_overlay_blobs.s tries to read them.
+ifeq ($(USE_OVERLAY_P384_EMBED),1)
+PRG_DEPS += build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin
+build/crypto/shared/p384_overlay_blobs.o: build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin
 endif
 
 $(PRG): $(PRG_DEPS)
