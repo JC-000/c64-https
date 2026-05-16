@@ -96,10 +96,20 @@ REU_OVERLAY_P384_CURVE     = $70000
 ; cfg/x25519.cfg pins these via SYMBOLS — downstream override available).
 
 ; --- overlay slot size (bytes) ---
-; Each overlay image occupies exactly this many bytes in the REU store and
-; is DMA'd into the live CRYPTO_OVERLAY region at runtime.
+; Each overlay image occupies exactly this many bytes in the REU store
+; and is DMA'd into the live CRYPTO_OVERLAY region at runtime.
+;
+; Phase 3: trimmed from $2000 (8 KB) to $1E00 (7,680 B) to match the
+; actual live UCI CRYPTO_OVERLAY slot ($4200-$5FFF) and the padded
+; .bin image size from tools/integration/build_nistcurves_p384_bin.sh
+; (`SLOT_BYTES=7680`).  The previous $2000 value caused crypto_swap.s
+; to DMA 512 bytes past the slot, into the start of CRYPTO_RESIDENT
+; RODATA at $6000-$61FF -- silently corrupting that range on every
+; swap.  Tests didn't catch it because no code read $6000+ between
+; back-to-back swaps; the production TLS path (Phase 4a) WOULD have
+; been broken by it.
 .ifndef OVERLAY_SIZE
-OVERLAY_SIZE               = $2000   ; 8 KB
+OVERLAY_SIZE               = $1E00   ; 7,680 B
 .endif
 
 ; Note: `.export` of these equates happens once in
