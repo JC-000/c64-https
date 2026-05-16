@@ -18,8 +18,15 @@ Two sub-tests:
        and 0x0503.
   [1b] tls_handle_cert_verify with a synthesized CertificateVerify
        handshake message whose signature_scheme = 0x0503 sets
-       cv_sig_scheme = 1, ecdsa_curve_id = 1, and returns C=1 (stub
-       dispatcher rejection — exactly as expected pre-Phase-4a).
+       cv_sig_scheme = 1, ecdsa_curve_id = 1, and returns C=1.
+       Pre-Phase-4a this came from the `sec / rts` stub in
+       ecdsa_verify; post-Phase-4a (commit-this-PR) it comes from
+       ecdsa_verify_384_tls's DER parse rejecting the 48-zero-byte
+       dummy signature (first byte must be 0x30 SEQUENCE; rejection
+       still propagates C=1).  The negotiation contract under test
+       (cv_sig_scheme=1, ecdsa_curve_id=1, dispatcher reached) is
+       unchanged.  Phase 5 will replace this synthetic test with a
+       real-signature test once a SHA-384 transcript path lands.
 
 Usage:
     /Users/someone/.local/share/c64-test-harness/venv/bin/python \\
@@ -218,12 +225,20 @@ def test_cert_verify_p384_dispatch(transport, labels):
     signature_scheme = 0x0503, calls tls_handle_cert_verify, and asserts:
       - cv_sig_scheme = 1
       - ecdsa_curve_id = 1
-      - C=1 (carry set), since the P-384 branch in ecdsa_verify is still
-        the `sec / rts` stub Phase 4a will fill in.
+      - C=1 (carry set).  Post-Phase-4a this comes from the dispatcher's
+        DER parse rejecting the 48-byte all-zero dummy signature (the
+        first byte must be the DER SEQUENCE tag 0x30); pre-Phase-4a it
+        came from the `sec / rts` stub in ecdsa_verify.  Either path
+        proves cv_sig_scheme=1, ecdsa_curve_id=1, and dispatcher
+        reachability -- the contract this subtest exercises.
 
-    The signature payload itself is irrelevant — the P-384 short-circuit
-    in tls_cert.s skips DER parse + SHA-256 + dispatcher setup, jumping
-    directly to ecdsa_verify with curve_id=1.
+    The signature payload itself is irrelevant for the negotiation
+    plumbing under test -- a real-signature P-384 verify needs both a
+    real ECDSA-P384 cert + signature AND a SHA-384 transcript hash
+    (Phase 5).  Phase 4a's dispatcher composes the dual-overlay swap
+    (sha384 -> curve) + sibling ecdsa_verify_384, but the SHA-384
+    transcript source is a 32 B SHA-256 placeholder zero-padded to
+    48 B until Phase 5 wires up tls_transcript_384.
     """
     print("\n  [1b] CertificateVerify dispatch on signature_scheme=0x0503")
 
@@ -278,14 +293,17 @@ def test_cert_verify_p384_dispatch(transport, labels):
         print(f"       FAIL: ecdsa_curve_id = {curve_id:#x}, expected 0x01")
         ok = False
     if carry != 1:
-        # Phase 4a will replace the stub; the test will need updating then
-        # to assert C=0 against a real signature instead.
-        print(f"       FAIL: carry = {carry}, expected 1 (stub rejection)")
+        # Phase 4a's dispatcher should also reject a 48-zero-byte sig at
+        # the DER parse step (first byte must be 0x30 SEQUENCE).  Phase 5
+        # will replace this with a real-signature test once SHA-384
+        # transcript wiring lands.
+        print(f"       FAIL: carry = {carry}, expected 1 "
+              f"(DER rejection / stub rejection)")
         ok = False
 
     if ok:
         print("       PASS: cv_sig_scheme=1, ecdsa_curve_id=1, "
-              "C=1 (stub dispatcher reached)")
+              "C=1 (Phase 4a dispatcher reached)")
         return 1, 0
     return 0, 1
 
