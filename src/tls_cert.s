@@ -27,6 +27,7 @@
         .export tls_handle_certificate
         .export x509_extract_pubkey
         .export tls_handle_cert_verify
+        .export cv_sig_scheme           ; Phase 4b: exported for negotiation tests
 
         .import tls_rec_buf
         .import tls_rec_len
@@ -512,19 +513,42 @@ tls_handle_cert_verify:
         sta tls_recv_sub_progress
 
         ; --- Read signature algorithm [4-5] ---
-        ; Must be 0x0403 (ecdsa_secp256r1_sha256)
-        lda tls_rec_buf+4
-        cmp #$04
-        beq :+
-        jmp @cv_error
-:
+        ; Accept 0x0403 (ecdsa_secp256r1_sha256) or 0x0503
+        ; (ecdsa_secp384r1_sha384).  Phase 4b: negotiation plumbing for
+        ; P-384 — actual P-384 verify dispatch is filled in by Phase 4a
+        ; through the existing ecdsa_verify entry (curve_id-switched).
+        ; cv_sig_scheme := high byte - $04, so 0 = P-256, 1 = P-384.
         lda tls_rec_buf+5
         cmp #$03
         beq :+
-        jmp @cv_error
+        jmp @cv_error               ; low byte must be 03 for both
 :
+        lda tls_rec_buf+4
+        sec
+        sbc #$04
+        cmp #2
+        bcc :+
+        jmp @cv_error               ; high byte not in {$04,$05}
+:       sta cv_sig_scheme
+
         lda #$22
         sta tls_recv_sub_progress
+
+        ; --- P-384 short-circuit (Phase 4b) -------------------------------
+        ; The P-256 path below assumes 32-byte sig components and a
+        ; SHA-256 transcript hash; running it against a 48-byte/SHA-384
+        ; CertificateVerify would mis-parse the signature and feed the
+        ; wrong digest to the dispatcher.  Until Phase 4a wires up the
+        ; real P-384 verify, jump straight to ecdsa_verify with
+        ; curve_id = 1.  The dispatcher currently returns C=1 for
+        ; curve_id != 0 (sec/rts stub); we tail-call so its carry
+        ; propagates as our return.  Negotiation has reached the ECDSA
+        ; layer — the Phase 4b deliverable.
+        lda cv_sig_scheme
+        beq @cv_p256_path
+        sta ecdsa_curve_id          ; A = 1
+        jmp ecdsa_verify
+@cv_p256_path:
 
         ; --- Read signature length [6-7] (big-endian) ---
         lda tls_rec_buf+6            ; high byte (expect 0)
@@ -717,3 +741,4 @@ cert_bs_len:        .res 1          ; BIT STRING content length
 
 ; CertificateVerify parsing state
 cv_sig_len:         .res 1          ; DER signature length
+cv_sig_scheme:      .res 1          ; 0 = P-256/SHA-256, 1 = P-384/SHA-384
