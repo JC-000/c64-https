@@ -15,9 +15,18 @@
 ; Public API:
 ;   mul_tables_init   - build the 256x256 quarter-square tables
 ;                       (currently: stub; returns immediately).
-;   sqtab_lo, sqtab_hi - 256-byte tables, page-aligned, in TABLES_BSS
+;   sqtab_lo, sqtab_hi - 512-byte tables each (1 KB total), page-aligned,
+;                       in TABLES_BSS. Layout `sqtab_hi = sqtab_lo + $0200`;
+;                       semantics `(sqtab_hi[n] << 8) | sqtab_lo[n] =
+;                       floor(n^2 / 4)` for n in 0..510.
 ;                       (currently: defined by src/data.s; re-homed here
-;                        under CANONICAL_SQTAB in a later phase).
+;                        under CANONICAL_SQTAB in a later phase.)
+;
+; Size note: each table is 512 bytes, not 256. The earlier stub used
+; `.res 256` which would silently truncate at n >= 256 once any sibling
+; lib redirected its init here — every in-the-wild implementation uses
+; 512 B per table (see `src/data.s:136` here, and the audit in
+; `c64-lib-contract` issue #5). Fixed before any redirect lands.
 ; =============================================================================
 
         .export mul_tables_init
@@ -41,6 +50,6 @@ mul_tables_init:
         .export sqtab_hi
 
 .segment "TABLES_BSS"
-sqtab_lo:       .res 256
-sqtab_hi:       .res 256
+sqtab_lo:       .res 512
+sqtab_hi:       .res 512
 .endif
