@@ -66,12 +66,14 @@ import time
 import traceback
 from pathlib import Path
 
-from c64_test_harness.backends.device_lock import DeviceLock
+from c64_test_harness.backends.device_lock import DeviceLock, DeviceLockTimeout
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 from c64_test_harness.backends.ultimate64_helpers import (
     set_turbo_mhz,
     set_debug_stream_mode,
+    runner_health_check,
+    Ultimate64RunnerStuckError,
     DEBUG_MODE_6510,
 )
 from c64_test_harness.backends.u64_debug_capture import (
@@ -82,7 +84,10 @@ from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
 from c64_test_harness.labels import Labels
 
-from _memory_policy import build_policy_and_arbiter
+from _memory_policy import (
+    build_policy_and_arbiter,
+    build_policy_and_arbiter_with_overlay_carveout,
+)
 
 
 DEBUG_CAPTURE_ENABLED = os.environ.get("DEBUG_CAPTURE", "1") != "0"
@@ -1026,13 +1031,23 @@ def main() -> int:
     # --- Memory policy + arbiter: derive scratch addresses from the
     # current build's segment layout instead of hardcoding them.  The
     # policy reserves every PRG segment found in labels.txt; the
-    # arbiter then allocates inside CRYPTO_OVERLAY's unused tail
-    # ($5100-$5FFF under USE_X25519_SIBLING=1, $4200-$5FFF when the
-    # flag is off).  Transport hookup happens after the transport is
-    # constructed inside the try-block below.
+    # arbiter then allocates inside the NET_CODE zero-fill tail
+    # ($3xxx-$3FFF), carved out via
+    # ``build_policy_and_arbiter_with_overlay_carveout``. Previously this
+    # used ``build_policy_and_arbiter`` (CRYPTO_OVERLAY window), but
+    # Phase 5's overlay-blob landings fill CRYPTO_OVERLAY end-to-end
+    # ($4200-$5FFF) and the arbiter could no longer find a slot. The
+    # overlay-carveout helper steals the NET_CODE tail (declared
+    # ``fill = yes`` in the cfg, used only up to $3xxx by the adapter
+    # and relocated TLS/crypto-aux code) instead, which has ~1.6 KB of
+    # safe RAM under both the P-256 and P-384 builds.
+    # Transport hookup happens after the transport is constructed
+    # inside the try-block below.
     global ROUTINE_ADDR, HOST_STR_ADDR, PATH_STR_ADDR
     global SENTINEL_ADDR, PROGRESS_ADDR, CARRY_FLAG_ADDR
-    memory_policy, arbiter = build_policy_and_arbiter(LABELS_PATH, PRG_PATH)
+    memory_policy, arbiter = build_policy_and_arbiter_with_overlay_carveout(
+        LABELS_PATH, PRG_PATH,
+    )
     ROUTINE_ADDR    = arbiter.alloc(256, name="trampoline")
     HOST_STR_ADDR   = arbiter.alloc(64,  name="host_str")
     PATH_STR_ADDR   = arbiter.alloc(64,  name="path_str")
@@ -1097,10 +1112,26 @@ def main() -> int:
     prg = PRG_PATH.read_bytes()
 
     lock = DeviceLock(HOST)
-    if not lock.acquire(timeout=60.0):
-        print(f"ERROR: could not acquire DeviceLock({HOST})", file=sys.stderr)
-        return 3
-    print(f"Acquired DeviceLock({HOST})")
+    try:
+        # acquire_or_raise (c64-test-harness PR #88) replaces the legacy
+        # bare-bool acquire+if pattern. On timeout it gathers holder
+        # PID/liveness, lockfile age, and a quick REST reachability probe
+        # and raises DeviceLockTimeout with a diagnostic message that
+        # disambiguates "queued behind healthy holder" from
+        # "wedged / stale / unreachable" -- supervisors and humans need
+        # this signal to know whether to wait, kill the holder, or call
+        # for a recover() (the last requires explicit user authorization,
+        # never automated here).
+        lock.acquire_or_raise(timeout=120.0)
+    except DeviceLockTimeout as exc:
+        print(f"[fatal] DeviceLock({HOST}): {exc}", file=sys.stderr)
+        return 2
+    # Surface queue/holder metadata on kickoff so the supervisor log
+    # has the same diagnostic shape as the timeout path. read_info()
+    # returns the lockfile JSON dict (or None when the lockfile vanished
+    # between acquire and this read, which is harmless).
+    info = lock.read_info()
+    print(f"Acquired DeviceLock({HOST}); holder info: {info!r}")
 
     # --- Per-run debug artifact directory + rotation ---
     run_dir: Path | None = None
@@ -1131,6 +1162,28 @@ def main() -> int:
         print("Enabling UCI...")
         enable_uci(client)
         uci_enabled = True
+
+        # Pre-detect the firmware "Cannot open file" wedged-runner state
+        # (c64-test-harness PR #88 / runner_health_check). When the U64E
+        # runner subsystem is stuck, every subsequent client.run_prg(...)
+        # returns the same 404-ish failure shape, and the test would
+        # otherwise blow ~10 minutes timing out at the sentinel poll
+        # before surfacing it. The helper sends a tiny no-op PRG and
+        # raises Ultimate64RunnerStuckError on the wedge signature; we
+        # do NOT call recover() (that's a state-changing action that
+        # requires explicit user authorization), just surface and exit.
+        try:
+            runner_health_check(client)
+        except Ultimate64RunnerStuckError as exc:
+            print(
+                f"[fatal] U64E runner wedged at {HOST}: {exc}",
+                file=sys.stderr,
+            )
+            print(
+                "[fatal] supervisor: investigate / authorize recover()",
+                file=sys.stderr,
+            )
+            return 3
 
         print("Resetting machine...")
         client.reset()

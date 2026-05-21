@@ -6,7 +6,8 @@ ip65-build/*.bin
 ip65-build/*.map
 .claude/*
 !.claude/settings.json
-tools/https_e2e/certs/
+tools/https_e2e/certs/*
+!tools/https_e2e/certs/README
 tools/diag_4de0_*.py
 tools/diag_read_live.py
 .serena/

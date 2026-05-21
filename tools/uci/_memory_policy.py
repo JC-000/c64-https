@@ -287,9 +287,122 @@ def build_policy_and_arbiter(
     return policy, arbiter
 
 
+def build_policy_and_arbiter_with_overlay_carveout(
+    labels_path: str | Path,
+    prg_path: str | Path,
+    *,
+    unknown: UnknownPolicy = UnknownPolicy.WARN,
+    extra_reserved: tuple[MemoryRegion, ...] = (),
+    min_scratch_bytes: int = 512,
+) -> tuple[MemoryPolicy, MemoryArbiter]:
+    """Build a policy + arbiter that carves harness scratch from NET_CODE's tail.
+
+    Use this when ``CRYPTO_OVERLAY`` ($4200-$5FFF) is fully occupied by
+    an overlay blob (e.g. ``OVERLAY_BLOB_SHA384`` under the P-384 build,
+    or any future overlay that fills the whole region at PRG-load time
+    AND is the active swap slot at runtime). In that case the default
+    arbiter window ($4000-$5FFF) finds no free range and raises
+    :class:`MemoryArbiterError`.
+    Under the baseline P-256 / X25519-sibling P-256 builds the same
+    problem appears any time the CRYPTO_OVERLAY tail that
+    :func:`build_arbiter`'s default window relies on shrinks below the
+    387 B of harness scratch the e2e tests need (trampoline + host /
+    path strings + sentinels).
+    The workaround mirrors the P-384 wrapper that lived inline in
+    ``tools/uci/test_https_local_p384.py`` (factored out here so other
+    test scripts can reuse it without re-copying the implementation):
+    ``NET_CODE`` is declared $2000-$3FFF with ``fill = yes,
+    fillval = $00``. The adapter + relocated TLS / crypto-aux code
+    fills $2000-$3xxx (per ``build/labels.txt``'s ``__NET_CODE_LAST__``);
+    the tail (rounded up to the next page from ``LAST``) through $3FFF
+    is zero-fill in the PRG, never referenced by any production code,
+    and stays RAM after boot. We:
+      - round the NET_CODE used-end up to the next $100 boundary (cheap
+        insurance against off-by-one with the very last code byte),
+      - reject the carveout if it yields fewer than ``min_scratch_bytes``
+        of free space (default 512 B, conservative ceiling for the
+        387 B the current e2e tests need),
+      - surgically rewrite the ``NET_CODE`` reservation in the
+        labels-derived :class:`MemoryPolicy` to end at the carveout
+        start (so the freed tail isn't blocked by the reserved-takes-
+        precedence rule), and
+      - scope the returned :class:`MemoryArbiter` to that tail.
+    The CRYPTO_OVERLAY reservation is left intact — the overlay blob
+    occupies it for real, and the arbiter has no business allocating
+    there.
+    :param labels_path: ``build/labels.txt`` from the current build.
+    :param prg_path: PRG load image (currently unused — passed through
+        to :func:`build_policy` for consistency).
+    :param unknown: Passed through to :func:`build_policy`.
+    :param extra_reserved: Passed through to :func:`build_policy`.
+    :param min_scratch_bytes: Reject the carveout if NET_CODE's tail
+        yields fewer than this many bytes of free space.
+    :raises RuntimeError: When the NET_CODE tail is too small (build
+        change pushed code into the would-be scratch range).
+    """
+    labels_path = Path(labels_path)
+    bounds = _parse_segment_bounds(labels_path)
+    used_ends = _parse_used_ends(labels_path)
+    if "NET_CODE" not in bounds:
+        raise RuntimeError(
+            "labels.txt has no NET_CODE segment — cannot carve scratch tail"
+        )
+    netc_start, netc_decl_end = bounds["NET_CODE"]
+    netc_used_end = used_ends.get("NET_CODE", netc_start)
+    # Round up to next page so we don't trail right up to the last
+    # instruction byte (cheap insurance against off-by-one).
+    scratch_start = (netc_used_end + 0xFF) & ~0xFF
+    scratch_end_excl = netc_decl_end
+    free_bytes = scratch_end_excl - scratch_start
+    if free_bytes < min_scratch_bytes:
+        raise RuntimeError(
+            f"NET_CODE tail scratch window too small for harness: "
+            f"${scratch_start:04X}-${scratch_end_excl:04X} "
+            f"({free_bytes} B, need >= {min_scratch_bytes} B). "
+            f"NET_CODE used to ${netc_used_end:04X}, declared end "
+            f"${netc_decl_end:04X}."
+        )
+
+    base = build_policy(
+        labels_path,
+        prg_path,
+        unknown=unknown,
+        extra_reserved=extra_reserved,
+    )
+    # Surgically trim the NET_CODE reservation to end at scratch_start
+    # so the trailing free range is available to the arbiter.
+    # ``reserved_regions`` is a tuple of frozen MemoryRegion dataclasses;
+    # we rebuild a fresh tuple with NET_CODE shrunk.
+    new_reserved: list[MemoryRegion] = []
+    for r in base.reserved_regions:
+        if r.start == netc_start and r.end == netc_decl_end:
+            new_reserved.append(MemoryRegion(
+                netc_start, scratch_start,
+                note=f"{r.note}(overlay_carveout:trimmed)",
+            ))
+        else:
+            new_reserved.append(r)
+    policy = MemoryPolicy(
+        reserved_regions=tuple(new_reserved),
+        safe_regions=base.safe_regions,
+        unknown=base.unknown,
+    )
+    arbiter = MemoryArbiter(
+        policy=policy, window=(scratch_start, scratch_end_excl - 1),
+    )
+    print(
+        f"NET_CODE-tail harness scratch: "
+        f"${scratch_start:04X}-${scratch_end_excl - 1:04X} "
+        f"({free_bytes} B free; NET_CODE used to ${netc_used_end:04X}, "
+        f"declared end ${netc_decl_end:04X})"
+    )
+    return policy, arbiter
+
+
 __all__ = [
     "build_policy",
     "build_arbiter",
     "build_policy_and_arbiter",
+    "build_policy_and_arbiter_with_overlay_carveout",
     "attach_arbiter_safe_regions",
 ]

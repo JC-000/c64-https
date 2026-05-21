@@ -20,7 +20,7 @@ Targets:
                           `build/labels.txt` (VICE label format), and
                           `build/c64-https.dbg` (cc65 debug info,
                           consumable by VICE's monitor + diagnostic
-                          agents; P-384 overlay gets a `.dbg` sidecar too)
+                          agents; P-384 overlays get `.dbg` sidecars too)
   - `make clean`        — remove build artifacts
   - `make run`          — autostart the PRG in VICE
   - `make ip65-libs`    — rebuild ip65 object libraries from the submodule
@@ -146,18 +146,32 @@ is **$C9**. See `src/net/uci/uci_regs.inc` for the full equate list
 ### UCI command primitives
 
 `src/net/uci/uci_cmd.s` provides shared subroutines used by `net.s`:
-`uci_wait_idle`, `uci_begin_cmd`, `uci_push_wait`, `uci_end_cmd`,
-`uci_read_data`, etc. No zero-page usage — all absolute addressing
-and self-modifying code.
+`uci_wait_idle`, `uci_wait_not_busy`, `uci_begin_cmd`, `uci_push_wait`,
+`uci_read_resp_bytes`, etc. No zero-page usage — all absolute
+addressing and self-modifying code.
 
-`uci_wait_idle` is wall-clock-bounded (5 s budget via CIA1 TOD) per
-the design note below. On timeout it returns C=1 with `net_last_error
-= UCI_ERR_WAIT_TIMEOUT`. The four callers (`net_dhcp_acquire`,
-`net_tcp_connect`, `net_tcp_send`, `net_tcp_close`) all `bcs` out to
-surface the failure rather than letting the C64 hang indefinitely on
-a wedged FPGA. `uci_push_wait` and `uci_end_cmd` are still unbounded
-and should be converted to the same TOD pattern if a wedge there is
-ever observed.
+`uci_wait_idle`, `uci_wait_not_busy`, `uci_drain_resp`, and
+`uci_drain_status` are all wall-clock-bounded (5 s budget via CIA1
+TOD) per the design note below. On timeout they return C=1 with
+`net_last_error = UCI_ERR_WAIT_TIMEOUT`. All `uci_wait_idle` callers
+(`net_dhcp_acquire`, `net_tcp_connect`, `net_tcp_send`,
+`net_tcp_close`) and all `uci_wait_not_busy` / `uci_push_wait`
+callers (`net_poll`, `net_dhcp_acquire`, `net_tcp_connect`,
+`net_tcp_send`, `net_tcp_close`) `bcs` out to surface the failure
+rather than letting the C64 hang indefinitely on a wedged FPGA. All
+13 `uci_drain_resp` / `uci_drain_status` call sites in `net.s` also
+`bcs` out — on timeout the routine skips its companion drain + ack,
+forces the appropriate `net_tcp_state` (ERROR for poll paths,
+CONNECT_FAIL for connect, CLOSED for close, untouched for DHCP/send
+which use C=1 as their fail sentinel), and returns. `uci_push_wait`
+inherits the bound via its tail-call to `uci_wait_not_busy`. The
+`uci_wait_not_busy` conversion was driven by a Phase 5 wedge observed
+in CertVerify recv on real U64E hardware that converted a wedge into
+a 1843 s test sentinel timeout; the drain conversion (Phase 5j)
+closed the secondary risk that `net_tcp_send` / `net_poll` /
+`net_tcp_close` could still wedge in `uci_drain_resp` /
+`uci_drain_status` post-SOCKET_WRITE if firmware ever left DATA_AV /
+STAT_AV asserted.
 
 ### UCI error codes
 
@@ -274,6 +288,28 @@ backends:
     ring, parsed by `http_recv_response`
   - `http_status = 200`, `http_resp_buf = "HELLO FROM TLS SERVER"`,
     `http_resp_len = 21`
+
+**ECDSA P-384 also wired end-to-end (Phase 5).** The TLS dispatcher
+now negotiates `ecdsa_secp384r1_sha384` (0x0503) alongside the existing
+P-256/SHA-256 path; on a 0x0503 CertificateVerify it routes through
+`src/crypto/ecdsa_verify_384.s`, which composes the dual-overlay swap
+(SHA-384 overlay → ECDSA-P384 curve overlay) plus the sibling's
+`ecdsa_verify_384` to verify the server's signature. The
+`tls_handle_certificate` cert handler dispatches on `ecdsa_curve_id`
+and writes the 48 B P-384 pubkey into the dedicated
+`ecdsa_pubkey_x_384` / `_y_384` slots in CRYPTO_BSS (Phase 5 Fix B).
+The CertificateVerify signed-content blob is 130 B (RFC 8446 §4.4.3:
+64-space pad + 33 B context + 1 B sep + 32 B SHA-256 transcript;
+the transcript-hash function stays SHA-256 because c64-https
+negotiates only TLS_AES_128_GCM_SHA256 — Phase 5 Fix A). The
+end-to-end test is `tools/uci/test_https_local_p384.py` (mirrors
+`test_https_local.py` with P-384 cert profile via swapping CERT_PATH
+/ KEY_PATH to `tools/https_e2e/certs/server-p384.{pem,key}`); see the
+"ECDSA P-384 verify wall-clock" subsection for the wall-clock
+expectation. Negotiation plumbing test
+`tools/test_tls_p384_negotiation.py` confirms ClientHello advertises
+both 0x0403 + 0x0503 and the dispatcher reaches the P-384 path on
+0x0503 CertificateVerify (2/2 PASS as of Phase 5).
 
 ### Summary of recent fixes (post-PR23 branch)
 
@@ -434,10 +470,42 @@ budget, ample headroom). Further speedups live in the sibling
 here as a submodule bump without
 touching TLS call sites.
 
+### ECDSA P-384 verify wall-clock
+
+Not yet measured end-to-end. The U64E test host was unreachable from
+the dev machine when Phase 5's e2e wiring landed (DeviceLock
+unavailable; ping/TCP both unreachable to the default
+192.168.1.81). Run `tools/uci/test_https_local_p384.py` from a host
+with U64E LAN access to capture the number; the script defaults to a
+30 minute wall-clock budget (`SENTINEL_POLL_TIMEOUT=1800` /
+`ACCEPT_TIMEOUT=1800`) — expect 4-7 minutes per handshake at 48 MHz
+turbo, dominated by:
+
+  - one ECDSA-P384 verify (sibling `libs/nistcurves`
+    `ecdsa_verify_384`); P-256 measures 81.9 s, the P-384 cost is
+    ~5x because the field is 1.5x wider and the scalar mul does
+    proportionally more `fp_mul` / `fp_sqr` calls — extrapolate
+    ~400 s = ~7 min ceiling
+  - one SHA-384 hash over the 130 B signed-content blob (negligible
+    vs the verify)
+  - the dual-overlay swap dance (sha384 overlay swap-in →
+    sha384_init/update/final → curve overlay swap-in → verify); each
+    swap is 2 REU DMAs at ~16 ms wallclock — also negligible
+  - X25519 + Finished HMACs + state-machine overhead (~6-7 s
+    across the rest of the handshake, per the P-256 baseline)
+
+Once measured, drop the wall-clock here. Phase 4 cert-profile flag
+in the local listener (`HTTPS_LISTENER_CERT_PROFILE=p384` or the
+`cert_profile="p384"` kwarg to `start_https_listener`) is the
+upstream selector; `tools/uci/test_https_local_p384.py` inlines its
+own listener (matching `test_https_local.py`'s pattern) and points it
+at `tools/https_e2e/certs/server-p384.{pem,key}`.
+
 ### Design note — bounded timeouts must use wall-clock time
 
 Robustness work on the UCI adapter's spin-wait helpers (`uci_wait_idle`,
-`uci_push_wait`, etc.) MUST use a wall-clock time source — CIA timer
+`uci_wait_not_busy`, `uci_drain_resp`, `uci_drain_status`, etc.) MUST
+use a wall-clock time source — CIA timer
 on stock C64, TOD clock on U64E — rather than a cycle-counted iteration
 budget. The fences around every UCI register access make per-iteration
 cost scale with CPU speed: a budget that is ample at 1 MHz collapses
@@ -447,13 +515,33 @@ FPGA's wire-level operation durations. A prior attempt on branch
 budgets and broke DHCP at turbo for exactly this reason; the branch
 was abandoned.
 
-`uci_wait_idle` is the first helper to follow this pattern (issue #37).
+`uci_wait_idle` was the first helper to follow this pattern (issue #37).
 At entry it samples CIA1 TOD ($DC08-$DC0B) — read order is HOUR
 (latch) → MIN → SEC → TENTHS (unlatch) — and on each spin pass re-reads
 TENTHS, bailing with C=1 + `net_last_error = UCI_ERR_WAIT_TIMEOUT`
 after 50 transitions (~5 s wall-clock, independent of CPU turbo). State
 lives in two SMC bytes inside the routine to match the file's no-ZP
 convention. Use this as the template for any future bounded helper.
+
+`uci_wait_not_busy` was converted to the same pattern after a Phase 5
+wedge in CertVerify recv on real U64E hardware — the unbounded spin
+turned an FPGA wedge into a 1843 s test sentinel timeout. Same 5 s
+budget, same error code, same SMC-byte state convention. All six
+caller sites (`net_poll`, `net_dhcp_acquire`, `net_tcp_connect`,
+`net_tcp_send`, `net_tcp_close` direct + via `uci_push_wait`) `bcs`
+out on C=1 to surface the timeout. `uci_push_wait` inherits the bound
+via its tail-`jmp` into `uci_wait_not_busy` and needs no separate
+conversion.
+
+`uci_drain_resp` and `uci_drain_status` followed in Phase 5j to close
+the symmetric risk on the response-drain side: `net_tcp_send` /
+`net_poll` / `net_tcp_close` all call drains after their respective
+SOCKET_WRITE / POLL_DATA / SOCKET_CLOSE responses, and if firmware
+ever leaves DATA_AV / STAT_AV asserted post-response the old
+unbounded `jmp <self>` loops would wedge the C64 with no wall-clock
+escape. Same 5 s budget, same error code, same SMC-byte state
+convention. All 13 call sites in `net.s` `bcs` out on C=1 to skip
+the companion drain + ack and force the appropriate exit state.
 
 ## Memory layout
 

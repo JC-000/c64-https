@@ -34,7 +34,7 @@ IP65_DIR     := ip65
 IP65_BUILD   := ip65-build
 IP65_BIN     := $(IP65_BUILD)/ip65-c64.bin
 
-CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net/$(BACKEND) --debug-info
+CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net/$(BACKEND) -I build --debug-info
 LD65FLAGS := -C $(CFG) -Ln build/labels.txt -m build/c64-https.map --dbgfile build/c64-https.dbg
 
 # Source inventory.
@@ -90,6 +90,22 @@ CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
 else ifeq ($(BACKEND),uci)
 NET_SRCS := $(UCI_SRCS)
 CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
+# Phase 3: embed the two P-384 split overlay blobs in the PRG so boot
+# can populate REU banks 6/7 at startup.  Gated to UCI (ip65 has no
+# room for the SHA blob in main RAM) and to !USE_X25519_SIBLING (the
+# sibling rodata occupies CRYPTO_OVERLAY at PRG load time, displacing
+# the SHA blob).  Adds a build-order dep on the .bin files; a missing
+# .bin causes the .incbin to fail, so we extend PRG_DEPS below.
+ifneq ($(USE_X25519_SIBLING),1)
+# Phase 5 Fix D: respect a command-line USE_OVERLAY_P384_EMBED=0 so the
+# bootstrap rule below can do a no-overlay-embed prelim link to break
+# the overlay-bin <-> labels.txt cycle on a clean tree.  Default is
+# still 1 unless the operator explicitly disables it.
+USE_OVERLAY_P384_EMBED ?= 1
+ifeq ($(USE_OVERLAY_P384_EMBED),1)
+CA65FLAGS += -D USE_OVERLAY_P384_EMBED=1
+endif
+endif
 # Phase C.3: add c64-nist-curves P-384 primitives as a REU overlay.
 # Variable-base P-384 point ops (double/add/jacobian-to-affine) only —
 # see tools/integration/build_nistcurves_p384.sh for the scope rationale.
@@ -107,7 +123,12 @@ CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
 # integration can be re-enabled by uncommenting the two lines below once
 # the cfg is extended.
 #CA65FLAGS += -D USE_NISTCURVES_P384=1
-#SIBLING_LIB_ARCHIVES += build/lib/nistcurves-p384.a
+# Phase 1.5 split the monolithic nistcurves-p384.a into two halves
+# (nistcurves-p384-sha384.a + nistcurves-p384-curve.a) since the
+# combined image overflowed the live 7.5 KB CRYPTO_OVERLAY slot.
+# Either-of approach for the production wire-up will be Phase 4a.
+#SIBLING_LIB_ARCHIVES += build/lib/nistcurves-p384-sha384.a
+#SIBLING_LIB_ARCHIVES += build/lib/nistcurves-p384-curve.a
 else
 $(error Unknown BACKEND=$(BACKEND); expected ip65 or uci)
 endif
@@ -134,12 +155,39 @@ else
 PRG_DEPS := $(ALL_OBJS)
 endif
 
+# Phase 3: when USE_OVERLAY_P384_EMBED is on, add the two .bin files
+# to PRG_DEPS so make builds them before the .incbin in
+# src/crypto/shared/p384_overlay_blobs.s tries to read them.
+ifeq ($(USE_OVERLAY_P384_EMBED),1)
+PRG_DEPS += build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin
+PRG_DEPS += build/p384_overlay_equates.inc
+build/crypto/shared/p384_overlay_blobs.o: build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin
+endif
+
 $(PRG): $(PRG_DEPS)
 	@mkdir -p build
 	$(LD65) $(LD65FLAGS) -o $@ $(ALL_OBJS) $(SIBLING_LIB_ARCHIVES)
 	# Rewrite ca65 label format `al XXXXXX .name` -> VICE format `al C:XXXX .name`
 	# so the c64-test-harness Labels.from_file() reader can parse it.
 	sed -i '' 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(LABELS)
+
+# Phase 5 Fix D: $(LABELS) is normally a side-effect of the $(PRG)
+# link recipe; we don't add an explicit rule.  The overlay-bin rule
+# below has an order-only dep on $(LABELS) so its lookup_label()
+# resolves the main PRG's runtime mul_dma_lo / mul_dma_hi /
+# mul_cached_a / reu_fetch_mul_row to real addresses (was: silent
+# $0000 fallback that produced a curve overlay whose fp_mul_384
+# read/wrote $0000 and silently corrupted downstream state).
+#
+# Bootstrap workflow (clean tree under USE_OVERLAY_P384_EMBED=1):
+#   make BACKEND=uci USE_OVERLAY_P384_EMBED=0    # produce labels.txt
+#   make BACKEND=uci                              # real link with overlays
+# After this two-step bootstrap, plain `make BACKEND=uci` rebuilds
+# incrementally without intervention.  The script
+# tools/integration/build_nistcurves_p384_bin.sh prints a clear error
+# pointing at this two-step procedure if it runs without labels.txt
+# (vs the old silent $0000 stub fallback).
+
 
 link: $(PRG)
 
@@ -148,10 +196,10 @@ build/%.o: src/%.s
 	$(CA65) $(CA65FLAGS) -o $@ $<
 
 # Phase C.3: c64-nist-curves sibling archive (libs/nistcurves/ submodule).
-# Same gating as x25519: only linked under BACKEND=uci; ip65 continues
-# without P-384 entirely. Exports only the variable-base primitives
-# (see the build script for the excluded symbols and why).
-build/lib/nistcurves-p384.a:
+# Phase 1.5 split: produces TWO archives, one per overlay half. The
+# script writes both with a single invocation; the second target is a
+# pseudo-rule that piggybacks on the first.
+build/lib/nistcurves-p384-sha384.a build/lib/nistcurves-p384-curve.a:
 	@mkdir -p build/lib
 	bash tools/integration/build_nistcurves_p384.sh
 
@@ -176,18 +224,62 @@ build/lib/x25519.a:
 	@mkdir -p build/lib
 	bash tools/integration/build_x25519.sh
 
-# Phase C.3b: P-384 overlay IMAGE + labels for harness-time use only.
-# The production PRG does NOT link nistcurves-p384.a — this is smoke-test
-# infrastructure. tools/test_p384_symbols.py loads overlay-p384.bin into
-# REU at test time via a trampoline, then calls crypto_swap_to_p384 to
-# page it into the live slot. Keeps the main PRG size unchanged.
+# Phase C.3b / Phase 1.5 split: P-384 overlay IMAGES + labels for
+# harness-time use only.  The production PRG does NOT link
+# nistcurves-p384-{sha384,curve}.a — these are smoke-test infrastructure.
+# A future Phase 3 / Phase 4a harness will load both .bins into REU at
+# test time, then DMA them into the live slot via two new swap entry
+# points (crypto_swap_to_p384_sha384 / crypto_swap_to_p384_curve);
+# the existing crypto_swap_to_p384 entry point is now stale -- see the
+# comment block at the top of src/crypto/shared/crypto_swap.s.
 #
-# Both outputs live below build/; depend on the archive being built first.
-build/lib/overlay-p384.bin build/labels-p384.txt: build/lib/nistcurves-p384.a cfg/p384-overlay.cfg tools/integration/build_nistcurves_p384_bin.sh
+# All four outputs (two .bins + two labels files) are produced by a
+# single script invocation; the rule lists all four targets so make
+# only runs the script once even when several are stale.
+#
+# Phase 5 Fix D: build/labels.txt is an ORDER-ONLY dependency.  The
+# overlay-bin script's lookup_label() reads build/labels.txt to resolve
+# mul_dma_lo / mul_dma_hi / mul_cached_a / reu_fetch_mul_row to the
+# main PRG's runtime addresses (so the curve overlay's fp_mul_384
+# reads/writes the right $BA00 / $BB00 / etc. cells).  On a clean
+# build, build/labels.txt doesn't exist yet when this rule runs and the
+# script falls back to $0000 stubs - silently producing an overlay
+# image whose fp_mul_384 reads from $0000.  Order-only ('|') ensures
+# labels.txt exists before the script runs but doesn't trigger an
+# overlay rebuild on every main-PRG link.
+build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin build/labels-p384-sha384.txt build/labels-p384-curve.txt: \
+		build/lib/nistcurves-p384-sha384.a build/lib/nistcurves-p384-curve.a \
+		cfg/p384-overlay-sha384.cfg cfg/p384-overlay-curve.cfg \
+		tools/integration/build_nistcurves_p384_bin.sh \
+		| build/labels.txt
 	bash tools/integration/build_nistcurves_p384_bin.sh
 
 .PHONY: p384-overlay
-p384-overlay: build/lib/overlay-p384.bin build/labels-p384.txt
+p384-overlay: build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin \
+              build/labels-p384-sha384.txt build/labels-p384-curve.txt
+
+# Phase 5 Fix C: regenerate the P-384 overlay-resident symbol equates
+# (build/p384_overlay_equates.inc) from the overlay labels files so the
+# TLS-side dispatcher (src/crypto/ecdsa_verify_384.s) picks up address
+# changes via .include, with .assert pins catching drift.  Whenever
+# either labels file is rebuilt, the .inc regenerates and the
+# dispatcher .o is forced to rebuild.
+build/p384_overlay_equates.inc: build/labels-p384-sha384.txt build/labels-p384-curve.txt \
+                                tools/integration/gen_p384_overlay_equates.sh
+	bash tools/integration/gen_p384_overlay_equates.sh \
+	    build/labels-p384-sha384.txt build/labels-p384-curve.txt $@
+
+# The dispatcher .o now depends on the generated equates file (via
+# .include) AND on the overlay .bin files (PRG_DEPS already lists those
+# under USE_OVERLAY_P384_EMBED).  Phase 5 Fix D: gate the .inc dep on
+# USE_OVERLAY_P384_EMBED so the bootstrap rule for $(LABELS) (which
+# sub-makes with USE_OVERLAY_P384_EMBED=0) can skip rebuilding the .inc
+# from labels-p384-* (those depend on overlay-bins which depend on
+# $(LABELS) -- cycle).  The bootstrap pre-creates a placeholder .inc
+# before sub-making.
+ifeq ($(USE_OVERLAY_P384_EMBED),1)
+build/crypto/ecdsa_verify_384.o: build/p384_overlay_equates.inc
+endif
 
 # Build ip65 object libraries from the submodule. Only needed if the ip65
 # submodule changes; the prebuilt blob is committed to ip65-build/.

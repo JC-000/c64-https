@@ -24,6 +24,9 @@
         .export reu_fetch_mul_row
         .endif
 
+        ; ---- exports: Phase 3 P-384 overlay REU stash ----
+        .export reu_p384_overlay_init
+
         ; ---- exports: menu handlers ----
         .export do_net_init
         .export do_http_get
@@ -131,6 +134,27 @@
         .import poly_prod_lo
         .import poly_prod_hi
 
+        ; ---- imports: Phase 3 embedded P-384 overlay blob anchors ----
+        ; Resolved by src/crypto/shared/p384_overlay_blobs.s when
+        ; USE_OVERLAY_P384_EMBED is on; the symbols are weak/optional
+        ; in the same way OVERLAY_BLOB_* segments are optional in the
+        ; cfg.  reu_p384_overlay_init below is .ifdef-gated so it does
+        ; not reference the symbols when the flag is off (otherwise the
+        ; .import would fail for a missing symbol).
+        .ifdef USE_OVERLAY_P384_EMBED
+        .import p384_overlay_sha384_blob
+        .import p384_overlay_curve_blob
+        ; Re-include the REU layout header so REU_OVERLAY_P384_*
+        ; (24-bit) and OVERLAY_SIZE (16-bit) resolve as local literals
+        ; at assembly time rather than as cross-TU imports.  This
+        ; sidesteps the ld65 "size mismatch" warning that fires when a
+        ; 24-bit export from crypto_swap.o is .import'd as the default
+        ; 16-bit absolute (ca65 has no `:far` attribute on the 6502
+        ; CPU).  The header is `.ifndef`-guarded so the duplicate
+        ; include is a no-op aside from making the equates visible.
+        .include "reu_layout.inc"
+        .endif
+
 ; =============================================================================
 ; BASIC stub: 10 SYS 2061
 ; Loaded at $0801 via EXEHDR segment (first bytes of LOADER region).
@@ -216,6 +240,12 @@ start:
         and #%11111110
         sta $01
         jsr reu_mul_init
+
+        ; Phase 3: stash both P-384 split overlay images in REU banks 6
+        ; and 7 from the .incbin'd staging blocks at $4200 and $E000.
+        ; Inert under USE_X25519_SIBLING=1 / BACKEND=ip65 (see
+        ; reu_p384_overlay_init's body for the conditional).
+        jsr reu_p384_overlay_init
 
         ; Auto-initialize networking at boot so the banner shows the
         ; firmware-assigned IP without waiting for the user to press 'I'.
@@ -754,6 +784,130 @@ reu_fetch_mul_row:
         rts
 
 .endif ; .ifndef USE_X25519_SIBLING (in-tree reu_mul_init / reu_fetch_mul_row)
+
+; =============================================================================
+; reu_p384_overlay_init - Stash both P-384 split-overlay images in REU.
+;
+; Reads the two .incbin'd images at p384_overlay_sha384_blob ($4200) and
+; p384_overlay_curve_blob ($E000) and STASHes (C64->REU) each into the
+; REU bank reserved by src/crypto/shared/reu_layout.inc:
+;
+;   REU bank 6 ($60000)  <-  $4200..$5FFF (OVERLAY_SIZE bytes, sha384)
+;   REU bank 7 ($70000)  <-  $E000..$FDFF (OVERLAY_SIZE bytes, curve)
+;
+; After this returns, the live CRYPTO_OVERLAY slot at $4200 still holds
+; the SHA-384 image bytes -- but the linker considers it free (no segment
+; references the bytes by symbol after this point) so a subsequent
+; jsr crypto_swap_to_p384_curve will overwrite the slot with the curve
+; image from REU bank 7.  The under-KERNAL block at $E000-$FDFF is
+; freed unconditionally; KERNAL ROM is banked in by default so future
+; reads from $E000 hit ROM, not the no-longer-needed blob bytes.
+;
+; Inert when USE_OVERLAY_P384_EMBED is undefined (BACKEND=ip65, or
+; USE_X25519_SIBLING=1 under UCI) -- the routine compiles to a single
+; RTS so the call site in `start` is harmless.
+;
+; SEI around each DMA window; restores caller's I flag.  ~16 ms total
+; wall-clock at any CPU speed (REU DMA bus runs at ~1 MHz regardless
+; of turbo).
+;
+; Clobbers: A.  Does NOT update current_overlay -- crypto_swap_none has
+; that responsibility; boot calls neither because the BSS reset at
+; entry already left current_overlay = OV_NONE = 0.
+; =============================================================================
+reu_p384_overlay_init:
+.ifdef USE_OVERLAY_P384_EMBED
+        ; --- Stash 1: $4200 (SHA blob) -> REU bank 6, offset $0000 ---
+        php
+        sei
+        lda #<p384_overlay_sha384_blob
+        sta reu_c64_lo
+        lda #>p384_overlay_sha384_blob
+        sta reu_c64_hi
+        lda #<REU_OVERLAY_P384_SHA384
+        sta reu_reu_lo
+        lda #>REU_OVERLAY_P384_SHA384
+        sta reu_reu_hi
+        lda #^REU_OVERLAY_P384_SHA384
+        sta reu_reu_bank
+        lda #<OVERLAY_SIZE
+        sta reu_len_lo
+        lda #>OVERLAY_SIZE
+        sta reu_len_hi
+        lda #0
+        sta reu_addr_ctrl       ; both addresses autoincrement
+        lda #$90                ; execute + STASH (C64->REU)
+        sta reu_command
+        plp
+
+        ; --- Intermediate: copy CURVE blob from $E000 -> CRYPTO_OVERLAY ---
+        ; The CURVE blob lives in RAM under KERNAL ROM at $E000-$FDFF.
+        ; VICE's REU emulator reads C64 RAM via a path that does NOT
+        ; respect $01 banking for the $E000-$FFFF range -- a STASH
+        ; from $E000 with KERNAL banked off still returns ROM bytes
+        ; (and on bank 7 specifically returns an undefined fill
+        ; pattern, see the empirical results documented in Phase 3
+        ; commit).  Workaround: CPU-copy the blob from $E000 (with
+        ; KERNAL banked off so the LDA sees RAM) into the now-free
+        ; CRYPTO_OVERLAY slot at $4200 (the SHA-384 blob has already
+        ; been stashed to REU bank 6, so the slot bytes are no longer
+        ; load-bearing), then STASH from $4200.  CPU copy is
+        ; ~7,680 * 5 cy ~= 38 K cycles ~= 38 ms at 1 MHz / ~0.8 ms at
+        ; 48 MHz -- negligible vs the DMA latency itself.
+        php
+        sei
+        lda $01
+        pha                     ; save banking
+        and #%11111101          ; clear bit 1 (KERNAL ROM off, RAM at $E000)
+        sta $01
+
+        ; Copy 30 pages ($1E00 = 7,680 B) from $E000-$FDFF to $4200-$5FFF
+        ; via self-modifying base+Y indexing.  Y walks 0..255; outer
+        ; loop bumps the high byte of both src and dst pointers.
+        lda #$E0
+        sta @cp_src+2
+        lda #$42
+        sta @cp_dst+2
+        ldx #30                 ; 30 pages = $1E00 bytes
+@cp_page:
+        ldy #0
+@cp_byte:
+@cp_src:
+        lda $E000,y             ; high byte self-modified above
+@cp_dst:
+        sta $4200,y             ; high byte self-modified above
+        iny
+        bne @cp_byte
+        inc @cp_src+2
+        inc @cp_dst+2
+        dex
+        bne @cp_page
+
+        pla                     ; restore banking (KERNAL back on)
+        sta $01
+
+        ; --- Stash 2: $4200 (CURVE blob, freshly copied) -> REU bank 7 ---
+        lda #$00
+        sta reu_c64_lo
+        lda #$42
+        sta reu_c64_hi
+        lda #<REU_OVERLAY_P384_CURVE
+        sta reu_reu_lo
+        lda #>REU_OVERLAY_P384_CURVE
+        sta reu_reu_hi
+        lda #^REU_OVERLAY_P384_CURVE
+        sta reu_reu_bank
+        lda #<OVERLAY_SIZE
+        sta reu_len_lo
+        lda #>OVERLAY_SIZE
+        sta reu_len_hi
+        lda #0
+        sta reu_addr_ctrl
+        lda #$90
+        sta reu_command
+        plp
+.endif ; .ifdef USE_OVERLAY_P384_EMBED
+        rts
 
 ; =============================================================================
 ; Strings (read-only)

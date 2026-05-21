@@ -139,6 +139,14 @@ net_poll:
         rts
 @do_poll:
         jsr uci_wait_not_busy
+        bcc :+
+        ; FPGA wedged before we could push SOCKET_READ — net_last_error is
+        ; already UCI_ERR_WAIT_TIMEOUT. Force tcp_state to ERROR so the
+        ; HTTP/TLS layer stops polling on this socket.
+        lda #UCI_TCP_ERROR
+        sta net_tcp_state
+        rts
+:
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -156,6 +164,14 @@ net_poll:
         jsr uci_put_byte
 
         jsr uci_push_wait
+        bcc :+
+        ; FPGA wedged waiting for SOCKET_READ response — net_last_error is
+        ; already UCI_ERR_WAIT_TIMEOUT. Force tcp_state to ERROR so the
+        ; HTTP/TLS layer stops polling on this socket.
+        lda #UCI_TCP_ERROR
+        sta net_tcp_state
+        rts
+:
 
         jsr uci_check_err
         bcc @no_err
@@ -165,8 +181,11 @@ net_poll:
         lda #UCI_TCP_ERROR
         sta net_tcp_state
         jsr uci_drain_resp
+        bcs @pe_drain_to            ; drain wedged — tcp_state already ERROR
         jsr uci_drain_status
+        bcs @pe_drain_to
         jsr uci_ack
+@pe_drain_to:
         rts
 
 @no_err:
@@ -199,8 +218,14 @@ net_poll:
 @hdr_done_short:
         ; Firmware returned fewer than 2 bytes. Treat as "no data".
         jsr uci_drain_resp
+        bcs @hds_drain_to           ; drain wedged — surface as ERROR
         jsr uci_drain_status
+        bcs @hds_drain_to
         jsr uci_ack
+        rts
+@hds_drain_to:
+        lda #UCI_TCP_ERROR
+        sta net_tcp_state
         rts
 
 @hdr_done:
@@ -212,8 +237,14 @@ net_poll:
         ora uci_poll_rem+0
         bne @have_data
         jsr uci_drain_resp
+        bcs @hd0_drain_to           ; drain wedged — surface as ERROR
         jsr uci_drain_status
+        bcs @hd0_drain_to
         jsr uci_ack
+        rts
+@hd0_drain_to:
+        lda #UCI_TCP_ERROR
+        sta net_tcp_state
         rts
 
 @have_data:
@@ -289,8 +320,14 @@ net_poll:
 
 @done_data:
         jsr uci_drain_resp
+        bcs @dd_drain_to            ; drain wedged — surface as ERROR
         jsr uci_drain_status
+        bcs @dd_drain_to
         jsr uci_ack
+        rts
+@dd_drain_to:
+        lda #UCI_TCP_ERROR
+        sta net_tcp_state
         rts
 
 ; =============================================================================
@@ -327,6 +364,8 @@ net_dhcp_acquire:
         jsr uci_put_byte
 
         jsr uci_push_wait
+        bcs @dhcp_wait_to       ; FPGA wedged after PUSH_CMD — bail with C=1
+                                ; (net_last_error already UCI_ERR_WAIT_TIMEOUT)
 
         jsr uci_check_err
         bcc @no_err
@@ -351,7 +390,9 @@ net_dhcp_acquire:
         ; but this is cheap insurance against firmware revisions that
         ; return a longer record).
         jsr uci_drain_resp
+        bcs @dhcp_wait_to           ; drain wedged — surface as DHCP fail
         jsr uci_drain_status
+        bcs @dhcp_wait_to
         jsr uci_ack
 
         ; Copy the first 4 bytes (IP) into net_local_ip.
@@ -442,6 +483,15 @@ net_tcp_connect:
         uci_fence
 
         jsr uci_push_wait
+        bcc :+
+        ; FPGA wedged waiting for TCP_CONNECT response — net_last_error is
+        ; already UCI_ERR_WAIT_TIMEOUT. Force tcp_state to CONNECT_FAIL so
+        ; callers don't try to use a phantom socket.
+        lda #UCI_TCP_CONNECT_FAIL
+        sta net_tcp_state
+        sec
+        rts
+:
 
         jsr uci_check_err
         bcc @tc_no_err
@@ -449,8 +499,11 @@ net_tcp_connect:
         lda #UCI_ERR_CONNECT_FAIL
         sta net_last_error
         jsr uci_drain_resp
+        bcs @tc_err_drain_to        ; drain wedged — still surface CONNECT_FAIL
         jsr uci_drain_status
+        bcs @tc_err_drain_to
         jsr uci_ack
+@tc_err_drain_to:
         sec
         rts
 
@@ -469,8 +522,19 @@ net_tcp_connect:
         jsr uci_read_resp_bytes
 
         jsr uci_drain_resp
+        bcs @tc_ok_drain_to         ; drain wedged — surface as CONNECT_FAIL
+                                    ; (net_last_error already
+                                    ;  UCI_ERR_WAIT_TIMEOUT from the drain)
         jsr uci_drain_status
+        bcs @tc_ok_drain_to
         jsr uci_ack
+        jmp @tc_validate
+@tc_ok_drain_to:
+        lda #UCI_TCP_CONNECT_FAIL
+        sta net_tcp_state
+        sec
+        rts
+@tc_validate:
 
         ; Validate the response: firmware must have returned at least 1
         ; byte (uci_resp_count) AND a non-zero socket_id. Issue #36 — at
@@ -603,6 +667,12 @@ net_tcp_send:
 
 @sb_push:
         jsr uci_push_wait
+        bcc :+
+        ; FPGA wedged waiting for SOCKET_WRITE response — net_last_error is
+        ; already UCI_ERR_WAIT_TIMEOUT. Bail with C=1.
+        sec
+        rts
+:
 
         jsr uci_check_err
         bcc @sb_no_err
@@ -610,8 +680,11 @@ net_tcp_send:
         lda #UCI_ERR_SEND_FAIL
         sta net_last_error
         jsr uci_drain_resp
+        bcs @sb_err_drain_to        ; drain wedged — preserve SEND_FAIL exit
         jsr uci_drain_status
+        bcs @sb_err_drain_to
         jsr uci_ack
+@sb_err_drain_to:
         sec
         rts
 
@@ -626,8 +699,16 @@ net_tcp_send:
         jsr uci_read_resp_bytes
 
         jsr uci_drain_resp
+        bcs @sb_ok_drain_to         ; drain wedged post-SOCKET_WRITE — bail
         jsr uci_drain_status
+        bcs @sb_ok_drain_to
         jsr uci_ack
+        jmp @sb_continue
+@sb_ok_drain_to:
+        ; net_last_error already UCI_ERR_WAIT_TIMEOUT from the drain.
+        sec
+        rts
+@sb_continue:
 
         ; Sanity: if written != requested-for-this-chunk, flag short-write.
         ; We still treat the send as done (MVP semantics).
@@ -702,11 +783,21 @@ net_tcp_close:
         jsr uci_put_byte
 
         jsr uci_push_wait
+        bcc :+
+        ; FPGA wedged on close — force CLOSED state and bail. Best-effort
+        ; semantics: skip drains (FIFO state is undefined when wedged).
+        lda #UCI_TCP_CLOSED
+        sta net_tcp_state
+        rts
+:
         jsr uci_check_err       ; clear latched error if any
         jsr uci_drain_resp
+        bcs @cl_drain_to            ; drain wedged — still force CLOSED
         jsr uci_drain_status
+        bcs @cl_drain_to
         jsr uci_ack
 
+@cl_drain_to:
         lda #UCI_TCP_CLOSED
         sta net_tcp_state
         rts
