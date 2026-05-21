@@ -122,33 +122,46 @@
 
         .include "constants.inc"        ; reu_* register equates
         .include "reu_layout.inc"
+        .include "overlay_ids.inc"      ; OV_* constants (W3)
 
         .export crypto_swap_to_x25519_sibling
+        .export crypto_swap_to_x25519           ; W3 new
+        .export crypto_swap_to_p256_verify      ; W3 new
         .export crypto_swap_to_p384_sha384
         .export crypto_swap_to_p384_curve
         .export crypto_swap_none
+        .export crypto_overlay_call             ; W3 new
         .export current_overlay
 
         ; Export REU layout equates once (kept in sync with reu_layout.inc).
         .export REU_OVERLAY_P384_SHA384
         .export REU_OVERLAY_P384_CURVE
+        .export REU_OVERLAY_P256_VERIFY         ; W3 new
+        .export REU_OVERLAY_X25519              ; W3 new
         .export OVERLAY_SIZE
 
         ; Live overlay slot start address (from the cfg's MEMORY{} define).
         .import __CRYPTO_OVERLAY_START__
 
 ; -----------------------------------------------------------------------------
-; Overlay IDs -- must stay in sync with `current_overlay` comments above.
+; Overlay IDs -- canonical values live in `overlay_ids.inc` (W3).  This
+; file's local equates above (OV_NONE, OV_X25519_SIBLING, OV_P384_SHA384,
+; OV_P384_CURVE) were folded into the include; the .ifndef-guarded
+; definitions there are the single source of truth.  `OV_P256_VERIFY`
+; (id 2) and `OV_X25519` (id 3) are the new W3 additions.
+;
+; NB: the architecture plan's "OV_X25519=3, OV_P256_VERIFY=4" sketch
+; assumed OV_P384_SHA384/CURVE were 1/2 — they are actually 4/5 (Phase 3
+; intentionally skipped 2/3 for headroom).  The W3 IDs slot into the
+; reserved gap so existing call sites that compare `current_overlay`
+; against OV_P384_* see no renumber.
 ; -----------------------------------------------------------------------------
         .export OV_NONE
         .export OV_X25519_SIBLING
+        .export OV_P256_VERIFY                  ; W3 new
+        .export OV_X25519                       ; W3 new
         .export OV_P384_SHA384
         .export OV_P384_CURVE
-
-OV_NONE           = 0
-OV_X25519_SIBLING = 1
-OV_P384_SHA384    = 4
-OV_P384_CURVE     = 5
 
 ; REU command: execute REU->C64 stash (bit 7 = start, bits 1-0 = direction
 ; 01 = REU-to-C64).  Matches the DMA issue used elsewhere in the codebase.
@@ -175,6 +188,7 @@ REU_CMD_REU_TO_C64 = $91
 crypto_swap_to_x25519_sibling:
         lda #OV_X25519_SIBLING
         sta current_overlay
+swap_done_fast:
         rts
 
 ; -----------------------------------------------------------------------------
@@ -212,6 +226,60 @@ crypto_swap_to_p384_curve:
         rts
 
 ; -----------------------------------------------------------------------------
+; crypto_swap_to_x25519 -- DMA X25519 sibling image from REU bank 3
+; (REU_OVERLAY_X25519) into the live CRYPTO_OVERLAY slot.  Idempotent.
+;
+; Distinct from `crypto_swap_to_x25519_sibling` above: that entry point
+; is the legacy state-only marker (used when the linker placed the
+; X25519 sibling rodata into the slot at PRG load time).  This new
+; entry point DOES the DMA from REU, so it can be called after a
+; P-384 or P-256 swap has overwritten the slot.  Boot-time stash
+; happens in `reu_p384_overlay_init` (boot.s).
+;
+; Idempotent: re-entering with OV_X25519 already current is a single
+; byte compare + rts (no DMA).  NB: arrival from the legacy
+; OV_X25519_SIBLING state still triggers a DMA (the slot contents are
+; assumed identical, but the marker IDs differ and the safe path is
+; to refresh from REU rather than to assume the linker-placed bytes
+; were not later overwritten).
+; -----------------------------------------------------------------------------
+crypto_swap_to_x25519:
+        lda #OV_X25519
+        cmp current_overlay
+        beq swap_done_fast
+        pha
+        lda #<REU_OVERLAY_X25519
+        ldx #>REU_OVERLAY_X25519
+        ldy #^REU_OVERLAY_X25519
+        jsr do_swap
+        pla
+        sta current_overlay
+        rts
+
+; -----------------------------------------------------------------------------
+; crypto_swap_to_p256_verify -- DMA P-256 verify image (sibling
+; libs/nistcurves verify-only minimal subset) from REU_OVERLAY_P256_VERIFY
+; (bank 2 slot $22100) into the live CRYPTO_OVERLAY slot.  Idempotent.
+;
+; W3 new.  Today the P-256 verify primitives are always-resident in
+; CRYPTO_RESIDENT (Phase C.4 sibling integration); W1 will later move
+; them into the cold-path overlay slot.  Until that wiring, this
+; entry point is callable but unused by TLS call sites.
+; -----------------------------------------------------------------------------
+crypto_swap_to_p256_verify:
+        lda #OV_P256_VERIFY
+        cmp current_overlay
+        beq swap_done_fast
+        pha
+        lda #<REU_OVERLAY_P256_VERIFY
+        ldx #>REU_OVERLAY_P256_VERIFY
+        ldy #^REU_OVERLAY_P256_VERIFY
+        jsr do_swap
+        pla
+        sta current_overlay
+        rts
+
+; -----------------------------------------------------------------------------
 ; crypto_swap_none -- mark the slot as undefined.
 ;
 ; Does NOT zero the slot bytes -- callers MUST NOT jsr into the slot
@@ -222,7 +290,87 @@ crypto_swap_none:
         sta current_overlay
         rts
 
-swap_done_fast:
+; -----------------------------------------------------------------------------
+; crypto_overlay_call -- swap-then-call convenience wrapper (W3 new).
+;
+; Performs an idempotent swap to the requested overlay (no-op if it is
+; already current) and then JSRs to (slot_base + offset).  Designed
+; so a TLS call site can do:
+;
+;       lda #OV_P256_VERIFY
+;       ldx #<(ecdsa_verify_256 - __CRYPTO_OVERLAY_START__)
+;       ldy #>(ecdsa_verify_256 - __CRYPTO_OVERLAY_START__)
+;       jsr crypto_overlay_call
+;
+; instead of two separate jsr's (swap, then jsr abs).  The dispatcher
+; is responsible for ensuring fn_offset+slot_base is a valid entry
+; point — there is no symbol-table check here.
+;
+; Inputs:
+;       A = overlay id (OV_*)
+;       X = fn offset low byte (relative to __CRYPTO_OVERLAY_START__)
+;       Y = fn offset high byte
+;
+; Behaviour:
+;   * Stashes X / Y / A in self-modifying-code (SMC) slots before
+;     branching to the swap helper so the swap is free to clobber
+;     all three registers.
+;   * Dispatches on A to the matching crypto_swap_to_<id> entry point.
+;     Unknown IDs return immediately without swapping or JSRing
+;     (the call is a no-op; current_overlay is left untouched).
+;   * After the swap returns, indirect-jsrs through the SMC'd absolute
+;     address (slot_base + offset).
+;   * The callee's return value (C flag + A/X/Y) passes through
+;     unchanged to the caller.
+;
+; ABI mirror: documented identically in overlay_ids.inc usage notes.
+; -----------------------------------------------------------------------------
+crypto_overlay_call:
+        ; Save the overlay id for the dispatch below.  txa/tya in the
+        ; pointer math below clobbers A, so we have to stash it first.
+        pha
+
+        ; Compute slot_base + (Y:X) and stash into the indirect JSR slot.
+        clc
+        txa
+        adc #<__CRYPTO_OVERLAY_START__
+        sta @call_target+1
+        tya
+        adc #>__CRYPTO_OVERLAY_START__
+        sta @call_target+2
+
+        ; Recover the overlay id and dispatch.  Order: most-frequent
+        ; first (X25519 + P-256 verify will be the W1 hot pair; the
+        ; P-384 pair is the legacy / 0x0503-only path).
+        pla
+        cmp #OV_X25519
+        bne @not_x25519
+        jsr crypto_swap_to_x25519
+        jmp @call_target
+@not_x25519:
+        cmp #OV_P256_VERIFY
+        bne @not_p256
+        jsr crypto_swap_to_p256_verify
+        jmp @call_target
+@not_p256:
+        cmp #OV_P384_SHA384
+        bne @not_sha384
+        jsr crypto_swap_to_p384_sha384
+        jmp @call_target
+@not_sha384:
+        cmp #OV_P384_CURVE
+        bne @not_curve
+        jsr crypto_swap_to_p384_curve
+        jmp @call_target
+@not_curve:
+        ; Unknown overlay id -- no-op (caller error).  Leaves
+        ; current_overlay untouched and returns with C=1 to surface
+        ; the misuse.
+        sec
+        rts
+
+@call_target:
+        jsr $0000               ; absolute address SMC'd above
         rts
 
 ; -----------------------------------------------------------------------------

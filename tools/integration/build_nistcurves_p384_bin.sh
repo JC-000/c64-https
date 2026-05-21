@@ -185,22 +185,20 @@ link_one () {
     local dbg_out
     dbg_out="${bin_out%.bin}.dbg"
 
+    # Under c64-lib-contract / libs/nistcurves cfa9085+, the upstream
+    # archive includes `constants.o` which `.export`s every REU register
+    # equate (`reu_status` / `reu_command` / `reu_c64_lo`-`hi` /
+    # `reu_reu_lo`-`hi` / `reu_reu_bank` / `reu_len_lo`-`hi` /
+    # `reu_addr_ctrl`). Pre-contract the .a was missing those exports
+    # and consumers patched them in via `ld65 --define`. Post-contract
+    # `--define`-ing them duplicates the symbol and ld65 errors with
+    # "Duplicate external identifier".
     "$LD65" \
         -C "$cfg" \
         -o "$bin_out" \
         -Ln "$labels_out" \
         -m "$map_out" \
         --dbgfile "$dbg_out" \
-        --define reu_status=\$df00 \
-        --define reu_command=\$df01 \
-        --define reu_c64_lo=\$df02 \
-        --define reu_c64_hi=\$df03 \
-        --define reu_reu_lo=\$df04 \
-        --define reu_reu_hi=\$df05 \
-        --define reu_reu_bank=\$df06 \
-        --define reu_len_lo=\$df07 \
-        --define reu_len_hi=\$df08 \
-        --define reu_addr_ctrl=\$df0a \
         --define mul_cached_a="$DEF_MUL_CACHED_A" \
         --define mul_dma_lo="$DEF_MUL_DMA_LO" \
         --define mul_dma_hi="$DEF_MUL_DMA_HI" \
