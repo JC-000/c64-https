@@ -573,5 +573,12 @@ cert_sig_r:        .res 48              ; signature r component (max 48 for P-38
 cert_sig_s:        .res 48              ; signature s component (max 48 for P-384)
 cert_sig_len:      .res 1               ; 32 (P-256) or 48 (P-384)
 cert_curve_id:     .res 1               ; 0=P-256, 1=P-384
+; W1 partial: cert_buf (1.5 KB) lives in BSS_TAIL — the same offload
+; region as src/data.s::tls_rec_buf — routed to NET_BSS_TAIL under
+; UCI. Keeps the cert parse staging out of the CRYPTO_HOT overflow
+; path. ip65 cfg aliases BSS_TAIL to BSS so the relocation is
+; invisible there.
+.segment "BSS_TAIL"
 cert_buf:          .res 1536            ; certificate DER buffer
+.segment "BSS"
 cert_buf_len:      .res 2               ; certificate length

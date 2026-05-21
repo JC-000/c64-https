@@ -32,9 +32,15 @@
 .export zp_ptr
 
 ; Phase C.4: c64-nist-curves fp256.s references a handful of REU DMA
-; registers via `.import` (it was written to live in a linker-visible
-; symbol world). Promote the numeric equates from constants.inc so ld65
-; can resolve the sibling's imports.
-.export reu_reu_hi
-.export reu_reu_bank
-.export reu_command
+; registers via `.import`. Pre-contract, the sibling shipped no
+; constants.o, so c64-https had to promote its in-tree equates from
+; constants.inc to satisfy the link. Under c64-lib-contract (libs/
+; nistcurves cfa9085+), the library publishes constants.o which
+; `.export`s the same REU register equates. Those declarations now
+; satisfy the .imports — remove the c64-https-side .export to avoid
+; ld65 "Duplicate external identifier" errors.
+;
+; Code in c64-https that references these symbols through
+; constants.inc continues to work because constants.inc still defines
+; them as local equates; the library's .export only becomes
+; load-bearing for sources that .import them.
