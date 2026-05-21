@@ -22,6 +22,8 @@ from c64_test_harness import (
     read_bytes, write_bytes, jsr, wait_for_text,
 )
 
+from _vice_helpers import default_vice_config
+
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
@@ -718,8 +720,7 @@ def main():
     print(f"  Labels loaded: {len(required)} required labels verified")
 
     # Launch VICE
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        extra_args=["-reu", "-reusize", "512"])
+    config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
     print("\n=== Starting VICE ===")
 
     with ViceInstanceManager(config=config) as mgr:
