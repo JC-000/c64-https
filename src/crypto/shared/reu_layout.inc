@@ -38,7 +38,50 @@ REU_OVERLAY_P256           = $22100
 REU_OVERLAY_P384           = $24100
 .endif
 
+; --- W3: P-256 verify overlay image (library-ingestion architecture §2.5) ---
+; The architecture plan §2.5 proposes "bank 2 at offset $1F00" for this
+; image.  Offset $1F00 falls inside the slot-1 span ($20100-$22100), so
+; we reuse the existing REU_OVERLAY_P256 slot at $22100 instead: it is
+; the second 8 KB-aligned slot in bank 2, it is already 8 KB-padded
+; (matching OVERLAY_SIZE), and it has been declared since Phase 1.5
+; without a current production consumer (the P-256 sibling is always-
+; resident, no live overlay swap).  This avoids carving a second slot
+; out of bank 2.  The alias is `.ifndef`-guarded; downstream override
+; via `--asm-define REU_OVERLAY_P256_VERIFY=$xxxxx` remains available.
+.ifndef REU_OVERLAY_P256_VERIFY
+REU_OVERLAY_P256_VERIFY    = REU_OVERLAY_P256
+.endif
+
+; --- W3: X25519 sibling overlay image (library-ingestion architecture §2.5) ---
+; Architecture plan §2.5: "x25519 sibling tables get bank 3 (resolves
+; the c64-x25519 #43 collision concern)."  Bank 3 ($30000) was nominally
+; reserved for P-256 fixed-base precompute, but the TLS path uses
+; ec_scalar_mul_var (variable-base) only — the reservation has no
+; runtime consumer.  Using bank 3 for the X25519 sibling code+rodata
+; image keeps the production overlay store (bank 2) free for the
+; existing P-384 SHA384/Curve halves at $22100/$24100 and the new
+; P-256 verify slot above.
+;
+; This is the IMAGE address (DMA source for `crypto_swap_to_x25519`)
+; — the sibling's running mul/doubled/17-bit-carry tables continue to
+; live in their own REU homes (currently banks 0-2 under v0.4.0).
+; When c64-x25519 #43 lands and the sibling's table bases become
+; `--asm-define`-able, the consumer-side override will relocate the
+; sibling tables (e.g. to bank 4+) so they don't collide with the
+; bank-3 image staging.  Until then, USE_X25519_SIBLING=1 + a real
+; `crypto_swap_to_x25519` overwrite of CRYPTO_OVERLAY is gated behind
+; W1's hot/cold partition (no current TLS caller).
+.ifndef REU_OVERLAY_X25519
+REU_OVERLAY_X25519         = $30000
+.endif
+
 ; --- P-256 precompute (1 bank) ---
+; NB: REU_OVERLAY_X25519 above lives at the same bank ($30000).  Both
+; are reservations -- the P-256 precompute is unused at runtime (the
+; TLS dispatcher uses variable-base scalar mul, no Lim-Lee table),
+; and the X25519 sibling image is similarly cold until W1 wires a
+; real swap into TLS.  When either becomes hot, the cfg has to pick
+; one and relocate the other.
 .ifndef REU_P256_PRECOMPUTE_BASE
 REU_P256_PRECOMPUTE_BASE   = $30000
 .endif

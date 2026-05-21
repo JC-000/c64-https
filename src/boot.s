@@ -155,6 +155,35 @@
         .include "reu_layout.inc"
         .endif
 
+        ; ---- imports: W3 embedded P-256 verify overlay blob anchor ----
+        ; Mirror of the P-384 pattern above.  Resolved by
+        ; src/crypto/shared/p256_overlay_blobs.s when
+        ; USE_OVERLAY_P256_EMBED is on (gated from the top-level Makefile
+        ; by EMBED_P256_OVERLAY=1).  Mutually exclusive with
+        ; USE_OVERLAY_P384_EMBED at the cfg level -- both target the
+        ; CRYPTO_OVERLAY slot at PRG-load time, so the Makefile turns
+        ; P-384 embedding off when EMBED_P256_OVERLAY=1.
+        .ifdef USE_OVERLAY_P256_EMBED
+        .import p256_overlay_verify_blob
+        ; Same REU layout include rationale as the P-384 block above
+        ; (.ifndef-guarded; idempotent).
+        .include "reu_layout.inc"
+        .endif
+
+        ; ---- imports: W3 X25519 sibling slot stash ----
+        ; Under USE_X25519_SIBLING=1, the sibling's X25519_RODATA +
+        ; X25519_BSS segments load into CRYPTO_OVERLAY at PRG-load time.
+        ; Boot stashes those slot bytes (i.e. the sibling's running
+        ; code+rodata image) to REU bank 3 so a later
+        ; `crypto_swap_to_x25519` can refresh the slot from there after
+        ; a P-256 / P-384 swap has overwritten it.  No new .incbin
+        ; needed -- the linker already pinned the bytes at $4200.
+        .ifdef USE_X25519_SIBLING
+        .import __CRYPTO_OVERLAY_START__
+        ; Same REU layout include rationale as above.
+        .include "reu_layout.inc"
+        .endif
+
 ; =============================================================================
 ; BASIC stub: 10 SYS 2061
 ; Loaded at $0801 via EXEHDR segment (first bytes of LOADER region).
@@ -907,6 +936,83 @@ reu_p384_overlay_init:
         sta reu_command
         plp
 .endif ; .ifdef USE_OVERLAY_P384_EMBED
+
+; -----------------------------------------------------------------------------
+; W3: P-256 verify image stash (Makefile EMBED_P256_OVERLAY=1).
+;
+; When `USE_OVERLAY_P256_EMBED` is defined the cfg routes
+; OVERLAY_BLOB_P256 into CRYPTO_OVERLAY at PRG-load time (mutually
+; exclusive with OVERLAY_BLOB_SHA384 -- the Makefile turns
+; USE_OVERLAY_P384_EMBED off when EMBED_P256_OVERLAY=1).  Boot DMAs the
+; slot bytes to REU_OVERLAY_P256_VERIFY (bank 2, $22100) so a later
+; `crypto_swap_to_p256_verify` can refresh the slot.  Same SEI window
+; + ~8 ms cost as the P-384 stash above; STASH (C64->REU) command
+; $90.
+; -----------------------------------------------------------------------------
+.ifdef USE_OVERLAY_P256_EMBED
+        php
+        sei
+        lda #<p256_overlay_verify_blob
+        sta reu_c64_lo
+        lda #>p256_overlay_verify_blob
+        sta reu_c64_hi
+        lda #<REU_OVERLAY_P256_VERIFY
+        sta reu_reu_lo
+        lda #>REU_OVERLAY_P256_VERIFY
+        sta reu_reu_hi
+        lda #^REU_OVERLAY_P256_VERIFY
+        sta reu_reu_bank
+        lda #<OVERLAY_SIZE
+        sta reu_len_lo
+        lda #>OVERLAY_SIZE
+        sta reu_len_hi
+        lda #0
+        sta reu_addr_ctrl
+        lda #$90                ; execute + STASH (C64->REU)
+        sta reu_command
+        plp
+.endif ; .ifdef USE_OVERLAY_P256_EMBED
+
+; -----------------------------------------------------------------------------
+; W3: X25519 sibling slot stash (USE_X25519_SIBLING=1).
+;
+; The sibling's X25519_RODATA + X25519_BSS segments load into
+; CRYPTO_OVERLAY at PRG-load time (see cfg/c64-https-uci.cfg).  Boot
+; STASHes the slot bytes to REU_OVERLAY_X25519 (bank 3, $30000) so a
+; later `crypto_swap_to_x25519` can refresh the slot after a P-256 /
+; P-384 swap has overwritten it.  Same SEI window + ~8 ms cost as the
+; P-256 stash above.  No .incbin -- the linker already pinned the
+; sibling image into CRYPTO_OVERLAY.
+;
+; NB: this stashes the *initialized* portion of CRYPTO_OVERLAY (the
+; sibling's rodata tables) plus any zero-init BSS bytes that fall in
+; the same span.  The BSS is fine to stash-and-restore because the
+; sibling's `reu_mul_init` rebuilds the volatile mul tables anyway;
+; the rodata round-trip is the load-bearing part.
+; -----------------------------------------------------------------------------
+.ifdef USE_X25519_SIBLING
+        php
+        sei
+        lda #<__CRYPTO_OVERLAY_START__
+        sta reu_c64_lo
+        lda #>__CRYPTO_OVERLAY_START__
+        sta reu_c64_hi
+        lda #<REU_OVERLAY_X25519
+        sta reu_reu_lo
+        lda #>REU_OVERLAY_X25519
+        sta reu_reu_hi
+        lda #^REU_OVERLAY_X25519
+        sta reu_reu_bank
+        lda #<OVERLAY_SIZE
+        sta reu_len_lo
+        lda #>OVERLAY_SIZE
+        sta reu_len_hi
+        lda #0
+        sta reu_addr_ctrl
+        lda #$90                ; execute + STASH (C64->REU)
+        sta reu_command
+        plp
+.endif ; .ifdef USE_X25519_SIBLING
         rts
 
 ; =============================================================================

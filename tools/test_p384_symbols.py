@@ -186,21 +186,18 @@ def main() -> int:
             ViceConfig, ViceInstanceManager,
             read_bytes, jsr, wait_for_text,
         )
+        from _vice_helpers import default_vice_config
     except ImportError:
         print("FATAL: c64-test-harness package not installed")
         return 1
 
-    # VICE harness gotcha: the boot path runs nistcurves P-256 fp_mul
-    # which DMAs 8x8 multiply rows from REU banks 0/1.  Without `-reu`
-    # the banks don't exist and the boot path silently no-ops the
-    # DMA, leading to wrong-result symptoms (and in our case, also
-    # leaves the Phase 3 reu_p384_overlay_init STASH a no-op so the
-    # subsequent crypto_swap_to_p384_* DMAs would deliver zeros).
-    # ALWAYS pass `-reu` for any test that touches REU under VICE.
-    extra_args = ["-reu", "-reusize", "512"]
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        extra_args=extra_args)
-    print(f"  VICE config: extra_args={extra_args!r}")
+    # default_vice_config() applies the mandatory -reu/-reusize=512 flags;
+    # see tools/_vice_helpers.py for the rationale (sibling nistcurves
+    # fp_mul fetches 8x8 multiply rows from REU banks 0/1 -- without -reu
+    # those reads silently no-op and Phase 3 reu_p384_overlay_init's
+    # STASH becomes a no-op too).
+    config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    print(f"  VICE config: extra_args={config.extra_args!r}")
 
     print("\n=== Starting VICE ===")
 

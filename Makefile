@@ -90,6 +90,26 @@ CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
 else ifeq ($(BACKEND),uci)
 NET_SRCS := $(UCI_SRCS)
 CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
+
+# --- W3: EMBED_P256_OVERLAY=1 stages the P-256 verify .bin as a
+# .incbin into CRYPTO_OVERLAY at PRG-load time.  Mutually exclusive
+# with USE_OVERLAY_P384_EMBED (same slot at $4200) — the rules below
+# turn the P-384 SHA embed off when EMBED_P256_OVERLAY=1 to avoid
+# overflowing the 7,680 B slot.  Default 0 so the un-flagged UCI
+# build is byte-identical to today.
+#
+# Mirrors the P-384 USE_OVERLAY_P384_EMBED bootstrap pattern: the user-
+# visible Make flag is `EMBED_P256_OVERLAY=1`; the ca65-level symbol
+# `USE_OVERLAY_P256_EMBED` (which gates the .incbin in
+# src/crypto/shared/p256_overlay_blobs.s) defaults to the same value
+# but can be explicitly overridden via the command line for the
+# bootstrap prelim link (avoids the overlay-bin <-> labels.txt cycle on
+# a clean tree).  Bootstrap workflow:
+#   make BACKEND=uci EMBED_P256_OVERLAY=1 USE_OVERLAY_P256_EMBED=0
+#   make BACKEND=uci EMBED_P256_OVERLAY=1
+EMBED_P256_OVERLAY ?= 0
+USE_OVERLAY_P256_EMBED ?= $(EMBED_P256_OVERLAY)
+
 # Phase 3: embed the two P-384 split overlay blobs in the PRG so boot
 # can populate REU banks 6/7 at startup.  Gated to UCI (ip65 has no
 # room for the SHA blob in main RAM) and to !USE_X25519_SIBLING (the
@@ -100,11 +120,34 @@ ifneq ($(USE_X25519_SIBLING),1)
 # Phase 5 Fix D: respect a command-line USE_OVERLAY_P384_EMBED=0 so the
 # bootstrap rule below can do a no-overlay-embed prelim link to break
 # the overlay-bin <-> labels.txt cycle on a clean tree.  Default is
-# still 1 unless the operator explicitly disables it.
-USE_OVERLAY_P384_EMBED ?= 1
+# still 1 unless the operator explicitly disables it.  W3: also
+# auto-turn-off when EMBED_P256_OVERLAY=1 (mutually-exclusive slot).
+ifeq ($(EMBED_P256_OVERLAY),1)
+USE_OVERLAY_P384_EMBED ?= 0
+else
+# W5 / libs/nistcurves cfa9085+ bump: PR #25's SHA-384 rotr LUTs
+# (LIB_NISTCURVES_SHA384_TABLES, 3 KB page-aligned) push the SHA-384
+# overlay-half archive above the 7.5 KB CRYPTO_OVERLAY slot limit by
+# ~1.5 KB. Default flips to 0 until the SHA-384 LUTs are either:
+#   - relocated out of the overlay slot (consumer-side path: route
+#     LIB_NISTCURVES_SHA384_TABLES to a separate resident region and
+#     teach the standalone overlay cfg to omit them from the .bin), or
+#   - shrunk on the library side (eg by sharing rotr LUTs across the
+#     8 shift amounts, or runtime-generating them at boot).
+# Set USE_OVERLAY_P384_EMBED=1 explicitly to attempt the embed (will
+# fail at link with an overflow until the SHA-384 LUTs are dealt with).
+USE_OVERLAY_P384_EMBED ?= 0
+endif
 ifeq ($(USE_OVERLAY_P384_EMBED),1)
 CA65FLAGS += -D USE_OVERLAY_P384_EMBED=1
 endif
+endif
+
+# W3: propagate USE_OVERLAY_P256_EMBED to ca65 (the .incbin in
+# src/crypto/shared/p256_overlay_blobs.s is gated on this).  The
+# default-derivation from EMBED_P256_OVERLAY happens above.
+ifeq ($(USE_OVERLAY_P256_EMBED),1)
+CA65FLAGS += -D USE_OVERLAY_P256_EMBED=1
 endif
 # Phase C.3: add c64-nist-curves P-384 primitives as a REU overlay.
 # Variable-base P-384 point ops (double/add/jacobian-to-affine) only —
@@ -162,6 +205,19 @@ ifeq ($(USE_OVERLAY_P384_EMBED),1)
 PRG_DEPS += build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin
 PRG_DEPS += build/p384_overlay_equates.inc
 build/crypto/shared/p384_overlay_blobs.o: build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin
+endif
+
+# W3: when USE_OVERLAY_P256_EMBED is on, add the P-256 verify .bin to
+# PRG_DEPS so make builds it before the .incbin in
+# src/crypto/shared/p256_overlay_blobs.s tries to read it.  The .bin
+# rule below also has an order-only dep on build/labels.txt for the
+# main-PRG label lookup (same bootstrap cycle as P-384).  Gated on the
+# ca65-level USE_OVERLAY_P256_EMBED rather than EMBED_P256_OVERLAY so
+# the bootstrap prelim link (with USE_OVERLAY_P256_EMBED=0) skips the
+# .bin dep cleanly.
+ifeq ($(USE_OVERLAY_P256_EMBED),1)
+PRG_DEPS += build/lib/nistcurves-p256-verify.bin
+build/crypto/shared/p256_overlay_blobs.o: build/lib/nistcurves-p256-verify.bin
 endif
 
 $(PRG): $(PRG_DEPS)
@@ -257,6 +313,22 @@ build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin build/labels-
 .PHONY: p384-overlay
 p384-overlay: build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin \
               build/labels-p384-sha384.txt build/labels-p384-curve.txt
+
+# W3: P-256 verify overlay .bin (library-ingestion architecture).
+# Mirrors the P-384 overlay .bin rule: depends on the P-256 sibling
+# archive (build/lib/nistcurves-p256.a, already a default PRG dep) +
+# the standalone overlay cfg.  Order-only dep on build/labels.txt for
+# the lookup_label() fallback (same pattern as P-384 — see Fix D
+# comment block above).
+build/lib/nistcurves-p256-verify.bin build/labels-p256-verify.txt: \
+		build/lib/nistcurves-p256.a \
+		cfg/p256-overlay-verify.cfg \
+		tools/integration/build_nistcurves_p256_bin.sh \
+		| build/labels.txt
+	bash tools/integration/build_nistcurves_p256_bin.sh
+
+.PHONY: p256-overlay
+p256-overlay: build/lib/nistcurves-p256-verify.bin build/labels-p256-verify.txt
 
 # Phase 5 Fix C: regenerate the P-384 overlay-resident symbol equates
 # (build/p384_overlay_equates.inc) from the overlay labels files so the
