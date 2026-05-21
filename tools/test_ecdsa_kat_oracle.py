@@ -42,6 +42,8 @@ from c64_test_harness import (
     wait_for_text,
 )
 
+from _vice_helpers import default_vice_config
+
 # ---------------------------------------------------------------------------
 # Constants (mirrors tools/test_x509.py)
 # ---------------------------------------------------------------------------
@@ -290,8 +292,7 @@ def main():
     print(f"  Vectors to run: {len(KAT_VECTORS)} (CAVP SigVer P-256/SHA-256 valid)")
     print(f"  Per-vector wallclock budget: 2400 s (VICE warp; typical ~5-16 min)")
 
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        extra_args=["-reu", "-reusize", "512"])
+    config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()

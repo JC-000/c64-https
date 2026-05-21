@@ -18,6 +18,8 @@ from c64_test_harness import (
     read_bytes, write_bytes, jsr, wait_for_text,
 )
 
+from _vice_helpers import default_vice_config
+
 try:
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
     from cryptography.hazmat.primitives.serialization import (
@@ -134,8 +136,7 @@ def main():
 
     trampoline = build_trampoline(labels, blank=blank)
 
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
-                        extra_args=["-reu", "-reusize", "512"])
+    config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
 
     print(f"Trampoline: {len(trampoline)} bytes at ${TRAMPOLINE_ADDR:04X}")
     print(f"VIC-II blanking: {'ON' if blank else 'OFF'}")
