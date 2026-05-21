@@ -295,7 +295,7 @@ def build_policy_and_arbiter_with_overlay_carveout(
     extra_reserved: tuple[MemoryRegion, ...] = (),
     min_scratch_bytes: int = 512,
 ) -> tuple[MemoryPolicy, MemoryArbiter]:
-    """Build a policy + arbiter that carves harness scratch from NET_CODE's tail.
+    """Build a policy + arbiter that carves harness scratch from a tail region.
 
     Use this when ``CRYPTO_OVERLAY`` ($4200-$5FFF) is fully occupied by
     an overlay blob (e.g. ``OVERLAY_BLOB_SHA384`` under the P-384 build,
@@ -308,21 +308,67 @@ def build_policy_and_arbiter_with_overlay_carveout(
     :func:`build_arbiter`'s default window relies on shrinks below the
     387 B of harness scratch the e2e tests need (trampoline + host /
     path strings + sentinels).
-    The workaround mirrors the P-384 wrapper that lived inline in
-    ``tools/uci/test_https_local_p384.py`` (factored out here so other
-    test scripts can reuse it without re-copying the implementation):
-    ``NET_CODE`` is declared $2000-$3FFF with ``fill = yes,
-    fillval = $00``. The adapter + relocated TLS / crypto-aux code
-    fills $2000-$3xxx (per ``build/labels.txt``'s ``__NET_CODE_LAST__``);
-    the tail (rounded up to the next page from ``LAST``) through $3FFF
-    is zero-fill in the PRG, never referenced by any production code,
-    and stays RAM after boot. We:
-      - round the NET_CODE used-end up to the next $100 boundary (cheap
+
+    Candidate source regions, tried in order (first that fits ``min_scratch_bytes``
+    wins):
+
+      1. ``NET_BSS_TAIL`` — the W1-partial / Phase C.4 spill-over BSS
+         region (declared $3B26-$41FF under UCI; the ip65 cfg uses a
+         different range, see cfg/c64-https-ip65.cfg). Most cfg
+         restructures keep slack at the high end of this region because
+         ``LIB_NISTCURVES_P256_BSS`` is ld65-placed from the bottom up;
+         under the post-W1 UCI layout this is where the "harness
+         scratch" hole actually lives. NET_BSS_TAIL is declared
+         ``type = bss`` with ``fill = yes, fillval = $00`` (UCI) or
+         file-backed (ip65), but in both cases the bytes above
+         ``__NET_BSS_TAIL_LAST__`` are unused by any production code.
+      2. ``NET_CODE`` — the legacy carveout location used by every
+         build prior to Worker D's UCI cfg restructure. ``NET_CODE`` is
+         declared $2000-$3FFF with ``fill = yes, fillval = $00``; the
+         adapter + relocated TLS / crypto-aux code fills $2000-$3xxx
+         (per ``build/labels.txt``'s ``__NET_CODE_LAST__``); the tail
+         (rounded up to the next page from ``LAST``) is zero-fill in
+         the PRG, never referenced by any production code, and stays
+         RAM after boot. Under the post-W1 UCI cfg this region is
+         completely full (NET_CODE shrunk to ``$1B26 = 6950 B`` so its
+         tail vanished); the fallback exists for older builds and the
+         ip65 backend where NET_CODE still has slack.
+      3. ``CRYPTO_OVERLAY`` — the 7,680 B swap slot at $4200-$5FFF.
+         Conditional fallback: usable ONLY when the build has no
+         overlay blob linked into the slot. The default UCI build
+         (no ``USE_X25519_SIBLING=1`` / no ``EMBED_P256_OVERLAY=1`` /
+         no ``USE_OVERLAY_P384_EMBED=1``) leaves CRYPTO_OVERLAY
+         zero-filled in the PRG with nothing reading from it at
+         runtime, which is a natural scratch home.
+
+         We gate on labels.txt: if any of
+         ``__OVERLAY_BLOB_SHA384_SIZE__``,
+         ``__OVERLAY_BLOB_P256_SIZE__``,
+         ``__X25519_RODATA_SIZE__``, or ``__X25519_BSS_SIZE__`` is
+         non-zero — OR any of ``__OVERLAY_P256_SIZE__`` /
+         ``__OVERLAY_P384_SIZE__`` (the segment names that route
+         linked .o files into the slot) — CRYPTO_OVERLAY is *skipped*
+         and we fall through to the standard error message naming the
+         NET_BSS_TAIL / NET_CODE shortfalls. The harness loses no
+         functionality on builds that need the overlay slot for real:
+         it returns the same RuntimeError it raised before this
+         candidate was added.
+
+         Unlike candidates (1) and (2), CRYPTO_OVERLAY is fully unused
+         (no ``__CRYPTO_OVERLAY_*_LAST__`` records any byte being
+         written — the region's "used end" tracks the MEMORY entry's
+         ``define = yes`` markers, not actual segment placement). When
+         this candidate is selected we therefore carve from the
+         region's *start* address rather than from a page-aligned
+         used-end.
+
+    For the chosen region we:
+      - round the region's used-end up to the next $100 boundary (cheap
         insurance against off-by-one with the very last code byte),
-      - reject the carveout if it yields fewer than ``min_scratch_bytes``
+      - reject the candidate if it yields fewer than ``min_scratch_bytes``
         of free space (default 512 B, conservative ceiling for the
         387 B the current e2e tests need),
-      - surgically rewrite the ``NET_CODE`` reservation in the
+      - surgically rewrite the chosen region's reservation in the
         labels-derived :class:`MemoryPolicy` to end at the carveout
         start (so the freed tail isn't blocked by the reserved-takes-
         precedence rule), and
@@ -335,33 +381,118 @@ def build_policy_and_arbiter_with_overlay_carveout(
         to :func:`build_policy` for consistency).
     :param unknown: Passed through to :func:`build_policy`.
     :param extra_reserved: Passed through to :func:`build_policy`.
-    :param min_scratch_bytes: Reject the carveout if NET_CODE's tail
-        yields fewer than this many bytes of free space.
-    :raises RuntimeError: When the NET_CODE tail is too small (build
-        change pushed code into the would-be scratch range).
+    :param min_scratch_bytes: Reject the candidate if its tail yields
+        fewer than this many bytes of free space.
+    :raises RuntimeError: When no candidate region's tail can supply
+        ``min_scratch_bytes`` of free space. The message names every
+        candidate tried with its measured free byte count so the
+        supervisor can decide whether to grow the region in the cfg.
     """
     labels_path = Path(labels_path)
     bounds = _parse_segment_bounds(labels_path)
     used_ends = _parse_used_ends(labels_path)
-    if "NET_CODE" not in bounds:
-        raise RuntimeError(
-            "labels.txt has no NET_CODE segment — cannot carve scratch tail"
-        )
-    netc_start, netc_decl_end = bounds["NET_CODE"]
-    netc_used_end = used_ends.get("NET_CODE", netc_start)
-    # Round up to next page so we don't trail right up to the last
-    # instruction byte (cheap insurance against off-by-one).
-    scratch_start = (netc_used_end + 0xFF) & ~0xFF
-    scratch_end_excl = netc_decl_end
-    free_bytes = scratch_end_excl - scratch_start
-    if free_bytes < min_scratch_bytes:
-        raise RuntimeError(
-            f"NET_CODE tail scratch window too small for harness: "
-            f"${scratch_start:04X}-${scratch_end_excl:04X} "
-            f"({free_bytes} B, need >= {min_scratch_bytes} B). "
-            f"NET_CODE used to ${netc_used_end:04X}, declared end "
-            f"${netc_decl_end:04X}."
-        )
+
+    # Segments that, when present with non-zero size, indicate the
+    # CRYPTO_OVERLAY slot is in use as a real overlay swap target.
+    # ld65 only emits ``__NAME_SIZE__`` for a segment that received
+    # bytes (i.e. its `.segment "NAME"` block was non-empty at link
+    # time), so the *presence* of any of these symbols in
+    # ``_parse_segment_bounds()``'s output is itself the gate.
+    overlay_blockers = (
+        "OVERLAY_BLOB_SHA384",
+        "OVERLAY_BLOB_P256",
+        "OVERLAY_P256",
+        "OVERLAY_P384",
+        "X25519_RODATA",
+        "X25519_BSS",
+    )
+    crypto_overlay_in_use = any(name in bounds for name in overlay_blockers)
+
+    # Ordered list of (region_name, bounds, used_end). NET_BSS_TAIL is
+    # the preferred source post-W1 because the UCI cfg keeps its
+    # harness-relevant slack there. NET_CODE is the historical home
+    # (pre-W1) and stays as a fallback for builds that haven't been
+    # restructured (notably the ip65 backend's older cfg variants).
+    # CRYPTO_OVERLAY is the high-headroom fallback for builds that
+    # don't currently embed an overlay blob into the slot (default
+    # UCI build = no embed flags set); 7,680 B of zero-fill RAM at
+    # $4200-$5FFF, untouched at runtime.
+    candidate_names: list[str] = ["NET_BSS_TAIL", "NET_CODE"]
+    if not crypto_overlay_in_use:
+        candidate_names.append("CRYPTO_OVERLAY")
+    attempts: list[tuple[str, int, int, int, int]] = []
+    # Per-attempt tuple: (name, region_start, region_decl_end,
+    #                    region_used_end, scratch_start)
+    # The chosen attempt also fills in scratch_end_excl + free_bytes
+    # via the loop variables below.
+
+    chosen_name: str | None = None
+    chosen_start = chosen_decl_end = chosen_used_end = 0
+    scratch_start = scratch_end_excl = free_bytes = 0
+    for name in candidate_names:
+        if name not in bounds:
+            attempts.append((name, 0, 0, 0, 0))
+            continue
+        rstart, rdecl_end = bounds[name]
+        if name == "CRYPTO_OVERLAY":
+            # Whole-region carveout: nothing is loaded into the slot,
+            # so we use the entire $4200-$5FFF range. No page-rounding
+            # against ``__CRYPTO_OVERLAY_LAST__`` (which equals
+            # ``__CRYPTO_OVERLAY_START__`` for an empty region).
+            rused_end = rstart
+            sstart = rstart
+        else:
+            rused_end = used_ends.get(name, rstart)
+            # Round up to next page so we don't trail right up to the
+            # last instruction / BSS byte (cheap insurance against
+            # off-by-one).
+            sstart = (rused_end + 0xFF) & ~0xFF
+        if sstart >= rdecl_end:
+            attempts.append((name, rstart, rdecl_end, rused_end, sstart))
+            continue
+        send = rdecl_end
+        fbytes = send - sstart
+        attempts.append((name, rstart, rdecl_end, rused_end, sstart))
+        if fbytes >= min_scratch_bytes:
+            chosen_name = name
+            chosen_start, chosen_decl_end = rstart, rdecl_end
+            chosen_used_end = rused_end
+            scratch_start, scratch_end_excl, free_bytes = sstart, send, fbytes
+            break
+
+    if chosen_name is None:
+        # Build a single multi-line message naming every candidate so
+        # the supervisor can pick a follow-up (grow NET_BSS_TAIL, route
+        # P-256 BSS elsewhere, shrink the library, etc.) without
+        # re-running the test.
+        diag_lines = [
+            "No carveout candidate has enough tail for harness scratch:"
+        ]
+        for name, rstart, rdecl_end, rused_end, sstart in attempts:
+            if rdecl_end == 0:
+                diag_lines.append(
+                    f"  {name}: not declared in labels.txt"
+                )
+            elif sstart >= rdecl_end:
+                diag_lines.append(
+                    f"  {name}: used to ${rused_end:04X}, declared end "
+                    f"${rdecl_end:04X} (no tail above page boundary)"
+                )
+            else:
+                fb = rdecl_end - sstart
+                diag_lines.append(
+                    f"  {name}: ${sstart:04X}-${rdecl_end:04X} "
+                    f"({fb} B free; used to ${rused_end:04X}, declared end "
+                    f"${rdecl_end:04X})"
+                )
+        if crypto_overlay_in_use:
+            blockers_present = [n for n in overlay_blockers if n in bounds]
+            diag_lines.append(
+                f"  CRYPTO_OVERLAY: skipped (in use by: "
+                f"{', '.join(blockers_present)})"
+            )
+        diag_lines.append(f"  need >= {min_scratch_bytes} B in some region.")
+        raise RuntimeError("\n".join(diag_lines))
 
     base = build_policy(
         labels_path,
@@ -369,15 +500,16 @@ def build_policy_and_arbiter_with_overlay_carveout(
         unknown=unknown,
         extra_reserved=extra_reserved,
     )
-    # Surgically trim the NET_CODE reservation to end at scratch_start
-    # so the trailing free range is available to the arbiter.
-    # ``reserved_regions`` is a tuple of frozen MemoryRegion dataclasses;
-    # we rebuild a fresh tuple with NET_CODE shrunk.
+    # Surgically trim the chosen region's reservation to end at
+    # scratch_start so the trailing free range is available to the
+    # arbiter. ``reserved_regions`` is a tuple of frozen MemoryRegion
+    # dataclasses; we rebuild a fresh tuple with that one region
+    # shrunk.
     new_reserved: list[MemoryRegion] = []
     for r in base.reserved_regions:
-        if r.start == netc_start and r.end == netc_decl_end:
+        if r.start == chosen_start and r.end == chosen_decl_end:
             new_reserved.append(MemoryRegion(
-                netc_start, scratch_start,
+                chosen_start, scratch_start,
                 note=f"{r.note}(overlay_carveout:trimmed)",
             ))
         else:
@@ -391,10 +523,10 @@ def build_policy_and_arbiter_with_overlay_carveout(
         policy=policy, window=(scratch_start, scratch_end_excl - 1),
     )
     print(
-        f"NET_CODE-tail harness scratch: "
+        f"{chosen_name}-tail harness scratch: "
         f"${scratch_start:04X}-${scratch_end_excl - 1:04X} "
-        f"({free_bytes} B free; NET_CODE used to ${netc_used_end:04X}, "
-        f"declared end ${netc_decl_end:04X})"
+        f"({free_bytes} B free; {chosen_name} used to ${chosen_used_end:04X}, "
+        f"declared end ${chosen_decl_end:04X})"
     )
     return policy, arbiter
 
