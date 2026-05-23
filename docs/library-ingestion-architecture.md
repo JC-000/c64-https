@@ -565,3 +565,40 @@ This is *already true today* (CLAUDE.md:131: "ip65 backend does NOT embed the P-
 ### 7.8 Open question — should the manifest become a cross-project standard doc?
 
 c64-https + c64-wireguard now jointly need the same library contract. Worth asking the user: should the spec land in *one* of the consumer projects, in a separate "c64-crypto-abi" repo, or as a section in each library's `API.md`? The current plan parks it in `docs/library-ingestion-architecture.md` (this file), with library-side issues cross-linked between consumers — but a future "the spec lives at <stable URL>" reference would be a smaller move once the contract stabilizes. Defer that decision until after Issues A-E close.
+
+## Appendix — Status as of 2026-05-23
+
+This document was written on 2026-05-20 as a forward-looking plan. The cross-project contract has since landed at [JC-000/c64-lib-contract](https://github.com/JC-000/c64-lib-contract) as `SPEC.md` (answering §7.8 — the spec lives in a dedicated repo, not in either consumer). Adopter and consumer work has progressed in parallel; this appendix snapshots which items have shipped vs. are still in-flight.
+
+### Library-side issues — status
+
+| Issue | Status | Note |
+|---|---|---|
+| c64-x25519 #43 (REU config) | landed | absorbed into c64-x25519 v0.6.0 + c64-lib-contract SPEC §8.1 adoption |
+| c64-x25519 #44 (`.exportzp`) | landed | same v0.6.0 release |
+| c64-ChaCha20-Poly1305 #26 (`.exportzp`) | landed | not yet consumed by c64-https — in-tree ChaCha20-Poly1305 is permanent |
+| Issue A (nistcurves minimal archives) | landed | `make -C libs/nistcurves lib-p256-verify` / `lib-p384-verify` / `lib-p384-sha384` / `lib-p384-curve` ship in v0.3.0 |
+| Issue B (nistcurves segment rename) | landed | `LIB_NISTCURVES_*` segment names in v0.3.0; cfg routes them by name |
+| Issue C (x25519 `LIB_VERSION_*`) | landed | v0.5.0+ |
+| Issue D (ChaCha20-Poly1305 `LIB_VERSION_*`) | landed | filed and absorbed |
+| Issue E (nistcurves manifest equates) | landed | per SPEC §8.1 |
+
+### c64-https-side work items — status
+
+| Item | Status | PR / commit |
+|---|---|---|
+| W1 — Cfg restructure UCI (hot/cold split) | landed | PR #55 (cfg/c64-https-uci.cfg: CRYPTO_HOT $6000-$9FFF + CRYPTO_COLD_SHADOW $A000-$BFFF) |
+| W2 — Cfg restructure ip65 | partial | PR #55 landed the ip65 cfg in W1-partial form; `LIB_NISTCURVES_P256_BSS` overflows CRYPTO_COLD_SHADOW by 1,662 B under ip65, tracked at [c64-nist-curves#54](https://github.com/JC-000/c64-nist-curves/issues/54) (Task #12 — library-side minimal-archive variant) |
+| W3 — Overlay infrastructure extension | partial | PR #55 ships the W3 P-256 overlay slot under EMBED_P256_OVERLAY=1; X25519 / P-256 verify swap dispatchers landed; reu_p384_overlay_init extension still aspirational |
+| W4 — Library manifest consumer | partial | segment markers (`__<SEGMENT>_SIZE__`) used in cfg post-W1; assemble-time `.assert` ZP collision guard is future work |
+| W5 — Integration script removal | landed | `tools/integration/build_nistcurves_p{256,384}.sh` / `build_x25519.sh` now are thin `make -C libs/<X> lib-<VARIANT>` wrappers (PR #55); legacy sed-strip retired |
+| W6 — VICE REU helper | landed | PR #53 (`tools/_vice_helpers.py::default_vice_config()`); all in-tree VICE tests routed through it |
+| W7 — U64E queue conventions | landed | PR #53 (DeviceLock queue-budget helper) |
+
+### Outstanding work
+
+- **Task #12** — fix ip65 `LIB_NISTCURVES_P256_BSS` overflow via library-side minimal-archive variant (tracked at [c64-nist-curves#54](https://github.com/JC-000/c64-nist-curves/issues/54)).
+- **P-384 wall-clock measurement** — still owed in CLAUDE.md's "ECDSA P-384 verify wall-clock" subsection; the dispatcher works on hardware but a clean end-to-end wall-clock has not yet been captured.
+- **CI/CD bot (§5)** — design is documented; implementation is post-stabilisation.
+
+Everything else described in this document either shipped via PRs #51-#55 or is operating in its target steady state.
