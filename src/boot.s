@@ -21,7 +21,13 @@
         .import reu_mul_init
         .else
         .export reu_mul_init
+        ; Under USE_NISTCURVES_ONCHIP the sibling's rebuilt
+        ; mul_8x8_onchip.o exports reu_fetch_mul_row unconditionally
+        ; (upstream has no guard on it) — yield ours to avoid the
+        ; ld65 duplicate. The in-tree routine body stays for local use.
+        .ifndef USE_NISTCURVES_ONCHIP
         .export reu_fetch_mul_row
+        .endif
         .endif
 
         ; ---- exports: Phase 3 P-384 overlay REU stash ----
@@ -268,6 +274,15 @@ start:
         lda $01
         and #%11111110
         sta $01
+        ; Onchip note (issue #69): fp_mul generates rows on-chip and REU
+        ; banks 0/1 are never fetched, so this population pass is not
+        ; strictly needed under USE_NISTCURVES_ONCHIP. It is RETAINED
+        ; under both profiles anyway: C64U hardware testing (2026-07-20)
+        ; showed the first UCI TCP_CONNECT after a REU-quiet boot is
+        ; dropped by the FPGA bridge (0/6 e2e vs 3/6 for REU-profile
+        ; builds on the same flaky-WiFi day) — the boot-time REU DMA
+        ; traffic appears to settle shared expansion-I/O state. See
+        ; c64-test-harness#137 experiment log.
         jsr reu_mul_init
 
         ; Phase 3: stash both P-384 split overlay images in REU banks 6

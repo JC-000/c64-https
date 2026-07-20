@@ -38,6 +38,14 @@ Variables:
                           CRYPTO_OVERLAY slot at PRG-load (UCI; mutually
                           exclusive with USE_X25519_SIBLING /
                           USE_OVERLAY_P384_EMBED)
+  - `USE_NISTCURVES_ONCHIP=1` — link the libs/nistcurves v0.5.0
+                          FP_ONCHIP_MUL turbo-profile P-256 verify
+                          archive (no REU row-fetch DMA; ~34 MHz
+                          crossover vs the default REU profile — see
+                          the ECDSA wall-clock section). Mutually
+                          exclusive with USE_X25519_SIBLING and both
+                          overlay-embed flags (MUL_CODE occupies
+                          CRYPTO_OVERLAY).
   - `CA65`, `LD65`      — toolchain overrides
   - `VICE`              — override the `make run` emulator
 
@@ -267,6 +275,15 @@ that this codebase now handles:
     fix when the P-384 build unblocks).
   - **Wider fence floor** — see the delay-loop fence section above
     (INNER=217 accommodates both devices).
+  - **REU-quiet boot drops the first TCP_CONNECT** — a PRG whose boot
+    issues no REU DMA (the original onchip-profile gating skipped
+    reu_mul_init) loses its first UCI TCP_CONNECT at the FPGA bridge:
+    command accepted, no error bit, DATA_AV never asserts, no SYN on
+    the wire (0/8 e2e attempts vs 3/3 for the identical build with
+    reu_mul_init retained; interleaved control confirmed). Boot-time
+    REU traffic evidently settles shared expansion-I/O state. boot.s
+    therefore retains reu_mul_init under BOTH profiles. See
+    c64-test-harness#137.
   - **Multiple network interfaces** — Ethernet AND WiFi. GET_IPADDR
     (iface=0) returns 0.0.0.0 on a WiFi-connected box;
     `net_dhcp_acquire` probes iface 0..3 and takes the first lease.
@@ -549,30 +566,42 @@ measured 2026-07-19 with the INNER=217 fence and boot-at-speed flow:
   - 64 MHz: **64.7 s** end-to-end — first >48 MHz datapoint. The
     48→64 ratio (0.89) is well short of the ideal 0.75.
 
-**Why turbo stops paying (measured 2026-07-19):** isolated
-`ecdsa_verify_256` bench (`bench_ecdsa_u64e.py`, RFC 6979 vector, n=3
-medians on the C64U) gives 53.8 s @ 48 MHz / 47.4 s @ 64 MHz. Fitting
-T(f) = D + C/f to both pairs:
+**Why turbo stops paying — and the fix (campaign 2026-07-20):** the
+REU's DMA rate is anchored to the ~1 MHz bus clock, so fp_mul's
+row fetches put a speed-invariant floor under every verify. Filed as
+[c64-nist-curves#69](https://github.com/JC-000/c64-nist-curves/issues/69);
+upstream shipped the `FP_ONCHIP_MUL` turbo profile in v0.5.0, consumed
+here via `make BACKEND=uci USE_NISTCURVES_ONCHIP=1`. Full 4-point
+clock sweeps (`bench_ecdsa_u64e.py`, RFC 6979 vector, n=2 medians,
+C64U, fits T(f)=D+C/f, residuals <=4.1%):
 
-                       CPU-scaled C      speed-invariant D
-  ECDSA verify         1.22 Gcycles      28.4 s  (53% of wall @ 48)
-  full HTTPS e2e       1.59 Gcycles      39.8 s
+  config           16MHz   32MHz   48MHz   64MHz    D(floor)   C
+  v0.3.0 REU       72.1    57.9    53.7    47.5     41.8 s     491 MHz*s
+  v0.5.0 REU       72.2    57.7    53.7    49.3     42.9 s     471 MHz*s
+  v0.5.0 onchip   117.5    59.6    41.2    31.0      2.5 s    1839 MHz*s
 
-  D is self-consistent to 0.1 s from either endpoint. The 28.4 s
-  verify-side D matches the sibling fp_mul's REU row-fetch traffic:
-  each 256-bit multiply DMAs up to 32 rows x 512 B = 16 KB from REU
-  banks 0/1, and REU DMA runs at the stock ~1 MB/s bus rate
-  regardless of CPU turbo (independently evidenced by the P-384
-  overlay swap: 2x7.5 KB in ~16 ms at 48 MHz = ~1.04 us/B). ~28 s
-  = ~27 MB of row DMA per verify at that rate. The remaining
-  ~11.4 s of e2e D is UCI firmware/network latency. Above ~48 MHz
-  the verify is majority-DMA-bound; the projected ceiling with this
-  fp_mul is T(inf) ~= D = 28 s no matter the clock. Getting
-  meaningfully faster requires cutting REU traffic in the sibling
-  library (fetch-free on-chip square-table mul a la c64-x25519 —
-  breakeven vs row DMA is ~2.5 MHz — or narrower row transfers),
-  tracked at
-  [c64-nist-curves#69](https://github.com/JC-000/c64-nist-curves/issues/69).
+  - The REU-profile floor is ~42 s (an earlier 2-point fit said
+    28.4 s — that number was ill-conditioned and is superseded; at
+    64 MHz the REU verify is ~88% floor).
+  - v0.5.0's REU path is performance-identical to v0.3.0.
+  - The onchip profile ELIMINATES the floor (D = 2.5 s) at the cost
+    of ~3.9x the CPU work; it scales 3.79x for a 4x clock.
+  - **Measured crossover: ~34 MHz** — REU wins below (57.7 vs
+    59.6 s at 32 MHz, in-band bracket), onchip wins above. At stock
+    1 MHz REU remains ~3x faster. Ship both profiles; note these
+    numbers are for the no-comb verify archive (the library's
+    comb-PRG numbers are ~2x faster in absolute terms).
+
+  HTTPS e2e handshake wall-clock (C64U, local listener):
+
+  profile          48 MHz    64 MHz
+  v0.3.0 REU       73.0 s    64.7-65.9 s
+  v0.5.0 onchip    59.9 s    **47.5 s** (n=3: 47.0/47.6/47.8)
+
+  47.5 s @ 64 MHz is the first sub-50 s handshake — still above a
+  typical 10-30 s internet-server window, but upstream's shape-(2)
+  follow-up (c64-nist-curves#71, ~8 s comb verify projected) plus
+  the comb archive would land the handshake around ~25-30 s.
 
 v0.3.0's hot-path code is essentially unchanged from v0.2.0;
 the small wall-clock improvement is within measurement noise across
