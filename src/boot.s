@@ -274,14 +274,16 @@ start:
         lda $01
         and #%11111110
         sta $01
-        .ifndef USE_NISTCURVES_ONCHIP
+        ; Onchip note (issue #69): fp_mul generates rows on-chip and REU
+        ; banks 0/1 are never fetched, so this population pass is not
+        ; strictly needed under USE_NISTCURVES_ONCHIP. It is RETAINED
+        ; under both profiles anyway: C64U hardware testing (2026-07-20)
+        ; showed the first UCI TCP_CONNECT after a REU-quiet boot is
+        ; dropped by the FPGA bridge (0/6 e2e vs 3/6 for REU-profile
+        ; builds on the same flaky-WiFi day) — the boot-time REU DMA
+        ; traffic appears to settle shared expansion-I/O state. See
+        ; c64-test-harness#137 experiment log.
         jsr reu_mul_init
-        .else
-        ; Onchip profile (issue #69): fp_mul generates rows on-chip via
-        ; og_common/ct_mul_8x8 — REU banks 0/1 are never fetched, so the
-        ; ~128 KB population pass is skipped. Boot obligation for the
-        ; sibling shrinks to sqtab_init (called below via the shared path).
-        .endif
 
         ; Phase 3: stash both P-384 split overlay images in REU banks 6
         ; and 7 from the .incbin'd staging blocks at $4200 and $E000.
