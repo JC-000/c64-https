@@ -60,14 +60,18 @@ UCI_TARGET_NETWORK = $03        ; network stack
 ; Tuned empirically via binary search at 48 MHz:
 ;   OUTER=3 INNER=121 (~1830 cycles, ~38 µs at 48 MHz) = FAIL
 ;   OUTER=3 INNER=122 (~1845 cycles, ~38.4 µs at 48 MHz) = PASS (minimum)
-;   OUTER=5 INNER=100 (~2525 cycles, ~52 µs at 48 MHz) = chosen (35% margin)
+;   OUTER=5 INNER=100 (~2525 cycles, ~52 µs at 48 MHz) = old choice (35%
+;                      margin at 48 MHz, but only ~4% at 64 MHz)
+;   OUTER=5 INNER=131 (~3300 cycles, ~51.6 µs at 64 MHz) = chosen — keeps
+;                      the 35% margin at the C64 Ultimate's 64 MHz top
+;                      speed (68.8 µs at 48 MHz, ~3.3 ms at 1 MHz)
 ;
-; At 1 MHz the overhead is ~2.5 ms per access — acceptable for networking.
+; At 1 MHz the overhead is ~3.3 ms per access — acceptable for networking.
 ; The macro preserves A and X via the stack, costing ~14 bytes per call
 ; site (vs 256 for the NOP sled that still wasn't enough).
 ; =============================================================================
 UCI_FENCE_OUTER = 5     ; outer loop iterations
-UCI_FENCE_INNER = 100   ; inner loop iterations
+UCI_FENCE_INNER = 131   ; inner loop iterations
 
 .macro uci_fence
     pha                         ; save A

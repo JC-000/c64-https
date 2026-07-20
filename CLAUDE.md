@@ -224,10 +224,12 @@ corrupt the UCI command protocol.
 **Fix:** A nested delay-loop macro `uci_fence` (defined in
 `src/net/uci/uci_regs.inc`) is inserted after every read/write to UCI
 registers `$DF1C-$DF1F`. Parameters: `UCI_FENCE_OUTER = 5`,
-`UCI_FENCE_INNER = 100`, yielding ~2525 cycles (~52 us at 48 MHz,
-35% safety margin). 14 bytes per fence site, 24 fence sites total
-(11 write + 13 read). At 1 MHz the same loop costs ~2.5 ms per
-access — negligible for networking.
+`UCI_FENCE_INNER = 131`, yielding ~3300 cycles (~51.6 us at 64 MHz,
+35% safety margin at the C64 Ultimate's top speed; ~68.8 us at
+48 MHz). 14 bytes per fence site, 24 fence sites total (11 write +
+13 read). At 1 MHz the same loop costs ~3.3 ms per access —
+negligible for networking. (The pre-C64U value INNER=100 gave 35%
+margin at 48 MHz but only ~4% at 64 MHz.)
 
 48 MHz turbo is fully supported and verified on real U64E hardware.
 
