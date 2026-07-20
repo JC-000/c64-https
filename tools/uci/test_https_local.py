@@ -1206,7 +1206,9 @@ def main() -> int:
         client.run_prg(prg)
         # Wait for auto-init (entropy, REU stash, DHCP). Scales with TURBO_MHZ
         # so stock 1 MHz runs allow enough time for entropy + REU sqtab init.
-        time.sleep(22.0 * _TIMEOUT_SCALE)
+        # C64_INIT_WAIT overrides the base (comb-profile boots run
+        # ec_precompute_256: ~30-50 s at 64 MHz — use 90+).
+        time.sleep(float(os.environ.get("C64_INIT_WAIT", "22")) * _TIMEOUT_SCALE)
 
         init_flag = transport.read_memory(labels["net_initialized"], 1)[0]
         print(f"net_initialized = ${init_flag:02X}")

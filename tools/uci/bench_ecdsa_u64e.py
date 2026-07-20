@@ -439,15 +439,22 @@ def main() -> int:
         enable_uci(client)
         uci_enabled = True
 
+        # Boot at the first sweep speed: comb-profile boots run
+        # ec_precompute_256 (~30-50 s even at 64 MHz, ~40 min at stock),
+        # so booting at leftover config speed is not survivable. Also
+        # matches the C64U boot-at-speed rule (runtime-switch quirk).
+        set_turbo_mhz(client, MHZ_LIST[0])
+        time.sleep(0.5)
+
         print("Resetting machine...")
         client.reset()
         time.sleep(2.5)
 
         print("run_prg(PRG)...")
         client.run_prg(prg)
-        # Wait for auto-init (entropy + sqtab + reu_mul + DHCP).
-        # reu_mul_init is the slow step; 22s is what test_https_local uses.
-        time.sleep(22.0)
+        # Wait for auto-init (entropy + sqtab + reu_mul + DHCP; comb
+        # profile adds ec_precompute_256). Override for slow profiles.
+        time.sleep(float(os.environ.get("C64_INIT_WAIT", "22")))
 
         init_flag = transport.read_memory(labels["net_initialized"], 1)[0]
         print(f"net_initialized = ${init_flag:02X}")

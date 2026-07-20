@@ -38,14 +38,21 @@ Variables:
                           CRYPTO_OVERLAY slot at PRG-load (UCI; mutually
                           exclusive with USE_X25519_SIBLING /
                           USE_OVERLAY_P384_EMBED)
-  - `USE_NISTCURVES_ONCHIP=1` — link the libs/nistcurves v0.5.0
+  - `USE_NISTCURVES_ONCHIP=1` — link the libs/nistcurves
                           FP_ONCHIP_MUL turbo-profile P-256 verify
-                          archive (no REU row-fetch DMA; ~34 MHz
-                          crossover vs the default REU profile — see
-                          the ECDSA wall-clock section). Mutually
-                          exclusive with USE_X25519_SIBLING and both
-                          overlay-embed flags (MUL_CODE occupies
-                          CRYPTO_OVERLAY).
+                          archive (no REU row-fetch DMA; ~22 MHz
+                          crossover vs the default REU profile at
+                          v0.6.0 — see the ECDSA wall-clock section).
+                          Mutually exclusive with USE_X25519_SIBLING
+                          and both overlay-embed flags (MUL_CODE
+                          occupies CRYPTO_OVERLAY).
+  - `USE_NISTCURVES_ONCHIP_COMB=1` — comb-accelerated onchip profile
+                          (implies USE_NISTCURVES_ONCHIP): Lim-Lee
+                          fixed-base u1*G + ec_precompute_256 boot
+                          pass into REU bank 2. Fastest verify above
+                          ~7 MHz; boot costs ~50 s at 64 MHz (test
+                          scripts: set C64_INIT_WAIT). Uses
+                          cfg/c64-https-$(BACKEND)-onchip.cfg.
   - `CA65`, `LD65`      — toolchain overrides
   - `VICE`              — override the `make run` emulator
 
@@ -580,6 +587,7 @@ C64U, fits T(f)=D+C/f, residuals <=4.1%):
   v0.5.0 REU       72.2    57.7    53.7    49.3     42.9 s     471 MHz*s
   v0.5.0 onchip   117.5    59.6    41.2    31.0      2.5 s    1839 MHz*s
   v0.6.0 onchip    88.3    43.3    30.9    22.9      1.1 s    1396 MHz*s
+  v0.6.0 onchip+comb 49.4  24.9    16.5    12.4     ~0.2 s     787 MHz*s
 
   - The REU-profile floor is ~42 s (an earlier 2-point fit said
     28.4 s — that number was ill-conditioned and is superseded; at
@@ -587,26 +595,30 @@ C64U, fits T(f)=D+C/f, residuals <=4.1%):
   - v0.5.0's REU path is performance-identical to v0.3.0.
   - The onchip profile ELIMINATES the floor (D = 2.5 s) at the cost
     of ~3.9x the CPU work; it scales 3.79x for a 4x clock.
-  - **Measured crossover: ~34 MHz for v0.5.0 shape-1; ~22 MHz for
-    v0.6.0 shape-2** (inline quarter-square row gen, issue #71 —
-    onchip now wins at 32 MHz too: 43.3 vs 57.7 s). At stock 1 MHz
-    REU remains the right default (~2.5x faster). Ship both
-    profiles; note these numbers are for the no-comb verify archive
-    (the library's comb-PRG numbers are ~2x faster in absolute
-    terms).
+  - **Measured crossovers vs the REU profile: ~34 MHz (v0.5.0
+    shape-1), ~22 MHz (v0.6.0 shape-2), ~7 MHz (shape-2 + comb)**.
+    The comb build (USE_NISTCURVES_ONCHIP_COMB=1) dominates the
+    no-comb onchip build at every clock; its costs are the
+    ec_precompute_256 boot pass (~50 s at 64 MHz, ~3.5 min at
+    16 MHz, ~40 min at stock — scripts need C64_INIT_WAIT) and REU
+    bank 2 $0000-$3FFF residency. At stock 1 MHz the REU profile
+    remains the right default.
 
   HTTPS e2e handshake wall-clock (C64U, local listener):
 
-  profile          48 MHz    64 MHz
-  v0.3.0 REU       73.0 s    64.7-65.9 s
-  v0.5.0 onchip    59.9 s    47.5 s (n=3: 47.0/47.6/47.8)
-  v0.6.0 onchip    51.0 s    **39.7 s**
+  profile             48 MHz    64 MHz
+  v0.3.0 REU          73.0 s    64.7-65.9 s
+  v0.5.0 onchip       59.9 s    47.5 s (n=3: 47.0/47.6/47.8)
+  v0.6.0 onchip       51.0 s    39.7 s
+  v0.6.0 onchip+comb  38.4 s    **31.0 s**
 
-  39.7 s @ 64 MHz brushes the top of a typical 10-30 s
-  internet-server handshake window. The remaining big lever is the
-  comb-accelerated full archive (`nistcurves-onchip.a` + precompute
-  boot + REU bank-2 residency): upstream's comb verify measures
-  11.8 s @ 64 MHz, projecting a ~28-29 s handshake here.
+  31.0 s @ 64 MHz sits at the top edge of a typical 10-30 s
+  internet-server handshake window — the first configuration where
+  a real-server TLS connection is plausible. Remaining spend:
+  ~12.4 s verify + ~18.6 s of everything else (X25519, SHA-256
+  transcript+HMACs, record I/O, UCI firmware/network latency) —
+  the non-verify side is now the bigger half and the next
+  profiling target.
 
 v0.3.0's hot-path code is essentially unchanged from v0.2.0;
 the small wall-clock improvement is within measurement noise across

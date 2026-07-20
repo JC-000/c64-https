@@ -47,7 +47,12 @@
 ; --- Exports ---
 .export ecdsa_verify
 .export ecdsa_parse_der_sig
+; Under the comb profile the sibling's points256_comb.o provides the
+; real Lim-Lee ec_scalar_mul — the shim below (seed G, run the
+; variable-base ladder) is only for no-comb archives.
+.ifndef USE_NISTCURVES_COMB
 .export ec_scalar_mul                   ; shim for sibling's Lim-Lee slot
+.endif
 
 
 .segment "CRYPTO_CODE"
@@ -90,6 +95,7 @@ ecdsa_verify:
 ; contiguous 32-byte slots (X then Y) in the sibling's data segments, so
 ; a single 64-byte copy loop suffices for both coordinates.
 ; =============================================================================
+.ifndef USE_NISTCURVES_COMB
 ec_scalar_mul:
         ldy #63
 @cp_g:  lda ec_gx256,y                  ; also covers ec_gy256 at +32
@@ -97,6 +103,7 @@ ec_scalar_mul:
         dey
         bpl @cp_g
         jmp ec_scalar_mul_var
+.endif
 
 
 ; =============================================================================
