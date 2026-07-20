@@ -571,7 +571,10 @@ T(f) = D + C/f to both pairs:
   meaningfully faster requires cutting REU traffic in the sibling
   library (fetch-free on-chip square-table mul a la c64-x25519 —
   breakeven vs row DMA is ~2.5 MHz — or narrower row transfers),
-  tracked as a c64-nist-curves issue candidate. v0.3.0's hot-path code is essentially unchanged from v0.2.0;
+  tracked at
+  [c64-nist-curves#69](https://github.com/JC-000/c64-nist-curves/issues/69).
+
+v0.3.0's hot-path code is essentially unchanged from v0.2.0;
 the small wall-clock improvement is within measurement noise across
 runs. It is fine for the local listener used by the e2e harness (600 s
 budget, ample headroom). Further speedups live in the sibling
