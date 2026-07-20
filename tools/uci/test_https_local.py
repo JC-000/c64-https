@@ -1185,6 +1185,19 @@ def main() -> int:
             )
             return 3
 
+        # --- Set turbo BEFORE booting the PRG ---
+        # C64 Ultimate quirk (firmware 1.1.0, core 1.49): a runtime CPU
+        # speed change via the REST config API can glitch the UCI bridge
+        # so that the next pushed command is silently lost — observed as
+        # UCI_ERR_NO_SOCKET on the first TCP_CONNECT after a 1->64 MHz
+        # switch (2x reproduced; 1->48 happened to survive). Booting at
+        # the target speed avoids the mid-session switch entirely and
+        # also makes boot speed deterministic (it used to be whatever
+        # the previous run left in the device config).
+        print(f"Setting turbo to {TURBO_MHZ} MHz...")
+        set_turbo_mhz(client, TURBO_MHZ)
+        time.sleep(0.5)
+
         print("Resetting machine...")
         client.reset()
         time.sleep(2.5)
@@ -1200,12 +1213,9 @@ def main() -> int:
         if init_flag == 0:
             print("WARNING: net_initialized is 0 — auto-init may have failed")
 
-        # --- Flip to 48 MHz turbo BEFORE we trigger the stub ---
-        print(f"Setting turbo to {TURBO_MHZ} MHz...")
-        set_turbo_mhz(client, TURBO_MHZ)
-        time.sleep(0.5)
+        # (Turbo was set before boot — see the C64U quirk note above.)
 
-        # --- Start 6510 debug-stream capture (after turbo, before trigger) ---
+        # --- Start 6510 debug-stream capture (before trigger) ---
         if DEBUG_CAPTURE_ENABLED:
             try:
                 set_debug_stream_mode(client, DEBUG_MODE_6510)
