@@ -579,6 +579,7 @@ C64U, fits T(f)=D+C/f, residuals <=4.1%):
   v0.3.0 REU       72.1    57.9    53.7    47.5     41.8 s     491 MHz*s
   v0.5.0 REU       72.2    57.7    53.7    49.3     42.9 s     471 MHz*s
   v0.5.0 onchip   117.5    59.6    41.2    31.0      2.5 s    1839 MHz*s
+  v0.6.0 onchip    88.3    43.3    30.9    22.9      1.1 s    1396 MHz*s
 
   - The REU-profile floor is ~42 s (an earlier 2-point fit said
     28.4 s — that number was ill-conditioned and is superseded; at
@@ -586,22 +587,26 @@ C64U, fits T(f)=D+C/f, residuals <=4.1%):
   - v0.5.0's REU path is performance-identical to v0.3.0.
   - The onchip profile ELIMINATES the floor (D = 2.5 s) at the cost
     of ~3.9x the CPU work; it scales 3.79x for a 4x clock.
-  - **Measured crossover: ~34 MHz** — REU wins below (57.7 vs
-    59.6 s at 32 MHz, in-band bracket), onchip wins above. At stock
-    1 MHz REU remains ~3x faster. Ship both profiles; note these
-    numbers are for the no-comb verify archive (the library's
-    comb-PRG numbers are ~2x faster in absolute terms).
+  - **Measured crossover: ~34 MHz for v0.5.0 shape-1; ~22 MHz for
+    v0.6.0 shape-2** (inline quarter-square row gen, issue #71 —
+    onchip now wins at 32 MHz too: 43.3 vs 57.7 s). At stock 1 MHz
+    REU remains the right default (~2.5x faster). Ship both
+    profiles; note these numbers are for the no-comb verify archive
+    (the library's comb-PRG numbers are ~2x faster in absolute
+    terms).
 
   HTTPS e2e handshake wall-clock (C64U, local listener):
 
   profile          48 MHz    64 MHz
   v0.3.0 REU       73.0 s    64.7-65.9 s
-  v0.5.0 onchip    59.9 s    **47.5 s** (n=3: 47.0/47.6/47.8)
+  v0.5.0 onchip    59.9 s    47.5 s (n=3: 47.0/47.6/47.8)
+  v0.6.0 onchip    51.0 s    **39.7 s**
 
-  47.5 s @ 64 MHz is the first sub-50 s handshake — still above a
-  typical 10-30 s internet-server window, but upstream's shape-(2)
-  follow-up (c64-nist-curves#71, ~8 s comb verify projected) plus
-  the comb archive would land the handshake around ~25-30 s.
+  39.7 s @ 64 MHz brushes the top of a typical 10-30 s
+  internet-server handshake window. The remaining big lever is the
+  comb-accelerated full archive (`nistcurves-onchip.a` + precompute
+  boot + REU bank-2 residency): upstream's comb verify measures
+  11.8 s @ 64 MHz, projecting a ~28-29 s handshake here.
 
 v0.3.0's hot-path code is essentially unchanged from v0.2.0;
 the small wall-clock improvement is within measurement noise across
