@@ -31,6 +31,13 @@ Targets:
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65)
+  - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
+                          `libs/x25519@v0.6.0` sibling (UCI only — ip65
+                          has a tracked BSS overflow; see "Known issues")
+  - `EMBED_P256_OVERLAY=1` — stage the P-256 verify image into the
+                          CRYPTO_OVERLAY slot at PRG-load (UCI; mutually
+                          exclusive with USE_X25519_SIBLING /
+                          USE_OVERLAY_P384_EMBED)
   - `CA65`, `LD65`      — toolchain overrides
   - `VICE`              — override the `make run` emulator
 
@@ -56,9 +63,11 @@ buffers in the crypto BSS — see per-module headers for details):
 
   X25519 / field arithmetic
     Default: in-tree `src/crypto/{x25519,fe25519}.s`.
-    Opt-in: sibling `libs/x25519@v0.4.0` via `make USE_X25519_SIBLING=1`
-    (UCI backend only — see Known issues for the ip65 fit blocker; Phase
-    C.5). Sibling and in-tree both expose the same ABI:
+    Opt-in: sibling `libs/x25519@v0.6.0` via `make USE_X25519_SIBLING=1`
+    (UCI backend only — see Known issues for the ip65 fit limitation).
+    The v0.6.0 pin is c64-lib-contract-aligned (SPEC §8.1) and adds the
+    bank-2 drop + RAM-reclaim work; older v0.4.0 pin is historical only.
+    Sibling and in-tree both expose the same ABI:
     x25519_scalarmult     — X25519 scalar × point, 32-byte buffers
     fe25519_mul, fe25519_sqr, fe25519_inv
 
@@ -70,11 +79,14 @@ buffers in the crypto BSS — see per-module headers for details):
   SHA-256                   (in-tree; no sibling)
     sha256_init, sha256_update, sha256_final
 
-  ECDSA P-256                (libs/nistcurves sibling, Phase C.4)
+  ECDSA P-256                (`libs/nistcurves@v0.3.0` sibling,
+                              c64-lib-contract SPEC §1-§8.1 aligned)
     ecdsa_verify_256      — TLS dispatcher in src/crypto/ecdsa_verify.s
                             packs the BE struct + calls the sibling entry
     ec_scalar_mul_var     — variable-base scalar multiplication
-    (in-tree ecdsa_{curve,fp,mod,points}.s were deleted in Phase G)
+    (in-tree ecdsa_{curve,fp,mod,points}.s were deleted in Phase G;
+    archive built via `make -C libs/nistcurves lib-p256-verify` — see
+    `tools/integration/build_nistcurves_p256.sh` for the wrapper.)
 
 P-384 is *stubbed at the TLS layer* (see `project_p384_stubbed` memory
 note). The sibling `libs/nistcurves` P-384 primitives are buildable as
@@ -82,25 +94,31 @@ an external overlay image (Phase C.3b, `make p384-overlay`) but the
 target has a pre-existing unresolved-symbol bug (`ec_base384_x/y` in
 points384_raw.s) — fix that before wiring P-384 into the TLS path.
 
-MEMORY requirements for a drop-in sibling library:
-  - Code + rodata must load into the `CRYPTO` region at **$6000-$9FFF**
-    (below the BASIC ROM shadow at $A000, so it survives ROM banking).
-  - `TABLES_BSS` (`x25519` squaring tables etc.) must stay **below $A000**;
-    the cfg pins it inside the CRYPTO region with `align = $100`.
+MEMORY requirements for a drop-in sibling library (see "Memory layout"
+below for the post-W1 hot/cold split):
+  - Code + rodata must load into the `CRYPTO_HOT` region at
+    **$6000-$9FFF** (UCI) / `CRYPTO_RESIDENT` (ip65, same span). No
+    segment may cross $A000 — boot zeroes $A000-$BFFF as BSS, so any
+    executable straddling that boundary gets wiped on first call.
+  - Large BSS (page-aligned tables etc.) lands in `CRYPTO_COLD_SHADOW`
+    at **$A000-$BFFF** (file-backed zero-fill, CPU port $01 = $36
+    selects RAM under BASIC ROM).
+  - Sibling-library segments follow the c64-lib-contract SPEC §8.1
+    naming (`LIB_NISTCURVES_P256_CODE`, `LIB_NISTCURVES_P256_RODATA`,
+    `LIB_NISTCURVES_P256_BSS`, etc.); the consumer cfg places them by
+    name. See [c64-lib-contract](https://github.com/JC-000/c64-lib-contract)
+    for the contract spec and `docs/library-ingestion-architecture.md`
+    for the c64-https rollout plan.
   - Zero-page usage is defined in `src/constants.inc` — fe25519 lives at
     `$2C-$37`, x25519 state at `$38-$3A`, ECDSA bignum at `$22-$3C`.
     These ranges are time-shared (fe25519 and ChaCha20 never overlap).
   - REU Profile B is the baseline. Under the default build the in-tree
     x25519 implementation uses a smaller on-chip squaring table in
     `TABLES_BSS` and leaves REU banks 0-1 free. Under
-    `USE_X25519_SIBLING=1` (Phase C.5) the sibling's `reu_mul_init`
-    populates REU banks 0-5 with mul / doubled / 17-bit-carry tables;
-    banks 3-5 nominally collide with the P-256 / P-384 precompute
-    reservations in `src/crypto/shared/reu_layout.inc` but the
-    collision is theoretical only (P-256 uses `ec_scalar_mul_var` with
-    no precompute; P-384 is stubbed at the TLS layer). Banks 6-7 stay
-    reserved for the `make p384-overlay` external-image smoke test
-    (Phase C.3b).
+    `USE_X25519_SIBLING=1` the v0.6.0 sibling's `reu_mul_init` dropped
+    the bank-2 squaring table (RAM-reclaim work, c64-lib-contract
+    §8.1 adoption); banks 6-7 stay reserved for the
+    `make p384-overlay` external-image smoke test.
   - `crypto_init` currently bootstraps `mul_tables_init` only. X25519
     state and any per-run setup happens from the boot path in
     `src/boot.s`. The overlay swap dispatcher
@@ -215,14 +233,20 @@ access — negligible for networking.
 
 ### Memory layout under UCI
 
-The NET_CODE/NET_BSS regions ($2000-$5FFF) are repurposed:
+Post-W1 the UCI cfg is the reference; see the "Memory layout" section
+below for the full table. Headline differences from the (similarly
+post-W1) ip65 layout:
 
-  $2000-$3FFF  UCI_CODE     UCI adapter code (`net.s`, `uci_cmd.s`)
-  $4000-$5FFF  UCI_BSS      `uci_host_buf`, ipaddr scratch, socket
-                            state, command control block
-
-All other regions (LOADER, CRYPTO, SHADOW_BSS, TCP_BUF) are identical
-to the ip65 layout.
+  - `NET_CODE` ($2000-$3B25) is much smaller because the UCI adapter
+    is ~1.7 KB vs ip65's ~6.95 KB blob. The tail carries
+    `LOADER_OVERFLOW`, `TLS_CODE`, `CRYPTO_AUX_CODE`.
+  - `NET_BSS_TAIL` ($3B26-$3FFF) absorbs UCI_BSS +
+    `LIB_NISTCURVES_P256_BSS` spill.
+  - `CRYPTO_OVERLAY` is a real 7.5 KB slot ($4200-$5FFF) used for the
+    P-384 SHA-384/curve overlays, the W3 P-256 overlay embed, and the
+    `USE_X25519_SIBLING=1` X25519 rodata + BSS.
+  - `CRYPTO_HOT` + `CRYPTO_COLD_SHADOW` are the W1 hot/cold split of
+    the historical `CRYPTO_RESIDENT` (see "Memory layout" below).
 
 ### UCI test scripts
 
@@ -385,21 +409,24 @@ Five latent bugs and three new ones were cleared to get here:
     `tools/uci/test_https_print_body.py` with a mixed-case response
     body.  `http_resp_buf` still holds raw ASCII — only the render
     pipeline is translated.
-  - **X25519 sibling (Phase C.5)** — `make USE_X25519_SIBLING=1` builds
-    against `libs/x25519@v0.4.0`. Default is OFF; the in-tree
-    implementation remains the shipped default until the flag flip is
-    decided. The Phase C.1 hang and v0.3.0 retry rollback are both
-    closed by upstream PR #36 + v0.4.0 H2 (defensive REU register init
-    at every `x25519_scalarmult` / `fe25519_mul` / `_sqr` / `_mul_a24`
-    / `_inv` entry — eliminates the `do_swap` residue confound on
-    `$DF04`/`$DF0A` that produced the wrong-result symptom). Verified
-    on U64E at 48 MHz: HTTPS handshake completes in ~101 s
-    (vs ~87 s under in-tree X25519; the +14 s is consistent with
-    v0.4.0's release-notes-documented +27 % scalarmult cost over v0.3.0
-    for the L1-L29 CT closures). **ip65 backend overflows
-    CRYPTO_RESIDENT by 1 KB under the flag** — UCI is the supported
-    path; ip65 fit is a separate cfg-restructure follow-up. See
-    `tools/integration/build_x25519.sh` for the staging layout.
+  - **X25519 sibling (`libs/x25519@v0.6.0`)** —
+    `make USE_X25519_SIBLING=1` builds against the sibling; default is
+    OFF, the in-tree implementation remains the shipped default until
+    the flag flip is decided. The v0.6.0 pin landed via PR #55 along
+    with the c64-lib-contract alignment; it drops the bank-2 squaring
+    table and reclaims RAM under the post-W1 hot/cold split (see
+    "Memory layout" below). Earlier-pin caveats (Phase C.1 hang,
+    v0.3.0 retry rollback, v0.4.0 H2 defensive REU re-inits) are all
+    superseded by v0.6.0; the file-level history lives in the c64-x25519
+    repo's CHANGELOG. **ip65 backend currently overflows
+    `LIB_NISTCURVES_P256_BSS` placement into CRYPTO_COLD_SHADOW by
+    1,662 bytes** when the bumped library is linked under ip65 (the W1
+    hot/cold split closed the analogous UCI-side gap but ip65's blob is
+    larger, so it stays at limit); fix is tracked at
+    [c64-nist-curves#54](https://github.com/JC-000/c64-nist-curves/issues/54)
+    (minimal-archive split). UCI is the supported sibling-on path
+    today. See `tools/integration/build_x25519.sh` for the
+    `make -C libs/x25519 lib-x25519-scalarmult` wrapper.
   - **CRYPTO_OVERLAY collisions are now caught by MemoryPolicy.** All
     `tools/uci/*.py` test scripts derive their scratch DMA addresses
     from a `MemoryArbiter` backed by a c64-https-aware `MemoryPolicy`
@@ -426,14 +453,15 @@ Five latent bugs and three new ones were cleared to get here:
     stays stuck at `reu_mul_init`'s final-iteration residue (a=255), so
     every `fp_mul` returns `a*255*b mod p` instead of `a*b mod p`.
     Cascade: wrong `w=s^-1 mod n`, wrong `u1`/`u2`, wrong computed `R`,
-    `R.x != r`, verify returns C=1. Pattern is fixed in
-    `tools/test_x509.py:769` and `tools/test_ecdsa_kat_oracle.py:293`;
-    mirror this in any new VICE-driven test for P-256:
-    `ViceConfig(..., extra_args=["-reu", "-reusize", "512"])`. The same
-    pattern is already in `tools/test_x25519.py:722`,
-    `tools/bench_x25519.py:138`, `tools/test_p384_symbols.py:370`. The
-    UCI path is unaffected because the U64E hardware has REU enabled by
-    default; the symptom was VICE-only.
+    `R.x != r`, verify returns C=1. **Use the helper at
+    `tools/_vice_helpers.py::default_vice_config()`** (PR #53) — it
+    pre-applies the mandatory `-reu -reusize 512` flags. All in-tree
+    VICE-driven tests (`test_x509.py`, `test_ecdsa_kat_oracle.py`,
+    `test_x25519.py`, `bench_x25519.py`, `test_p384_symbols.py`) now go
+    through it; mirror that pattern in any new VICE test rather than
+    spelling out `ViceConfig(extra_args=["-reu", "-reusize", "512"])`
+    by hand. The UCI path is unaffected because the U64E hardware has
+    REU enabled by default; the symptom was VICE-only.
 
 ### ECDSA P-256 verify wall-clock
 
@@ -456,19 +484,16 @@ a verify-path bug — see "VICE harness gotcha" in the Known issues
 list. With `-reu` enabled, `tools/test_x509.py` 3c PASSes cleanly in
 ~60 s wall-clock under VICE warp.
 
-Under the v0.2.0 submodule pin the U64E 48 MHz handshake measures
-**86.7 s** end-to-end (re-measured 2026-05-12, `tools/uci/test_https_local`,
-local listener). The +4.8 s vs the 81.9 s v0.1.0-10-gdfdfb59 baseline
-above is attributable to v0.2.0's defensive REU register inits at
-`fp_mul`/`fp_sqr`/`ec_scalar_mul_var`/`fp_inv`/`ecdsa_verify_256` proc
-entry (release notes "Security/correctness defences" — +6 cy/call;
-the wall-clock impact compounds across the tens of thousands of
-field-mul/sqr calls in the scalar mult).
-It is fine for the local listener used by the e2e harness (600 s
+Under the current `libs/nistcurves@v0.3.0` pin (post-PR #55,
+c64-lib-contract-aligned) the U64E 48 MHz handshake measures **82.1 s**
+end-to-end (verified 2026-05-20 against the local listener; the prior
+v0.2.0 measurement was 86.7 s, and the pre-Phase-C.4 in-tree path was
+~110 s). v0.3.0's hot-path code is essentially unchanged from v0.2.0;
+the small wall-clock improvement is within measurement noise across
+runs. It is fine for the local listener used by the e2e harness (600 s
 budget, ample headroom). Further speedups live in the sibling
 `libs/nistcurves` repo — any drop through the Crypto ABI lands
-here as a submodule bump without
-touching TLS call sites.
+here as a submodule bump without touching TLS call sites.
 
 ### ECDSA P-384 verify wall-clock
 
@@ -545,33 +570,82 @@ the companion drain + ack and force the appropriate exit state.
 
 ## Memory layout
 
-Defined in `cfg/c64-https-ip65.cfg`. Physically contiguous file-backed
-regions run from $0801 through $9FFF, with SHADOW_BSS at $A000 and the
-TCP ring at $C000.
+Defined in `cfg/c64-https-ip65.cfg` (W1 partial split) and
+`cfg/c64-https-uci.cfg` (full W1 hot/cold split). Post-W1 the cfgs
+diverge non-trivially; both refactors landed via PR #55 to absorb the
+bumped `libs/nistcurves` library without overflowing CRYPTO.
 
-  $0801-$1FFF  LOADER       BASIC stub + boot + TLS + HTTP + net wrapper
-  $2000-$3FFF  NET_CODE     ip65 code (as .incbin blob) / UCI adapter,
-                            plus LOADER_OVERFLOW tail
-  $4000-$5FFF  NET_BSS      ip65 BSS (zero-filled in the PRG)
-  $6000-$9FFF  CRYPTO       all crypto code, rodata, and TABLES_BSS
-  $A000-$BFFF  SHADOW_BSS   mutable state behind BASIC ROM shadow
-                            (CPU port $01 = $36 selects RAM)
-  $C000-$CFFF  TCP_BUF      `tcp_recv_buf`, 4KB ring for ip65 callback
+UCI layout (W1 reference — `cfg/c64-https-uci.cfg`):
+
+  $0801-$1FFF  LOADER             BASIC stub + boot + HTTP + net wrapper
+  $2000-$3B25  NET_CODE           UCI adapter (~1.7 KB) + LOADER_OVERFLOW
+                                  + TLS_CODE + CRYPTO_AUX_CODE
+  $3B26-$3FFF  NET_BSS_TAIL       BSS spill carved from NET_CODE tail
+                                  (UCI_BSS + LIB_NISTCURVES_P256_BSS
+                                  land here when they don't fit in
+                                  CRYPTO_HOT)
+  $4000-$41FF  UCI_BSS_REGION     Zero-size alias post-W1 (UCI_BSS moved
+                                  into NET_BSS_TAIL above)
+  $4200-$5FFF  CRYPTO_OVERLAY     7.5 KB swappable overlay slot
+                                  (X25519 sibling / P-384 SHA-384 /
+                                  P-384 curve / W3 P-256 verify embed)
+  $6000-$9FFF  CRYPTO_HOT         16 KB file-backed; resident code +
+                                  rodata + small BSS (UCI_BSS, most of
+                                  libs/nistcurves P-256). No segment
+                                  crosses $A000 — boot's zbss loop wipes
+                                  $A000-$BFFF, so anything executable up
+                                  there would be zeroed on first run.
+  $A000-$BFFF  CRYPTO_COLD_SHADOW 8 KB file-backed (zero-filled); large
+                                  BSS chunks (BSS, CRYPTO_BSS,
+                                  TABLES_BSS, BSS_TAIL).
+  $C000-$DFFF  OVERLAY_FILE_PAD   Zero-pad in the PRG; runtime: TCP_BUF
+                                  ring at $C000.
+  $E000-$FDFF  OVERLAY_BLOB_CURVE_RAM
+                                  P-384 CURVE overlay blob; boot DMAs
+                                  it to REU bank 7 then this region is
+                                  reusable.
+
+ip65 layout (W1 partial — `cfg/c64-https-ip65.cfg`):
+
+  $0801-$1FFF  LOADER             (same)
+  $2000-$3FFF  NET_CODE           ip65 blob + LOADER_OVERFLOW +
+                                  CRYPTO_AUX_CODE2
+  $4000-$4F8B  NET_BSS            ip65 blob's BSS (occupancy stops at
+                                  $4F8B per ip65-c64.map)
+  $4F8C-$5FFF  CRYPTO_OVERLAY     4,212 B reclaimed BSS-TAIL slot; holds
+                                  TLS_CODE + CRYPTO_AUX_CODE (Phase C.4
+                                  placement). Future P-384 / SHA-384 /
+                                  X25519 sibling overlay segments
+                                  anchored here (`optional = yes`).
+  $6000-$9FFF  CRYPTO_RESIDENT    16 KB file-backed code + rodata
+                                  (stays below $A000 — see UCI note)
+  $A000-$BFFF  CRYPTO_COLD_SHADOW 8 KB file-backed BSS
+  $C000-$CFFF  TCP_BUF            tcp_recv_buf, 4 KB ring for ip65 callback
 
 `LOADER_OVERFLOW` is a small segment carrying ~125 B of `http.s` growth
 (Content-Length parser + digit pattern) that did not fit in LOADER's
 ~50 B of slack. It rides in the tail of `NET_CODE`, after the ip65
 blob under the ip65 backend and after the UCI adapter under the UCI
-backend. Both `cfg/c64-https-ip65.cfg` and `cfg/c64-https-uci.cfg`
-declare it. Reachable via JSR from LOADER-resident CODE.
+backend. Both cfgs declare it. Reachable via JSR from LOADER-resident
+CODE.
 
-Tight regions (after Phase 6 fit-up):
-  - **CRYPTO** is **100%** full. Any new crypto byte requires relocation
-    or reclamation somewhere.
-  - **SHADOW_BSS** was **99.8%** full after Phase 6; ≈258 B was reclaimed
-    in the `tls_hs_buf` removal (256 B buffer + 2 B length word), so
-    there is a bit more slack now. Still the tightest region after
-    CRYPTO — check the linker map before adding anything sizeable.
+Tight regions (post-W1):
+  - **CRYPTO_HOT / CRYPTO_RESIDENT** carry resident code + rodata.
+    Under UCI the W1 split moved big BSS into CRYPTO_COLD_SHADOW,
+    opening enough slack to absorb the v0.3.0 nistcurves bump cleanly.
+  - **CRYPTO_COLD_SHADOW** ($A000-$BFFF, 8 KB) holds the bulk of BSS.
+    Under ip65 the total c64-https + libs/nistcurves BSS claim exceeds
+    8 KB by 1,662 B; ld65 surfaces this at link time as a `BSS overflows
+    CRYPTO_COLD_SHADOW by 1662 bytes` warning. Cfg-only relief is
+    exhausted under the bumped library — resolution requires a
+    library-side minimal-archive variant, tracked at
+    [c64-nist-curves#54](https://github.com/JC-000/c64-nist-curves/issues/54).
+    UCI builds clean; ip65 still builds clean today only when the
+    sibling X25519 flag is off (which is the default).
+  - **CRYPTO_OVERLAY** under UCI doubles as P-384 SHA-384/curve overlay
+    paging slot, the W3 P-256 overlay embed slot, AND the
+    USE_X25519_SIBLING=1 X25519 sibling rodata + BSS slot. Mutually
+    exclusive at link time across the three flags.
 
 There is a known TODO to restructure the MEMORY map so that all
 file-backed regions are physically contiguous in a single ROM-like
@@ -579,6 +653,11 @@ run (the LOADER/NET gap is currently zero-filled into the PRG just
 to keep offsets right). That cleanup is explicitly **out of scope**
 for the ca65-conversion branch — see the Phase 6 commit for the
 rationale and follow-up plan.
+
+See `docs/library-ingestion-architecture.md` for the broader plan
+(W1-W7 work items, library-side issues A-E filed against
+`JC-000/c64-lib-contract` + adopter repos, CI bot design) that this
+section is incrementally executing.
 
 ### LOADADDR / exports stubs
 
