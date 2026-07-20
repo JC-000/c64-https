@@ -547,10 +547,31 @@ measured 2026-07-19 with the INNER=217 fence and boot-at-speed flow:
   - 48 MHz: **73.0 s** end-to-end (faster than the U64E's 82.1 s at
     the same clock — different FPGA core)
   - 64 MHz: **64.7 s** end-to-end — first >48 MHz datapoint. The
-    48→64 ratio (0.89) is well short of the ideal 0.75, so at these
-    speeds a growing share of wall-clock is speed-invariant (network
-    I/O, fence overhead, FPGA-side command latency); raw CPU crypto
-    is no longer the whole story. v0.3.0's hot-path code is essentially unchanged from v0.2.0;
+    48→64 ratio (0.89) is well short of the ideal 0.75.
+
+**Why turbo stops paying (measured 2026-07-19):** isolated
+`ecdsa_verify_256` bench (`bench_ecdsa_u64e.py`, RFC 6979 vector, n=3
+medians on the C64U) gives 53.8 s @ 48 MHz / 47.4 s @ 64 MHz. Fitting
+T(f) = D + C/f to both pairs:
+
+                       CPU-scaled C      speed-invariant D
+  ECDSA verify         1.22 Gcycles      28.4 s  (53% of wall @ 48)
+  full HTTPS e2e       1.59 Gcycles      39.8 s
+
+  D is self-consistent to 0.1 s from either endpoint. The 28.4 s
+  verify-side D matches the sibling fp_mul's REU row-fetch traffic:
+  each 256-bit multiply DMAs up to 32 rows x 512 B = 16 KB from REU
+  banks 0/1, and REU DMA runs at the stock ~1 MB/s bus rate
+  regardless of CPU turbo (independently evidenced by the P-384
+  overlay swap: 2x7.5 KB in ~16 ms at 48 MHz = ~1.04 us/B). ~28 s
+  = ~27 MB of row DMA per verify at that rate. The remaining
+  ~11.4 s of e2e D is UCI firmware/network latency. Above ~48 MHz
+  the verify is majority-DMA-bound; the projected ceiling with this
+  fp_mul is T(inf) ~= D = 28 s no matter the clock. Getting
+  meaningfully faster requires cutting REU traffic in the sibling
+  library (fetch-free on-chip square-table mul a la c64-x25519 —
+  breakeven vs row DMA is ~2.5 MHz — or narrower row transfers),
+  tracked as a c64-nist-curves issue candidate. v0.3.0's hot-path code is essentially unchanged from v0.2.0;
 the small wall-clock improvement is within measurement noise across
 runs. It is fine for the local listener used by the e2e harness (600 s
 budget, ample headroom). Further speedups live in the sibling
