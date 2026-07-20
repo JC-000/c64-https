@@ -57,21 +57,29 @@ UCI_TARGET_NETWORK = $03        ; network stack
 ; the FPGA needs). Instead we use a nested delay loop:
 ;   total cycles ≈ OUTER * (INNER * 5 + 5)
 ;
-; Tuned empirically via binary search at 48 MHz:
+; Tuned empirically via binary search at 48 MHz on U64E:
 ;   OUTER=3 INNER=121 (~1830 cycles, ~38 µs at 48 MHz) = FAIL
 ;   OUTER=3 INNER=122 (~1845 cycles, ~38.4 µs at 48 MHz) = PASS (minimum)
-;   OUTER=5 INNER=100 (~2525 cycles, ~52 µs at 48 MHz) = old choice (35%
-;                      margin at 48 MHz, but only ~4% at 64 MHz)
-;   OUTER=5 INNER=131 (~3300 cycles, ~51.6 µs at 64 MHz) = chosen — keeps
-;                      the 35% margin at the C64 Ultimate's 64 MHz top
-;                      speed (68.8 µs at 48 MHz, ~3.3 ms at 1 MHz)
+;   OUTER=5 INNER=100 (~2525 cycles, ~52 µs at 48 MHz) = U64E-era choice
 ;
-; At 1 MHz the overhead is ~3.3 ms per access — acceptable for networking.
+; Re-tuned at 64 MHz on the C64 Ultimate (firmware 1.1.0, core 1.49),
+; whose floor is HIGHER than the U64E's ~38 µs — and only bites under
+; sustained CMD_DATA bursts (TCP_CONNECT hostname push; short commands
+; like GET_IPADDR survive spacings that lose the connect command):
+;   OUTER=5 INNER=131 (3300 cycles,  51.6 µs at 64) = FAIL (NO_SOCKET —
+;                      DHCP fine, TCP_CONNECT never latched)
+;   OUTER=5 INNER=160 (4025 cycles,  62.9 µs at 64) = PASS
+;   OUTER=5 INNER=255 (6400 cycles, 100.0 µs at 64) = PASS
+;   OUTER=5 INNER=217 (5450 cycles,  85.2 µs at 64) = chosen — 35%
+;                      margin over the worst-case floor (62.9 µs);
+;                      113.5 µs at 48 MHz, ~5.5 ms at 1 MHz
+;
+; At 1 MHz the overhead is ~5.5 ms per access — acceptable for networking.
 ; The macro preserves A and X via the stack, costing ~14 bytes per call
 ; site (vs 256 for the NOP sled that still wasn't enough).
 ; =============================================================================
 UCI_FENCE_OUTER = 5     ; outer loop iterations
-UCI_FENCE_INNER = 131   ; inner loop iterations
+UCI_FENCE_INNER = 217   ; inner loop iterations
 
 .macro uci_fence
     pha                         ; save A
