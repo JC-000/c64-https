@@ -21,7 +21,13 @@
         .import reu_mul_init
         .else
         .export reu_mul_init
+        ; Under USE_NISTCURVES_ONCHIP the sibling's rebuilt
+        ; mul_8x8_onchip.o exports reu_fetch_mul_row unconditionally
+        ; (upstream has no guard on it) — yield ours to avoid the
+        ; ld65 duplicate. The in-tree routine body stays for local use.
+        .ifndef USE_NISTCURVES_ONCHIP
         .export reu_fetch_mul_row
+        .endif
         .endif
 
         ; ---- exports: Phase 3 P-384 overlay REU stash ----
@@ -268,7 +274,14 @@ start:
         lda $01
         and #%11111110
         sta $01
+        .ifndef USE_NISTCURVES_ONCHIP
         jsr reu_mul_init
+        .else
+        ; Onchip profile (issue #69): fp_mul generates rows on-chip via
+        ; og_common/ct_mul_8x8 — REU banks 0/1 are never fetched, so the
+        ; ~128 KB population pass is skipped. Boot obligation for the
+        ; sibling shrinks to sqtab_init (called below via the shared path).
+        .endif
 
         ; Phase 3: stash both P-384 split overlay images in REU banks 6
         ; and 7 from the .incbin'd staging blocks at $4200 and $E000.

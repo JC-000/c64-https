@@ -130,11 +130,24 @@ mul_dma_hi:     .res 256        ; DMA target: hi bytes of a*b for current a
 ; These remain in-tree under both modes: sqtab_init is still served by
 ; src/crypto/poly1305.s (the sibling's mul_8x8.s is intentionally
 ; excluded from build/lib/x25519.a — see tools/integration/build_x25519.sh).
+.ifndef USE_NISTCURVES_ONCHIP
 .align 256
 .export sqtab_lo
 .export sqtab_hi
 sqtab_lo:       .res 512
 sqtab_hi:       .res 512
+.else
+; Under USE_NISTCURVES_ONCHIP the sibling's rebuilt mul_8x8_onchip.o
+; exports sqtab_lo/hi as ABSOLUTE EQUATES at LIB_SHARED_SQTAB_BASE=$BC00
+; (its .export is unconditional, so the in-tree labels must yield).
+; Keep a same-size aligned placeholder so the TABLES_BSS layout — and
+; therefore the $BC00 address the equate is baked to — stays put. The
+; placeholder is exported solely so the Makefile's post-link check can
+; assert it still sits at $BC00; sqtab_init fills it via the equates.
+.align 256
+.export sqtab_reserved
+sqtab_reserved: .res 1024
+.endif
 
 .segment "BSS"
 

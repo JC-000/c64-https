@@ -201,6 +201,68 @@ sqtab_init:
 ; Uses identity: a*b = sqtab[a+b] - sqtab[|a-b|]
 ; Clobbers: A, X, Y
 ; =============================================================================
+.ifdef USE_NISTCURVES_ONCHIP
+; --- c64-lib-contract §8.3 canonical body (issue #69 integration) ---
+; The sibling's FP_ONCHIP_MUL row generator (og_common, rebuilt with
+; SHARED_CT_MUL_8X8) imports ct_mul_8x8 + the SMC bake sites from the
+; consumer. Body copied verbatim from libs/nistcurves/src/mul_8x8.s
+; (the §8.3 reference copy). Convention: caller bakes `a` into
+; smc_sum_a_imm+1 / smc_diff_a_imm+1 once per row, passes b in Y.
+; The legacy in-tree convention (A=a, X=b, re-baked per call) is kept
+; as the thin `mul_8x8` shim for poly1305/fe25519 call sites.
+.export ct_mul_8x8
+.export smc_sum_a_imm, smc_diff_a_imm
+
+mul_8x8:                        ; legacy shim: A=a, X=b
+        sta smc_sum_a_imm+1     ; bake a (per call — legacy sites only)
+        sta smc_diff_a_imm+1
+        txa
+        tay                     ; Y = b
+        ; fall through into ct_mul_8x8
+
+ct_mul_8x8:
+        ; --- Compute sum = a + b and SMC-patch the two abs,x hi bytes ---
+        tya                     ; A = b
+        clc
+smc_sum_a_imm:
+        adc #$00                ; SMC imm = a; A = (a+b).lo, C = sum-page bit
+        tax                     ; X = (a+b) & $FF
+        lda #>sqtab_lo
+        adc #0                  ; sum-page carry folded into hi byte
+        sta smc_lo_addr+2       ; patch sqtab_lo abs,x hi byte
+        adc #(>sqtab_hi - >sqtab_lo)   ; C=0 after prior adc #0, so += 2
+        sta smc_hi_addr+2       ; patch sqtab_hi abs,x hi byte
+
+        ; --- Branchless |a-b| -> Y (sign-mask flip-and-negate) ---
+        tya                     ; A = b
+        sec
+smc_diff_a_imm:
+        sbc #$00                ; SMC imm = a; A = b-a, C=1 iff b>=a
+        sta ct_diff_raw
+        lda #$00
+        sbc #$00                ; C=1: $00; C=0: $FF (sign mask)
+        sta ct_sign_mask
+        eor ct_diff_raw         ; raw XOR mask
+        sec
+        sbc ct_sign_mask        ; + (-mask): +0 if b>=a, +1 if b<a
+        tay                     ; Y = |a-b| (in [0,255])
+
+        ; --- Table-lookup subtract: sqtab[a+b] - sqtab[|a-b|] ---
+smc_lo_addr:
+        lda sqtab_lo,x          ; hi byte SMC-patched above
+        sec
+        sbc sqtab_lo,y
+        sta poly_prod_lo
+smc_hi_addr:
+        lda sqtab_hi,x          ; hi byte SMC-patched above
+        sbc sqtab_hi,y
+        sta poly_prod_hi
+        rts
+
+ct_diff_raw:    .byte 0
+ct_sign_mask:   .byte 0
+
+.else
 mul_8x8:
         sta mul_a               ; save A
         stx mul_b               ; save X
@@ -244,6 +306,7 @@ mul_8x8:
         sbc sqtab_hi,y
         sta poly_prod_hi
         rts
+.endif ; USE_NISTCURVES_ONCHIP
 
 ; =============================================================================
 ; poly1305_multiply - Multiply h (17 bytes) by r (16 bytes), reduce mod 2^130-5

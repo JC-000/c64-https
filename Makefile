@@ -61,7 +61,29 @@ UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s
 # external overlay image (see below), not linked into the main PRG.
 # Phase C.4 adds nistcurves-p256.a which IS linked in, always-resident,
 # for BOTH backends (replaces the in-tree ecdsa_{curve,fp,mod,points}.s).
+#
+# USE_NISTCURVES_ONCHIP=1 (issue #69 / nistcurves v0.5.0): swap in the
+# FP_ONCHIP_MUL turbo-profile archive — fp_mul/fp_sqr generate multiply
+# rows on-chip instead of REU DMA row fetches, removing the ~1 MHz-anchored
+# DMA floor on turbo hosts (crossover ~30 MHz; see CLAUDE.md "Why turbo
+# stops paying"). Gates: data.s yields sqtab to the lib's $BC00 equates,
+# poly1305.s provides the §8.3 canonical ct_mul_8x8 + SMC bake sites,
+# boot.s skips reu_mul_init + yields the reu_fetch_mul_row export.
+ifeq ($(USE_NISTCURVES_ONCHIP),1)
+ifeq ($(USE_X25519_SIBLING),1)
+$(error USE_NISTCURVES_ONCHIP and USE_X25519_SIBLING are mutually exclusive for now: both archives export reu_fetch_mul_row)
+endif
+ifeq ($(USE_OVERLAY_P384_EMBED),1)
+$(error USE_NISTCURVES_ONCHIP places LIB_NISTCURVES_MUL_CODE in CRYPTO_OVERLAY - mutually exclusive with USE_OVERLAY_P384_EMBED)
+endif
+ifeq ($(EMBED_P256_OVERLAY),1)
+$(error USE_NISTCURVES_ONCHIP places LIB_NISTCURVES_MUL_CODE in CRYPTO_OVERLAY - mutually exclusive with EMBED_P256_OVERLAY)
+endif
+SIBLING_LIB_ARCHIVES := build/lib/nistcurves-p256-onchip.a
+CA65FLAGS += -D USE_NISTCURVES_ONCHIP=1
+else
 SIBLING_LIB_ARCHIVES := build/lib/nistcurves-p256.a
+endif
 
 # Phase C.5 (USE_X25519_SIBLING=1): c64-x25519 v0.4.0 sibling, always-resident,
 # replaces in-tree fe25519.s + x25519.s + X25519 buffers in src/data.s.
@@ -226,6 +248,14 @@ $(PRG): $(PRG_DEPS)
 	# Rewrite ca65 label format `al XXXXXX .name` -> VICE format `al C:XXXX .name`
 	# so the c64-test-harness Labels.from_file() reader can parse it.
 	sed -i '' 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(LABELS)
+ifeq ($(USE_NISTCURVES_ONCHIP),1)
+	# Onchip-profile invariant: the sibling's sqtab_lo/hi equates are
+	# BAKED to $$BC00/$$BE00 (LIB_SHARED_SQTAB_BASE in the wrapper).
+	# data.s's sqtab_reserved placeholder must still land exactly there —
+	# any TABLES_BSS layout drift silently corrupts every multiply.
+	@grep -q '^al C:BC00 \.sqtab_reserved' $(LABELS) || \
+		{ echo 'ERROR: sqtab_reserved is not at $$BC00 — TABLES_BSS layout drifted; realign LIB_SHARED_SQTAB_BASE in tools/integration/build_nistcurves_p256.sh'; exit 1; }
+endif
 
 # Phase 5 Fix D: $(LABELS) is normally a side-effect of the $(PRG)
 # link recipe; we don't add an explicit rule.  The overlay-bin rule
@@ -267,7 +297,14 @@ build/lib/nistcurves-p384-sha384.a build/lib/nistcurves-p384-curve.a:
 # for the 160-byte BE struct packing that bridges TLS to the sibling.
 build/lib/nistcurves-p256.a:
 	@mkdir -p build/lib
-	bash tools/integration/build_nistcurves_p256.sh
+	bash tools/integration/build_nistcurves_p256.sh reu
+
+# Onchip turbo-profile variant (issue #69). Same wrapper, onchip mode:
+# builds upstream lib-p256-verify-onchip and rebuilds mul_8x8_onchip.o
+# with the SHARED_* consumer defines + LIB_SHARED_SQTAB_BASE=$BC00.
+build/lib/nistcurves-p256-onchip.a:
+	@mkdir -p build/lib
+	bash tools/integration/build_nistcurves_p256.sh onchip
 
 # Phase C.5: c64-x25519 v0.4.0 X25519 archive — replaces the in-tree
 # fe25519.s + x25519.s + X25519 buffer declarations in src/data.s when
