@@ -180,16 +180,20 @@ def _prepare_vector_buffers(transport: Ultimate64Transport,
     """DMA-write all ecdsa_* input buffers from a JSON vector dict."""
     # Zero-fill first (buffers are 48 bytes each to handle P-384 hypothetical);
     # verify_256 reads the first 32 only but pre-zeroing is paranoid-safe.
+    # These buffers legitimately live inside CRYPTO_COLD_SHADOW
+    # ($A000-$BFFF) post-W1, which the MemoryPolicy reserves — override
+    # with a reason rather than widening the policy for everyone.
+    _OVR = "ecdsa vector input buffers (CRYPTO_BSS in CRYPTO_COLD_SHADOW)"
     zero48 = bytes(48)
     for name in ("ecdsa_hash", "ecdsa_sig_r", "ecdsa_sig_s",
                  "ecdsa_pubkey_x", "ecdsa_pubkey_y"):
-        transport.write_memory(labels[name], zero48)
+        transport.write_memory(labels[name], zero48, override=_OVR)
 
     # Write the 32-byte big-endian values verbatim.
     def _write_be32(name: str, hex_str: str) -> None:
         raw = bytes.fromhex(hex_str)
         assert len(raw) == 32, f"{name}: expected 32 bytes, got {len(raw)}"
-        transport.write_memory(labels[name], raw)
+        transport.write_memory(labels[name], raw, override=_OVR)
 
     _write_be32("ecdsa_hash", vec["hash"])
     _write_be32("ecdsa_sig_r", vec["sig_r"])
@@ -198,9 +202,9 @@ def _prepare_vector_buffers(transport: Ultimate64Transport,
     _write_be32("ecdsa_pubkey_y", vec["pubkey_y"])
 
     # Control bytes.
-    transport.write_memory(labels["ecdsa_curve_id"], bytes([0]))
-    transport.write_memory(labels["ecdsa_hash_len"], bytes([32]))
-    transport.write_memory(labels["ecdsa_sig_len"], bytes([32]))
+    transport.write_memory(labels["ecdsa_curve_id"], bytes([0]), override=_OVR)
+    transport.write_memory(labels["ecdsa_hash_len"], bytes([32]), override=_OVR)
+    transport.write_memory(labels["ecdsa_sig_len"], bytes([32]), override=_OVR)
 
 
 def _run_single(transport: Ultimate64Transport,

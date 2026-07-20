@@ -224,12 +224,63 @@ corrupt the UCI command protocol.
 **Fix:** A nested delay-loop macro `uci_fence` (defined in
 `src/net/uci/uci_regs.inc`) is inserted after every read/write to UCI
 registers `$DF1C-$DF1F`. Parameters: `UCI_FENCE_OUTER = 5`,
-`UCI_FENCE_INNER = 100`, yielding ~2525 cycles (~52 us at 48 MHz,
-35% safety margin). 14 bytes per fence site, 24 fence sites total
-(11 write + 13 read). At 1 MHz the same loop costs ~2.5 ms per
+`UCI_FENCE_INNER = 217`, yielding ~5450 cycles (85.2 us at 64 MHz —
+35% margin over the C64 Ultimate's empirically-bracketed floor;
+113.5 us at 48 MHz). 14 bytes per fence site, 24 fence sites total
+(11 write + 13 read). At 1 MHz the same loop costs ~5.5 ms per
 access — negligible for networking.
 
-48 MHz turbo is fully supported and verified on real U64E hardware.
+The C64 Ultimate (firmware 1.1.0, core 1.49) needs MORE inter-access
+time than the U64E's ~38 us, and the tighter floor only bites under
+sustained CMD_DATA bursts: at 51.6 us spacing DHCP/GET_IPADDR works
+but TCP_CONNECT's ~15-byte hostname push is silently lost
+(UCI_ERR_NO_SOCKET, firmware never opens the socket). Floor bracketed
+at 64 MHz: 51.6 us FAIL / 62.9 us PASS — see the tuning matrix in
+`uci_regs.inc`. The U64E-era INNER=100 (52.6 us at 48 MHz) was never
+observed failing on U64E but sits below the C64U floor; INNER=217 is
+safe on both devices at every speed.
+
+48 MHz turbo is fully supported and verified on real U64E hardware;
+64 MHz is supported and verified on the C64 Ultimate (see "C64
+Ultimate notes" below).
+
+### C64 Ultimate notes
+
+A second UCI-capable device joined the bench 2026-07-19: a **C64
+Ultimate "Starlight Edition"** (product "C64 Ultimate", firmware
+1.1.0, FPGA 122, core 1.49, NTSC mode, WiFi-connected) at
+10.53.21.158 — `U64_HOST=10.53.21.158`. Differences from the U64E
+that this codebase now handles:
+
+  - **64 MHz turbo** — the C64U's CPU Speed enum adds "64" (and drops
+    " 5"). c64-test-harness's `CPU_SPEED_BY_MHZ` carries the superset.
+    E2e verified at 64 MHz (see benchmarks below).
+  - **Runtime speed-switch quirk** — changing CPU speed via the REST
+    config API while the PRG is running can glitch the UCI bridge so
+    the NEXT pushed command is silently lost (reproduced 2x as
+    UCI_ERR_NO_SOCKET on the first TCP_CONNECT after a 1→64 switch,
+    even with a 100 us fence; a 1→48 switch happened to survive).
+    `tools/uci/test_https_local.py` now sets turbo BEFORE
+    reset/run_prg so the machine boots at target speed and never
+    switches mid-session. Mirror that pattern in new scripts
+    (`test_https_local_p384.py` still uses the old late-switch order —
+    fix when the P-384 build unblocks).
+  - **Wider fence floor** — see the delay-loop fence section above
+    (INNER=217 accommodates both devices).
+  - **Multiple network interfaces** — Ethernet AND WiFi. GET_IPADDR
+    (iface=0) returns 0.0.0.0 on a WiFi-connected box;
+    `net_dhcp_acquire` probes iface 0..3 and takes the first lease.
+  - **REU ships disabled** — fresh C64U config has `RAM Expansion
+    Unit: Disabled`; without it sibling-nistcurves `fp_mul` silently
+    computes garbage (same failure mode as the VICE `-reu` gotcha).
+    Enable via REST config write. NOTE: the C64U has no `"REU"`
+    Cartridge preset (presets list is just `[""]`), so the harness's
+    `set_reu()` helper — which also sets `Cartridge: "REU"` — is
+    incompatible as written; set `RAM Expansion Unit: Enabled`
+    directly. Config writes are runtime-only (revert on power cycle).
+  - Same UCI register map, ID byte $C9, command set, and DeviceLock /
+    enable_uci flow as the U64E — boot_check/phase2/phase3/e2e scripts
+    run unmodified.
 
 ### Memory layout under UCI
 
@@ -488,7 +539,42 @@ Under the current `libs/nistcurves@v0.3.0` pin (post-PR #55,
 c64-lib-contract-aligned) the U64E 48 MHz handshake measures **82.1 s**
 end-to-end (verified 2026-05-20 against the local listener; the prior
 v0.2.0 measurement was 86.7 s, and the pre-Phase-C.4 in-tree path was
-~110 s). v0.3.0's hot-path code is essentially unchanged from v0.2.0;
+~110 s).
+
+On the **C64 Ultimate** (10.53.21.158, see "C64 Ultimate notes"),
+measured 2026-07-19 with the INNER=217 fence and boot-at-speed flow:
+
+  - 48 MHz: **73.0 s** end-to-end (faster than the U64E's 82.1 s at
+    the same clock — different FPGA core)
+  - 64 MHz: **64.7 s** end-to-end — first >48 MHz datapoint. The
+    48→64 ratio (0.89) is well short of the ideal 0.75.
+
+**Why turbo stops paying (measured 2026-07-19):** isolated
+`ecdsa_verify_256` bench (`bench_ecdsa_u64e.py`, RFC 6979 vector, n=3
+medians on the C64U) gives 53.8 s @ 48 MHz / 47.4 s @ 64 MHz. Fitting
+T(f) = D + C/f to both pairs:
+
+                       CPU-scaled C      speed-invariant D
+  ECDSA verify         1.22 Gcycles      28.4 s  (53% of wall @ 48)
+  full HTTPS e2e       1.59 Gcycles      39.8 s
+
+  D is self-consistent to 0.1 s from either endpoint. The 28.4 s
+  verify-side D matches the sibling fp_mul's REU row-fetch traffic:
+  each 256-bit multiply DMAs up to 32 rows x 512 B = 16 KB from REU
+  banks 0/1, and REU DMA runs at the stock ~1 MB/s bus rate
+  regardless of CPU turbo (independently evidenced by the P-384
+  overlay swap: 2x7.5 KB in ~16 ms at 48 MHz = ~1.04 us/B). ~28 s
+  = ~27 MB of row DMA per verify at that rate. The remaining
+  ~11.4 s of e2e D is UCI firmware/network latency. Above ~48 MHz
+  the verify is majority-DMA-bound; the projected ceiling with this
+  fp_mul is T(inf) ~= D = 28 s no matter the clock. Getting
+  meaningfully faster requires cutting REU traffic in the sibling
+  library (fetch-free on-chip square-table mul a la c64-x25519 —
+  breakeven vs row DMA is ~2.5 MHz — or narrower row transfers),
+  tracked at
+  [c64-nist-curves#69](https://github.com/JC-000/c64-nist-curves/issues/69).
+
+v0.3.0's hot-path code is essentially unchanged from v0.2.0;
 the small wall-clock improvement is within measurement noise across
 runs. It is fine for the local listener used by the e2e harness (600 s
 budget, ample headroom). Further speedups live in the sibling
