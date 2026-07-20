@@ -333,22 +333,36 @@ net_poll:
 ; =============================================================================
 ; net_dhcp_acquire — read the firmware-assigned IP via UCI GET_IPADDR
 ;
-; The U64E firmware runs DHCP autonomously before the PRG is launched, so
-; our job is to READ the result, not to perform DHCP ourselves. Sequence:
+; The Ultimate firmware runs DHCP autonomously before the PRG is launched,
+; so our job is to READ the result, not to perform DHCP ourselves. Sequence
+; (per interface):
 ;
-;   wait_idle -> begin_cmd(NETWORK) -> put(CMD_GET_IPADDR) -> put(iface=0)
+;   wait_idle -> begin_cmd(NETWORK) -> put(CMD_GET_IPADDR) -> put(iface)
 ;   -> push_wait -> check_err -> read 12 bytes -> drain resp
 ;   -> drain status -> ack
 ;
+; Interface fallback: the U64E has a single interface (index 0), but the
+; C64 Ultimate has Ethernet AND WiFi — a box on WiFi returns 0.0.0.0 for
+; index 0. We probe indices 0..NET_DHCP_MAX_IFACE-1 and take the first
+; one with a non-zero lease. A CMD_FAILED on an out-of-range index is
+; cleaned up (drain + ack) and treated like "no lease on this interface".
+;
 ; The 12-byte response layout is IP(4) + Netmask(4) + Gateway(4). We copy
-; the first 4 bytes into net_local_ip. If all four are zero we treat the
-; call as having failed (no DHCP lease) and return C=1.
+; the first 4 bytes into net_local_ip. If all probed interfaces yield a
+; zero IP we return C=1 with net_last_error = UCI_ERR_NO_IP (or
+; UCI_ERR_CMD_FAILED if the last probe failed at the command layer).
 ;
 ; Clobbers: A, X, Y
 ; Output:   C=0 on success (net_local_ip populated), C=1 on failure
 ;           (net_last_error contains the specific failure code).
 ; =============================================================================
+NET_DHCP_MAX_IFACE = 4          ; probe interface indices 0..3
+
 net_dhcp_acquire:
+        lda #$00
+        sta @iface_idx          ; SMC-style local, no-ZP file convention
+
+@next_iface:
         jsr uci_wait_idle
         bcs @dhcp_wait_to             ; FPGA wedged — bail with C=1
 
@@ -358,9 +372,9 @@ net_dhcp_acquire:
         lda #UCI_CMD_GET_IPADDR
         jsr uci_put_byte
 
-        ; Interface index 0 — matches the build_get_ip helper in
-        ; c64-test-harness/src/c64_test_harness/uci_network.py.
-        lda #$00
+        ; Interface index — 0 first (only iface on U64E; Ethernet on the
+        ; C64 Ultimate), then 1.. (C64U WiFi) until one has a lease.
+        lda @iface_idx
         jsr uci_put_byte
 
         jsr uci_push_wait
@@ -370,11 +384,23 @@ net_dhcp_acquire:
         jsr uci_check_err
         bcc @no_err
 
+        ; Command failed for this interface (e.g. index out of range on
+        ; single-interface firmware). Clean up response/status state so
+        ; the next probe starts from idle, then advance.
         lda #UCI_ERR_CMD_FAILED
         sta net_last_error
+        jsr uci_drain_resp
+        bcs @dhcp_wait_to
+        jsr uci_drain_status
+        bcs @dhcp_wait_to
+        jsr uci_ack
+        jmp @advance
+
 @dhcp_wait_to:
         sec
         rts
+
+@iface_idx: .byte 0
 
 @no_err:
         ; Read the 12-byte response into uci_ipaddr_resp.
@@ -403,7 +429,8 @@ net_dhcp_acquire:
         dex
         bpl @copy_ip
 
-        ; If all four bytes are zero the firmware has no lease yet.
+        ; If all four bytes are zero this interface has no lease —
+        ; fall through to probe the next one.
         lda net_local_ip+0
         ora net_local_ip+1
         ora net_local_ip+2
@@ -412,10 +439,21 @@ net_dhcp_acquire:
 
         lda #UCI_ERR_NO_IP
         sta net_last_error
-        sec
+
+@advance:
+        inc @iface_idx
+        lda @iface_idx
+        cmp #NET_DHCP_MAX_IFACE
+        bcc @next_iface
+        sec                     ; every interface probed, none had a lease
         rts
 
 @have_ip:
+        ; Clear any residue from earlier no-lease probes (e.g. iface 0's
+        ; UCI_ERR_NO_IP on a WiFi-connected C64U) so diagnostics don't
+        ; read a stale error next to a successful acquire.
+        lda #$00
+        sta net_last_error
         clc
         rts
 
