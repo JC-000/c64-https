@@ -48,7 +48,7 @@
 set -eo pipefail
 
 PROFILE="${1:-reu}"
-case "$PROFILE" in reu|onchip) ;; *) echo "ERROR: profile must be reu|onchip, got '$PROFILE'" >&2; exit 2;; esac
+case "$PROFILE" in reu|onchip|onchip-comb) ;; *) echo "ERROR: profile must be reu|onchip|onchip-comb, got '$PROFILE'" >&2; exit 2;; esac
 
 # --- Paths ---
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -56,7 +56,18 @@ LIB_DIR="$PROJECT_ROOT/libs/nistcurves"
 LIB_SRC="$LIB_DIR/src"
 LIB_BUILD="$LIB_DIR/build"
 OUT_DIR="$PROJECT_ROOT/build/lib"
-if [ "$PROFILE" = "onchip" ]; then
+if [ "$PROFILE" = "onchip-comb" ]; then
+    # Comb-accelerated turbo profile: stage from the FULL onchip archive
+    # (the only shipped archive whose ecdsa256.o is the comb variant and
+    # which carries points256_comb.o + data_p256_limlee.o), then drop
+    # everything non-P-256 in step 4b. Consumer boot obligation grows by
+    # ec_precompute_256 (REU bank 2 $0000-$3FFF anchors, SPEC §8.3/§8.5).
+    UPSTREAM_TARGET="lib-onchip"
+    UPSTREAM_ARCHIVE="$LIB_BUILD/lib/nistcurves-onchip.a"
+    STAGING="$PROJECT_ROOT/build/lib/nistcurves_p256_onchip_comb_staging"
+    ARCHIVE="$OUT_DIR/nistcurves-p256-onchip-comb.a"
+    SIZES="$OUT_DIR/nistcurves-p256-onchip-comb.sizes.txt"
+elif [ "$PROFILE" = "onchip" ]; then
     UPSTREAM_TARGET="lib-p256-verify-onchip"
     UPSTREAM_ARCHIVE="$LIB_BUILD/lib/nistcurves-p256-verify-onchip.a"
     STAGING="$PROJECT_ROOT/build/lib/nistcurves_p256_onchip_staging"
@@ -116,7 +127,17 @@ cp "$UPSTREAM_ARCHIVE" "$STAGING/upstream.a"
 
 # --- 4. Drop conflicting members / rebuild the onchip mul object ---
 rm -f "$STAGING/mul_8x8.o" "$STAGING/data_shared.o"
-if [ "$PROFILE" = "onchip" ]; then
+# 4b. onchip-comb: the full onchip archive carries both curves + SHA-384 +
+# reference-inverse extras; keep only the P-256 comb verify set.
+if [ "$PROFILE" = "onchip-comb" ]; then
+    rm -f "$STAGING"/fp384_onchip.o "$STAGING"/mod384.o "$STAGING"/curve384.o \
+          "$STAGING"/points384_core.o "$STAGING"/points384_comb.o \
+          "$STAGING"/data_p384.o "$STAGING"/data_p384_limlee.o \
+          "$STAGING"/ecdsa384.o "$STAGING"/ecdsa384_msg.o \
+          "$STAGING"/sha384*.o "$STAGING"/data_sha.o \
+          "$STAGING"/inv256.o "$STAGING"/data_p256_invref.o
+fi
+if [ "$PROFILE" = "onchip" ] || [ "$PROFILE" = "onchip-comb" ]; then
     # Rebuild (not drop): fp256_onchip.o imports og_common/og_src_ld which
     # only this TU provides. The SHARED_* defines strip everything that
     # would collide with the in-tree providers (see header comment #3).

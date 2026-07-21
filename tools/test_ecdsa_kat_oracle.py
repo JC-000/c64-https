@@ -301,7 +301,10 @@ def main():
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        # Comb-profile boots run ec_precompute_256 (256 point mults) before
+        # the menu — minutes of VICE time even under warp. Overridable.
+        _menu_to = float(os.environ.get("C64_INIT_TIMEOUT", "60"))
+        grid = wait_for_text(transport, "Q=QUIT", timeout=_menu_to, verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

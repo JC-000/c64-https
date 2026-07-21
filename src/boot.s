@@ -132,6 +132,11 @@
         .import tls_hostname
         .import tls_hostname_len
 
+        ; ---- imports: comb precompute (sibling nistcurves, comb profile) ----
+        .ifdef USE_NISTCURVES_COMB
+        .import ec_precompute_256
+        .endif
+
         ; ---- imports: multiply / REU staging (data.asm) ----
         .import mul_8x8
         .import mul_dma_lo
@@ -284,6 +289,14 @@ start:
         ; traffic appears to settle shared expansion-I/O state. See
         ; c64-test-harness#137 experiment log.
         jsr reu_mul_init
+
+        ; Comb profile (SPEC §8.5): build the P-256 Lim-Lee anchor table
+        ; into REU bank 2 $0000-$3FFF. Needs sqtab (built above) + the
+        ; onchip row generator; runs once per boot. ~seconds at turbo,
+        ; ~25 s at stock 1 MHz.
+        .ifdef USE_NISTCURVES_COMB
+        jsr ec_precompute_256
+        .endif
 
         ; Phase 3: stash both P-384 split overlay images in REU banks 6
         ; and 7 from the .incbin'd staging blocks at $4200 and $E000.

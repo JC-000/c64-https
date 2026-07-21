@@ -35,7 +35,9 @@ IP65_BUILD   := ip65-build
 IP65_BIN     := $(IP65_BUILD)/ip65-c64.bin
 
 CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net/$(BACKEND) -I build --debug-info
-LD65FLAGS := -C $(CFG) -Ln build/labels.txt -m build/c64-https.map --dbgfile build/c64-https.dbg
+# Lazy (=) so the USE_NISTCURVES_ONCHIP_COMB block below can retarget
+# CFG to the cfg variant after this line.
+LD65FLAGS = -C $(CFG) -Ln build/labels.txt -m build/c64-https.map --dbgfile build/c64-https.dbg
 
 # Source inventory.
 TOP_SRCS    := $(wildcard src/*.s)
@@ -69,6 +71,15 @@ UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s
 # stops paying"). Gates: data.s yields sqtab to the lib's $BC00 equates,
 # poly1305.s provides the §8.3 canonical ct_mul_8x8 + SMC bake sites,
 # boot.s skips reu_mul_init + yields the reu_fetch_mul_row export.
+# USE_NISTCURVES_ONCHIP_COMB=1: comb-accelerated onchip profile — the
+# comb ecdsa256 + points256_comb + Lim-Lee data replace the no-comb
+# verifier (u1*G via 8-way fixed-base comb instead of a second
+# variable-base ladder). Implies USE_NISTCURVES_ONCHIP; adds the
+# ec_precompute_256 boot pass (REU bank 2 $0000-$3FFF anchors) and
+# switches to the CRYPTO_HOT-relieving cfg variant.
+ifeq ($(USE_NISTCURVES_ONCHIP_COMB),1)
+USE_NISTCURVES_ONCHIP := 1
+endif
 ifeq ($(USE_NISTCURVES_ONCHIP),1)
 ifeq ($(USE_X25519_SIBLING),1)
 $(error USE_NISTCURVES_ONCHIP and USE_X25519_SIBLING are mutually exclusive for now: both archives export reu_fetch_mul_row)
@@ -79,8 +90,14 @@ endif
 ifeq ($(EMBED_P256_OVERLAY),1)
 $(error USE_NISTCURVES_ONCHIP places LIB_NISTCURVES_MUL_CODE in CRYPTO_OVERLAY - mutually exclusive with EMBED_P256_OVERLAY)
 endif
-SIBLING_LIB_ARCHIVES := build/lib/nistcurves-p256-onchip.a
 CA65FLAGS += -D USE_NISTCURVES_ONCHIP=1
+ifeq ($(USE_NISTCURVES_ONCHIP_COMB),1)
+SIBLING_LIB_ARCHIVES := build/lib/nistcurves-p256-onchip-comb.a
+CA65FLAGS += -D USE_NISTCURVES_COMB=1
+CFG := cfg/c64-https-$(BACKEND)-onchip.cfg
+else
+SIBLING_LIB_ARCHIVES := build/lib/nistcurves-p256-onchip.a
+endif
 else
 SIBLING_LIB_ARCHIVES := build/lib/nistcurves-p256.a
 endif
@@ -305,6 +322,12 @@ build/lib/nistcurves-p256.a:
 build/lib/nistcurves-p256-onchip.a:
 	@mkdir -p build/lib
 	bash tools/integration/build_nistcurves_p256.sh onchip
+
+# Comb-accelerated onchip variant: full onchip archive trimmed to the
+# P-256 comb verify set (comb ecdsa256 + points256_comb + Lim-Lee data).
+build/lib/nistcurves-p256-onchip-comb.a:
+	@mkdir -p build/lib
+	bash tools/integration/build_nistcurves_p256.sh onchip-comb
 
 # Phase C.5: c64-x25519 v0.4.0 X25519 archive — replaces the in-tree
 # fe25519.s + x25519.s + X25519 buffer declarations in src/data.s when
