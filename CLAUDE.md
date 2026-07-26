@@ -620,6 +620,38 @@ C64U, fits T(f)=D+C/f, residuals <=4.1%):
   the non-verify side is now the bigger half and the next
   profiling target.
 
+**U64E lane (2026-07-25)** — same sweep protocol on the U64E
+(10.43.23.81), 16/32/48 MHz only (no 64 MHz enum on the U64E), all
+three v0.6.0 profiles at HEAD, n=2 medians of the RFC 6979 vector,
+72/72 runs correctness-PASS (fits T(f)=D+C/f; REU/onchip residuals
+<=0.4%, comb <=3.8%):
+
+  config              16MHz   32MHz   48MHz    D(floor)   C
+  v0.6.0 REU           81.6    65.2    59.2     48.2 s     535 MHz*s
+  v0.6.0 onchip        87.6    44.9    30.5      2.0 s    1370 MHz*s
+  v0.6.0 onchip+comb   49.1    24.6    18.4      2.2 s     747 MHz*s
+
+  Device delta vs the C64U at the same clocks (the C64U's
+  v0.3.0/v0.5.0 REU rows are the comparable REU baseline — the REU
+  path is performance-identical across those pins):
+
+  - **REU profile: U64E is +10-13% slower at every clock** (floor
+    48.2 s vs 41.8 s) — consistent with the 82.1 vs 73.0 s e2e
+    split first seen at 48 MHz. Different FPGA core, slower
+    REU/expansion-bus DMA.
+  - **onchip profile: parity** (-1.3% to +3.6%, within n=2 noise)
+    at all three clocks. The CPU-bound path is device-independent,
+    so the whole device delta is localized to REU DMA, not the CPU
+    core.
+  - **comb profile: parity at 16/32 MHz, +12% at 48 MHz** (18.4 vs
+    16.5 s). Plausibly the Lim-Lee table fetches from REU bank 2 —
+    a DMA-anchored cost whose share grows with clock — but a single
+    n=2 point; re-measure before leaning on it.
+  - Crossovers vs REU shift down on the U64E because its REU floor
+    is higher: onchip wins above ~18 MHz (C64U: ~22), comb above
+    ~5 MHz (C64U: ~7). Comb still dominates no-comb onchip at
+    every clock. Best U64E verify: **18.4 s @ 48 MHz** (comb).
+
 v0.3.0's hot-path code is essentially unchanged from v0.2.0;
 the small wall-clock improvement is within measurement noise across
 runs. It is fine for the local listener used by the e2e harness (600 s
