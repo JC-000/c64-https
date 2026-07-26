@@ -644,9 +644,13 @@ three v0.6.0 profiles at HEAD, n=2 medians of the RFC 6979 vector,
     so the whole device delta is localized to REU DMA, not the CPU
     core.
   - **comb profile: parity at 16/32 MHz, +12% at 48 MHz** (18.4 vs
-    16.5 s). Plausibly the Lim-Lee table fetches from REU bank 2 —
-    a DMA-anchored cost whose share grows with clock — but a single
-    n=2 point; re-measure before leaning on it.
+    16.5 s). The U64E side is confirmed: a 2026-07-26 rerun at n=6
+    per positive vector gave median 18.39 s, spread 18.31-18.45 s
+    (±0.4%) across all three vectors. Plausibly the Lim-Lee table
+    fetches from REU bank 2 — a DMA-anchored cost whose share grows
+    with clock. The residual uncertainty is the C64U's 16.5 s
+    (itself n=2); re-measure that side before treating the gap as
+    exactly 12%.
   - Crossovers vs REU shift down on the U64E because its REU floor
     is higher: onchip wins above ~18 MHz (C64U: ~22), comb above
     ~5 MHz (C64U: ~7). Comb still dominates no-comb onchip at
