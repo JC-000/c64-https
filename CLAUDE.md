@@ -104,10 +104,11 @@ buffers in the crypto BSS — see per-module headers for details):
     `tools/integration/build_nistcurves_p256.sh` for the wrapper.)
 
 P-384 is *stubbed at the TLS layer* (see `project_p384_stubbed` memory
-note). The sibling `libs/nistcurves` P-384 primitives are buildable as
-an external overlay image (Phase C.3b, `make p384-overlay`) but the
-target has a pre-existing unresolved-symbol bug (`ec_base384_x/y` in
-points384_raw.s) — fix that before wiring P-384 into the TLS path.
+note). The sibling `libs/nistcurves` P-384 primitives were meant to be
+buildable as an external overlay image (Phase C.3b, `make
+p384-overlay`) but every P-384 build target is broken at the v0.6.0
+pin — see "Known issues" for the current failure chain. Fix the build
+before wiring P-384 into the TLS path.
 
 MEMORY requirements for a drop-in sibling library (see "Memory layout"
 below for the post-W1 hot/cold split):
@@ -513,12 +514,20 @@ Five latent bugs and three new ones were cleared to get here:
     rather than hardcoding addresses. The migration left
     `unknown_policy=WARN` so writes outside declared segments surface
     as `UserWarning`; tightening to `DENY` is a follow-up.
-  - `make p384-overlay` has a pre-existing unresolved-symbol bug:
-    `points384_raw.s` references `ec_base384_x` / `ec_base384_y`
-    which aren't exported by the current sibling build. Not a Phase C
-    regression — the target has never built cleanly — but should be
-    fixed before P-384 is actually wired into the TLS path. TLS-level
-    P-384 verify remains stubbed regardless (see `project_p384_stubbed`).
+  - **All P-384 build targets are broken at the v0.6.0 pin**
+    (verified 2026-07-26): both `make p384-overlay` and `make
+    BACKEND=uci USE_OVERLAY_P384_EMBED=1` fail in
+    `tools/integration/build_nistcurves_p384.sh` at the `ar65`
+    staging step (`nistcurves_p384_staging/curve/ecdsa384.o` never
+    produced — the upstream layout drifted under the v0.5.0/v0.6.0
+    bumps). Behind that likely still lurk the earlier v0.3.0-era
+    SHA-384 LUT overlay overflow (1536 B over the 7.5 KB slot) and
+    the historical `ec_base384_x/y` unresolved-symbol bug — neither
+    is reachable until the wrapper is fixed. The target has never
+    built cleanly. Issues #32 and #45 were closed as stale on this
+    basis; file fresh issues against the current failure chain when
+    P-384 enablement resumes. TLS-level P-384 verify remains stubbed
+    regardless (see `project_p384_stubbed`).
   - **VICE harness gotcha**: any test that exercises sibling
     `libs/nistcurves` P-256 primitives (`fp_mul`, `fp_inv`,
     `ec_scalar_mul_var`, `ecdsa_verify_256`, ...) MUST launch VICE with
@@ -665,11 +674,16 @@ here as a submodule bump without touching TLS call sites.
 
 ### ECDSA P-384 verify wall-clock
 
-Not yet measured end-to-end. The U64E test host was unreachable from
-the dev machine when Phase 5's e2e wiring landed (DeviceLock
-unavailable; ping/TCP both unreachable to the default
-192.168.1.81). Run `tools/uci/test_https_local_p384.py` from a host
-with U64E LAN access to capture the number; the script defaults to a
+Not yet measured end-to-end, and currently UNMEASURABLE: the P-384
+embed build does not build at the v0.6.0 pin (fails in the sibling
+wrapper's `ar65` staging step — see "Known issues"), so
+`tools/uci/test_https_local_p384.py` has no P-384 PRG to run and
+would just boot the default P-256 image. The May-2026 hw attempts
+that predate the build breakage died at EncryptedExtensions decrypt
+(issue #45, closed 2026-07-26 as stale — the suspect commit window
+was buried by the W1/v0.5.0/v0.6.0 rework; restart from a fresh
+build + fresh repro). Once the build is fixed, run the script from a
+host with U64E LAN access to capture the number; it defaults to a
 30 minute wall-clock budget (`SENTINEL_POLL_TIMEOUT=1800` /
 `ACCEPT_TIMEOUT=1800`) — expect 4-7 minutes per handshake at 48 MHz
 turbo, dominated by:
