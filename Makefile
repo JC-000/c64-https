@@ -225,7 +225,7 @@ ALL_OBJS := $(TOP_OBJS) $(CRYPTO_OBJS) $(CRYPTO_SHARED_OBJS) $(NET_OBJS)
 PRG    := build/c64-https.prg
 LABELS := build/labels.txt
 
-.PHONY: all link run clean ip65-libs ip65-blob
+.PHONY: all link run clean ip65-libs ip65-blob package
 
 all: $(PRG)
 
@@ -433,3 +433,18 @@ run: $(PRG)
 
 clean:
 	rm -rf build
+
+# Release packaging: build the PRG matrix, bundle both UCI PRGs onto a D64,
+# and write dist/MANIFEST.txt (sizes, git HEAD, sha256 checksums). The scripts
+# run `make clean` between flag combinations themselves, so `package` does not
+# depend on any build artifact. build_listener_zip.sh is skipped gracefully
+# when absent so a partial checkout can still package the PRGs.
+package:
+	bash tools/package/build_prgs.sh
+	@if [ -x tools/package/build_listener_zip.sh ]; then \
+	    echo "[package] running tools/package/build_listener_zip.sh"; \
+	    bash tools/package/build_listener_zip.sh; \
+	else \
+	    echo "[package] tools/package/build_listener_zip.sh absent — skipping listener zip"; \
+	fi
+	bash tools/package/build_d64.sh

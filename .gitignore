@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 build/
+dist/
 ip65-build/*.o
 ip65-build/*.bin
 ip65-build/*.map
