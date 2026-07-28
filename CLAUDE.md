@@ -348,6 +348,13 @@ overridable via the `U64_HOST` environment variable) and use
                             diagnostics on pass or timeout.
                             `DEBUG_CAPTURE=1` enables a bounded 6510
                             bus stream for post-mortem.
+                            `EXTERNAL_LISTENER=1` (+ `EXTERNAL_HOST`,
+                            `EXTERNAL_PORT`, default 4433) skips the
+                            inline listener + repo-cert load and points
+                            the C64 at an out-of-band server — e.g. the
+                            packaged `dist/c64-https-listener.zip`
+                            listener; pass criteria then come from
+                            C64-side state only. Default OFF.
                             Each run writes a timestamped artifact dir
                             under `$UCI_DEBUG_DIR` (default
                             `/tmp/uci_https_debug/<ISO>/`) containing:
@@ -373,6 +380,23 @@ UCI/U64E at 48 MHz turbo and stock 1 MHz, and ip65/VICE at stock 1 MHz
 no-WARP (after the 255-byte TCP RX clamp fix in `src/net/ip65/net.s`;
 see `tests/test_phase3_https_1mhz.py`). The flow, identical across both
 backends:
+
+**U64E wedge episode (2026-07-27/28, resolved — know the signature):**
+the U64E at 10.43.23.81 spent 2026-07-27 in a runtime wedge where
+EVERY TLS handshake stalled deterministically at the first encrypted
+record (screen `...KEYS ENC1 RX`, never GOT2, `net_last_error=0x86`,
+`tls_recv_sub_progress=0x02`), at any clock, while DHCP/TCP/plaintext
+kept working; the D64 REST mount also failed (broken pipe). Soft
+resets did NOT clear it; the device then hard-crashed (unresponsive
+to its power button) and a hard power cycle fixed everything.
+Firmware 3.14d was UNCHANGED throughout (same image passed May-2026
+e2e) — this is transient device instability, not a firmware update,
+not client code (the 2026-05-20 known-good commit failed identically
+while wedged; the identical setup passed on the C64U). **If you see
+the no-GOT2 signature on healthy-looking transport: do not bisect
+code — power cycle the device (hard, at the wall).** Tracked with
+full evidence in
+[c64-test-harness#141](https://github.com/JC-000/c64-test-harness/issues/141).
 
   - ClientHello → ServerHello (X25519 key share)
   - EncryptedExtensions, Certificate, CertificateVerify (sibling
@@ -854,6 +878,66 @@ ld65 and ca65 edge cases; they are intentional and should stay:
     appear in `build/labels.txt` for the Python test harness. The
     `.export` has to live in exactly one translation unit; doing it
     inside the `.inc` header would duplicate on every include.
+
+## Packaging
+
+`make package` builds the release artifacts into `dist/` (gitignored):
+
+  - `c64-https-uci-reu.prg`    — default REU profile (`make BACKEND=uci`).
+                                 Requires REU hardware/enabled; fastest
+                                 at stock 1 MHz (the REU profile is the
+                                 right default below ~7 MHz).
+  - `c64-https-uci-onchip.prg` — `USE_NISTCURVES_ONCHIP=1`. **No REU
+                                 required** — for stock machines without
+                                 an REU (~3.9x the verify CPU work; at
+                                 1 MHz expect ~23 min for the ECDSA
+                                 verify alone).
+  - `c64-https.d64`            — both PRGs on one 1541 image
+                                 (`HTTPS-REU`, `HTTPS-NOREU`), built
+                                 with VICE's `c1541`.
+  - `c64-https-listener.zip`   — self-contained Python TLS 1.3 test
+                                 listener (source: `tools/package/
+                                 listener/`): `run.sh` creates a venv,
+                                 installs `cryptography`, **generates
+                                 fresh P-256 certs** (`gen_certs.py`),
+                                 and serves the canonical response.
+                                 Requires an OpenSSL 1.1.1+/3.x python
+                                 (refuses LibreSSL, e.g. macOS system
+                                 python, with a clear error).
+  - `MANIFEST.txt`             — sizes, git HEAD, sha256 checksums.
+
+Scripts live in `tools/package/` (`build_prgs.sh`, `build_d64.sh`,
+`build_listener_zip.sh`); each variant build does `make clean` first
+(flag changes are not tracked by make). Builds are deterministic —
+`make package` reproduces the validated hashes at the same HEAD.
+
+**ip65 is NOT packaged**: plain `make BACKEND=ip65` does not link at
+the current nistcurves pin (`BSS overflows CRYPTO_COLD_SHADOW by 1406
+bytes` — c64-nist-curves#54; error captured to
+`dist/ip65-link-error.txt` at package time). The comb profile is also
+deliberately excluded (REU bank 2 residency + ~40 min boot precompute
+at 1 MHz make it wrong for a general release).
+
+Validation record (2026-07-27, HEAD cb6eab4):
+  - onchip PRG passes the 3-vector ECDSA KAT in VICE **without** REU
+    (and with, as control) — the no-REU claim is verified, and
+    boot.s's unconditional reu_mul_init is harmless with no REU
+    attached. Both D64 files boot to banner in VICE.
+  - Full shipped chain (zip listener + freshly generated certs +
+    sha-verified dist PRGs, `EXTERNAL_LISTENER=1`), all HTTP 200 +
+    canonical body over TLS_CHACHA20_POLY1305_SHA256:
+
+      device   variant   clock    handshake+GET
+      C64U     REU       48 MHz   72.4 s
+      C64U     onchip    48 MHz   49.8 s
+      C64U     REU       64 MHz   65.2 s
+      C64U     onchip    64 MHz   40.1 s
+      U64E     REU       48 MHz   79.8 s
+      U64E     onchip    48 MHz   51.8 s
+      U64E     REU       1 MHz    1142.9 s (~19 min) — the stock-clock
+                                  user story, validated end-to-end
+    (U64E runs post power-cycle — see the wedge-episode note in
+    "End-to-end HTTPS status".)
 
 ## Smoke tests
 

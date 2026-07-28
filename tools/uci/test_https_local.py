@@ -188,6 +188,20 @@ HTTP_RESPONSE    = (
     b"HELLO FROM TLS SERVER"
 )
 
+# --- External-listener mode ----------------------------------------------
+# When EXTERNAL_LISTENER=1 the script does NOT stand up its own inline TLS
+# listener and does NOT load the repo cert/key: the server side is provided
+# out-of-band (e.g. the packaged dist/c64-https-listener.zip listener). The
+# C64 client is pointed at EXTERNAL_HOST:EXTERNAL_PORT and the pass criteria
+# come purely from C64-side state (http_resp_buf / screen RAM). Default OFF —
+# behavior is unchanged unless the var is set.
+EXTERNAL_LISTENER = os.environ.get("EXTERNAL_LISTENER", "0") == "1"
+# Dev-host IP the C64 should dial. Empty -> auto-detect this machine's LAN IP
+# toward the U64E (correct when the external listener runs on this same host
+# bound to 0.0.0.0).
+EXTERNAL_HOST = os.environ.get("EXTERNAL_HOST", "")
+EXTERNAL_PORT = int(os.environ.get("EXTERNAL_PORT", "4433"))
+
 
 def _detect_local_ip(target: str) -> str:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1006,7 +1020,8 @@ def main() -> int:
     if not LABELS_PATH.is_file():
         print(f"ERROR: labels.txt not found", file=sys.stderr)
         return 2
-    if not CERT_PATH.is_file() or not KEY_PATH.is_file():
+    if not EXTERNAL_LISTENER and (not CERT_PATH.is_file()
+                                  or not KEY_PATH.is_file()):
         print(f"ERROR: cert/key not found at {CERT_PATH} / {KEY_PATH}",
               file=sys.stderr)
         return 2
@@ -1061,41 +1076,54 @@ def main() -> int:
     for base, last, note in arbiter.allocations:
         print(f"  ${base:04X}-${last:04X}  {note}")
 
-    test_host_ip = _detect_local_ip(HOST)
-    print(f"\nDev host LAN IP : {test_host_ip}")
-    print(f"Cert / key      : {CERT_PATH} / {KEY_PATH}")
-
-    # --- Bind HTTPS listener (try default port, fall back to 4433) ---
-    ctx = _make_ssl_context()
-    srv = _try_bind(test_host_ip, DEFAULT_HTTPS_PORT)
-    chosen_port = DEFAULT_HTTPS_PORT
-    if srv is None:
-        if DEFAULT_HTTPS_PORT != FALLBACK_HTTPS_PORT:
-            print(f"NOTE: bind {test_host_ip}:{DEFAULT_HTTPS_PORT} failed"
-                  f" (need root?), falling back to {FALLBACK_HTTPS_PORT}")
-            srv = _try_bind(test_host_ip, FALLBACK_HTTPS_PORT)
-            chosen_port = FALLBACK_HTTPS_PORT
-        if srv is None:
-            print(f"ERROR: could not bind HTTPS listener", file=sys.stderr)
-            return 1
-    print(f"HTTPS port      : {chosen_port}")
-    print(f"Expected body   : {EXPECTED_BODY!r}")
-
     server_result: dict = {}
-    server_thread = threading.Thread(
-        target=_run_https_server,
-        args=(srv, ctx, server_result),
-        daemon=True,
-    )
-    server_thread.start()
-    for _ in range(60):
-        if server_result.get("listening"):
-            break
-        time.sleep(0.05)
+    server_thread: threading.Thread | None = None
+
+    if EXTERNAL_LISTENER:
+        # Server side is provided out-of-band (packaged listener). Don't
+        # bind, don't load certs, don't spawn a thread — just point the
+        # C64 at the external host:port. Pass criteria come from C64 state.
+        test_host_ip = EXTERNAL_HOST or _detect_local_ip(HOST)
+        chosen_port = EXTERNAL_PORT
+        print(f"\nDev host LAN IP : {test_host_ip}")
+        print(f"EXTERNAL_LISTENER=1 — using out-of-band listener at "
+              f"{test_host_ip}:{chosen_port} (no inline server, no repo certs)")
+        print(f"Expected body   : {EXPECTED_BODY!r}")
     else:
-        print("ERROR: HTTPS server failed to start", file=sys.stderr)
-        return 1
-    print(f"HTTPS server listening on {test_host_ip}:{chosen_port}")
+        test_host_ip = _detect_local_ip(HOST)
+        print(f"\nDev host LAN IP : {test_host_ip}")
+        print(f"Cert / key      : {CERT_PATH} / {KEY_PATH}")
+
+        # --- Bind HTTPS listener (try default port, fall back to 4433) ---
+        ctx = _make_ssl_context()
+        srv = _try_bind(test_host_ip, DEFAULT_HTTPS_PORT)
+        chosen_port = DEFAULT_HTTPS_PORT
+        if srv is None:
+            if DEFAULT_HTTPS_PORT != FALLBACK_HTTPS_PORT:
+                print(f"NOTE: bind {test_host_ip}:{DEFAULT_HTTPS_PORT} failed"
+                      f" (need root?), falling back to {FALLBACK_HTTPS_PORT}")
+                srv = _try_bind(test_host_ip, FALLBACK_HTTPS_PORT)
+                chosen_port = FALLBACK_HTTPS_PORT
+            if srv is None:
+                print(f"ERROR: could not bind HTTPS listener", file=sys.stderr)
+                return 1
+        print(f"HTTPS port      : {chosen_port}")
+        print(f"Expected body   : {EXPECTED_BODY!r}")
+
+        server_thread = threading.Thread(
+            target=_run_https_server,
+            args=(srv, ctx, server_result),
+            daemon=True,
+        )
+        server_thread.start()
+        for _ in range(60):
+            if server_result.get("listening"):
+                break
+            time.sleep(0.05)
+        else:
+            print("ERROR: HTTPS server failed to start", file=sys.stderr)
+            return 1
+        print(f"HTTPS server listening on {test_host_ip}:{chosen_port}")
 
     # --- Build routine (port patched in at build time) ---
     routine_bytes_raw, host_len_patch = _build_http_routine(labels, chosen_port)
@@ -1284,7 +1312,8 @@ def main() -> int:
             print(f"TIMEOUT: sentinel not set after "
                   f"{SENTINEL_POLL_TIMEOUT:.0f}s "
                   f"(progress=0x{last_progress:02X})", file=sys.stderr)
-            server_thread.join(timeout=1.0)
+            if server_thread is not None:
+                server_thread.join(timeout=1.0)
             _dump_full(transport, labels, server_result, run_dir=run_dir)
             outcome = "TIMEOUT"
             exit_code = 1
@@ -1292,7 +1321,8 @@ def main() -> int:
 
         # --- Results ---
         # Join server thread briefly so server_result is populated
-        server_thread.join(timeout=5.0)
+        if server_thread is not None:
+            server_thread.join(timeout=5.0)
         _dump_full(transport, labels, server_result, run_dir=run_dir)
 
         # Reread resp_data + screen_text for the assertion logic below.
