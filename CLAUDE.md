@@ -930,6 +930,8 @@ Validation record (2026-07-27, HEAD cb6eab4):
       device   variant   clock    handshake+GET
       C64U     REU       48 MHz   72.4 s
       C64U     onchip    48 MHz   49.8 s
+      C64U     REU       64 MHz   65.2 s
+      C64U     onchip    64 MHz   40.1 s
       U64E     REU       48 MHz   79.8 s
       U64E     onchip    48 MHz   51.8 s
       U64E     REU       1 MHz    1142.9 s (~19 min) — the stock-clock
