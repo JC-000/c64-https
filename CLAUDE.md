@@ -381,17 +381,22 @@ no-WARP (after the 255-byte TCP RX clamp fix in `src/net/ip65/net.s`;
 see `tests/test_phase3_https_1mhz.py`). The flow, identical across both
 backends:
 
-**DEVICE STATUS (2026-07-27): the U64E at 10.43.23.81 is on firmware
-3.14d, which breaks ALL TLS handshakes on that device** — deterministic,
-speed-independent stall at the first encrypted record (no GOT2,
-`net_last_error=0x86`), proven NOT to be a code regression (the
-2026-05-20 known-good commit fails identically; the identical setup
-passes on the C64U fw 1.1.0). Its D64 REST mount endpoint is also
-broken (multipart upload → broken pipe). Do not run handshake e2e on
-the U64E until [c64-test-harness#141](https://github.com/JC-000/c64-test-harness/issues/141)
-is resolved — use the C64U (10.53.21.158). Non-TLS UCI paths (DHCP,
-TCP echo, plain HTTP) still work on the U64E. The historical U64E
-numbers below predate the firmware change.
+**U64E wedge episode (2026-07-27/28, resolved — know the signature):**
+the U64E at 10.43.23.81 spent 2026-07-27 in a runtime wedge where
+EVERY TLS handshake stalled deterministically at the first encrypted
+record (screen `...KEYS ENC1 RX`, never GOT2, `net_last_error=0x86`,
+`tls_recv_sub_progress=0x02`), at any clock, while DHCP/TCP/plaintext
+kept working; the D64 REST mount also failed (broken pipe). Soft
+resets did NOT clear it; the device then hard-crashed (unresponsive
+to its power button) and a hard power cycle fixed everything.
+Firmware 3.14d was UNCHANGED throughout (same image passed May-2026
+e2e) — this is transient device instability, not a firmware update,
+not client code (the 2026-05-20 known-good commit failed identically
+while wedged; the identical setup passed on the C64U). **If you see
+the no-GOT2 signature on healthy-looking transport: do not bisect
+code — power cycle the device (hard, at the wall).** Tracked with
+full evidence in
+[c64-test-harness#141](https://github.com/JC-000/c64-test-harness/issues/141).
 
   - ClientHello → ServerHello (X25519 key share)
   - EncryptedExtensions, Certificate, CertificateVerify (sibling
@@ -918,12 +923,19 @@ Validation record (2026-07-27, HEAD cb6eab4):
     (and with, as control) — the no-REU claim is verified, and
     boot.s's unconditional reu_mul_init is harmless with no REU
     attached. Both D64 files boot to banner in VICE.
-  - Full shipped chain on C64U 48 MHz (zip listener + freshly
-    generated certs + sha-verified dist PRGs, `EXTERNAL_LISTENER=1`):
-    REU **72.4 s** / onchip **49.8 s** handshake, both HTTP 200 +
-    canonical body, TLS_CHACHA20_POLY1305_SHA256.
-  - U64E validation is blocked by its firmware 3.14d regression (see
-    "End-to-end HTTPS status" device-status note + c64-test-harness#141).
+  - Full shipped chain (zip listener + freshly generated certs +
+    sha-verified dist PRGs, `EXTERNAL_LISTENER=1`), all HTTP 200 +
+    canonical body over TLS_CHACHA20_POLY1305_SHA256:
+
+      device   variant   clock    handshake+GET
+      C64U     REU       48 MHz   72.4 s
+      C64U     onchip    48 MHz   49.8 s
+      U64E     REU       48 MHz   79.8 s
+      U64E     onchip    48 MHz   51.8 s
+      U64E     REU       1 MHz    1142.9 s (~19 min) — the stock-clock
+                                  user story, validated end-to-end
+    (U64E runs post power-cycle — see the wedge-episode note in
+    "End-to-end HTTPS status".)
 
 ## Smoke tests
 
