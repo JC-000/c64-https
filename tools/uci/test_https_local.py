@@ -1236,11 +1236,18 @@ def main() -> int:
         #
         # So: read the current state and skip the write entirely when it
         # already matches, and give a genuine change a wider settle.
+        # Shape note: the REST config responses wrap their items in a
+        # `<Category>` key and put each value directly under the ITEM name
+        # — there is no per-item "value" key (an earlier attempt here read
+        # `.get("value")` and silently got None/None on a C64U, which made
+        # the skip unreachable). Mirror the harness's own get_reu_config:
+        # fetch the category, unwrap, index by item name. One request
+        # covers both items. `.get(CAT, cat)` tolerates either shape.
         try:
-            cur_speed = client.get_config_item(
-                CAT_U64_SPECIFIC, "CPU Speed").get("value")
-            cur_turbo = client.get_config_item(
-                CAT_U64_SPECIFIC, "Turbo Control").get("value")
+            cat = client.get_config_category(CAT_U64_SPECIFIC)
+            inner = cat.get(CAT_U64_SPECIFIC, cat)
+            cur_speed = inner.get("CPU Speed")
+            cur_turbo = inner.get("Turbo Control")
         except Exception as exc:                      # probe is best-effort
             print(f"  (turbo state probe failed: {exc}; writing anyway)")
             cur_speed = cur_turbo = None
