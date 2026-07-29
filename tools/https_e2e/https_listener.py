@@ -31,7 +31,9 @@ Cert profile selection precedence (first match wins):
 from __future__ import annotations
 
 import os
+import socket
 import ssl
+import sys
 import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -247,6 +249,23 @@ def start_https_listener(
 
     server = HTTPServer((host, port), _Handler)
 
+    if sys.platform == "darwin":
+        # macOS drops a connection after ~30 s of unACKed retransmission
+        # (5 rexmts observed, then RST). A 1 MHz C64 on the ip65 backend
+        # ACKs only when it polls, and its crypto stalls run 4-25 min —
+        # the server flight sits unACKed far past the default drop time
+        # and the kernel RSTs mid-handshake (observed on the feth rig:
+        # 5x rexmt of the flight tail over 33 s, RST, then the C64 ACKed
+        # into the dead socket 4.5 min later). TCP_RXT_CONNDROPTIME
+        # (xnu tcp.h, 0x80) raises that per-socket, set on the listening
+        # socket BEFORE the ssl wrap so accepted sockets inherit it.
+        # Linux needs nothing: its default retransmit patience is minutes.
+        # UCI-backend runs never hit this because the Ultimate firmware's
+        # TCP stack ACKs autonomously regardless of C64 polling.
+        TCP_RXT_CONNDROPTIME = 0x80
+        server.socket.setsockopt(
+            socket.IPPROTO_TCP, TCP_RXT_CONNDROPTIME, 7200)
+
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     ctx.maximum_version = ssl.TLSVersion.TLSv1_3
@@ -255,6 +274,22 @@ def start_https_listener(
         ctx.set_ecdh_curve("secp384r1")
     ctx.load_cert_chain(cert_path, key_path)
     server.socket = ctx.wrap_socket(server.socket, server_side=True)
+
+    if sys.platform == "darwin":
+        # Belt-and-suspenders: BSD option inheritance across accept() is
+        # not guaranteed for TCP-level options, so also set the drop time
+        # on each accepted connection explicitly.
+        _orig_get_request = server.get_request
+
+        def _get_request_patched():
+            conn, addr = _orig_get_request()
+            try:
+                conn.setsockopt(socket.IPPROTO_TCP, 0x80, 7200)
+            except OSError:
+                pass
+            return conn, addr
+
+        server.get_request = _get_request_patched
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

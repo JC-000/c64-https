@@ -35,6 +35,11 @@ IP65_BUILD   := ip65-build
 IP65_BIN     := $(IP65_BUILD)/ip65-c64.bin
 
 CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net/$(BACKEND) -I build --debug-info
+# Optional HTTPS target-port override (src/boot.s defaults to 443).
+# `make HTTPS_PORT=4433` lets a test rig's TLS listener bind unprivileged.
+ifdef HTTPS_PORT
+CA65FLAGS += -D HTTPS_PORT=$(HTTPS_PORT)
+endif
 # Lazy (=) so the USE_NISTCURVES_ONCHIP_COMB block below can retarget
 # CFG to the cfg variant after this line.
 LD65FLAGS = -C $(CFG) -Ln build/labels.txt -m build/c64-https.map --dbgfile build/c64-https.dbg

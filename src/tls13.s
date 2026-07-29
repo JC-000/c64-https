@@ -453,6 +453,39 @@ tls_recv_server_hello:
         lda #$05
         sta tls_recv_progress
 
+        ; Drain frames already at the NIC and ACK them BEFORE the
+        ; multi-minute ECDHE stall. The server's post-SH flight is on
+        ; the wire/in the chip by now (it splits at the 512 B default
+        ; MSS because ip65's SYN carries no MSS option); without this
+        ; drain the tail sits unACKed while we compute, and impatient
+        ; peers drop the connection (macOS: hard drop after 13
+        ; retransmits ≈ 54 s on a LAN — the C64 then verifies the whole
+        ; buffered flight offline and dies SENDING client Finished into
+        ; an RST'd socket). Draining here leaves zero unACKed data
+        ; across every later crypto stall; idle connections survive.
+        ; Safe: SH is fully parsed above, and net_poll only appends to
+        ; the TCP ring — it never touches tls_rec_buf. Bounded 8x250
+        ; polls (~10-20 s at 1 MHz — trivial vs the 20 min verify, and
+        ; long enough to cover the peer's first retransmission of the
+        ; flight tail if it wasn't at the NIC yet when we got here).
+        ldy #8
+@sh_drain_outer:
+        ldx #250
+@sh_drain:
+        tya
+        pha
+        txa
+        pha
+        jsr net_poll
+        pla
+        tax
+        pla
+        tay
+        dex
+        bne @sh_drain
+        dey
+        bne @sh_drain_outer
+
         ; compute ECDH shared secret now that tls_server_pubkey is populated
         jsr tls_ecdh_compute_shared
         clc
