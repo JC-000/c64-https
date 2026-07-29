@@ -3,6 +3,14 @@
 
         .include "constants.inc"
 
+        ; HTTPS target port. Overridable at build time for test rigs
+        ; whose TLS listener cannot bind the privileged default (e.g.
+        ; `make HTTPS_PORT=4433` for the unprivileged macOS/VICE e2e).
+        ; The default MUST stay 443 and the default build byte-identical.
+        .ifndef HTTPS_PORT
+        HTTPS_PORT = 443
+        .endif
+
         ; ---- exports: entry + print helpers ----
         .export start
         .export main_loop
@@ -521,9 +529,9 @@ do_https_get:
         lda #1
         sta http_path_len
 
-        lda #<443
+        lda #<HTTPS_PORT
         sta http_port
-        lda #>443
+        lda #>HTTPS_PORT
         sta http_port+1
 
         ; --- copy hostname into tls_hostname for SNI ---
@@ -556,9 +564,9 @@ do_https_get:
         ldy #>dns_ok_msg
         jsr print_string
 
-        ; --- TCP connect port 443 ---
-        lda #<443               ; port low byte
-        ldx #>443               ; port high byte
+        ; --- TCP connect on HTTPS_PORT (default 443) ---
+        lda #<HTTPS_PORT        ; port low byte
+        ldx #>HTTPS_PORT        ; port high byte
         jsr net_tcp_connect
         bcc @tcp_ok
 
