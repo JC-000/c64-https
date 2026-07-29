@@ -11,3 +11,14 @@
 
 .export ip65_init
 .export ip65_process
+
+; --- ip65 refit: SCRATCH_UNION drift guard -----------------------------
+; cfg/c64-https-ip65.cfg time-shares cert_buf's RAM with
+; LIB_NISTCURVES_P256_BSS (verify-time scratch) via the SCRATCH_UNION
+; region at $A000. Both anchors are pinned in the cfg; this link-time
+; assert catches any silent drift (e.g. someone dropping the start=
+; pin or reordering segments) before it becomes runtime corruption.
+; ip65-only file, so the UCI backends (where cert_buf floats) are
+; unaffected.
+.import cert_buf
+.assert cert_buf = $A000, lderror, "ip65 refit: cert_buf must sit at $A000 (SCRATCH_UNION anchor) - see cfg/c64-https-ip65.cfg"

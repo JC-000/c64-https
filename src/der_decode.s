@@ -573,12 +573,18 @@ cert_sig_r:        .res 48              ; signature r component (max 48 for P-38
 cert_sig_s:        .res 48              ; signature s component (max 48 for P-384)
 cert_sig_len:      .res 1               ; 32 (P-256) or 48 (P-384)
 cert_curve_id:     .res 1               ; 0=P-256, 1=P-384
-; W1 partial: cert_buf (1.5 KB) lives in BSS_TAIL — the same offload
-; region as src/data.s::tls_rec_buf — routed to NET_BSS_TAIL under
-; UCI. Keeps the cert parse staging out of the CRYPTO_HOT overflow
-; path. ip65 cfg aliases BSS_TAIL to BSS so the relocation is
-; invisible there.
-.segment "BSS_TAIL"
+; ip65 refit: cert_buf gets its own segment (was BSS_TAIL alongside
+; src/data.s::tls_rec_buf) so the ip65 cfg can pin it at $A000 and
+; time-share the RAM with LIB_NISTCURVES_P256_BSS (verify-time scratch).
+; LIFETIME CONTRACT: cert_buf (and cert_tbs_ptr/len, which point into
+; it) are dead once x509_parse_cert / x509_extract_pubkey returns —
+; the pubkey is extracted at Certificate-processing time, and the
+; CertificateVerify path reads only tls_rec_buf + the transcript +
+; the CRYPTO_BSS pubkey slots. ecdsa_verify may therefore scribble
+; cert_buf freely. Any future cert-chain validation that re-reads
+; cert_buf (or hashes TBS via cert_tbs_ptr) after Certificate
+; processing MUST first break the union in cfg/c64-https-ip65.cfg.
+.segment "CERT_BUF_BSS"
 cert_buf:          .res 1536            ; certificate DER buffer
 .segment "BSS"
 cert_buf_len:      .res 2               ; certificate length
