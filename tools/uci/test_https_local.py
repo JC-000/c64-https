@@ -75,6 +75,8 @@ from c64_test_harness.backends.ultimate64_helpers import (
     runner_health_check,
     Ultimate64RunnerStuckError,
     DEBUG_MODE_6510,
+    CAT_U64_SPECIFIC,
+    cpu_speed_enum,
 )
 from c64_test_harness.backends.u64_debug_capture import (
     DebugCapture,
@@ -1222,9 +1224,47 @@ def main() -> int:
         # the target speed avoids the mid-session switch entirely and
         # also makes boot speed deterministic (it used to be whatever
         # the previous run left in the device config).
-        print(f"Setting turbo to {TURBO_MHZ} MHz...")
-        set_turbo_mhz(client, TURBO_MHZ)
-        time.sleep(0.5)
+        # Sharper finding (2026-07-29, C64U): the glitch is caused by the
+        # config WRITE itself and SURVIVES the reset below — it is not
+        # limited to mid-session switches. It also fires on a REDUNDANT
+        # write: 3/3 attempts wrote "64" while the device was already at
+        # 64 MHz and every one lost its first TCP_CONNECT
+        # (UCI_ERR_NO_SOCKET, no SYN on the wire), while the identical PRG
+        # at the identical speed passed via a script that performs no
+        # config write before its reset. At 48 MHz the same pattern costs
+        # only the first attempt.
+        #
+        # So: read the current state and skip the write entirely when it
+        # already matches, and give a genuine change a wider settle.
+        try:
+            cur_speed = client.get_config_item(
+                CAT_U64_SPECIFIC, "CPU Speed").get("value")
+            cur_turbo = client.get_config_item(
+                CAT_U64_SPECIFIC, "Turbo Control").get("value")
+        except Exception as exc:                      # probe is best-effort
+            print(f"  (turbo state probe failed: {exc}; writing anyway)")
+            cur_speed = cur_turbo = None
+
+        # str() both sides: cpu_speed_enum returns a str ("48"), but the
+        # REST value's type is the firmware's business, not ours — a silent
+        # int/str mismatch here would make the skip never fire and quietly
+        # restore the old always-write behaviour.
+        want_speed = str(cpu_speed_enum(TURBO_MHZ))
+        if str(cur_speed) == want_speed and cur_turbo == "Manual":
+            print(
+                f"Turbo already {TURBO_MHZ} MHz (Manual) — skipping config "
+                "write (avoids the C64U bridge glitch; see comment above)"
+            )
+        else:
+            print(
+                f"Setting turbo to {TURBO_MHZ} MHz "
+                f"(from {cur_turbo}/{cur_speed})..."
+            )
+            set_turbo_mhz(client, TURBO_MHZ)
+            # Wider settle than the historical 0.5 s: the write is what
+            # perturbs the bridge, and the first TCP_CONNECT is what pays
+            # for it. Overridable for experiments.
+            time.sleep(float(os.environ.get("TURBO_SETTLE", "3.0")))
 
         print("Resetting machine...")
         client.reset()
