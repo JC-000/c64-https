@@ -12,6 +12,7 @@
         ; ---- exports ----
         .export http_get
         .export http_build_get
+        .export http_recv_body
         .export http_recv_response
         .export http_get_plain
         .export http_get_verb
@@ -39,10 +40,12 @@
         .import http_line_buf
         .import http_content_length
 
-        ; ---- imports: data.asm BSS (TLS app data + TCP ring tail) ----
+        ; ---- imports: data.asm BSS (TLS app data) ----
+        ; (tcp_recv_head/tail imports dropped in the issue #72 redesign —
+        ; the parser no longer touches the ciphertext ring on the TLS
+        ; path; ring access is via net_recv_byte on the plain path only.)
         .import tls_app_ptr
         .import tls_app_len
-        .import tcp_recv_tail
 
         ; ---- imports: TLS handshake layer (SNI buffer + connect/close) ----
         .import tls_hostname
@@ -131,6 +134,47 @@ http_get:
 :
 
         ; --- 8. Receive response via TLS ---
+        ; Extracted to http_recv_body (issue #72) so the boot.s HTTPS demo
+        ; can share the exact production receive/parse path instead of its
+        ; old first-record-only copy loop. Closes stay here: the demo does
+        ; its own close sequence with progress prints.
+        jsr http_recv_body
+
+        jsr tls_close
+        jsr net_tcp_close
+        clc
+        rts
+
+@tls_error:
+        jsr net_tcp_close
+@error:
+        sec
+        rts
+
+@close_error:
+        jsr tls_close
+        jsr net_tcp_close
+        sec
+        rts
+
+; =============================================================================
+; http_recv_body - receive + parse the HTTP response over TLS
+;
+; The production receive path shared by http_get and the boot.s HTTPS demo.
+; Polls the network and hands each decrypted TLS application record to
+; http_recv_response as a linear span (status line + headers + body with
+; Content-Length termination). Plaintext never touches the TCP ring —
+; see the span-input comment at the record handoff below.
+;
+; Input:  TLS session established, request already sent
+; Output: C=0; http_status / http_resp_buf (body) / http_resp_len populated.
+;         Returns on parse-complete OR on the poll-timeout fallback
+;         ("accept whatever we have" — preserves the historical http_get
+;         behaviour for chunked/streaming responses with no Content-Length).
+;         Caller closes the connection.
+; Clobbers: A, X, Y, zp_ptr
+; =============================================================================
+http_recv_body:
         ; Initialise parser state. http_content_length / _known are reset
         ; at the status-line -> headers transition (see @parse_status_line).
         lda #0
@@ -149,45 +193,26 @@ http_get:
         jsr tls_recv
         bcs @recv_no_data
 
-        ; Got decrypted data in tls_app_ptr / tls_app_len
-        ; Copy tls_app_ptr to ZP for indirect addressing
+        ; Got decrypted data in tls_app_ptr / tls_app_len.
+        ; Hand the decrypted record to the parser as a linear span
+        ; (issue #72 redesign). The historical approach fed plaintext
+        ; back into the shared TCP ring, which breaks whenever ciphertext
+        ; for later records (body record #2, the peer's close_notify) is
+        ; already queued between head and tail — on ip65 the rx callback
+        ; queues eagerly, so the parser ate ciphertext as HTTP text
+        ; (garbage http_status) or lost the body to a discard. Span input
+        ; keeps the ring pure ciphertext: no feed, no discard, and
+        ; multi-record bodies parse correctly on both backends.
         lda tls_app_ptr
-        sta zp_ptr
+        sta http_in_ptr
         lda tls_app_ptr+1
-        sta zp_ptr+1
-
-        ; Feed decrypted bytes into the TCP ring buffer.
-        ; Ring is 1024 bytes with 16-bit masked head/tail. We compute the
-        ; destination absolute address per-byte via SMC on @feed_store.
-        ldy #0
-@feed_loop:
-        cpy tls_app_len         ; low byte only (TLS records < 256)
-        beq @feed_done
-        lda (zp_ptr),y
-        pha
-        ; dest = tcp_recv_buf + tail
-        clc
-        lda tcp_recv_tail+0
-        adc #<tcp_recv_buf
-        sta @feed_store+1
-        lda tcp_recv_tail+1
-        adc #>tcp_recv_buf
-        sta @feed_store+2
-        pla
-@feed_store:
-        sta $ffff               ; SMC: patched above
-        ; tail = (tail + 1) & TCP_RECV_MASK
-        inc tcp_recv_tail+0
-        bne @feed_mask
-        inc tcp_recv_tail+1
-@feed_mask:
-        lda tcp_recv_tail+1
-        and #>(TCP_RECV_MASK)
-        sta tcp_recv_tail+1
-        iny
-        bne @feed_loop          ; always branches (tls_app_len < 256)
-@feed_done:
-        ; Parse from ring buffer
+        sta http_in_ptr+1
+        lda tls_app_len
+        sta http_in_len
+        lda tls_app_len+1
+        sta http_in_len+1
+        lda #1
+        sta http_in_mode        ; input mode 1: parser reads this span
         jsr http_recv_response
         bcc @recv_complete      ; C=0 means parsing complete
         ; Reset timeout counter on progress
@@ -204,24 +229,54 @@ http_get:
         ; Timeout — accept whatever we have
 
 @recv_complete:
-        jsr tls_close
-        jsr net_tcp_close
         clc
         rts
 
 @recv_timeout: .word 0
 
-@tls_error:
-        jsr net_tcp_close
-@error:
+; =============================================================================
+; http_in_byte - fetch the next input byte for http_recv_response
+;
+; Dual-source input (issue #72): the parser is shared between the plain
+; HTTP path (input = the TCP ring, which holds plaintext there) and the
+; TLS path (input = the current decrypted record span; plaintext must
+; NEVER be fed through the ciphertext ring — see http_recv_body).
+;
+; http_in_mode: 0 = ring (delegates to net_recv_byte)
+;               1 = span (http_in_ptr / http_in_len, 16-bit)
+; Output: C=0 + byte in A, or C=1 = input exhausted.
+; Preserves X, Y (matches net_recv_byte's contract).
+; =============================================================================
+http_in_byte:
+        lda http_in_mode
+        beq @ring               ; mode 0: plain path reads the ring
+        ; span mode: exhausted?
+        lda http_in_len
+        ora http_in_len+1
+        beq @span_empty
+        ; SMC-patch the load address (module convention: no-ZP, the
+        ; parser's body state owns zp_ptr)
+        lda http_in_ptr
+        sta @in_ld+1
+        lda http_in_ptr+1
+        sta @in_ld+2
+@in_ld: lda $ffff               ; SMC: patched above
+        pha
+        inc http_in_ptr
+        bne :+
+        inc http_in_ptr+1
+:       lda http_in_len
+        bne :+
+        dec http_in_len+1
+:       dec http_in_len
+        pla
+        clc
+        rts
+@span_empty:
         sec
         rts
-
-@close_error:
-        jsr tls_close
-        jsr net_tcp_close
-        sec
-        rts
+@ring:
+        jmp net_recv_byte
 
 ; =============================================================================
 ; http_build_get - construct HTTP/1.1 GET request in http_req_buf
@@ -385,7 +440,7 @@ http_recv_response:
 
 ; ----- state 0: accumulate status line until \n -----
 @state_status:
-        jsr net_recv_byte
+        jsr http_in_byte
         bcc @status_have_data
         jmp @not_done           ; no data yet, try again later
 @status_have_data:
@@ -482,7 +537,7 @@ http_recv_response:
 ; This replaces the earlier 4-byte \r\n\r\n pattern matcher — one state
 ; machine is smaller than two running in parallel.
 @state_headers:
-        jsr net_recv_byte
+        jsr http_in_byte
         bcc @hdr_got_byte
         jmp @not_done
 @hdr_got_byte:
@@ -545,7 +600,7 @@ http_recv_response:
         cmp http_content_length+1
         beq @done
 @body_read:
-        jsr net_recv_byte
+        jsr http_in_byte
         bcs @not_done           ; no byte right now -> poll more
         ; store byte using zp_ptr = http_resp_buf + http_resp_len
         pha                     ; save received byte
@@ -702,6 +757,8 @@ http_get_plain:
         sta http_hdr_match
         sta http_resp_len
         sta http_resp_len+1
+        sta http_in_mode        ; input mode 0: parser reads the TCP ring
+                                ; (plain HTTP — ring holds plaintext)
 
         ; --- 7. Poll + parse loop (with timeout) ---
         lda #0
@@ -758,3 +815,7 @@ http_crlf:
 
 http_bg_idx:    .res 1          ; build_get write cursor
 http_bg_src:    .res 1          ; build_get source index temp
+; Parser input source (issue #72 span-input redesign — see http_in_byte)
+http_in_mode:   .res 1          ; 0 = TCP ring (plain HTTP), 1 = span (TLS)
+http_in_ptr:    .res 2          ; span read cursor
+http_in_len:    .res 2          ; span bytes remaining (16-bit)
