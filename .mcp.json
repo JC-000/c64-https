@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "serena": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/JC-000/serena@feature/ca65-language-server",
+        "--with-editable",
+        "/Users/someone/Documents/ca65-asm-serena-lsp/packages/ca65-ls",
+        "serena",
+        "start-mcp-server"
+      ],
+      "env": {}
+    }
+  }
+}
