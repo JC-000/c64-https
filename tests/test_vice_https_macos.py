@@ -52,6 +52,7 @@ for p in (_TOOLS, "/Users/someone/Documents/c64-test-harness/src"):
         sys.path.insert(0, p)
 
 from c64_test_harness.backends.vice_binary import BinaryViceTransport  # noqa: E402
+from c64_test_harness import Labels, read_bytes  # noqa: E402
 from https_e2e import (  # noqa: E402
     press_key,
     wait_for_screen_text,
@@ -180,6 +181,35 @@ def _last_progress(screen: str) -> str:
         if idx > best_idx:
             best, best_idx = needle, idx
     return best
+
+
+_DIAG_SYMBOLS = (
+    # (label, byte count) — read on failure, before teardown kills VICE.
+    ("tls_state", 1), ("tls_recv_progress", 1), ("tls_recv_sub_progress", 1),
+    ("tls_read_seq", 8), ("tls_rec_type", 1), ("tls_rec_len", 2),
+    ("net_last_error", 1), ("net_tcp_state", 1),
+    ("tcp_recv_head", 2), ("tcp_recv_tail", 2), ("tcp_recv_overflow", 1),
+    ("http_status", 2),
+)
+
+
+def _dump_c64_state(transport: BinaryViceTransport) -> None:
+    """Read TLS/net state via labels at failure time (VICE still alive)."""
+    try:
+        labels = Labels.from_file(os.path.join(_REPO_ROOT, "build", "labels.txt"))
+    except Exception as e:  # noqa: BLE001
+        print(f"  (state dump unavailable — labels: {e})")
+        return
+    print("=== C64 state at failure ===")
+    for name, count in _DIAG_SYMBOLS:
+        addr = labels.address(name)
+        if addr is None:
+            continue
+        try:
+            data = read_bytes(transport, addr, count)
+            print(f"  {name:22s} = {data.hex()}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  {name:22s} unreadable ({e})")
 
 
 def main() -> int:
@@ -349,14 +379,35 @@ def main() -> int:
                 print(f"  {ts:8.1f}  (+{ts - prev:7.1f})  {phase}")
                 prev = ts
         if result == "pass":
-            ok_body = RESPONSE_BODY.split()[0] in final.upper()
+            # Verify the response from C64 memory, not the screen — the
+            # 22-byte body scrolls off the 25-line display behind the
+            # HTTP headers. http_get only completes (-> CONNECTION
+            # CLOSED) once http_resp_len == Content-Length, so memory
+            # holds the ground truth.
+            ok_body = False
+            detail = "labels unavailable"
+            try:
+                labels = Labels.from_file(
+                    os.path.join(_REPO_ROOT, "build", "labels.txt"))
+                status = read_bytes(transport, labels["http_status"], 2)
+                rlen = read_bytes(transport, labels["http_resp_len"], 2)
+                n = rlen[0] | (rlen[1] << 8)
+                buf = read_bytes(transport, labels["http_resp_buf"],
+                                 min(n, 64) or 1)
+                body = buf.decode("ascii", errors="replace")
+                stat = status[0] | (status[1] << 8)
+                ok_body = (stat == 200 and body.startswith(RESPONSE_BODY))
+                detail = f"http_status={stat} len={n} body={body!r}"
+            except Exception as e:  # noqa: BLE001
+                detail = f"memory check failed: {e}"
+                ok_body = RESPONSE_BODY.split()[0] in final.upper()
             print(f"PASS: handshake+GET complete in {t_end:.0f}s wall "
-                  f"(warp={'off' if NO_WARP else 'on'}); "
-                  f"body needle {'seen' if ok_body else 'NOT SEEN'}")
+                  f"(warp={'off' if NO_WARP else 'on'}); {detail}")
             return 0 if ok_body else 1
         if result == "fail":
             print(f"FAIL at stage {reason} (+{t_end:.0f}s); "
                   f"last progress: {_last_progress(final)}")
+            _dump_c64_state(transport)
             return 1
         print(f"FAIL: timeout after {TLS_TIMEOUT:.0f}s; "
               f"last progress: {_last_progress(final)}")
