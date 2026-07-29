@@ -222,9 +222,17 @@ def c64_x25519_clamp(transport, labels, scalar):
 
 
 def c64_x25519_scalarmult(transport, labels, scalar, u):
-    """Compute scalar * u on C64. Returns 32-byte result."""
+    """Compute X25519(scalar, u) on C64. Returns 32-byte result.
+
+    x25519_scalarmult does NOT clamp — production clamps via
+    x25519_clamp first (see src/tls_ecdh.s), and the RFC 7748 test
+    vectors assume decodeScalar25519 (clamping). Without the clamp jsr
+    the ladder computes the mathematically-correct product for the RAW
+    scalar, which does not match the RFC expected outputs.
+    """
     write_bytes(transport, labels["x25_scalar"], scalar)
     write_bytes(transport, labels["x25_u"], u)
+    jsr(transport, labels["x25519_clamp"])
     jsr(transport, labels["x25519_scalarmult"], timeout=7200.0)
     return read_bytes(transport, labels["x25_result"], 32)
 

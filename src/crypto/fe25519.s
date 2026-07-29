@@ -65,7 +65,17 @@
 .import poly_prod_lo
 .import poly_prod_hi
 .import mul_8x8
+.ifdef USE_NISTCURVES_ONCHIP
+; REU-less onchip profile: rows are generated on-chip via the sibling's
+; og_common (mul_8x8_onchip.o). reu_fetch_mul_row is NOT imported so the
+; X25519 path cannot silently regress to the REU-DMA fetch (which without
+; an REU leaves stale rows and computes garbage — see the VICE -reu
+; harness gotcha in CLAUDE.md, which applied to fe_mul too until now).
+.import og_common
+.import og_src_ld
+.else
 .import reu_fetch_mul_row
+.endif
 
 .segment "CRYPTO_CODE"
 
@@ -356,6 +366,34 @@ fe_cswap:
         bpl @loop
         rts
 
+.ifdef USE_NISTCURVES_ONCHIP
+; =============================================================================
+; fe_gen_mul_row - on-chip multiply-row generation for fe_mul
+;
+; USE_NISTCURVES_ONCHIP builds must not DMA rows from the REU (there may
+; be none). Mirrors fp256's gen_mul_row stub: SMC-patch the sibling
+; og_common's source-load operand to mul_src2_buf (fe_mul stages src2
+; there before the outer loop) and delegate. og_common generates
+; mul_dma_lo/hi entries for every NONZERO byte value in
+; mul_src2_buf[0..31] plus the diagonal at mul_cached_a — exactly the
+; set fe_mul's inner loop reads (its beq fast-path never reads index 0).
+; The operand must be re-patched on every call because fp256's
+; gen_mul_row patches the same site to its own staging buffer.
+;
+; Input:    mul_cached_a = src1[i] (row multiplicand)
+; Clobbers: A, X, Y, poly_prod_lo/hi + ct_mul_8x8 scratch/SMC sites
+;           (safe: the fe_mul call site reloads A/X/Y and rewrites
+;           poly_prod_* before any use)
+; =============================================================================
+fe_gen_mul_row:
+        lda #<mul_src2_buf
+        sta og_src_ld+1
+        lda #>mul_src2_buf
+        sta og_src_ld+2
+        ldx #31
+        jmp og_common
+.endif
+
 ; =============================================================================
 ; fe_mul - (fe_dst) = (fe_src1) * (fe_src2) mod p
 ;
@@ -394,8 +432,13 @@ fe_mul:
 @nonzero_i:
         sta mul_cached_a       ; cache src1[i] for inner loop
 
+.ifdef USE_NISTCURVES_ONCHIP
+        ; Generate the multiplication row for src1[i] on-chip (REU-less)
+        jsr fe_gen_mul_row
+.else
         ; DMA the multiplication row for src1[i] from REU
         jsr reu_fetch_mul_row
+.endif
 
         ; Self-mod: patch accumulation addresses to base = fe_wide + i
         ; Patch BOTH copies of the unrolled inner loop
