@@ -122,6 +122,7 @@
         ; ---- imports: HTTP ----
         .import http_get_plain
         .import http_build_get
+        .import http_recv_body
 
         ; ---- imports: HTTP I/O state (data.asm) ----
         .import http_host_ptr
@@ -621,36 +622,15 @@ do_https_get:
         ldy #>send_ok_msg
         jsr print_string
 
-        ; --- receive response via TLS ---
-@recv_loop:
-        jsr net_poll            ; pump network
-        jsr tls_recv
-        bcs @recv_loop          ; C=1 means no data yet, keep polling
+        ; --- receive + parse response ---
+        ; Shared production path (issue #72): http_recv_body walks status
+        ; line + headers + body with Content-Length termination, leaving
+        ; the BODY in http_resp_buf / http_resp_len. Replaces the old
+        ; first-record-only copy loop that showed headers and lost the
+        ; body whenever it arrived as a second TLS record.
+        jsr http_recv_body
 
-        ; got data -- tls_app_ptr/tls_app_len has decrypted payload
-        ; copy into http_resp_buf (up to 512 bytes)
-        lda tls_app_ptr
-        sta zp_ptr
-        lda tls_app_ptr+1
-        sta zp_ptr+1
-
-        ldy #0
-        ldx tls_app_len         ; low byte of length (assume <256 for first chunk)
-@copy_resp:
-        cpx #0
-        beq @recv_done
-        lda (zp_ptr),y
-        sta http_resp_buf,y
-        iny
-        dex
-        bne @copy_resp
-
-@recv_done:
-        sty http_resp_len       ; store how many bytes we copied
-        lda #0
-        sta http_resp_len+1
-
-        ; display response
+        ; display response body
         jsr print_resp_body
 
 @close:

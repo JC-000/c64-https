@@ -160,7 +160,17 @@ sqtab_reserved: .res 1024
 .export tcp_recv_overflow
 tcp_recv_head:      .res 2      ; read position (16-bit, masked with TCP_RECV_MASK)
 tcp_recv_tail:      .res 2      ; write position (updated by ip65 callback)
-tcp_recv_overflow:  .res 1      ; set to 1 by callback if ring fills up
+tcp_recv_overflow:  .res 1      ; set to 1 by callback if ring fills up.
+                                ; NOTE (issue #72): retransmission
+                                ; duplicates also enter the ring, so this
+                                ; can latch during retransmit bursts even
+                                ; with in-flight data far below ring size
+                                ; (observed in the VICE e2e, 690 B flight,
+                                ; stream intact). A set flag is a
+                                ; diagnostic breadcrumb, not proof of
+                                ; loss — see the set-site comment in
+                                ; src/net/ip65/net.s for the full
+                                ; semantics.
 
 ; Diagnostic counters — incremented by net_poll at entry and return
 .export net_poll_entry_count

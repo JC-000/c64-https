@@ -376,7 +376,16 @@ cb_loop:
         lda cb_next_hi
         cmp tcp_recv_head+1
         bne cb_not_full
-        ; ring full — record overflow and stop copying
+        ; ring full — record overflow and stop copying this delivery.
+        ; Semantics (issue #72): ip65 ACKs the full inbound length
+        ; regardless of what we copy (see the PR #27 clamp history), so
+        ; if the dropped tail was NEW in-sequence data it is genuinely
+        ; lost to the stream — the TLS layer will then fail on a broken
+        ; record. In practice the flag has only been observed latching
+        ; during TCP retransmission bursts, where the dropped delivery
+        ; duplicated bytes already consumed and the stream survived.
+        ; Treat a set flag as a diagnostic breadcrumb, not proof of
+        ; corruption — but investigate if TLS errors follow.
         lda #1
         sta tcp_recv_overflow
         jmp cb_done
