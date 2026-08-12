@@ -26,6 +26,8 @@
 ; After both Finished, traffic keys replace handshake keys.
 
 .include "constants.inc"
+; Backend-sensitive loop budgets (resolved via -I src/net/$(BACKEND)).
+.include "net_tuning.inc"
 
 ; --- Public exports ---
 .export tls_connect
@@ -464,13 +466,19 @@ tls_recv_server_hello:
         ; an RST'd socket). Draining here leaves zero unACKed data
         ; across every later crypto stall; idle connections survive.
         ; Safe: SH is fully parsed above, and net_poll only appends to
-        ; the TCP ring — it never touches tls_rec_buf. Bounded 8x250
-        ; polls (~10-20 s at 1 MHz — trivial vs the 20 min verify, and
-        ; long enough to cover the peer's first retransmission of the
-        ; flight tail if it wasn't at the NIC yet when we got here).
-        ldy #8
+        ; the TCP ring — it never touches tls_rec_buf.
+        ;
+        ; The budget is BACKEND-SENSITIVE and therefore lives in the
+        ; per-backend net_tuning.inc (issue #73): an ip65 net_poll is a
+        ; cheap NIC pump, but a UCI net_poll is a full firmware command
+        ; round-trip (~37 ms measured at 48 MHz, mostly clock-invariant
+        ; FPGA turnaround). Sizing this loop on ip65's poll cost alone
+        ; cost UCI ~70 s of pure wall-clock — and UCI firmware ACKs
+        ; autonomously, so the drain has nothing to buy there anyway.
+        ; See each backend's net_tuning.inc for the values + rationale.
+        ldy #NET_SH_DRAIN_OUTER
 @sh_drain_outer:
-        ldx #250
+        ldx #NET_SH_DRAIN_INNER
 @sh_drain:
         tya
         pha
