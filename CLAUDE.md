@@ -331,7 +331,11 @@ Scripts under `tools/uci/` require a U64E (default 192.168.1.81,
 overridable via the `U64_HOST` environment variable) and use
 `DeviceLock` + `enable_uci`/`disable_uci`:
 
-  - `boot_check.py`       — verify UCI firmware detection and boot banner
+  - `boot_check.py`       — boot the PRG and assert the backend banner
+                            (`BACKEND=uci|ip65`, default uci), the
+                            absence of any `FAILED` line, and that the
+                            menu was reached. `C64_PRG` overrides the
+                            image; `BOOT_TIMEOUT` the menu budget.
   - `phase2_check.py`     — DHCP acquire + local IP readback
   - `phase3_tcp_echo.py`  — TCP connect/send/recv against a local echo server
   - `test_http_local.py`  — HTTP GET against a local test server
@@ -426,7 +430,9 @@ and writes the 48 B P-384 pubkey into the dedicated
 The CertificateVerify signed-content blob is 130 B (RFC 8446 §4.4.3:
 64-space pad + 33 B context + 1 B sep + 32 B SHA-256 transcript;
 the transcript-hash function stays SHA-256 because c64-https
-negotiates only TLS_AES_128_GCM_SHA256 — Phase 5 Fix A). The
+offers exactly one cipher suite, TLS_CHACHA20_POLY1305_SHA256
+(0x1303, `src/tls_handshake.s:85`, echo-verified at :380), whose
+hash is SHA-256 — Phase 5 Fix A). The
 end-to-end test is `tools/uci/test_https_local_p384.py` (mirrors
 `test_https_local.py` with P-384 cert profile via swapping CERT_PATH
 / KEY_PATH to `tools/https_e2e/certs/server-p384.{pem,key}`); see the
@@ -493,7 +499,12 @@ Five latent bugs and three new ones were cleared to get here:
   - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
   - Boot banner line 03 still says "rr-net" under ip65 build even
     though Phase 2 made it backend-aware — this is correct/expected
-    behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
+    behavior. Under UCI it says "UCI NETWORKING". Those two strings
+    are the whole of `net_banner_str`
+    (`src/net/ip65/net_banner.s` / `src/net/uci/net.s`), and
+    `tools/uci/boot_check.py` asserts against them, so keep the two
+    in step. (This entry used to claim the UCI line read
+    "ULTIMATE 64 ELITE (UCI)" — it never did.)
   - The delay-loop fence adds ~2.5 ms overhead per UCI register access
     at 1 MHz (negligible for networking, but visible in tight loops).
   - `http_resp_buf` is rendered through `ascii_chrout` (a small
@@ -576,6 +587,12 @@ Five latent bugs and three new ones were cleared to get here:
     spelling out `ViceConfig(extra_args=["-reu", "-reusize", "512"])`
     by hand. The UCI path is unaffected because the U64E hardware has
     REU enabled by default; the symptom was VICE-only.
+    The single deliberate exception is `C64_VICE_NO_REU=1`, which makes
+    `default_vice_config()` drop the REU flags (and say so on stderr).
+    It exists so the shipped onchip PRG's "no REU required" claim has a
+    runnable test — see the packaging validation record for the exact
+    invocation. Never set it for a REU-profile build: that is precisely
+    the silent-garbage case above.
 
 ### ECDSA P-256 verify wall-clock
 
@@ -1055,6 +1072,19 @@ Validation record (2026-07-27, HEAD cb6eab4):
     (and with, as control) — the no-REU claim is verified, and
     boot.s's unconditional reu_mul_init is harmless with no REU
     attached. Both D64 files boot to banner in VICE.
+    Reproduce it with the `C64_VICE_NO_REU` opt-out (no patching, and
+    `-reu` stays the default everywhere else):
+
+        make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1
+        C64_SKIP_BUILD=1 C64_VICE_NO_REU=1 \
+            python3 tools/test_ecdsa_kat_oracle.py    # 3/3, exit 0
+        C64_SKIP_BUILD=1 python3 tools/test_ecdsa_kat_oracle.py
+                                                      # control, 3/3
+
+    The flag is only meaningful on an onchip image. Run it against a
+    REU-profile build and all three valid vectors verify as C=1 with
+    no error message — that silent-wrong-answer failure mode is why
+    `-reu` is the default (see "VICE harness gotcha").
   - Full shipped chain (zip listener + freshly generated certs +
     sha-verified dist PRGs, `EXTERNAL_LISTENER=1`), all HTTP 200 +
     canonical body over TLS_CHACHA20_POLY1305_SHA256:

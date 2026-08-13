@@ -33,9 +33,9 @@
 ;
 ;      Phase 5 Fix A: blob length is 130 bytes, not 146.  RFC 8446
 ;      §4.4.1 specifies the transcript-hash uses the negotiated cipher
-;      suite's hash function — c64-https only negotiates
-;      TLS_AES_128_GCM_SHA256, so the transcript is always 32 B SHA-256
-;      regardless of the signature scheme.  The 46+33+1+32 = 130 layout
+;      suite's hash function — c64-https offers exactly one suite,
+;      TLS_CHACHA20_POLY1305_SHA256 (0x1303), so the transcript is
+;      always 32 B SHA-256 regardless of the signature scheme.  The 46+33+1+32 = 130 layout
 ;      is what the server signed; padding to 48 B for SHA-384's digest
 ;      width would feed the verifier a different message than the one
 ;      the server hashed.  SHA-384(blob) still produces a 48 B digest
@@ -49,7 +49,9 @@
 ;   6. crypto_swap_to_p384_curve -> ecdsa_verify_384.
 ;      C=0 valid / C=1 invalid -- propagated to caller.
 ;
-; Phase 5 note: c64-https only negotiates TLS_AES_128_GCM_SHA256, so
+; Phase 5 note: c64-https offers exactly one cipher suite,
+; TLS_CHACHA20_POLY1305_SHA256 (0x1303) — see src/tls_handshake.s:85
+; and the ServerHello echo check at :380 — and its hash is SHA-256, so
 ; the TLS 1.3 transcript-hash function is always SHA-256 (RFC 8446
 ; §4.4.1 ties transcript-hash to the cipher suite's hash, not to the
 ; signature_algorithm).  The signed-content blob therefore embeds a
@@ -249,7 +251,7 @@ ecdsa_verify_384_tls:
         ; [98..129] transcript hash (32 B SHA-256).  Phase 5 Fix A:
         ; copy the 32 B SHA-256 tls_transcript verbatim — no padding.
         ; The TLS 1.3 transcript-hash is bound to the cipher suite
-        ; (SHA-256 via TLS_AES_128_GCM_SHA256), independent from the
+        ; (SHA-256 via TLS_CHACHA20_POLY1305_SHA256), independent of the
         ; signature_algorithm's hash (SHA-384 here).  Padding to 48 B
         ; would feed the verifier a different message than the server
         ; signed.
