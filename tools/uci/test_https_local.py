@@ -288,6 +288,35 @@ def _run_https_server(srv: socket.socket, ctx: ssl.SSLContext,
             pass
 
 
+def _check_c64_result(body_ascii: str, screen_text: str) -> list[str]:
+    """C64-side pass criteria. Returns a list of problems; empty ⇒ pass.
+
+    The only accepted criterion is that ``http_resp_buf`` holds the complete
+    expected body. Screen RAM is diagnostic, never evidence.
+
+    History (audit finding F5): this used to fall back to passing the run
+    whenever the 5 characters ``HELLO`` appeared anywhere in the 1000 bytes
+    of screen RAM. That branch was reachable *only* after the body assertion
+    had already failed, so it substituted a weaker criterion at exactly the
+    moment the strong one did not hold — a truncated body, a mis-decrypted
+    body that happened to keep its first word, or a stale ``HELLO`` left on
+    screen by an earlier run all passed. The fallback is gone; a screen-RAM
+    hit without the body is now reported as a *reason the run failed*.
+    """
+    problems: list[str] = []
+    if EXPECTED_BODY not in body_ascii:
+        problems.append(
+            f"http_resp_buf does not contain the expected body "
+            f"{EXPECTED_BODY!r} (got {body_ascii[:120]!r})"
+        )
+        if "HELLO" in screen_text.upper():
+            problems.append(
+                "screen RAM contains 'HELLO' but that is not a pass — only "
+                "the complete body in http_resp_buf counts (audit F5)"
+            )
+    return problems
+
+
 def _load_labels() -> dict[str, int]:
     # c64-test-harness Labels is a Mapping since 0.12.4 (JC-000/c64-test-harness#64)
     # and parses both C: and non-C (REU/bank) label lines since #62.
@@ -1388,23 +1417,18 @@ def main() -> int:
         except Exception:
             pass
 
-        if EXPECTED_BODY in body_ascii:
-            print(f"\nPASS: http_resp_buf contains '{EXPECTED_BODY}'")
-            outcome = "PASS"
-            exit_code = 0
+        problems = _check_c64_result(body_ascii, screen_text)
+        if problems:
+            print("\nFAIL: C64-side pass criteria not met:", file=sys.stderr)
+            for p in problems:
+                print(f"  - {p}", file=sys.stderr)
+            outcome = "FAIL"
+            exit_code = 1
             return exit_code
 
-        if "HELLO" in screen_text.upper():
-            print(f"\nPASS: screen RAM contains HELLO "
-                  f"(body in resp_buf may differ in encoding)")
-            outcome = "PASS"
-            exit_code = 0
-            return exit_code
-
-        print(f"\nFAIL: expected '{EXPECTED_BODY}' not found in response"
-              f" or screen", file=sys.stderr)
-        outcome = "FAIL"
-        exit_code = 1
+        print(f"\nPASS: http_resp_buf contains '{EXPECTED_BODY}'")
+        outcome = "PASS"
+        exit_code = 0
         return exit_code
 
     finally:
