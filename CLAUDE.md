@@ -57,9 +57,22 @@ Targets:
                           blob on demand and then reuses it, so this
                           target is only for forcing a rebuild.
 
+**`make clean` when you change `BACKEND=` or any flag.** make tracks
+source timestamps, not the command line, so an object built for the other
+backend is "up to date" and gets linked as-is. This is not only about
+`-D` flags: `BACKEND=` also selects the `-I src/net/$(BACKEND)` include
+path, and `src/tls13.s` pulls `net_tuning.inc` from there. Building
+`BACKEND=uci` and then plain `make` re-links a *UCI-tuned* `tls13.o`
+into an ip65 PRG — post-ServerHello drain budget 1x16 instead of 8x250,
+i.e. issue #73's regression, silently reintroduced. Observed 2026-08-13:
+the mixed image is the same 47,105 B as the clean one and differs only
+in content (`d483d46f…` vs the correct `db311110…`), and nothing in the
+build output says so — the final `make` runs `ld65` alone.
+
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
-                          (`cfg/c64-https-$(BACKEND).cfg`; default ip65)
+                          (`cfg/c64-https-$(BACKEND).cfg`; default ip65).
+                          Changing it requires `make clean` — see above.
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
                           `libs/x25519@v0.6.0` sibling (UCI only — ip65
                           has a tracked code/rodata overflow; see
