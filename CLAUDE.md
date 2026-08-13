@@ -413,6 +413,12 @@ overridable via the `U64_HOST` environment variable) and use
   - `test_http_local.py`  — HTTP GET against a local test server
   - `test_http_live.py`   — HTTP GET against a real internet host (requires
                             internet access from the U64E)
+  - `test_https_bad_finished.py` — the client must ABORT on a forged server
+                            Finished. Uses the hand-rolled
+                            `tools/https_e2e/evil_listener.py` rather than
+                            stock `ssl`. `FINISHED_MODE=good` is the control
+                            and must be run first. See "Negative-path
+                            coverage — the server Finished" under Smoke tests.
   - `test_https_local.py` — HTTPS e2e scaffolding against a local TLS 1.3
                             listener (ECDSA-P256 cert from
                             `tools/https_e2e/certs/`). DMAs a 6502 stub
@@ -1246,8 +1252,45 @@ the TLS state machine. For a quick sanity check after a build:
   - `tools/test_tls_handshake.py`  — full handshake state machine
   - `tools/test_http.py`           — HTTP request/response build + parse
   - `tools/test_x509.py`           — X.509 parser
+  - `tools/test_finished_verify.py` — server-Finished **rejection** path
+                                     (18 cases, 2 vector sets; see below)
 
 All 7 pass as of the ca65-conversion branch (97/97 assertions).
+
+### Negative-path coverage — the server Finished
+
+`tools/test_finished_verify.py` and `tools/uci/test_https_bad_finished.py`
+exist because an audit found the client's Finished-mismatch abort had **no
+test at all**: inverting the mismatch branch (`sec` -> `clc` in
+`tls_verify_finished`, `src/tls_keyschedule.s`) left the full hardware e2e
+reaching HTTP 200 with the correct body. Every listener the suite talks to
+sends a *correct* Finished, so nothing ever exercised the reject.
+
+  - `tools/test_finished_verify.py` (VICE) drives `tls_verify_finished`
+    directly over DMA with a 6502 carry-latching stub — no P-register read,
+    and an unwritten latch is reported as inconclusive, never a pass. Two
+    (secret, transcript) vector sets x 9 cases each, including the two
+    realistic attacks: a valid HMAC under the wrong secret, and one over the
+    wrong transcript.
+  - `tools/uci/test_https_bad_finished.py` (U64E/C64U) is the end-to-end
+    version, against `tools/https_e2e/evil_listener.py` — a hand-rolled TLS 1.3
+    server (real X25519, real key schedule, real ChaCha20-Poly1305 records,
+    real P-256 CertificateVerify) that flips **one bit** of the server
+    Finished `verify_data` before encryption. Corrupting the *ciphertext*
+    instead would break the Poly1305 tag and get rejected at `aead_decrypt`,
+    never reaching the Finished comparison — which is why stock `ssl` cannot
+    produce this test case and the server side is written out by hand.
+    `FINISHED_MODE=good` runs the identical server with a correct Finished and
+    is the mandatory control; `FINISHED_MODE=bad` (default) is the test.
+    The oracle uses `tls_last_state`, which `src/tls13.s:@error` stashes on
+    abort: `tls_state=$FF` + `tls_last_state=6 (FINISHED)` proves the abort
+    happened at Finished rather than earlier at Certificate (4) or
+    CertificateVerify (5). Server-side evidence (`client_accepted_finished`)
+    is asserted too.
+
+Both flip under the mutant: 18/18 -> 2/18 in VICE, PASS -> FAIL on the U64E.
+Note `evil_listener.py` is a test fixture, not a TLS stack — it has no
+hardening and belongs nowhere near production.
 
 The `tools/uci/` scripts cover the UCI backend on U64E hardware (see
 the "UCI test scripts" subsection above).
