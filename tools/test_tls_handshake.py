@@ -22,7 +22,6 @@ import sys
 
 from c64_test_harness import (
     Labels,
-    ViceConfig,
     ViceInstanceManager,
     read_bytes,
     write_bytes,
@@ -33,6 +32,8 @@ from c64_test_harness import (
     wait_for_pc,
     wait_for_text,
 )
+
+from _vice_helpers import default_vice_config
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -205,6 +206,33 @@ def check_labels(labels, names):
         if not check_label(labels, name):
             return False
     return True
+
+
+# A routine that is still `clc; rts` is unimplemented: it reports success
+# without doing anything.
+STUB_CLC_RTS = bytes([0x18, 0x60])
+
+
+def report_if_stub(transport, addr, name):
+    """Announce (loudly) that *name* is a ``clc; rts`` stub.
+
+    Returns True when the routine at *addr* is a stub.
+
+    Callers must NOT skip on a stub.  This file used to answer a detected
+    stub with ``return 0, 0``, which dropped the whole group out of both
+    the passed and failed counters -- the suite then reported success
+    while testing nothing, and the stub (a routine that claims success
+    unconditionally) sailed through.  A stub has to FAIL its group's
+    tests: the diagnostic below explains why they fail, and the tests
+    still run so the failures land in the denominator (audit finding
+    F10, same shape as F3).
+    """
+    if read_bytes(transport, addr, 2) == STUB_CLC_RTS:
+        print(f"\n  STUB: {name} is a `clc; rts` stub -- unimplemented. "
+              "The tests below still run and are expected to FAIL; a stub "
+              "is never a skip and never a pass.")
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +626,10 @@ def test_server_hello_parse(transport, labels, rng):
     hs_buf = labels["tls_rec_buf"]
     hs_len_addr = labels["tls_rec_len"]
 
+    # A stub is reported, not skipped -- all three tests below then run and
+    # fail on their own merits.
+    report_if_stub(transport, parse_sh, "tls_parse_server_hello")
+
     # --- Test 3a: Valid ServerHello with x25519 ---
     print("\n  [3a] ServerHello: valid parse (x25519, cipher 0x1303)")
     server_random = bytes(rng.getrandbits(8) for _ in range(32))
@@ -619,12 +651,15 @@ def test_server_hello_parse(transport, labels, rng):
                 [len(hs_msg) & 0xFF, (len(hs_msg) >> 8) & 0xFF])
 
     try:
-        regs = jsr(transport, parse_sh, timeout=120.0)
-
-        # Check carry flag (C=0 means success)
-        carry = 0
-        if regs and "P" in regs:
-            carry = regs["P"] & 0x01
+        # Read the carry through the jsr_check_carry trampoline (LDA #0 /
+        # ROL A / STA), which captures C on the 6502 itself.  The previous
+        # code read it out of the harness register dict under the key "P";
+        # VICE's binary monitor names the status register "FL", so the
+        # lookup never matched, `carry` stayed pinned at 0, and the error
+        # branch below was unreachable (audit finding F10, same root cause
+        # as F1 in test_tls_record.py).  The trampoline has no dependency
+        # on register naming at all.
+        carry = jsr_check_carry(transport, parse_sh, timeout=120.0)
 
         if carry == 0:
             # Verify server_random was extracted
@@ -649,23 +684,11 @@ def test_server_hello_parse(transport, labels, rng):
                     print(f"         expected: {server_pubkey[:8].hex()}...")
                     print(f"         got:      {got_pubkey[:8].hex()}...")
         else:
-            # Parser returned error but it might be a stub
-            # Check if the implementation is a stub (just clc; rts)
-            code = read_bytes(transport, parse_sh, 2)
-            if code == bytes([0x18, 0x60]):  # CLC; RTS
-                print("       SKIP: tls_parse_server_hello is a stub (clc; rts)")
-                return 0, 0
             failed += 1
             print("       FAIL: parser returned C=1 (error) for valid ServerHello")
     except Exception as e:
         failed += 1
         print(f"       FAIL: {e}")
-
-    # Check if this is a stub before running error tests
-    code = read_bytes(transport, parse_sh, 3)
-    if code[:2] == bytes([0x18, 0x60]):  # CLC; RTS
-        print("  SKIP: remaining ServerHello tests (stub implementation)")
-        return 0, 0
 
     # --- Test 3b: Wrong cipher suite -> C=1 ---
     print("  [3b] ServerHello: wrong cipher suite -> error")
@@ -871,11 +894,9 @@ def test_key_schedule(transport, labels):
 
     derive_hs = labels["tls_derive_handshake_keys"]
 
-    # Check if this is a stub (clc; rts)
-    code = read_bytes(transport, derive_hs, 2)
-    if code == bytes([0x18, 0x60]):
-        print("\n  SKIP: tls_derive_handshake_keys is a stub (clc; rts)")
-        return 0, 0
+    # Same rule as the ServerHello group: a stub is reported, not skipped.
+    # The five tests below then fail against the RFC 8448 vectors.
+    report_if_stub(transport, derive_hs, "tls_derive_handshake_keys")
 
     # Set up inputs: shared secret and transcript hash
     write_bytes(transport, labels["tls_shared_secret"], SHARED_SECRET)
@@ -1264,7 +1285,10 @@ def main():
           f"{found_optional}/{len(optional_labels)} optional TLS labels found")
 
     # Launch VICE
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    # default_vice_config() applies the mandatory -reu/-reusize=512 flags;
+    # see tools/_vice_helpers.py for the rationale.
+    config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True,
+                                 sound=False)
     print(f"\n=== Starting VICE ===")
 
     with ViceInstanceManager(config=config) as mgr:
