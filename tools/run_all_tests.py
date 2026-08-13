@@ -130,7 +130,19 @@ def main():
     suites = ["entropy", "net", "sha256", "crypto", "hkdf",
               "keyschedule", "http", "tls_record", "tls_handshake",
               "x25519"]
-    if not skip_slow:
+
+    # Suites deliberately not run this session, as (name, reason). --skip-slow
+    # used to drop x509 by simply never adding it to the list, so the aggregate
+    # printed a TOTAL and exited 0 with no trace that the entire X.509/ECDSA
+    # suite had not run. That is audit finding F3's shape one level up: the
+    # skipped assertions left the denominator instead of being accounted for.
+    # An explicit operator flag is a legitimate reason to skip; it is not a
+    # licence to report an unqualified clean pass.
+    skipped_suites = []
+    if skip_slow:
+        skipped_suites.append(
+            ("x509", "--skip-slow (X.509 DER parsing + ECDSA P-256 verify)"))
+    else:
         suites.insert(0, "x509")
 
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
@@ -176,13 +188,25 @@ def main():
     total_failed = sum(r[2] for r in results)
     total_tests = total_passed + total_failed
 
+    skipped_note = ""
+    if skipped_suites:
+        skipped_note = (f" -- {len(skipped_suites)} suite(s) SKIPPED: "
+                        + ", ".join(n for n, _ in skipped_suites))
+
     print(f"\n{'='*60}")
     print(f"TOTAL: {total_passed}/{total_tests} passed, "
-          f"{total_failed} failed")
+          f"{total_failed} failed{skipped_note}")
     for name, passed, failed, duration in sorted(results):
         status = "OK" if failed == 0 else "FAIL"
         print(f"  {status:4s} {name:20s} {passed:3d}/{passed+failed:3d} "
               f"({duration:.1f}s)")
+    for name, reason in skipped_suites:
+        print(f"  SKIP {name:20s}   ---   did not run: {reason}")
+    if skipped_suites:
+        print("\n  WARNING: the suite(s) above did not run. This aggregate "
+              "result does not")
+        print("           certify them, and their assertions are absent from "
+              "the TOTAL.")
     print(f"{'='*60}")
 
     sys.exit(0 if total_failed == 0 else 1)
