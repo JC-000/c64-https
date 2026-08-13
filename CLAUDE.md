@@ -78,7 +78,17 @@ observed in one worktree on 2026-08-13:
 
 So neither exit code nor file size distinguishes a good build from a bad
 one here. After any flag or `BACKEND` change, `make clean`; if a build
-matters, check its sha256.
+matters, check the **PRG's** sha256.
+
+Specifically the PRG's, not an object's: **ca65 stamps the build's
+wall-clock time into every `.o`** (LE32 in the object header — offset
+107 in `build/tls13.o`, exactly `date +%s` of the build). Two clean
+builds of identical source therefore produce different object hashes,
+so a `.o` hash is not evidence of anything. `ld65` does not propagate
+that field, so the PRG *is* deterministic: `build/c64-https.prg` held at
+`db31111031e2…` across every rebuild while `build/tls13.o` changed hash
+each time. That asymmetry is what makes PRG-hash comparison a usable
+check — it is a property of the toolchain, not a convention.
 
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
