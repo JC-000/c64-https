@@ -81,14 +81,19 @@ one here. After any flag or `BACKEND` change, `make clean`; if a build
 matters, check the **PRG's** sha256.
 
 Specifically the PRG's, not an object's: **ca65 stamps the build's
-wall-clock time into every `.o`** (LE32 in the object header — offset
-107 in `build/tls13.o`, exactly `date +%s` of the build). Two clean
-builds of identical source therefore produce different object hashes,
-so a `.o` hash is not evidence of anything. `ld65` does not propagate
-that field, so the PRG *is* deterministic: `build/c64-https.prg` held at
-`db31111031e2…` across every rebuild while `build/tls13.o` changed hash
-each time. That asymmetry is what makes PRG-hash comparison a usable
-check — it is a property of the toolchain, not a convention.
+wall-clock time into every `.o` header**, so two clean builds of
+identical source produce different object hashes and a `.o` hash is not
+evidence of anything. `ld65` does not propagate that field, so the PRG
+*is* deterministic: `build/c64-https.prg` held at `db31111031e2…` across
+every rebuild while every `.o` changed hash each time. That asymmetry is
+what makes PRG-hash comparison a usable check — a property of the
+toolchain, not a convention.
+
+No byte offset is quoted here on purpose: it is a cc65-version detail,
+and three people reading three different offsets out of the same effect
+is how a checkable finding turns into a disputed one. The reproduction
+is `make clean && make` twice and comparing hashes, which holds whatever
+the layout.
 
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
