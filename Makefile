@@ -6,7 +6,8 @@
 #   make              — default, produces build/c64-https.prg + build/labels.txt
 #   make clean        — remove build artifacts
 #   make run          — launch the PRG in VICE x64sc
-#   make ip65-libs    — rebuild ip65 object libraries from the submodule
+#   make ip65-libs    — build ip65 object libraries from the submodule
+#                       (required once per fresh clone, BACKEND=ip65 only)
 #   make ip65-blob    — rebuild ip65-build/ip65-c64.bin (requires ip65-libs first)
 #
 # Variables:
@@ -418,13 +419,16 @@ ifeq ($(USE_OVERLAY_P384_EMBED),1)
 build/crypto/ecdsa_verify_384.o: build/p384_overlay_equates.inc
 endif
 
-# Build ip65 object libraries from the submodule. Only needed if the ip65
-# submodule changes; the prebuilt blob is committed to ip65-build/.
+# Build ip65 object libraries from the submodule. Required once per fresh
+# clone — the submodule ships sources, and the ip65-blob link below needs
+# the .lib archives this target produces. Re-run when the submodule moves.
 ip65-libs:
 	cd $(IP65_DIR) && $(MAKE) -C ip65 && $(MAKE) -C drivers
 
-# Build the ip65 binary blob (ip65-build/ip65-c64.bin). The resulting file is
-# committed to the repo so a normal `make` does not need to rebuild it.
+# Build the ip65 binary blob (ip65-build/ip65-c64.bin). The file is a
+# gitignored build artifact (.gitignore: ip65-build/*.bin), NOT committed.
+# `all` depends on it under BACKEND=ip65, so a normal `make` builds it once
+# and then reuses it — `clean` only removes build/, so it survives.
 ip65-blob: $(IP65_BIN)
 
 $(IP65_BIN): $(IP65_BUILD)/ip65_stub.s $(IP65_BUILD)/ip65.cfg

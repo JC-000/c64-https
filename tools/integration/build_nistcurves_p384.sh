@@ -203,7 +203,7 @@ rm -f "$ARCHIVE_CURVE"
     "$STAGING/curve/mod384.o" \
     "$STAGING/curve/curve384.o" \
     "$STAGING/curve/points384_core.o" \
-    "$STAGING/curve/ecdsa384.o" \
+    "$STAGING/curve/ecdsa384_nocomb.o" \
     "$STAGING/curve/ec_scalar_mul_384_shim.o" \
     "$STAGING/curve/data_p384.o"
 
@@ -221,7 +221,7 @@ rm -f "$ARCHIVE_CURVE"
 {
     echo "# nistcurves-p384-curve.a per-source byte counts (ca65 .o file sizes)"
     for src in lib_version lib_manifest zp_config constants reu_config \
-               fp384 mod384 curve384 points384_core ecdsa384 \
+               fp384 mod384 curve384 points384_core ecdsa384_nocomb \
                ec_scalar_mul_384_shim data_p384; do
         if [ -f "$STAGING/curve/$src.o" ]; then
             bytes=$(wc -c < "$STAGING/curve/$src.o")

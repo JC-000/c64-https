@@ -12,8 +12,8 @@ verbatim so the Commodore 64 client sees exactly what it expects.
 ## What it does
 
 - Serves **TLS 1.3 only** (min = max pinned to TLS 1.3). The C64 advertises
-  a single cipher suite, `TLS_AES_128_GCM_SHA256`, which the stdlib server
-  offers among its TLS 1.3 defaults and selects.
+  a single cipher suite, `TLS_CHACHA20_POLY1305_SHA256` (0x1303), which the
+  stdlib server offers among its TLS 1.3 defaults and selects.
 - Presents a self-signed **ECDSA P-256** (`secp256r1`, `ecdsa-with-SHA256`)
   leaf certificate. The C64 verifies the CertificateVerify signature against
   this leaf key, so a freshly generated self-signed cert is sufficient —

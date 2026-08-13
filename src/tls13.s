@@ -471,9 +471,9 @@ tls_recv_server_hello:
         ; The budget is BACKEND-SENSITIVE and therefore lives in the
         ; per-backend net_tuning.inc (issue #73): an ip65 net_poll is a
         ; cheap NIC pump, but a UCI net_poll is a full firmware command
-        ; round-trip (~37 ms measured at 48 MHz, mostly clock-invariant
+        ; round-trip (~40 ms measured at 48 MHz, mostly clock-invariant
         ; FPGA turnaround). Sizing this loop on ip65's poll cost alone
-        ; cost UCI ~70 s of pure wall-clock — and UCI firmware ACKs
+        ; cost UCI ~80 s of pure wall-clock — and UCI firmware ACKs
         ; autonomously, so the drain has nothing to buy there anyway.
         ; See each backend's net_tuning.inc for the values + rationale.
         ldy #NET_SH_DRAIN_OUTER
