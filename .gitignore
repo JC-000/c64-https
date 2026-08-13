@@ -12,3 +12,5 @@ tools/https_e2e/certs/*
 tools/diag_4de0_*.py
 tools/diag_read_live.py
 .serena/
+.ca65-ls/
+.mcp.json
