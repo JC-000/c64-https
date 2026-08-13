@@ -578,6 +578,12 @@ Five latent bugs and three new ones were cleared to get here:
     spelling out `ViceConfig(extra_args=["-reu", "-reusize", "512"])`
     by hand. The UCI path is unaffected because the U64E hardware has
     REU enabled by default; the symptom was VICE-only.
+    The single deliberate exception is `C64_VICE_NO_REU=1`, which makes
+    `default_vice_config()` drop the REU flags (and say so on stderr).
+    It exists so the shipped onchip PRG's "no REU required" claim has a
+    runnable test — see the packaging validation record for the exact
+    invocation. Never set it for a REU-profile build: that is precisely
+    the silent-garbage case above.
 
 ### ECDSA P-256 verify wall-clock
 
@@ -1057,6 +1063,19 @@ Validation record (2026-07-27, HEAD cb6eab4):
     (and with, as control) — the no-REU claim is verified, and
     boot.s's unconditional reu_mul_init is harmless with no REU
     attached. Both D64 files boot to banner in VICE.
+    Reproduce it with the `C64_VICE_NO_REU` opt-out (no patching, and
+    `-reu` stays the default everywhere else):
+
+        make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1
+        C64_SKIP_BUILD=1 C64_VICE_NO_REU=1 \
+            python3 tools/test_ecdsa_kat_oracle.py    # 3/3, exit 0
+        C64_SKIP_BUILD=1 python3 tools/test_ecdsa_kat_oracle.py
+                                                      # control, 3/3
+
+    The flag is only meaningful on an onchip image. Run it against a
+    REU-profile build and all three valid vectors verify as C=1 with
+    no error message — that silent-wrong-answer failure mode is why
+    `-reu` is the default (see "VICE harness gotcha").
   - Full shipped chain (zip listener + freshly generated certs +
     sha-verified dist PRGs, `EXTERNAL_LISTENER=1`), all HTTP 200 +
     canonical body over TLS_CHACHA20_POLY1305_SHA256:
