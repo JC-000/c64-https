@@ -17,10 +17,10 @@
 ; uci_wait_not_busy, uci_begin_cmd, 4x uci_put_byte, uci_push_wait,
 ; uci_check_err, header read, uci_drain_resp + uci_drain_status +
 ; uci_ack — ~25 fenced register accesses plus FPGA turnaround).
-; Measured on a C64 Ultimate at 48 MHz: ~37 ms per poll, of which only
-; ~2.8 ms is fence time — the remainder is clock-invariant firmware
+; Measured on a C64 Ultimate at 48 MHz: ~40 ms per poll, of which only
+; ~3 ms is fence time — the remainder is clock-invariant firmware
 ; turnaround, so turbo does not help. ip65's 2000-poll budget therefore
-; cost ~70 s and regressed the shipped handshake from 51.0 s to 125.4 s
+; cost ~80 s and regressed the shipped handshake from 51.0 s to 125.4 s
 ; (issue #73).
 ;
 ; 16 polls (~0.6 s at 48 MHz) is a deliberate small hedge rather than 0:

@@ -33,7 +33,8 @@ Variables:
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65)
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
                           `libs/x25519@v0.6.0` sibling (UCI only — ip65
-                          has a tracked BSS overflow; see "Known issues")
+                          has a tracked code/rodata overflow; see
+                          "Known issues")
   - `EMBED_P256_OVERLAY=1` — stage the P-256 verify image into the
                           CRYPTO_OVERLAY slot at PRG-load (UCI; mutually
                           exclusive with USE_X25519_SIBLING /
