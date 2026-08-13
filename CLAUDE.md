@@ -331,7 +331,11 @@ Scripts under `tools/uci/` require a U64E (default 192.168.1.81,
 overridable via the `U64_HOST` environment variable) and use
 `DeviceLock` + `enable_uci`/`disable_uci`:
 
-  - `boot_check.py`       — verify UCI firmware detection and boot banner
+  - `boot_check.py`       — boot the PRG and assert the backend banner
+                            (`BACKEND=uci|ip65`, default uci), the
+                            absence of any `FAILED` line, and that the
+                            menu was reached. `C64_PRG` overrides the
+                            image; `BOOT_TIMEOUT` the menu budget.
   - `phase2_check.py`     — DHCP acquire + local IP readback
   - `phase3_tcp_echo.py`  — TCP connect/send/recv against a local echo server
   - `test_http_local.py`  — HTTP GET against a local test server
@@ -495,7 +499,12 @@ Five latent bugs and three new ones were cleared to get here:
   - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
   - Boot banner line 03 still says "rr-net" under ip65 build even
     though Phase 2 made it backend-aware — this is correct/expected
-    behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
+    behavior. Under UCI it says "UCI NETWORKING". Those two strings
+    are the whole of `net_banner_str`
+    (`src/net/ip65/net_banner.s` / `src/net/uci/net.s`), and
+    `tools/uci/boot_check.py` asserts against them, so keep the two
+    in step. (This entry used to claim the UCI line read
+    "ULTIMATE 64 ELITE (UCI)" — it never did.)
   - The delay-loop fence adds ~2.5 ms overhead per UCI register access
     at 1 MHz (negligible for networking, but visible in tight loops).
   - `http_resp_buf` is rendered through `ascii_chrout` (a small
