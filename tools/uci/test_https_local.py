@@ -47,7 +47,17 @@ Flow:
        - Writes a sentinel on completion
   5. Trigger with SYS 16896 via keyboard buffer.
   6. Poll sentinel for up to 120 s (handshake is ~13-15 s at 48 MHz).
-  7. Assert response body contains "HELLO FROM TLS SERVER".
+  7. Assert BOTH sides:
+       - C64 side: http_resp_buf holds the complete "HELLO FROM TLS SERVER"
+         body (screen RAM is diagnostic only — see _check_c64_result).
+       - Server side: the listener completed the handshake, recorded no TLS
+         error, and decrypted the GET the C64 was told to send (see
+         _check_server_result). Skipped under EXTERNAL_LISTENER=1, which by
+         contract has no inline listener.
+
+Offline re-check of an archived run (no hardware):
+  ./test_https_local.py --check-artifact <run-dir> [--host IP] [--path P]
+re-runs the server-side criteria against that run's server_result.json.
 """
 from __future__ import annotations
 
@@ -314,6 +324,127 @@ def _check_c64_result(body_ascii: str, screen_text: str) -> list[str]:
                 "screen RAM contains 'HELLO' but that is not a pass — only "
                 "the complete body in http_resp_buf counts (audit F5)"
             )
+    return problems
+
+
+def _server_request_bytes(server_result: dict) -> bytes | None:
+    """Normalize the listener's ``request`` field to bytes, or None if absent.
+
+    Accepts both shapes: the in-process dict (raw ``bytes``) and the
+    ``server_result.json`` on-disk form written by
+    ``_serialize_server_result`` (``{"__type__": "bytes-b64", ...}``), so the
+    same checker runs live and against an archived run directory.
+    """
+    req = server_result.get("request")
+    if req is None:
+        return None
+    if isinstance(req, (bytes, bytearray)):
+        return bytes(req)
+    if isinstance(req, dict) and req.get("__type__") == "bytes-b64":
+        try:
+            return base64.b64decode(req.get("b64", ""))
+        except Exception:
+            return None
+    if isinstance(req, str):
+        return req.encode("utf-8", errors="replace")
+    return None
+
+
+def _check_server_result(server_result: dict, *,
+                         expect_host: str | None,
+                         expect_path: str = "/") -> list[str]:
+    """Server-side pass criteria. Returns a list of problems; empty ⇒ pass.
+
+    Audit finding F6: every run already recorded what the listener observed
+    into ``server_result.json`` — handshake completion, the decrypted
+    request, any TLS error — and the pass criteria never read a byte of it.
+    Every assertion was made against C64-side memory and screen RAM, i.e.
+    against state the client itself produces. The listener's record is the
+    one piece of evidence the client cannot fabricate, so it is now part of
+    the verdict.
+
+    Which fields are load-bearing, and why these and not more:
+
+      ``error``       — decisive. Set when the TLS handshake or the socket
+                        failed on the server side. A run that reached
+                        ``SSLEOFError: UNEXPECTED_EOF_WHILE_READING`` did not
+                        complete a TLS session with this listener, whatever
+                        the C64's RAM says afterwards.
+      ``listening``   — the listener reached ``accept()``. Absent ⇒ there was
+                        no server for the C64 to have talked to.
+      ``client_addr`` — the listener accepted a connection. Absent ⇒ the C64
+                        never reached this listener; anything in http_resp_buf
+                        is then stale or fabricated, not this run's evidence.
+      ``request``     — the decrypted request must be the one the C64 was
+                        configured to send. This is the strongest link
+                        between the two sides: the server can only produce
+                        these plaintext bytes by having completed the
+                        handshake and derived the same application keys.
+
+    All three of ``listening`` / ``client_addr`` / ``request`` are required,
+    so the function fails closed: an empty record — listener thread never
+    started, crashed before recording anything, artifact absent — is an
+    inconclusive check and therefore a failure, never an implicit "no error
+    recorded".
+
+    Deliberately NOT asserted, to avoid failing healthy runs:
+
+      - Byte-exact request equality. Only the request line and the ``Host:``
+        line are checked — both are values *this script* programmed into the
+        C64, so they cannot drift accidentally. Trailing headers
+        (``Connection: close``) are src/http.s's business; a future header
+        change should not fail the e2e oracle.
+      - ``request`` in EXTERNAL_LISTENER mode. There is no inline listener
+        then, ``server_result`` is empty by construction, and the documented
+        contract is that pass criteria come from C64 state only. The caller
+        skips this whole function in that mode and says so out loud.
+      - The listener sets ``request`` to ``b"<timeout>"`` when the
+        post-handshake ``recv`` times out; that is treated as a failure, not
+        as an absent field, because it means the session never carried the
+        GET.
+    """
+    problems: list[str] = []
+
+    err = server_result.get("error")
+    if err:
+        problems.append(f"listener recorded an error: {err}")
+
+    if not server_result.get("listening"):
+        problems.append(
+            "listener never reported `listening` — no server side to this run"
+        )
+
+    if server_result.get("client_addr") is None:
+        problems.append(
+            "listener never accepted a connection (`client_addr` absent) — "
+            "the C64 did not reach this listener"
+        )
+
+    req = _server_request_bytes(server_result)
+    if req is None:
+        problems.append(
+            "listener recorded no decrypted request — the TLS session never "
+            "carried the GET"
+        )
+    elif req == b"<timeout>":
+        problems.append(
+            "listener timed out waiting for the request after the handshake"
+        )
+    else:
+        want_line = b"GET " + expect_path.encode("ascii") + b" HTTP/1."
+        if not req.startswith(want_line):
+            problems.append(
+                f"decrypted request does not start with {want_line!r} "
+                f"(got {req[:40]!r})"
+            )
+        if expect_host is not None:
+            want_host = b"Host: " + expect_host.encode("ascii")
+            if want_host not in req:
+                problems.append(
+                    f"decrypted request lacks {want_host!r} "
+                    f"(got {req[:80]!r})"
+                )
+
     return problems
 
 
@@ -1418,8 +1549,28 @@ def main() -> int:
             pass
 
         problems = _check_c64_result(body_ascii, screen_text)
+
+        # Server-side corroboration (audit F6). The listener's record is the
+        # only evidence in this test the client cannot produce on its own, so
+        # a run passes only when both sides agree. Skipped — loudly — under
+        # EXTERNAL_LISTENER=1, where by contract there is no inline listener
+        # and no server_result to read.
+        if EXTERNAL_LISTENER:
+            print("\nNOTE: EXTERNAL_LISTENER=1 — server-side criteria "
+                  "skipped (no inline listener); C64-side state only")
+        else:
+            server_problems = _check_server_result(
+                server_result,
+                expect_host=test_host_ip,
+                expect_path=path_str.rstrip(b"\x00").decode("ascii"),
+            )
+            problems.extend(server_problems)
+            if not server_problems:
+                print("\nServer-side check: listener completed the handshake "
+                      "and decrypted the expected GET")
+
         if problems:
-            print("\nFAIL: C64-side pass criteria not met:", file=sys.stderr)
+            print("\nFAIL: pass criteria not met:", file=sys.stderr)
             for p in problems:
                 print(f"  - {p}", file=sys.stderr)
             outcome = "FAIL"
@@ -1523,5 +1674,71 @@ def main() -> int:
         print(f"Released DeviceLock({HOST})")
 
 
+def _check_artifact_main(argv: list[str]) -> int:
+    """`--check-artifact <run-dir|server_result.json> [--host IP] [--path P]`
+
+    Re-run the server-side pass criteria (audit F6) against an archived run
+    without touching hardware. Exists so the criteria are testable — and so a
+    stored run can be re-adjudicated after the criteria change.
+    """
+    if not argv:
+        print("usage: test_https_local.py --check-artifact "
+              "<run-dir|server_result.json> [--host IP] [--path P]",
+              file=sys.stderr)
+        return 2
+    target = Path(argv[0])
+    host: str | None = None
+    path = "/"
+    rest = argv[1:]
+    while rest:
+        flag = rest.pop(0)
+        if flag == "--host" and rest:
+            host = rest.pop(0)
+        elif flag == "--path" and rest:
+            path = rest.pop(0)
+        else:
+            print(f"unknown argument: {flag}", file=sys.stderr)
+            return 2
+
+    if target.is_dir():
+        target = target / "server_result.json"
+
+    # Fail closed: an absent or unreadable record is an inconclusive check,
+    # never an implicit "no error recorded". Same defect shape as the F5/F6
+    # fallbacks themselves, one layer up.
+    if not target.is_file():
+        print(f"FAIL: no server_result.json at {target} — the server-side "
+              f"record is missing, which is not a pass", file=sys.stderr)
+        return 1
+    try:
+        server_result = json.loads(target.read_text())
+    except Exception as exc:
+        print(f"FAIL: could not read {target}: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(server_result, dict):
+        print(f"FAIL: {target} is not a JSON object "
+              f"(got {type(server_result).__name__})", file=sys.stderr)
+        return 1
+    print(f"server_result   : {target}")
+    print(f"  listening     : {server_result.get('listening', False)}")
+    print(f"  client_addr   : {server_result.get('client_addr')}")
+    print(f"  request       : {_server_request_bytes(server_result)!r}")
+    print(f"  error         : {server_result.get('error', '<none>')}")
+    if host is None:
+        print("  (no --host given; the Host-header check is skipped)")
+
+    problems = _check_server_result(
+        server_result, expect_host=host, expect_path=path)
+    if problems:
+        print("\nFAIL: server-side criteria not met:", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 1
+    print("\nPASS: server-side criteria met")
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--check-artifact":
+        raise SystemExit(_check_artifact_main(sys.argv[2:]))
     raise SystemExit(main())
