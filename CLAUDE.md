@@ -15,6 +15,31 @@ Dependencies:
   - GNU make
   - VICE (`x64sc`) only for `make run` / the test harness
 
+First build in a fresh clone or worktree (ip65 backend only — the UCI
+backend needs none of this):
+
+    git submodule update --init --recursive
+    make ip65-libs        # once per clone
+    make
+
+`ip65-build/ip65-c64.bin` is a **gitignored local build artifact**
+(`.gitignore` line `ip65-build/*.bin`; `git ls-files ip65-build/` returns
+only `ip65.cfg` and `ip65_stub.s`), *not* a committed file. A plain `make`
+does try to build it, but the link step consumes ip65 `.lib` archives that
+the submodule does not ship — it ships the sources for them — so without
+`make ip65-libs` first it dies with:
+
+    ld65: Error: Input file '../ip65/ip65/ip65_tcp.lib' not found
+
+`make clean` only removes `build/`, so once built the blob survives and is
+never rebuilt; that persistence, not a committed file, is why the rebuild
+targets are normally invisible. The rebuild is deterministic: 6,951 B,
+sha256 `cf1a5ff7809af4e4655e385b378b936054f41046ff2b7604828af3240c2d90dd`
+— rebuilt byte-identically in three independent worktrees on 2026-08-13,
+and identical to a local copy built 2026-05-06. Three months and four
+artifacts agree, so a stale blob is not a failure mode worth designing
+around; a missing one is.
+
 Targets:
   - `make`              — default, produces `build/c64-https.prg`,
                           `build/labels.txt` (VICE label format), and
@@ -23,14 +48,57 @@ Targets:
                           agents; P-384 overlays get `.dbg` sidecars too)
   - `make clean`        — remove build artifacts
   - `make run`          — autostart the PRG in VICE
-  - `make ip65-libs`    — rebuild ip65 object libraries from the submodule
-                          (only needed if the ip65 submodule changes)
+  - `make ip65-libs`    — build ip65's object libraries from the
+                          submodule. Required once per fresh clone (see
+                          above), and again whenever the ip65 submodule
+                          changes.
   - `make ip65-blob`    — rebuild `ip65-build/ip65-c64.bin` from those
-                          libraries (the committed blob is normally reused)
+                          libraries. A plain `make` already builds the
+                          blob on demand and then reuses it, so this
+                          target is only for forcing a rebuild.
+
+**`make clean` when you change `BACKEND=` or any flag.** make tracks
+source timestamps, not the command line, so an object built for the
+other backend counts as up to date. This is not only about `-D` flags:
+`BACKEND=` also selects the `-I src/net/$(BACKEND)` include path, and
+`src/tls13.s` pulls `net_tuning.inc` from there. Both failure modes were
+observed in one worktree on 2026-08-13:
+
+  - **Mixed link.** An ip65 PRG built from a UCI-compiled `tls13.o`
+    carries drain budget 1x16 instead of 8x250 — issue #73's regression,
+    silently reintroduced. Same 47,105 B as the clean image; only the
+    content differs (`d483d46f…` vs the correct `db311110…`), and the
+    build output is a bare `ld65` line.
+  - **No link at all.** macOS ships **GNU Make 3.81**, which compares
+    mtimes at 1-second resolution. Objects recompiled inside the same
+    second as the previous link count as older (measured: 39 ms newer,
+    make said "Prerequisite ... is older than target"), so `make`
+    exits 0 having left the *other backend's* PRG in place — a
+    62,977 B UCI image where an ip65 build was asked for.
+
+So neither exit code nor file size distinguishes a good build from a bad
+one here. After any flag or `BACKEND` change, `make clean`; if a build
+matters, check the **PRG's** sha256.
+
+Specifically the PRG's, not an object's: **ca65 stamps the build's
+wall-clock time into every `.o` header**, so two clean builds of
+identical source produce different object hashes and a `.o` hash is not
+evidence of anything. `ld65` does not propagate that field, so the PRG
+*is* deterministic: `build/c64-https.prg` held at `db31111031e2…` across
+every rebuild while every `.o` changed hash each time. That asymmetry is
+what makes PRG-hash comparison a usable check — a property of the
+toolchain, not a convention.
+
+No byte offset is quoted here on purpose: it is a cc65-version detail,
+and three people reading three different offsets out of the same effect
+is how a checkable finding turns into a disputed one. The reproduction
+is `make clean && make` twice and comparing hashes, which holds whatever
+the layout.
 
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
-                          (`cfg/c64-https-$(BACKEND).cfg`; default ip65)
+                          (`cfg/c64-https-$(BACKEND).cfg`; default ip65).
+                          Changing it requires `make clean` — see above.
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
                           `libs/x25519@v0.6.0` sibling (UCI only — ip65
                           has a tracked code/rodata overflow; see
@@ -60,8 +128,10 @@ Variables:
 Test harness expectations:
   - Most `tools/test_*.py` scripts run `make clean && make` themselves
     before launching VICE. Set `C64_SKIP_BUILD=1` in the environment to
-    reuse the already-built PRG (7 scripts currently honor the var —
-    see the "Honor C64_SKIP_BUILD" commit for the list).
+    reuse the already-built PRG. 14 scripts honor it as of 2026-08-13
+    (13 under `tools/`, plus `tests/test_vice_https_macos.py`); the
+    current list is `grep -ln 'environ.*C64_SKIP_BUILD' tools/test_*.py
+    tests/test_*.py` rather than a number that goes stale here.
   - Use the `c64-test-harness` Python package to launch VICE; never run
     `x64sc` directly from tests.
 
@@ -1129,8 +1199,12 @@ the REU-less stock-C64 numbers above were measured. Knobs:
 `E2E_TIMEOUT`, `HTTPS_PORT` (the PRG's port is a build knob —
 `make HTTPS_PORT=4433` — so the listener can run unprivileged).
 
-Two prerequisites that are easy to lose:
+Three prerequisites that are easy to lose:
 
+  - **An ip65 PRG that builds at all.** This is the one backend that
+    needs the ip65 blob, which is a gitignored artifact — on a fresh
+    clone `make` fails at the blob link until `make ip65-libs` has run
+    once. See "First build in a fresh clone" under Build.
   - **An ethernet-capable VICE.** Stock macOS VICE binaries (official
     and Homebrew) compile ethernet in but gate the pcap driver on
     `geteuid()==0`, so unprivileged `-ethernetiodriver pcap` is
