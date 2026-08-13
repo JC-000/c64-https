@@ -861,13 +861,34 @@ C64U, fits T(f)=D+C/f, residuals <=4.1%):
     bank 2 $0000-$3FFF residency. At stock 1 MHz the REU profile
     remains the right default.
 
-  HTTPS e2e handshake wall-clock (C64U, local listener):
+  HTTPS e2e handshake wall-clock, local listener. **Device is a column,
+  never a caption** — the REU-profile device delta is 10-13%, so a row
+  whose device has to be inferred from a heading is not interpretable.
+  64 MHz exists only on the C64U (the U64E's CPU Speed enum stops at 48):
 
-  profile             48 MHz    64 MHz
-  v0.3.0 REU          73.0 s    64.7-65.9 s
-  v0.5.0 onchip       59.9 s    47.5 s (n=3: 47.0/47.6/47.8)
-  v0.6.0 onchip       51.0 s    39.7 s
-  v0.6.0 onchip+comb  38.4 s    **31.0 s**
+  device profile             1 MHz      8 MHz    48 MHz   64 MHz
+  C64U   v0.3.0 REU          --         --       73.0 s   64.7-65.9 s
+  C64U   v0.5.0 onchip       --         --       59.9 s   47.5 s (n=3)
+  C64U   v0.6.0 onchip       --         --       51.0 s   39.7 s
+  C64U   v0.6.0 onchip+comb  --         --       38.4 s   **31.0 s**
+  U64E   REU @ 2ceb5b1       1157.7 s   196.5 s  80.8 s   n/a (no enum)
+
+  The U64E row is a 2026-08-13 clock sweep at master 2ceb5b1, one clean
+  `BACKEND=uci` build reused across all three runs so clock is the only
+  variable, all three PASS with server-side evidence (the listener
+  decrypted the full GET; no TLS error). Times are handshake + GET
+  measured C64-side from `run_prg`, not whole-script wall-clock.
+
+  Fitting T(f) = D + C/f to that row gives **D = 58.5 s, C = 1099 MHz*s**,
+  residuals <= 0.69% across a 48x clock range. Two things follow. The
+  floor is ~58 s, and the documented REU-profile *verify* floor is
+  48.2 s, so roughly **10 s of the e2e is clock-invariant non-verify
+  cost** — UCI firmware round-trips and network latency, which no amount
+  of turbo touches. And the returns are visibly diminishing: 1->8 MHz
+  (8x clock) bought 5.9x, while 8->48 MHz (6x clock) bought only 2.4x.
+  Extrapolating the fit to 64 MHz predicts 75.6 s, which is why the
+  REU profile is the wrong choice above ~7 MHz — compare the C64U comb
+  rows above.
 
   Those rows are the 2026-07-20 campaign state. **Current HEAD is
   faster** — see "Post-#74 e2e numbers" below; the onchip rows in
