@@ -21,7 +21,6 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from c64_test_harness import (
     Labels,
-    ViceConfig,
     ViceInstanceManager,
     read_bytes,
     write_bytes,
@@ -32,6 +31,8 @@ from c64_test_harness import (
     wait_for_pc,
     wait_for_text,
 )
+
+from _vice_helpers import default_vice_config
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -74,6 +75,32 @@ REQUIRED_LABELS = [
 OPTIONAL_LABELS = [
     "tls_seq_increment",
 ]
+
+# Names the 6502 processor-status register can appear under in a
+# harness register dict.  VICE's binary monitor calls it "FL"; other
+# backends use "P" / "FLAGS" / "SR".  The original code only looked for
+# "P", so on VICE the lookup never matched and test 4b silently fell
+# through to a weaker oracle.
+STATUS_REG_NAMES = ("FL", "P", "FLAGS", "SR")
+
+
+def carry_from_regs(regs):
+    """Return the carry flag (0/1) from a harness register dict.
+
+    Returns ``None`` when no processor-status register is present.  A
+    caller that cannot read the carry has *not* observed the routine's
+    accept/reject decision, so ``None`` must be treated as a failed
+    test, never as a pass: the tag-comparison fallback this replaces
+    asserted only that the computed tag differed from the record's tag,
+    which is true of any tampered input whether or not ``aead_decrypt``
+    rejected it (audit finding F1).
+    """
+    if not regs:
+        return None
+    for name in STATUS_REG_NAMES:
+        if name in regs:
+            return regs[name] & 0x01
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -487,27 +514,35 @@ def test_record_decrypt(transport, labels, rng):
         regs = jsr(transport, labels["tls_record_decrypt"],
                           timeout=120.0)
 
-        # Expect carry flag set (C=1) indicating AEAD failure
-        # The carry flag is bit 0 of the status register (P)
-        if regs and "P" in regs:
-            carry = regs["P"] & 0x01
-            if carry:
-                passed += 1
-                print("       PASS: decrypt returned C=1 (tag mismatch)")
-            else:
-                failed += 1
-                print("       FAIL: decrypt returned C=0 (should be C=1 "
-                      "for tampered data)")
+        # The ONLY sound oracle here is the carry flag returned by
+        # tls_record_decrypt: C=1 means the record was rejected.  There is
+        # deliberately no fallback oracle -- see carry_from_regs() and the
+        # note above it.
+        carry = carry_from_regs(regs)
+        if carry is None:
+            failed += 1
+            print("       FAIL: could not read the 6502 status register "
+                  f"(register names seen: {sorted(regs) if regs else 'none'}; "
+                  f"looked for {'/'.join(STATUS_REG_NAMES)}). The tamper "
+                  "rejection could not be evaluated, which is not a pass.")
+        elif carry:
+            passed += 1
+            print("       PASS: decrypt returned C=1 (tag mismatch)")
         else:
-            # If we can't read P, check if tag comparison area differs
+            failed += 1
+            print("       FAIL: decrypt returned C=0 (should be C=1 "
+                  "for tampered data)")
+            # Diagnostic only -- never a pass criterion.  Differing tags
+            # say the tamper was *detectable*, not that decrypt rejected
+            # the record.
             c64_tag = read_bytes(transport, labels["poly1305_tag"], 16)
             aead_tag = read_bytes(transport, labels["aead_tag"], 16)
             if c64_tag != aead_tag:
-                passed += 1
-                print("       PASS: tags differ (tamper detected)")
+                print("              (computed tag != record tag, so the "
+                      "tamper was detectable but not rejected)")
             else:
-                failed += 1
-                print("       FAIL: tags match despite tampered ciphertext")
+                print("              (computed tag == record tag: the tag "
+                      "was never recomputed over the tampered ciphertext)")
     except Exception as e:
         failed += 1
         print(f"       FAIL: {e}")
@@ -765,7 +800,10 @@ def main():
     print(f"  Labels loaded: {len(REQUIRED_LABELS)} required labels verified")
 
     # Launch VICE
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    # default_vice_config() applies the mandatory -reu/-reusize=512 flags;
+    # see tools/_vice_helpers.py for the rationale.
+    config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True,
+                                 sound=False)
     print(f"\n=== Starting VICE ===")
 
     with ViceInstanceManager(config=config) as mgr:
