@@ -88,7 +88,17 @@ def run_test_suite(name, transport, labels, seed):
 
         elif name == "x25519":
             from test_x25519 import run_tests as x25519_run
-            passed, failed = x25519_run(transport, labels, seed=seed)
+            # run_tests also reports groups it skipped. This caller never
+            # sets test_x25519.FAST, so the RFC 7748 scalarmult vectors
+            # always run here (+~33 s) and the list is empty; assert it
+            # rather than dropping it, so a future gate cannot silently
+            # remove coverage from the aggregate verdict.
+            passed, failed, x25519_skipped = x25519_run(
+                transport, labels, seed=seed)
+            if x25519_skipped:
+                raise AssertionError(
+                    "x25519 suite skipped groups in the aggregate run: "
+                    + ", ".join(x25519_skipped))
 
     except Exception as e:
         import traceback
