@@ -58,16 +58,27 @@ Targets:
                           target is only for forcing a rebuild.
 
 **`make clean` when you change `BACKEND=` or any flag.** make tracks
-source timestamps, not the command line, so an object built for the other
-backend is "up to date" and gets linked as-is. This is not only about
-`-D` flags: `BACKEND=` also selects the `-I src/net/$(BACKEND)` include
-path, and `src/tls13.s` pulls `net_tuning.inc` from there. Building
-`BACKEND=uci` and then plain `make` re-links a *UCI-tuned* `tls13.o`
-into an ip65 PRG — post-ServerHello drain budget 1x16 instead of 8x250,
-i.e. issue #73's regression, silently reintroduced. Observed 2026-08-13:
-the mixed image is the same 47,105 B as the clean one and differs only
-in content (`d483d46f…` vs the correct `db311110…`), and nothing in the
-build output says so — the final `make` runs `ld65` alone.
+source timestamps, not the command line, so an object built for the
+other backend counts as up to date. This is not only about `-D` flags:
+`BACKEND=` also selects the `-I src/net/$(BACKEND)` include path, and
+`src/tls13.s` pulls `net_tuning.inc` from there. Both failure modes were
+observed in one worktree on 2026-08-13:
+
+  - **Mixed link.** An ip65 PRG built from a UCI-compiled `tls13.o`
+    carries drain budget 1x16 instead of 8x250 — issue #73's regression,
+    silently reintroduced. Same 47,105 B as the clean image; only the
+    content differs (`d483d46f…` vs the correct `db311110…`), and the
+    build output is a bare `ld65` line.
+  - **No link at all.** macOS ships **GNU Make 3.81**, which compares
+    mtimes at 1-second resolution. Objects recompiled inside the same
+    second as the previous link count as older (measured: 39 ms newer,
+    make said "Prerequisite ... is older than target"), so `make`
+    exits 0 having left the *other backend's* PRG in place — a
+    62,977 B UCI image where an ip65 build was asked for.
+
+So neither exit code nor file size distinguishes a good build from a bad
+one here. After any flag or `BACKEND` change, `make clean`; if a build
+matters, check its sha256.
 
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
