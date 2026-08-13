@@ -426,7 +426,9 @@ and writes the 48 B P-384 pubkey into the dedicated
 The CertificateVerify signed-content blob is 130 B (RFC 8446 §4.4.3:
 64-space pad + 33 B context + 1 B sep + 32 B SHA-256 transcript;
 the transcript-hash function stays SHA-256 because c64-https
-negotiates only TLS_AES_128_GCM_SHA256 — Phase 5 Fix A). The
+offers exactly one cipher suite, TLS_CHACHA20_POLY1305_SHA256
+(0x1303, `src/tls_handshake.s:85`, echo-verified at :380), whose
+hash is SHA-256 — Phase 5 Fix A). The
 end-to-end test is `tools/uci/test_https_local_p384.py` (mirrors
 `test_https_local.py` with P-384 cert profile via swapping CERT_PATH
 / KEY_PATH to `tools/https_e2e/certs/server-p384.{pem,key}`); see the
