@@ -32,9 +32,9 @@ Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65)
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
-                          `libs/x25519@v0.6.0` sibling (UCI only — ip65
-                          has a tracked code/rodata overflow; see
-                          "Known issues")
+                          `libs/x25519@v0.6.0` sibling. **Does not link
+                          on either backend at present** — both
+                          overflow, differently; see "Known issues"
   - `EMBED_P256_OVERLAY=1` — stage the P-256 verify image into the
                           CRYPTO_OVERLAY slot at PRG-load (UCI; mutually
                           exclusive with USE_X25519_SIBLING /
@@ -80,7 +80,9 @@ buffers in the crypto BSS — see per-module headers for details):
   X25519 / field arithmetic
     Default: in-tree `src/crypto/{x25519,fe25519}.s`.
     Opt-in: sibling `libs/x25519@v0.6.0` via `make USE_X25519_SIBLING=1`
-    (UCI backend only — see Known issues for the ip65 fit limitation).
+    — **currently unbuildable on both backends**, and the pinned
+    v0.6.0 additionally carries an upstream correctness bug; see
+    Known issues before relying on either fact.
     The v0.6.0 pin is c64-lib-contract-aligned (SPEC §8.1) and adds the
     bank-2 drop + RAM-reclaim work; older v0.4.0 pin is historical only.
     Sibling and in-tree both expose the same ABI:
@@ -95,7 +97,7 @@ buffers in the crypto BSS — see per-module headers for details):
   SHA-256                   (in-tree; no sibling)
     sha256_init, sha256_update, sha256_final
 
-  ECDSA P-256                (`libs/nistcurves@v0.3.0` sibling,
+  ECDSA P-256                (`libs/nistcurves@v0.6.0` sibling,
                               c64-lib-contract SPEC §1-§8.1 aligned)
     ecdsa_verify_256      — TLS dispatcher in src/crypto/ecdsa_verify.s
                             packs the BE struct + calls the sibling entry
@@ -519,20 +521,79 @@ Five latent bugs and three new ones were cleared to get here:
     "Memory layout" below). Earlier-pin caveats (Phase C.1 hang,
     v0.3.0 retry rollback, v0.4.0 H2 defensive REU re-inits) are all
     superseded by v0.6.0; the file-level history lives in the c64-x25519
-    repo's CHANGELOG. The ip65-side `LIB_NISTCURVES_P256_BSS` overflow
-    that used to be recorded here was the *default* build's overflow
-    and is fixed (see the CRYPTO_COLD_SHADOW entry under "Memory
-    layout"). `USE_X25519_SIBLING=1` under ip65 still does NOT link,
-    but the failure has moved and is now a different problem than the
-    old BSS overflow (measured 2026-07-29 post-refit): `X25519_RODATA`
-    overflows `CRYPTO_OVERLAY` by 2,048 B and
-    `LIB_NISTCURVES_P256_CODE` overflows `CRYPTO_RESIDENT` by 103 B —
-    i.e. a code/rodata placement problem, not the BSS one
-    c64-nist-curves#54 tracks. ip65's `CRYPTO_OVERLAY` is only 4,212 B
-    against UCI's 7.5 KB, which is the root of it. UCI remains the
-    supported sibling-on path. See `tools/integration/build_x25519.sh`
-    for the
-    `make -C libs/x25519 lib-x25519-scalarmult` wrapper.
+    repo's release notes. The ip65-side `LIB_NISTCURVES_P256_BSS`
+    overflow that used to be recorded here was the *default* build's
+    overflow and is fixed (see the CRYPTO_COLD_SHADOW entry under
+    "Memory layout").
+
+    **`USE_X25519_SIBLING=1` links on NEITHER backend** (re-measured
+    2026-08-13 at f0127a0, fresh submodules, cc65 from homebrew). The
+    two failures are different and independent:
+
+      make USE_X25519_SIBLING=1                 # ip65
+        X25519_RODATA overflows CRYPTO_OVERLAY by 2048 bytes
+        LIB_NISTCURVES_P256_CODE overflows CRYPTO_RESIDENT by 103 bytes
+
+      make BACKEND=uci USE_X25519_SIBLING=1     # UCI
+        LIB_NISTCURVES_P256_CODE overflows CRYPTO_HOT by 381 bytes
+
+      make BACKEND=uci                          # control: links clean
+
+    Earlier revisions of this file called UCI "the supported
+    sibling-on path"; that was wrong — nothing links the sibling
+    today, and no shipped artifact contains it. The UCI overflow is
+    simply the sibling's larger code claim: sibling CRYPTO_CODE is
+    4,207 B (fe25519 2,711 + x25519 698 + x25519_init 798) against the
+    in-tree pair's 2,769 B (fe25519 2,093 + x25519 676), i.e. +1,438 B
+    into a CRYPTO_HOT with ~1,057 B of slack. ip65 additionally has
+    only a 4,212 B `CRYPTO_OVERLAY` (vs UCI's 7.5 KB) to hold
+    `X25519_RODATA` (2,304 B) + `X25519_BSS` (1,536 B) on top of
+    TLS_CODE + CRYPTO_AUX_CODE.
+
+    **The pinned v0.6.0 also carries an upstream correctness bug.**
+    c64-x25519 #64 (fixed in v0.7.0): `x25519_scalarmult` returns
+    deterministically wrong results for a peer u-coordinate with bit
+    255 set, across v0.4.0-v0.6.0. v0.4.0 stopped writing the RFC 7748
+    `decodeUCoordinate` mask back into `x25_u` but left the ladder's
+    `z_3 = x_1 * (DA-CB)^2` site reading the unmasked buffer, so
+    x1 = x3 + 19 (mod p). **The in-tree implementation is NOT
+    affected** — `src/crypto/x25519.s` still writes the mask back
+    (`sta x25_u+31`), so its x_1 read sees the masked value;
+    `tools/test_x25519.py --slow` RFC 7748 vector 2 (whose u ends
+    `0x93`, bit 255 set) PASSes on the in-tree build, 73/73.
+    That same vector would catch the sibling bug the moment the
+    sibling links, so **do not flip the sibling default at the v0.6.0
+    pin** — bump to >= v0.7.0 first.
+
+    Upstream is at v0.8.0. A bump is not a one-line submodule move:
+    v0.8.0 renames `CODE`/`DATA` to `LIB_X25519_CODE`/`LIB_X25519_DATA`
+    and adds `LIB_X25519_INIT_CODE`, all three of which the consumer
+    cfgs must declare (`LIB_X25519_INIT_CODE` must be the last
+    file-emitting segment before any bss-type segment in a file-backed
+    area), and v0.7.0's #64 fix adds an `x25_x1` buffer that
+    `build_x25519.sh`'s hand-written BSS stub does not yet export.
+    v0.8.0 also ships an `X25519_ONCHIP_MUL` profile with no REU
+    surface at all (`LIB_X25519_REU_BANKS_USED = 0`, no
+    `reu_fetch_mul_row` export) — which would dissolve the
+    `USE_NISTCURVES_ONCHIP` / `USE_X25519_SIBLING` mutual exclusion at
+    `Makefile:90`, whose stated reason is that both archives export
+    that symbol. Note that v0.8.0's headline
+    `LIB_X25519_RESIDENT_BYTES` drop (9224 -> 8383) is **not** a
+    shrink: 826 B of it simply moved to the reclaimable
+    `LIB_X25519_COLD_BYTES`, and our wrapper stages only three of the
+    sibling's sources anyway, so upstream manifest deltas do not
+    subtract from the overflows above.
+
+    `tools/integration/build_x25519.sh` is the integration wrapper. It
+    does **not** call `make -C libs/x25519` — it stages three sibling
+    sources, sed-rewrites `.segment "CODE"` to `CRYPTO_CODE`, and
+    hand-emits the `X25519_RODATA` / `X25519_BSS` data modules. (An
+    earlier revision of this file pointed at a
+    `make -C libs/x25519 lib-x25519-scalarmult` target; no such target
+    exists upstream at any tag. The real targets are `lib`,
+    `lib-verify`, `lib-x25519-1764`, and — from v0.8.0 —
+    `lib-x25519-onchip`.) Both the sed rewrite and the hand-written
+    data modules are what a version bump has to be migrated through.
   - **CRYPTO_OVERLAY collisions are now caught by MemoryPolicy.** All
     `tools/uci/*.py` test scripts derive their scratch DMA addresses
     from a `MemoryArbiter` backed by a c64-https-aware `MemoryPolicy`
@@ -598,11 +659,13 @@ a verify-path bug — see "VICE harness gotcha" in the Known issues
 list. With `-reu` enabled, `tools/test_x509.py` 3c PASSes cleanly in
 ~60 s wall-clock under VICE warp.
 
-Under the current `libs/nistcurves@v0.3.0` pin (post-PR #55,
-c64-lib-contract-aligned) the U64E 48 MHz handshake measures **82.1 s**
+Under the `libs/nistcurves@v0.3.0` pin (post-PR #55,
+c64-lib-contract-aligned) the U64E 48 MHz handshake measured **82.1 s**
 end-to-end (verified 2026-05-20 against the local listener; the prior
 v0.2.0 measurement was 86.7 s, and the pre-Phase-C.4 in-tree path was
-~110 s).
+~110 s). The pin has since moved to **v0.6.0** — the tables below are
+the current numbers; the v0.3.0 row is kept only as the REU-profile
+baseline.
 
 On the **C64 Ultimate** (10.53.21.158, see "C64 Ultimate notes"),
 measured 2026-07-19 with the INNER=217 fence and boot-at-speed flow:
@@ -1088,6 +1151,30 @@ All 7 pass as of the ca65-conversion branch (97/97 assertions).
 
 The `tools/uci/` scripts cover the UCI backend on U64E hardware (see
 the "UCI test scripts" subsection above).
+
+### Upstream pin drift — `tools/check_upstream_pins.py`
+
+Reports, for every submodule in `.gitmodules`, which release the pin
+corresponds to and what upstream has tagged since. Stdlib + `git`
+only, one `git ls-remote --tags` per submodule, so it is fast and
+schedulable.
+
+    tools/check_upstream_pins.py                     # table
+    tools/check_upstream_pins.py --json              # machine-readable
+    tools/check_upstream_pins.py --strict            # exit 1 on drift
+    tools/check_upstream_pins.py --submodule libs/x25519
+
+**Do not read pins off `git submodule status`.** It renders versions
+via `git describe` *without* `--tags`, which considers annotated tags
+only, so a lightweight tag is invisible to it. c64-x25519 tagged
+`v0.6.0` lightweight while `v0.5.0` and `v0.7.0` are annotated —
+so `git submodule status` renders the exactly-on-`v0.6.0` pin as
+`v0.5.0-5-g95fdd70`, which reads as "five commits past a release" and
+has already been mistaken for a stale pin. `check_upstream_pins.py`
+resolves `refs/tags/<name>^{}` when the peeled ref exists and the bare
+ref otherwise, so both tag kinds behave identically. It also reads the
+gitlink from `git ls-tree` rather than the working copy, so it is
+correct for a submodule that was never `--init`'d.
 
 ### VICE ip65 rig (hardware-free e2e)
 
