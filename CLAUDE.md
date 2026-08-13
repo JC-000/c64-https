@@ -28,6 +28,15 @@ Targets:
   - `make ip65-blob`    — rebuild `ip65-build/ip65-c64.bin` from those
                           libraries (the committed blob is normally reused)
 
+Fresh-checkout gotcha: right after `git submodule update --init ip65`,
+plain `make` tries to *relink the blob* — the freshly checked-out
+`ip65-build/ip65_stub.s` is newer than the committed
+`ip65-build/ip65-c64.bin`, so the `$(IP65_BIN)` rule fires and dies on
+`ld65: Error: Input file '../ip65/ip65/ip65_tcp.lib' not found`.
+`touch ip65-build/ip65-c64.bin` restores the intended "committed blob
+is reused" path; `make ip65-libs` is the alternative if you actually
+want to rebuild it.
+
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65)
@@ -95,7 +104,7 @@ buffers in the crypto BSS — see per-module headers for details):
   SHA-256                   (in-tree; no sibling)
     sha256_init, sha256_update, sha256_final
 
-  ECDSA P-256                (`libs/nistcurves@v0.3.0` sibling,
+  ECDSA P-256                (`libs/nistcurves@v0.6.0` sibling,
                               c64-lib-contract SPEC §1-§8.1 aligned)
     ecdsa_verify_256      — TLS dispatcher in src/crypto/ecdsa_verify.s
                             packs the BE struct + calls the sibling entry
@@ -120,12 +129,30 @@ below for the post-W1 hot/cold split):
   - Large BSS (page-aligned tables etc.) lands in `CRYPTO_COLD_SHADOW`
     at **$A000-$BFFF** (file-backed zero-fill, CPU port $01 = $36
     selects RAM under BASIC ROM).
-  - Sibling-library segments follow the c64-lib-contract SPEC §8.1
+  - Sibling-library segments follow the c64-lib-contract SPEC §4
     naming (`LIB_NISTCURVES_P256_CODE`, `LIB_NISTCURVES_P256_RODATA`,
     `LIB_NISTCURVES_P256_BSS`, etc.); the consumer cfg places them by
-    name. See [c64-lib-contract](https://github.com/JC-000/c64-lib-contract)
+    name. (§8.1 is the shared `sqtab` table, a different clause — the
+    old §8.1 citation here was a miscite.) See
+    [c64-lib-contract](https://github.com/JC-000/c64-lib-contract)
     for the contract spec and `docs/library-ingestion-architecture.md`
     for the c64-https rollout plan.
+  - **Read `SPEC.md` on `main`, not the latest git tag.** The contract's
+    tags lag badly: newest tag is v0.4.0 while `main` is **v0.7.2**
+    (checked 2026-08-13). Sections added since v0.4.0 that bind a
+    *consumer* rather than an adopter: **§13 Network backend ABI**
+    (v0.6.0 — written from c64-https's own net surface; our intake
+    issue [#70](https://github.com/JC-000/c64-https/issues/70) is
+    OPEN), **§8.0 three-state shared-primitive semantics +
+    `LIB_<X>_SHARED_CONSUMES`** with a consumer-side coverage assert
+    (v0.5.0; c64-https is the `APP_OWNED` case — `src/boot.s`
+    `reu_mul_init`, `src/crypto/shared/mul_tables.s` `mul_tables_init`),
+    and **§1/§5 library-prefixed manifest exports** gated on
+    `ca65 -D LIB_NO_BARE_EXPORTS=1` (v0.7.0), which is the sanctioned
+    replacement for the hand-dropped `lib_version.o` workaround in
+    `tools/integration/build_x25519.sh`. c64-https imports **no**
+    contract manifest equate today, so none of these are enforced here
+    yet.
   - Zero-page usage is defined in `src/constants.inc` — fe25519 lives at
     `$2C-$37`, x25519 state at `$38-$3A`, ECDSA bignum at `$22-$3C`.
     These ranges are time-shared (fe25519 and ChaCha20 never overlap).
@@ -527,8 +554,9 @@ Five latent bugs and three new ones were cleared to get here:
     old BSS overflow (measured 2026-07-29 post-refit): `X25519_RODATA`
     overflows `CRYPTO_OVERLAY` by 2,048 B and
     `LIB_NISTCURVES_P256_CODE` overflows `CRYPTO_RESIDENT` by 103 B —
-    i.e. a code/rodata placement problem, not the BSS one
-    c64-nist-curves#54 tracks. ip65's `CRYPTO_OVERLAY` is only 4,212 B
+    i.e. a code/rodata placement problem, not the BSS one that
+    c64-nist-curves#54 used to track (that issue is CLOSED — see the
+    CRYPTO_COLD_SHADOW entry). ip65's `CRYPTO_OVERLAY` is only 4,212 B
     against UCI's 7.5 KB, which is the root of it. UCI remains the
     supported sibling-on path. See `tools/integration/build_x25519.sh`
     for the
@@ -544,20 +572,54 @@ Five latent bugs and three new ones were cleared to get here:
     rather than hardcoding addresses. The migration left
     `unknown_policy=WARN` so writes outside declared segments surface
     as `UserWarning`; tightening to `DENY` is a follow-up.
-  - **All P-384 build targets are broken at the v0.6.0 pin**
-    (verified 2026-07-26): both `make p384-overlay` and `make
-    BACKEND=uci USE_OVERLAY_P384_EMBED=1` fail in
-    `tools/integration/build_nistcurves_p384.sh` at the `ar65`
-    staging step (`nistcurves_p384_staging/curve/ecdsa384.o` never
-    produced — the upstream layout drifted under the v0.5.0/v0.6.0
-    bumps). Behind that likely still lurk the earlier v0.3.0-era
-    SHA-384 LUT overlay overflow (1536 B over the 7.5 KB slot) and
-    the historical `ec_base384_x/y` unresolved-symbol bug — neither
-    is reachable until the wrapper is fixed. The target has never
-    built cleanly. Issues #32 and #45 were closed as stale on this
-    basis; file fresh issues against the current failure chain when
-    P-384 enablement resumes. TLS-level P-384 verify remains stubbed
-    regardless (see `project_p384_stubbed`).
+  - **P-384 build targets are still broken, but one link fewer.**
+    The `ar65` staging failure (`nistcurves_p384_staging/curve/
+    ecdsa384.o` never produced) was **ours, not upstream's**:
+    `build_nistcurves_p384.sh` hardcoded the archive member name
+    `ecdsa384.o`, while upstream renamed it to `ecdsa384_nocomb.o` in
+    commit `64b313d` (c64-nist-curves issue #61), released in
+    **v0.5.0** — i.e. before our own v0.6.0 pin, and unchanged by
+    v0.7.0/v0.8.0. Upstream's `Makefile` builds every P-384 archive
+    from `LIB_P384_VERIFY_OBJS = ... $(BUILD_DIR)/ecdsa384_nocomb.o`.
+    Fixed 2026-08-13; both `nistcurves-p384-sha384.a` and
+    `nistcurves-p384-curve.a` now build. The chain then hits the
+    **next** blocker, which is exactly the one predicted here:
+    `LIB_NISTCURVES_SHA384_TABLES` overflows `OVERLAY_REGION` by
+    **1536 B** (`cfg/p384-overlay-sha384.cfg(29)`; the slot is
+    $4200-$5FFF = 7,680 B). A third, independent defect blocks the
+    embed variant: `make BACKEND=uci USE_OVERLAY_P384_EMBED=1` from
+    clean dies with `No rule to make target 'build/labels.txt'` —
+    the overlay rules take an order-only `| build/labels.txt` but
+    that file is only a side effect of the main link, whose bootstrap
+    rule is gated off under this flag. Also now dead: the wrapper's
+    `ec_scalar_mul_384_shim` — `od65 --dump-imports` shows
+    `ecdsa384_nocomb.o` imports `ec_scalar_mul_var_384`, not
+    `ec_scalar_mul_384`, so the `ECDSA_NO_COMB` variant already does
+    the variable-base fallback the shim was written to supply (it is
+    never pulled, so it is harmless; retire it with the next P-384
+    pass). No P-384 target has ever built cleanly end-to-end. Issues
+    #32 and #45 were closed as stale; file fresh issues against this
+    chain when P-384 enablement resumes. TLS-level P-384 verify
+    remains stubbed regardless (see `project_p384_stubbed`).
+  - **A `libs/nistcurves` bump to v0.7.0/v0.8.0 does not link under
+    UCI** (measured 2026-08-13). `LIB_NISTCURVES_P256_RODATA`
+    overflows `CRYPTO_HOT` by **207 B**, because CRYPTO_HOT is
+    already *one byte* from full at the v0.6.0 pin (`build/
+    c64-https.map`: rodata `009E1F..009FFE`, region ends `$9FFF`) and
+    v0.7.0's FIPS 186-5 §3.3 public-key validation gate adds +512 B.
+    ip65 links fine at v0.8.0, and both `tools/test_ecdsa_kat_oracle.py`
+    (3/3) and `tools/test_x509.py` (11/11) pass there — so the blocker
+    is placement, not function. A link-verified remedy exists (route
+    `cfg/c64-https-uci.cfg` `LIB_NISTCURVES_P256_RODATA` to the
+    otherwise-unused `CRYPTO_OVERLAY`; v0.8.0 UCI then links at the
+    same 62,977 B with 7,200 B of the slot still free) but it has had
+    no hardware run and it changes what `tools/uci/_memory_policy.py`
+    sees at $4200-$5FFF, so it needs a UCI e2e before it ships. The
+    bump is worth taking eventually: the gate validates the
+    attacker-supplied certificate public key that `src/tls_cert.s`
+    feeds to `ecdsa_verify_256`, which c64-https does not check
+    itself. No export was renamed or removed in v0.7.0/v0.8.0 —
+    `LIB_ABI_VERSION` is still 0.
   - **VICE harness gotcha**: any test that exercises sibling
     `libs/nistcurves` P-256 primitives (`fp_mul`, `fp_inv`,
     `ec_scalar_mul_var`, `ecdsa_verify_256`, ...) MUST launch VICE with
@@ -598,8 +660,9 @@ a verify-path bug — see "VICE harness gotcha" in the Known issues
 list. With `-reu` enabled, `tools/test_x509.py` 3c PASSes cleanly in
 ~60 s wall-clock under VICE warp.
 
-Under the current `libs/nistcurves@v0.3.0` pin (post-PR #55,
-c64-lib-contract-aligned) the U64E 48 MHz handshake measures **82.1 s**
+Under the then-current `libs/nistcurves@v0.3.0` pin (post-PR #55,
+c64-lib-contract-aligned; the pin is v0.6.0 today) the U64E 48 MHz
+handshake measured **82.1 s**
 end-to-end (verified 2026-05-20 against the local listener; the prior
 v0.2.0 measurement was 86.7 s, and the pre-Phase-C.4 in-tree path was
 ~110 s).
@@ -773,9 +836,10 @@ here as a submodule bump without touching TLS call sites.
 
 ### ECDSA P-384 verify wall-clock
 
-Not yet measured end-to-end, and currently UNMEASURABLE: the P-384
-embed build does not build at the v0.6.0 pin (fails in the sibling
-wrapper's `ar65` staging step — see "Known issues"), so
+Not yet measured end-to-end, and still UNMEASURABLE: the `ar65`
+staging failure is fixed, but the P-384 build now stops on the
+SHA-384 overlay table overflow (and the embed variant on a separate
+`build/labels.txt` ordering defect) — see "Known issues", so
 `tools/uci/test_https_local_p384.py` has no P-384 PRG to run and
 would just boot the default P-256 image. The May-2026 hw attempts
 that predate the build breakage died at EncryptedExtensions decrypt
@@ -970,8 +1034,13 @@ Tight regions (post-W1):
     last so it packs at $BA00 (keeping `sqtab_reserved` at $BC00 for
     the onchip bake invariant). Both backends now link clean, and the
     union is exercised live by `tools/test_x509.py` 3c/3d and by every
-    ip65 e2e run. c64-nist-curves#54 (minimal archive) remains open as
-    optional headroom, no longer a blocker.
+    ip65 e2e run. c64-nist-curves#54 (verify-path BSS trim) is
+    **CLOSED as COMPLETED (2026-07-16)**: the 261 B trim shipped in
+    commit `7cb59f7` before upstream v0.4.0, so it has been inside our
+    v0.6.0 pin all along and is not available as future headroom.
+    `LIB_NISTCURVES_P256_BSS` measures $0520 (1,312 B) at v0.6.0 and
+    is unchanged at v0.8.0, so the union's cap is not threatened by a
+    bump.
   - **CRYPTO_OVERLAY** under UCI doubles as P-384 SHA-384/curve overlay
     paging slot, the W3 P-256 overlay embed slot, AND the
     USE_X25519_SIBLING=1 X25519 sibling rodata + BSS slot. Mutually
@@ -1045,8 +1114,8 @@ build, and the REU-less ip65+onchip image is validated end-to-end in
 VICE (see "ip65 / stock-C64 wall-clock"). Adding it to `make package`
 is a live option — it is the only artifact that serves a stock C64 +
 RR-Net cartridge, which today has no shipped PRG at all. Note
-c64-nist-curves#54 (minimal archive) is now optional headroom rather
-than a blocker. The comb profile stays deliberately excluded (REU
+c64-nist-curves#54 is CLOSED-as-completed and already inside our pin,
+so it is not headroom in reserve. The comb profile stays deliberately excluded (REU
 bank 2 residency + ~40 min boot precompute at 1 MHz make it wrong for
 a general release).
 
