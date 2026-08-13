@@ -2,14 +2,29 @@
 """test_x25519.py -- fe25519 field arithmetic and X25519 key exchange tests.
 
 Tests fe_add, fe_sub, fe_mul, fe_sqr, fe_inv, fe_cswap, fe_mul_a24,
-fe_copy, fe_zero, fe_one, x25519_clamp, and (with --slow) x25519_scalarmult
-against Python reference implementations and RFC 7748 test vectors.
+fe_copy, fe_zero, fe_one, x25519_clamp, and x25519_scalarmult against
+Python reference implementations and RFC 7748 test vectors.
+
+The two RFC 7748 scalarmult vectors run BY DEFAULT. They are the only
+end-to-end `x25519_scalarmult` coverage in this file -- everything else
+is field arithmetic -- so a run that omits them certifies nothing about
+X25519 itself. They used to be gated behind `--slow` on the strength of
+a "~100 min each" comment; measured under VICE warp on the in-tree ip65
+build they cost **~16.5 s each** (full suite 37.9 s with them, 4.8 s
+without). The gate was buying 33 seconds and hiding the only test that
+matters. `--fast` still skips them, and any skip is now named in the
+summary line rather than silently leaving the denominator.
 
 Uses the binary monitor test harness -- jsr() is event-based via
 checkpoints, so no polling or retry wrappers are needed.
 
 Usage:
-    python3 tools/test_x25519.py [--seed S] [--verbose] [--slow]
+    python3 tools/test_x25519.py [--seed S] [--verbose] [--fast]
+
+    --fast   skip the RFC 7748 scalarmult vectors (~33 s). The summary
+             line then reports them as SKIPPED.
+    --slow   accepted and ignored; the vectors it used to enable are
+             now the default.
 """
 
 import os
@@ -29,7 +44,7 @@ PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
-SLOW = False
+FAST = False
 
 # p = 2^255 - 19
 P = (1 << 255) - 19
@@ -77,7 +92,13 @@ def clamp_ref(scalar):
     return bytes(s)
 
 
-# RFC 7748 Section 6.1 test vectors
+# RFC 7748 Section 5.2 test vectors (the scalarmult vectors -- Section 6.1
+# is the Alice/Bob Diffie-Hellman pair, which these are not).
+#
+# U_2 ends 0x93, i.e. bit 255 of the u-coordinate is SET. That makes
+# vector 2 the RFC 7748 decodeUCoordinate MSB-masking regression test:
+# it is the vector that caught upstream c64-x25519 #64, the bug present
+# in our pinned libs/x25519 v0.6.0. Do not drop it as "redundant".
 SCALAR_1 = bytes.fromhex(
     "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4")
 U_1 = bytes.fromhex(
@@ -634,16 +655,21 @@ def run_tests(transport, labels, seed):
          lambda: test_x25519_clamp(transport, labels, rng)),
     ]
 
-    if SLOW:
-        test_groups += [
-            ("x25519 RFC 7748 vector 1",
-             lambda: test_x25519_rfc7748_vector1(transport, labels)),
-            ("x25519 RFC 7748 vector 2",
-             lambda: test_x25519_rfc7748_vector2(transport, labels)),
-        ]
+    skipped_groups = []
+    scalarmult_groups = [
+        ("x25519 RFC 7748 vector 1",
+         lambda: test_x25519_rfc7748_vector1(transport, labels)),
+        ("x25519 RFC 7748 vector 2",
+         lambda: test_x25519_rfc7748_vector2(transport, labels)),
+    ]
+    if FAST:
+        # A skipped group must not silently leave the denominator: record
+        # it so the verdict can name it. These two are the only end-to-end
+        # x25519_scalarmult coverage in the file.
+        skipped_groups += [name for name, _ in scalarmult_groups]
+        print("\n  (--fast: skipping x25519 scalarmult vectors, ~33 s)")
     else:
-        print("\n  (x25519 scalarmult tests skipped -- "
-              "use --slow to enable, ~100 min each)")
+        test_groups += scalarmult_groups
 
     for name, test_fn in test_groups:
         print(f"\n--- {name} ---")
@@ -659,11 +685,11 @@ def run_tests(transport, labels, seed):
             import traceback
             traceback.print_exc()
 
-    return total_passed, total_failed
+    return total_passed, total_failed, skipped_groups
 
 
 def main():
-    global VERBOSE, SLOW
+    global VERBOSE, FAST
     os.chdir(PROJECT_ROOT)
 
     seed = random.randint(0, 2**32 - 1)
@@ -676,8 +702,12 @@ def main():
         elif args[i] == "--verbose":
             VERBOSE = True
             i += 1
+        elif args[i] == "--fast":
+            FAST = True
+            i += 1
         elif args[i] == "--slow":
-            SLOW = True
+            # Back-compat no-op: the vectors --slow used to enable now
+            # run by default. Kept so existing invocations don't break.
             i += 1
         else:
             i += 1
@@ -747,13 +777,23 @@ def main():
         # after jsr() returns (prevents crash when BASIC ROM is banked out)
         write_bytes(transport, 0x0339, bytes([0x4C, 0x39, 0x03]))
 
-        passed, failed = run_tests(transport, labels, seed)
+        passed, failed, skipped_groups = run_tests(transport, labels, seed)
 
         mgr.release(inst)
 
     total = passed + failed
     print(f"\n{'='*60}")
-    print(f"RESULTS: {passed}/{total} passed, {failed}/{total} failed")
+    summary = f"RESULTS: {passed}/{total} passed, {failed}/{total} failed"
+    if skipped_groups:
+        # Never print an unqualified clean pass over a group that did not
+        # run. Skipped assertions leave the denominator entirely, so the
+        # counters alone cannot express the gap -- name it explicitly.
+        summary += (f" -- {len(skipped_groups)} group(s) SKIPPED: "
+                    + ", ".join(skipped_groups))
+    print(summary)
+    if skipped_groups:
+        print("WARNING: end-to-end x25519_scalarmult coverage did NOT run; "
+              "this run does not certify X25519.")
     print(f"{'='*60}")
     sys.exit(0 if failed == 0 else 1)
 

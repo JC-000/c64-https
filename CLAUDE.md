@@ -15,6 +15,31 @@ Dependencies:
   - GNU make
   - VICE (`x64sc`) only for `make run` / the test harness
 
+First build in a fresh clone or worktree (ip65 backend only — the UCI
+backend needs none of this):
+
+    git submodule update --init --recursive
+    make ip65-libs        # once per clone
+    make
+
+`ip65-build/ip65-c64.bin` is a **gitignored local build artifact**
+(`.gitignore` line `ip65-build/*.bin`; `git ls-files ip65-build/` returns
+only `ip65.cfg` and `ip65_stub.s`), *not* a committed file. A plain `make`
+does try to build it, but the link step consumes ip65 `.lib` archives that
+the submodule does not ship — it ships the sources for them — so without
+`make ip65-libs` first it dies with:
+
+    ld65: Error: Input file '../ip65/ip65/ip65_tcp.lib' not found
+
+`make clean` only removes `build/`, so once built the blob survives and is
+never rebuilt; that persistence, not a committed file, is why the rebuild
+targets are normally invisible. The rebuild is deterministic: 6,951 B,
+sha256 `cf1a5ff7809af4e4655e385b378b936054f41046ff2b7604828af3240c2d90dd`
+— rebuilt byte-identically in three independent worktrees on 2026-08-13,
+and identical to a local copy built 2026-05-06. Three months and four
+artifacts agree, so a stale blob is not a failure mode worth designing
+around; a missing one is.
+
 Targets:
   - `make`              — default, produces `build/c64-https.prg`,
                           `build/labels.txt` (VICE label format), and
@@ -23,10 +48,52 @@ Targets:
                           agents; P-384 overlays get `.dbg` sidecars too)
   - `make clean`        — remove build artifacts
   - `make run`          — autostart the PRG in VICE
-  - `make ip65-libs`    — rebuild ip65 object libraries from the submodule
-                          (only needed if the ip65 submodule changes)
+  - `make ip65-libs`    — build ip65's object libraries from the
+                          submodule. Required once per fresh clone (see
+                          above), and again whenever the ip65 submodule
+                          changes.
   - `make ip65-blob`    — rebuild `ip65-build/ip65-c64.bin` from those
-                          libraries (the committed blob is normally reused)
+                          libraries. A plain `make` already builds the
+                          blob on demand and then reuses it, so this
+                          target is only for forcing a rebuild.
+
+**`make clean` when you change `BACKEND=` or any flag.** make tracks
+source timestamps, not the command line, so an object built for the
+other backend counts as up to date. This is not only about `-D` flags:
+`BACKEND=` also selects the `-I src/net/$(BACKEND)` include path, and
+`src/tls13.s` pulls `net_tuning.inc` from there. Both failure modes were
+observed in one worktree on 2026-08-13:
+
+  - **Mixed link.** An ip65 PRG built from a UCI-compiled `tls13.o`
+    carries drain budget 1x16 instead of 8x250 — issue #73's regression,
+    silently reintroduced. Same 47,105 B as the clean image; only the
+    content differs (`d483d46f…` vs the correct `db311110…`), and the
+    build output is a bare `ld65` line.
+  - **No link at all.** macOS ships **GNU Make 3.81**, which compares
+    mtimes at 1-second resolution. Objects recompiled inside the same
+    second as the previous link count as older (measured: 39 ms newer,
+    make said "Prerequisite ... is older than target"), so `make`
+    exits 0 having left the *other backend's* PRG in place — a
+    62,977 B UCI image where an ip65 build was asked for.
+
+So neither exit code nor file size distinguishes a good build from a bad
+one here. After any flag or `BACKEND` change, `make clean`; if a build
+matters, check the **PRG's** sha256.
+
+Specifically the PRG's, not an object's: **ca65 stamps the build's
+wall-clock time into every `.o` header**, so two clean builds of
+identical source produce different object hashes and a `.o` hash is not
+evidence of anything. `ld65` does not propagate that field, so the PRG
+*is* deterministic: `build/c64-https.prg` held at `db31111031e2…` across
+every rebuild while every `.o` changed hash each time. That asymmetry is
+what makes PRG-hash comparison a usable check — a property of the
+toolchain, not a convention.
+
+No byte offset is quoted here on purpose: it is a cc65-version detail,
+and three people reading three different offsets out of the same effect
+is how a checkable finding turns into a disputed one. The reproduction
+is `make clean && make` twice and comparing hashes, which holds whatever
+the layout.
 
 Fresh-checkout gotcha: right after `git submodule update --init ip65`,
 plain `make` tries to *relink the blob* — the freshly checked-out
@@ -39,11 +106,12 @@ want to rebuild it.
 
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
-                          (`cfg/c64-https-$(BACKEND).cfg`; default ip65)
+                          (`cfg/c64-https-$(BACKEND).cfg`; default ip65).
+                          Changing it requires `make clean` — see above.
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
-                          `libs/x25519@v0.6.0` sibling (UCI only — ip65
-                          has a tracked code/rodata overflow; see
-                          "Known issues")
+                          `libs/x25519@v0.6.0` sibling. **Does not link
+                          on either backend at present** — both
+                          overflow, differently; see "Known issues"
   - `EMBED_P256_OVERLAY=1` — stage the P-256 verify image into the
                           CRYPTO_OVERLAY slot at PRG-load (UCI; mutually
                           exclusive with USE_X25519_SIBLING /
@@ -69,8 +137,10 @@ Variables:
 Test harness expectations:
   - Most `tools/test_*.py` scripts run `make clean && make` themselves
     before launching VICE. Set `C64_SKIP_BUILD=1` in the environment to
-    reuse the already-built PRG (7 scripts currently honor the var —
-    see the "Honor C64_SKIP_BUILD" commit for the list).
+    reuse the already-built PRG. 14 scripts honor it as of 2026-08-13
+    (13 under `tools/`, plus `tests/test_vice_https_macos.py`); the
+    current list is `grep -ln 'environ.*C64_SKIP_BUILD' tools/test_*.py
+    tests/test_*.py` rather than a number that goes stale here.
   - Use the `c64-test-harness` Python package to launch VICE; never run
     `x64sc` directly from tests.
 
@@ -89,7 +159,9 @@ buffers in the crypto BSS — see per-module headers for details):
   X25519 / field arithmetic
     Default: in-tree `src/crypto/{x25519,fe25519}.s`.
     Opt-in: sibling `libs/x25519@v0.6.0` via `make USE_X25519_SIBLING=1`
-    (UCI backend only — see Known issues for the ip65 fit limitation).
+    — **currently unbuildable on both backends**, and the pinned
+    v0.6.0 additionally carries an upstream correctness bug; see
+    Known issues before relying on either fact.
     The v0.6.0 pin is c64-lib-contract-aligned (SPEC §8.1) and adds the
     bank-2 drop + RAM-reclaim work; older v0.4.0 pin is historical only.
     Sibling and in-tree both expose the same ABI:
@@ -358,12 +430,22 @@ Scripts under `tools/uci/` require a U64E (default 192.168.1.81,
 overridable via the `U64_HOST` environment variable) and use
 `DeviceLock` + `enable_uci`/`disable_uci`:
 
-  - `boot_check.py`       — verify UCI firmware detection and boot banner
+  - `boot_check.py`       — boot the PRG and assert the backend banner
+                            (`BACKEND=uci|ip65`, default uci), the
+                            absence of any `FAILED` line, and that the
+                            menu was reached. `C64_PRG` overrides the
+                            image; `BOOT_TIMEOUT` the menu budget.
   - `phase2_check.py`     — DHCP acquire + local IP readback
   - `phase3_tcp_echo.py`  — TCP connect/send/recv against a local echo server
   - `test_http_local.py`  — HTTP GET against a local test server
   - `test_http_live.py`   — HTTP GET against a real internet host (requires
                             internet access from the U64E)
+  - `test_https_bad_finished.py` — the client must ABORT on a forged server
+                            Finished. Uses the hand-rolled
+                            `tools/https_e2e/evil_listener.py` rather than
+                            stock `ssl`. `FINISHED_MODE=good` is the control
+                            and must be run first. See "Negative-path
+                            coverage — the server Finished" under Smoke tests.
   - `test_https_local.py` — HTTPS e2e scaffolding against a local TLS 1.3
                             listener (ECDSA-P256 cert from
                             `tools/https_e2e/certs/`). DMAs a 6502 stub
@@ -453,7 +535,9 @@ and writes the 48 B P-384 pubkey into the dedicated
 The CertificateVerify signed-content blob is 130 B (RFC 8446 §4.4.3:
 64-space pad + 33 B context + 1 B sep + 32 B SHA-256 transcript;
 the transcript-hash function stays SHA-256 because c64-https
-negotiates only TLS_AES_128_GCM_SHA256 — Phase 5 Fix A). The
+offers exactly one cipher suite, TLS_CHACHA20_POLY1305_SHA256
+(0x1303, `src/tls_handshake.s:85`, echo-verified at :380), whose
+hash is SHA-256 — Phase 5 Fix A). The
 end-to-end test is `tools/uci/test_https_local_p384.py` (mirrors
 `test_https_local.py` with P-384 cert profile via swapping CERT_PATH
 / KEY_PATH to `tools/https_e2e/certs/server-p384.{pem,key}`); see the
@@ -520,7 +604,12 @@ Five latent bugs and three new ones were cleared to get here:
   - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
   - Boot banner line 03 still says "rr-net" under ip65 build even
     though Phase 2 made it backend-aware — this is correct/expected
-    behavior. Under UCI it says "ULTIMATE 64 ELITE (UCI)".
+    behavior. Under UCI it says "UCI NETWORKING". Those two strings
+    are the whole of `net_banner_str`
+    (`src/net/ip65/net_banner.s` / `src/net/uci/net.s`), and
+    `tools/uci/boot_check.py` asserts against them, so keep the two
+    in step. (This entry used to claim the UCI line read
+    "ULTIMATE 64 ELITE (UCI)" — it never did.)
   - The delay-loop fence adds ~2.5 ms overhead per UCI register access
     at 1 MHz (negligible for networking, but visible in tight loops).
   - `http_resp_buf` is rendered through `ascii_chrout` (a small
@@ -546,21 +635,79 @@ Five latent bugs and three new ones were cleared to get here:
     "Memory layout" below). Earlier-pin caveats (Phase C.1 hang,
     v0.3.0 retry rollback, v0.4.0 H2 defensive REU re-inits) are all
     superseded by v0.6.0; the file-level history lives in the c64-x25519
-    repo's CHANGELOG. The ip65-side `LIB_NISTCURVES_P256_BSS` overflow
-    that used to be recorded here was the *default* build's overflow
-    and is fixed (see the CRYPTO_COLD_SHADOW entry under "Memory
-    layout"). `USE_X25519_SIBLING=1` under ip65 still does NOT link,
-    but the failure has moved and is now a different problem than the
-    old BSS overflow (measured 2026-07-29 post-refit): `X25519_RODATA`
-    overflows `CRYPTO_OVERLAY` by 2,048 B and
-    `LIB_NISTCURVES_P256_CODE` overflows `CRYPTO_RESIDENT` by 103 B —
-    i.e. a code/rodata placement problem, not the BSS one that
-    c64-nist-curves#54 used to track (that issue is CLOSED — see the
-    CRYPTO_COLD_SHADOW entry). ip65's `CRYPTO_OVERLAY` is only 4,212 B
-    against UCI's 7.5 KB, which is the root of it. UCI remains the
-    supported sibling-on path. See `tools/integration/build_x25519.sh`
-    for the
-    `make -C libs/x25519 lib-x25519-scalarmult` wrapper.
+    repo's release notes. The ip65-side `LIB_NISTCURVES_P256_BSS`
+    overflow that used to be recorded here was the *default* build's
+    overflow and is fixed (see the CRYPTO_COLD_SHADOW entry under
+    "Memory layout").
+
+    **`USE_X25519_SIBLING=1` links on NEITHER backend** (re-measured
+    2026-08-13 at f0127a0, fresh submodules, cc65 from homebrew). The
+    two failures are different and independent:
+
+      make USE_X25519_SIBLING=1                 # ip65
+        X25519_RODATA overflows CRYPTO_OVERLAY by 2048 bytes
+        LIB_NISTCURVES_P256_CODE overflows CRYPTO_RESIDENT by 103 bytes
+
+      make BACKEND=uci USE_X25519_SIBLING=1     # UCI
+        LIB_NISTCURVES_P256_CODE overflows CRYPTO_HOT by 381 bytes
+
+      make BACKEND=uci                          # control: links clean
+
+    Earlier revisions of this file called UCI "the supported
+    sibling-on path"; that was wrong — nothing links the sibling
+    today, and no shipped artifact contains it. The UCI overflow is
+    simply the sibling's larger code claim: sibling CRYPTO_CODE is
+    4,207 B (fe25519 2,711 + x25519 698 + x25519_init 798) against the
+    in-tree pair's 2,769 B (fe25519 2,093 + x25519 676), i.e. +1,438 B
+    into a CRYPTO_HOT with ~1,057 B of slack. ip65 additionally has
+    only a 4,212 B `CRYPTO_OVERLAY` (vs UCI's 7.5 KB) to hold
+    `X25519_RODATA` (2,304 B) + `X25519_BSS` (1,536 B) on top of
+    TLS_CODE + CRYPTO_AUX_CODE.
+
+    **The pinned v0.6.0 also carries an upstream correctness bug.**
+    c64-x25519 #64 (fixed in v0.7.0): `x25519_scalarmult` returns
+    deterministically wrong results for a peer u-coordinate with bit
+    255 set, across v0.4.0-v0.6.0. v0.4.0 stopped writing the RFC 7748
+    `decodeUCoordinate` mask back into `x25_u` but left the ladder's
+    `z_3 = x_1 * (DA-CB)^2` site reading the unmasked buffer, so
+    x1 = x3 + 19 (mod p). **The in-tree implementation is NOT
+    affected** — `src/crypto/x25519.s` still writes the mask back
+    (`sta x25_u+31`), so its x_1 read sees the masked value;
+    `tools/test_x25519.py --slow` RFC 7748 vector 2 (whose u ends
+    `0x93`, bit 255 set) PASSes on the in-tree build, 73/73.
+    That same vector would catch the sibling bug the moment the
+    sibling links, so **do not flip the sibling default at the v0.6.0
+    pin** — bump to >= v0.7.0 first.
+
+    Upstream is at v0.8.0. A bump is not a one-line submodule move:
+    v0.8.0 renames `CODE`/`DATA` to `LIB_X25519_CODE`/`LIB_X25519_DATA`
+    and adds `LIB_X25519_INIT_CODE`, all three of which the consumer
+    cfgs must declare (`LIB_X25519_INIT_CODE` must be the last
+    file-emitting segment before any bss-type segment in a file-backed
+    area), and v0.7.0's #64 fix adds an `x25_x1` buffer that
+    `build_x25519.sh`'s hand-written BSS stub does not yet export.
+    v0.8.0 also ships an `X25519_ONCHIP_MUL` profile with no REU
+    surface at all (`LIB_X25519_REU_BANKS_USED = 0`, no
+    `reu_fetch_mul_row` export) — which would dissolve the
+    `USE_NISTCURVES_ONCHIP` / `USE_X25519_SIBLING` mutual exclusion at
+    `Makefile:90`, whose stated reason is that both archives export
+    that symbol. Note that v0.8.0's headline
+    `LIB_X25519_RESIDENT_BYTES` drop (9224 -> 8383) is **not** a
+    shrink: 826 B of it simply moved to the reclaimable
+    `LIB_X25519_COLD_BYTES`, and our wrapper stages only three of the
+    sibling's sources anyway, so upstream manifest deltas do not
+    subtract from the overflows above.
+
+    `tools/integration/build_x25519.sh` is the integration wrapper. It
+    does **not** call `make -C libs/x25519` — it stages three sibling
+    sources, sed-rewrites `.segment "CODE"` to `CRYPTO_CODE`, and
+    hand-emits the `X25519_RODATA` / `X25519_BSS` data modules. (An
+    earlier revision of this file pointed at a
+    `make -C libs/x25519 lib-x25519-scalarmult` target; no such target
+    exists upstream at any tag. The real targets are `lib`,
+    `lib-verify`, `lib-x25519-1764`, and — from v0.8.0 —
+    `lib-x25519-onchip`.) Both the sed rewrite and the hand-written
+    data modules are what a version bump has to be migrated through.
   - **CRYPTO_OVERLAY collisions are now caught by MemoryPolicy.** All
     `tools/uci/*.py` test scripts derive their scratch DMA addresses
     from a `MemoryArbiter` backed by a c64-https-aware `MemoryPolicy`
@@ -638,6 +785,12 @@ Five latent bugs and three new ones were cleared to get here:
     spelling out `ViceConfig(extra_args=["-reu", "-reusize", "512"])`
     by hand. The UCI path is unaffected because the U64E hardware has
     REU enabled by default; the symptom was VICE-only.
+    The single deliberate exception is `C64_VICE_NO_REU=1`, which makes
+    `default_vice_config()` drop the REU flags (and say so on stderr).
+    It exists so the shipped onchip PRG's "no REU required" claim has a
+    runnable test — see the packaging validation record for the exact
+    invocation. Never set it for a REU-profile build: that is precisely
+    the silent-garbage case above.
 
 ### ECDSA P-256 verify wall-clock
 
@@ -665,7 +818,9 @@ c64-lib-contract-aligned; the pin is v0.6.0 today) the U64E 48 MHz
 handshake measured **82.1 s**
 end-to-end (verified 2026-05-20 against the local listener; the prior
 v0.2.0 measurement was 86.7 s, and the pre-Phase-C.4 in-tree path was
-~110 s).
+~110 s). The pin has since moved to **v0.6.0** — the tables below are
+the current numbers; the v0.3.0 row is kept only as the REU-profile
+baseline.
 
 On the **C64 Ultimate** (10.53.21.158, see "C64 Ultimate notes"),
 measured 2026-07-19 with the INNER=217 fence and boot-at-speed flow:
@@ -1124,6 +1279,19 @@ Validation record (2026-07-27, HEAD cb6eab4):
     (and with, as control) — the no-REU claim is verified, and
     boot.s's unconditional reu_mul_init is harmless with no REU
     attached. Both D64 files boot to banner in VICE.
+    Reproduce it with the `C64_VICE_NO_REU` opt-out (no patching, and
+    `-reu` stays the default everywhere else):
+
+        make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1
+        C64_SKIP_BUILD=1 C64_VICE_NO_REU=1 \
+            python3 tools/test_ecdsa_kat_oracle.py    # 3/3, exit 0
+        C64_SKIP_BUILD=1 python3 tools/test_ecdsa_kat_oracle.py
+                                                      # control, 3/3
+
+    The flag is only meaningful on an onchip image. Run it against a
+    REU-profile build and all three valid vectors verify as C=1 with
+    no error message — that silent-wrong-answer failure mode is why
+    `-reu` is the default (see "VICE harness gotcha").
   - Full shipped chain (zip listener + freshly generated certs +
     sha-verified dist PRGs, `EXTERNAL_LISTENER=1`), all HTTP 200 +
     canonical body over TLS_CHACHA20_POLY1305_SHA256:
@@ -1152,11 +1320,72 @@ the TLS state machine. For a quick sanity check after a build:
   - `tools/test_tls_handshake.py`  — full handshake state machine
   - `tools/test_http.py`           — HTTP request/response build + parse
   - `tools/test_x509.py`           — X.509 parser
+  - `tools/test_finished_verify.py` — server-Finished **rejection** path
+                                     (18 cases, 2 vector sets; see below)
 
 All 7 pass as of the ca65-conversion branch (97/97 assertions).
 
+### Negative-path coverage — the server Finished
+
+`tools/test_finished_verify.py` and `tools/uci/test_https_bad_finished.py`
+exist because an audit found the client's Finished-mismatch abort had **no
+test at all**: inverting the mismatch branch (`sec` -> `clc` in
+`tls_verify_finished`, `src/tls_keyschedule.s`) left the full hardware e2e
+reaching HTTP 200 with the correct body. Every listener the suite talks to
+sends a *correct* Finished, so nothing ever exercised the reject.
+
+  - `tools/test_finished_verify.py` (VICE) drives `tls_verify_finished`
+    directly over DMA with a 6502 carry-latching stub — no P-register read,
+    and an unwritten latch is reported as inconclusive, never a pass. Two
+    (secret, transcript) vector sets x 9 cases each, including the two
+    realistic attacks: a valid HMAC under the wrong secret, and one over the
+    wrong transcript.
+  - `tools/uci/test_https_bad_finished.py` (U64E/C64U) is the end-to-end
+    version, against `tools/https_e2e/evil_listener.py` — a hand-rolled TLS 1.3
+    server (real X25519, real key schedule, real ChaCha20-Poly1305 records,
+    real P-256 CertificateVerify) that flips **one bit** of the server
+    Finished `verify_data` before encryption. Corrupting the *ciphertext*
+    instead would break the Poly1305 tag and get rejected at `aead_decrypt`,
+    never reaching the Finished comparison — which is why stock `ssl` cannot
+    produce this test case and the server side is written out by hand.
+    `FINISHED_MODE=good` runs the identical server with a correct Finished and
+    is the mandatory control; `FINISHED_MODE=bad` (default) is the test.
+    The oracle uses `tls_last_state`, which `src/tls13.s:@error` stashes on
+    abort: `tls_state=$FF` + `tls_last_state=6 (FINISHED)` proves the abort
+    happened at Finished rather than earlier at Certificate (4) or
+    CertificateVerify (5). Server-side evidence (`client_accepted_finished`)
+    is asserted too.
+
+Both flip under the mutant: 18/18 -> 2/18 in VICE, PASS -> FAIL on the U64E.
+Note `evil_listener.py` is a test fixture, not a TLS stack — it has no
+hardening and belongs nowhere near production.
+
 The `tools/uci/` scripts cover the UCI backend on U64E hardware (see
 the "UCI test scripts" subsection above).
+
+### Upstream pin drift — `tools/check_upstream_pins.py`
+
+Reports, for every submodule in `.gitmodules`, which release the pin
+corresponds to and what upstream has tagged since. Stdlib + `git`
+only, one `git ls-remote --tags` per submodule, so it is fast and
+schedulable.
+
+    tools/check_upstream_pins.py                     # table
+    tools/check_upstream_pins.py --json              # machine-readable
+    tools/check_upstream_pins.py --strict            # exit 1 on drift
+    tools/check_upstream_pins.py --submodule libs/x25519
+
+**Do not read pins off `git submodule status`.** It renders versions
+via `git describe` *without* `--tags`, which considers annotated tags
+only, so a lightweight tag is invisible to it. c64-x25519 tagged
+`v0.6.0` lightweight while `v0.5.0` and `v0.7.0` are annotated —
+so `git submodule status` renders the exactly-on-`v0.6.0` pin as
+`v0.5.0-5-g95fdd70`, which reads as "five commits past a release" and
+has already been mistaken for a stale pin. `check_upstream_pins.py`
+resolves `refs/tags/<name>^{}` when the peeled ref exists and the bare
+ref otherwise, so both tag kinds behave identically. It also reads the
+gitlink from `git ls-tree` rather than the working copy, so it is
+correct for a submodule that was never `--init`'d.
 
 ### VICE ip65 rig (hardware-free e2e)
 
@@ -1168,8 +1397,12 @@ the REU-less stock-C64 numbers above were measured. Knobs:
 `E2E_TIMEOUT`, `HTTPS_PORT` (the PRG's port is a build knob —
 `make HTTPS_PORT=4433` — so the listener can run unprivileged).
 
-Two prerequisites that are easy to lose:
+Three prerequisites that are easy to lose:
 
+  - **An ip65 PRG that builds at all.** This is the one backend that
+    needs the ip65 blob, which is a gitignored artifact — on a fresh
+    clone `make` fails at the blob link until `make ip65-libs` has run
+    once. See "First build in a fresh clone" under Build.
   - **An ethernet-capable VICE.** Stock macOS VICE binaries (official
     and Homebrew) compile ethernet in but gate the pcap driver on
     `geteuid()==0`, so unprivileged `-ethernetiodriver pcap` is

@@ -8,11 +8,36 @@ test in c64-https must apply. The primary entry point is
 
 See user memory ``vice_reu_required_for_p256`` and the project's
 "VICE harness gotcha" note in ``CLAUDE.md`` for the canonical motivation.
+
+Opt-in no-REU mode
+------------------
+Setting ``C64_VICE_NO_REU=1`` in the environment drops the REU flags, so
+the packaging claim "the onchip PRG passes the ECDSA KAT without an REU"
+has a runnable test instead of requiring a monkeypatched copy of the
+script. It is deliberately opt-in and noisy: a no-REU run of a
+*REU-profile* build does not error, it silently computes wrong answers
+(a valid signature verifies as C=1). Only use it on
+``USE_NISTCURVES_ONCHIP=1`` images.
 """
 
 from __future__ import annotations
 
+import os
+import sys
+
 from c64_test_harness import ViceConfig
+
+#: Environment variable that opts a run out of the mandatory REU flags.
+NO_REU_ENV = "C64_VICE_NO_REU"
+
+
+def no_reu_requested(env: dict | None = None) -> bool:
+    """Return True when the environment opts out of the REU flags.
+
+    :param env: mapping to inspect (defaults to ``os.environ``).
+    """
+    src = os.environ if env is None else env
+    return str(src.get(NO_REU_ENV, "")).strip().lower() in ("1", "true", "yes", "on")
 
 
 def default_vice_config(
@@ -35,6 +60,20 @@ def default_vice_config(
     options (e.g. ``-warp``, custom monitor flags) without losing the REU
     enablement.
 
+    Setting ``C64_VICE_NO_REU=1`` omits the REU flags (and announces it on
+    stderr). That mode exists to test the REU-less onchip profile — the
+    shipped ``c64-https-uci-onchip.prg`` claims "no REU required", and this
+    is how that claim is reproduced:
+
+    .. code-block:: sh
+
+        make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1
+        C64_SKIP_BUILD=1 C64_VICE_NO_REU=1 \\
+            python3 tools/test_ecdsa_kat_oracle.py
+
+    On any other build the same invocation returns wrong answers without
+    complaining, which is exactly why REU stays the default.
+
     Remaining keyword arguments are forwarded verbatim to ``ViceConfig``;
     typical callers pass ``prg_path``, ``warp``, ``ntsc``, ``sound`` etc.
 
@@ -44,7 +83,17 @@ def default_vice_config(
     :param kwargs: forwarded to :class:`c64_test_harness.ViceConfig`.
     :returns: a configured ``ViceConfig`` instance.
     """
-    base_args = ["-reu", "-reusize", "512"]
+    if no_reu_requested():
+        print(
+            f"[{NO_REU_ENV}] VICE launching WITHOUT -reu — valid only for "
+            "USE_NISTCURVES_ONCHIP builds; any REU-profile image will "
+            "silently compute wrong results.",
+            file=sys.stderr,
+            flush=True,
+        )
+        base_args: list[str] = []
+    else:
+        base_args = ["-reu", "-reusize", "512"]
     if extra_args:
         base_args = base_args + list(extra_args)
     return ViceConfig(extra_args=base_args, **kwargs)

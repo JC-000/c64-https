@@ -10,6 +10,22 @@ Usage:
     python3 tools/test_x509.py [--seed S] [--verbose]
 
 Requires: Python 3.10+, c64_test_harness, VICE x64sc, cryptography
+
+Skip policy (audit finding F3)
+------------------------------
+This suite used to treat a missing label as a benign skip: dropping the
+single symbol ``ecdsa_verify`` from ``build/labels.txt`` silently deleted the
+whole ECDSA group, and the run still reported "ALL 7 TESTS PASSED" and exited
+0. The skipped assertions left the denominator instead of counting against it.
+
+The realistic trigger is a ``libs/nistcurves`` bump renaming an export, which
+is precisely the change this suite exists to catch.
+
+Policy now: every group listed in ``REQUIRED_LABEL_SETS`` is required. If its
+labels are missing, ``main()`` aborts before launching VICE (exit 1, summary
+names the group), and ``run_tests()`` — which ``tools/run_all_tests.py`` calls
+directly — counts each such group as a failure. Optional/unwired label sets
+(``CV_LABELS``) are deliberately not in that list.
 """
 
 import datetime
@@ -78,11 +94,25 @@ ECDSA_LABELS = [
     "sqtab_init",
 ]
 
-# Labels for CertificateVerify tests
+# Labels for CertificateVerify tests.
+# NOTE: no group currently drives these — the CertificateVerify tests are not
+# wired up (see run_tests()). They are therefore NOT in REQUIRED_LABEL_SETS:
+# a group that does not exist cannot be silently skipped.
 CV_LABELS = [
     "tls_handle_cert_verify",
     "tls_rec_buf", "tls_rec_len",
     "tls_transcript",
+]
+
+# Every test group this suite claims to run, with the labels it needs.
+#
+# These are REQUIRED, not optional. If a build stops exporting one of these
+# symbols — the realistic trigger being a libs/nistcurves bump that renames an
+# export — the affected group must be reported as a FAILURE, never quietly
+# dropped from the denominator. See the module docstring's "silent skip" note.
+REQUIRED_LABEL_SETS = [
+    ("DER parser (groups 1-2)", DER_LABELS),
+    ("ECDSA P-256 verify (group 3)", ECDSA_LABELS),
 ]
 
 
@@ -156,20 +186,40 @@ def jsr_with_carry(transport, addr, timeout=120.0, poll_interval=0.5):
     return result[0]
 
 
-def check_label(labels, name):
-    """Return True if label exists, print skip message if not."""
-    if labels.address(name) is None:
-        print(f"  SKIP: label '{name}' not found (routine not yet implemented)")
+# Groups that could not run this session because labels were missing.
+# Entries are (group_name, [missing label names]). run_tests() resets this.
+SKIPPED_GROUPS = []
+
+
+def missing_labels(labels, label_list):
+    """Return the subset of label_list that the build does not export."""
+    return [name for name in label_list if labels.address(name) is None]
+
+
+def preflight_required_labels(labels):
+    """Return [(group_name, [missing labels])] for declared groups that can't run."""
+    broken = []
+    for group_name, label_list in REQUIRED_LABEL_SETS:
+        missing = missing_labels(labels, label_list)
+        if missing:
+            broken.append((group_name, missing))
+    return broken
+
+
+def check_labels(labels, label_list, group="unnamed group"):
+    """Return True if all labels exist; otherwise record the group as skipped.
+
+    A missing label is NOT a benign skip. It means the build no longer exports
+    a symbol this suite depends on, so the group's assertions never execute.
+    Recording the group here is what keeps it out of the "everything passed"
+    denominator — run_tests() turns each recorded entry into a failure.
+    """
+    missing = missing_labels(labels, label_list)
+    if missing:
+        print(f"  SKIP: {group}: label(s) {', '.join(missing)} not found "
+              f"-- group CANNOT RUN (counted as a failure)")
+        SKIPPED_GROUPS.append((group, missing))
         return False
-    return True
-
-
-def check_labels(labels, label_list):
-    """Return True if all labels in the list exist."""
-    for name in label_list:
-        if labels.address(name) is None:
-            print(f"  SKIP: label '{name}' not found -- skipping test group")
-            return False
     return True
 
 
@@ -269,7 +319,7 @@ def test_der_parser_p256(transport, labels):
     passed = 0
     failed = 0
 
-    if not check_labels(labels, DER_LABELS):
+    if not check_labels(labels, DER_LABELS, "Group 1: DER Parser P-256"):
         return 0, 0
 
     print("\n  Generating P-256 self-signed certificate...")
@@ -396,7 +446,7 @@ def test_der_parser_p384(transport, labels):
     passed = 0
     failed = 0
 
-    if not check_labels(labels, DER_LABELS):
+    if not check_labels(labels, DER_LABELS, "Group 2: DER Parser P-384"):
         return 0, 0
 
     print("\n  Generating P-384 self-signed certificate...")
@@ -408,16 +458,22 @@ def test_der_parser_p384(transport, labels):
     # Load certificate to C64
     load_cert_to_c64(transport, labels, cert_der)
 
-    # Parse the certificate
+    # Parse the certificate.
+    # A parse failure here is a FAILURE, not a skip. This used to report
+    # "SKIP: may not be supported yet" and return (0, 0), which would have
+    # hidden a P-384 DER regression completely — same shape as F3. P-384
+    # certificate *parsing* works today (group 2 passes 2/2); it is only
+    # P-384 ECDSA *verify* that is stubbed at the TLS layer.
     try:
         carry = jsr_with_carry(transport, labels["x509_parse_cert"],
                                 timeout=120.0, poll_interval=0.5)
         if carry != 0:
-            print("  SKIP: P-384 parse returned C=1 (may not be supported yet)")
-            return 0, 0
+            print("  [2!] FAIL: x509_parse_cert returned C=1 on a P-384 "
+                  "certificate")
+            return 0, 1
     except Exception as e:
-        print(f"  SKIP: P-384 parse raised {e}")
-        return 0, 0
+        print(f"  [2!] FAIL: x509_parse_cert raised {e}")
+        return 0, 1
 
     # --- Test 1: Curve ID correct ---
     print("\n  [2a] DER parse P-384: curve_id = 1 (P-384)")
@@ -500,7 +556,7 @@ def test_ecdsa_verify_p256(transport, labels):
     passed = 0
     failed = 0
 
-    if not check_labels(labels, ECDSA_LABELS):
+    if not check_labels(labels, ECDSA_LABELS, "Group 3: ECDSA P-256 Verify"):
         return 0, 0
 
     print("\n  Using hardcoded P-256 test vector (pre-verified in Python)")
@@ -633,9 +689,16 @@ def run_tests(transport, labels):
 
     Order: DER parser first (fast, validates VICE), then ECDSA verify.
     CertificateVerify tests skipped until core verify is proven.
+
+    A declared group that cannot run because its labels are missing is counted
+    as ONE FAILURE, and named in SKIPPED_GROUPS. That is deliberate: this
+    function is called directly by tools/run_all_tests.py, which only sees
+    (passed, failed), so a group vanishing from the denominator would otherwise
+    be indistinguishable from a clean run there too.
     """
     total_passed = 0
     total_failed = 0
+    SKIPPED_GROUPS.clear()
 
     # --- DER parser tests (fast, ~seconds) ---
     test_groups = [
@@ -663,7 +726,7 @@ def run_tests(transport, labels):
             traceback.print_exc()
 
     # --- ECDSA verify tests (slow, minutes each) ---
-    ecdsa_ok = check_labels(labels, ECDSA_LABELS)
+    ecdsa_ok = check_labels(labels, ECDSA_LABELS, "Group 3: ECDSA P-256 Verify")
     if ecdsa_ok:
         # One-time sqtab_init before any ECDSA tests
         print(f"\n{'='*60}")
@@ -695,6 +758,19 @@ def run_tests(transport, labels):
 
     # CertificateVerify tests skipped for now
     # (re-enable after core ECDSA verify is proven)
+
+    # A group that could not run is a failure, not a hole in the denominator.
+    if SKIPPED_GROUPS:
+        print(f"\n{'='*60}")
+        print("  GROUPS THAT COULD NOT RUN (counted as failures)")
+        print(f"{'='*60}")
+        for group, missing in SKIPPED_GROUPS:
+            print(f"  [-] {group}: missing label(s) {', '.join(missing)}")
+        print("  A missing label means the build stopped exporting a symbol "
+              "this suite\n  depends on (e.g. a libs/nistcurves bump renamed "
+              "an export). The group's\n  assertions never executed, so this "
+              "run proves nothing about it.")
+        total_failed += len(SKIPPED_GROUPS)
 
     return total_passed, total_failed
 
@@ -745,17 +821,36 @@ def main():
     labels = Labels.from_file(LABELS_PATH)
 
     # Check which test groups can run
-    der_ok = all(labels.address(n) is not None for n in DER_LABELS)
-    ecdsa_ok = all(labels.address(n) is not None for n in ECDSA_LABELS)
-    cv_ok = all(labels.address(n) is not None for n in CV_LABELS)
+    der_ok = not missing_labels(labels, DER_LABELS)
+    ecdsa_ok = not missing_labels(labels, ECDSA_LABELS)
+    cv_ok = not missing_labels(labels, CV_LABELS)
 
     print(f"  Labels loaded from {LABELS_PATH}")
     print(f"    DER parser labels:        {'OK' if der_ok else 'MISSING'}")
     print(f"    ECDSA verify labels:       {'OK' if ecdsa_ok else 'MISSING'}")
-    print(f"    CertificateVerify labels:  {'OK' if cv_ok else 'MISSING'}")
+    print(f"    CertificateVerify labels:  "
+          f"{'OK' if cv_ok else 'MISSING'} (informational; no group uses these yet)")
 
-    if not (der_ok or ecdsa_ok or cv_ok):
-        print("\nFATAL: No test group has all required labels. Nothing to test.")
+    # Fail closed: every group in REQUIRED_LABEL_SETS is one this suite claims
+    # to run. If the build no longer exports the symbols it needs, the group's
+    # assertions cannot execute — and a suite that cannot execute its
+    # assertions has not passed. Abort here, before spending a VICE session
+    # producing a green result that covers less than it claims.
+    broken = preflight_required_labels(labels)
+    if broken:
+        names = "; ".join(f"{g} [missing: {', '.join(m)}]" for g, m in broken)
+        print(f"\n{'='*60}")
+        print("RESULTS")
+        print(f"{'='*60}")
+        print(f"  Passed: 0/0")
+        print(f"  Failed: 0/0")
+        print(f"\n  [-] X.509/ECDSA: ABORTED -- declared test group(s) "
+              f"cannot run: {names}")
+        print("      A missing label means the build stopped exporting a symbol")
+        print("      this suite depends on (e.g. a libs/nistcurves bump renamed")
+        print("      an export). Skipping the group would report success while")
+        print("      testing nothing, so this is a failure.")
+        print(f"{'='*60}")
         sys.exit(1)
 
     # Estimate test duration
@@ -793,16 +888,24 @@ def main():
         mgr.release(inst)
 
     # Summary
+    no_tests_ran = (passed + failed) == 0
+    if no_tests_ran:
+        # A suite that executed no assertions has not passed.
+        failed = 1
     total = passed + failed
     print(f"\n{'='*60}")
     print("RESULTS")
     print(f"{'='*60}")
     print(f"  Passed: {passed}/{total}")
     print(f"  Failed: {failed}/{total}")
-    if total == 0:
-        print("\n  [?] No tests ran (routines not yet implemented?)")
+    skipped = "; ".join(f"{g} [missing: {', '.join(m)}]" for g, m in SKIPPED_GROUPS)
+    if no_tests_ran:
+        print("\n  [-] X.509/ECDSA: NO TESTS RAN -- nothing was verified")
     elif failed == 0:
         print(f"\n  [+] X.509/ECDSA: ALL {total} TESTS PASSED")
+    elif skipped:
+        print(f"\n  [-] X.509/ECDSA: {failed} TEST(S) FAILED "
+              f"-- group(s) could not run: {skipped}")
     else:
         print(f"\n  [-] X.509/ECDSA: {failed} TEST(S) FAILED")
     print(f"{'='*60}")
