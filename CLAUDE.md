@@ -35,7 +35,10 @@ the submodule does not ship — it ships the sources for them — so without
 never rebuilt; that persistence, not a committed file, is why the rebuild
 targets are normally invisible. The rebuild is deterministic: 6,951 B,
 sha256 `cf1a5ff7809af4e4655e385b378b936054f41046ff2b7604828af3240c2d90dd`
-(reproduced byte-identically in two independent worktrees, 2026-08-13).
+— rebuilt byte-identically in three independent worktrees on 2026-08-13,
+and identical to a local copy built 2026-05-06. Three months and four
+artifacts agree, so a stale blob is not a failure mode worth designing
+around; a missing one is.
 
 Targets:
   - `make`              — default, produces `build/c64-https.prg`,
