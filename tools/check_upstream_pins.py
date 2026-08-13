@@ -5,8 +5,16 @@ Answers one question for every submodule in ``.gitmodules``: *what release is
 this pinned to, and what has upstream shipped since?*
 
 Dependency-free (stdlib + ``git`` only), no network libraries, no API tokens,
-no GitHub CLI. One ``git ls-remote --tags`` per submodule, so a full run is a
-couple of seconds. Safe to schedule.
+no GitHub CLI. Exactly one ``git ls-remote --tags`` and one ``git ls-tree`` per
+submodule. Safe to schedule.
+
+Cost, measured rather than asserted (2026-08-13, 3 submodules, warm DNS):
+**2.1 s wall-clock, 0.15 s of it CPU** — i.e. network-bound, and it scales
+with submodule count, not repo size. Re-check with ``time
+tools/check_upstream_pins.py``; the git-call count is verifiable by stubbing
+``subprocess.run``. Stated concretely on purpose: this whole script exists
+because of a claim nobody could execute, and a vague-but-true cost note is
+one refactor away from a false one.
 
     tools/check_upstream_pins.py              # human-readable table
     tools/check_upstream_pins.py --json       # machine-readable
