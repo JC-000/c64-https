@@ -436,7 +436,20 @@ def main() -> int:
         # Also pre-populate uci_host_buf directly — net_dns_resolve in the
         # routine copies from HOST_BUF_ADDR into uci_host_buf, but we DMA
         # the string into both locations for belt-and-braces determinism.
-        transport.write_memory(labels["uci_host_buf"], host_bytes)
+        #
+        # uci_host_buf is UCI_BSS, which the post-W1 UCI cfg packs inside
+        # CRYPTO_HOT ($6000-$9FFF, cfg/c64-https-uci.cfg) — it resolves to
+        # $6760 at the current pin. The MemoryPolicy reserves CRYPTO_HOT as
+        # one coarse region and cannot tell a writable BSS byte from resident
+        # code, so this legitimate write reads as a collision and raises
+        # MemoryPolicyError (issue #97). Override with a reason rather than
+        # widening the policy for everyone.
+        transport.write_memory(
+            labels["uci_host_buf"],
+            host_bytes,
+            override="uci_host_buf is UCI_BSS packed inside CRYPTO_HOT; "
+                     "pre-seeding the hostname buffer is the point of the test",
+        )
 
         # Clear result area (sentinel + collected bytes)
         transport.write_memory(RESULT_BUF_ADDR, bytes(0x80))
