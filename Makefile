@@ -455,12 +455,30 @@ clean:
 #
 # PACKAGE_PYTHON must be an interpreter that can run the listener's own
 # selftest — see `make package-verify`.
+#
+# build_prgs.sh is three-valued: 0 = all variants built, 2 = PARTIAL, 1 = none.
+# On PARTIAL the pipeline deliberately runs to completion anyway, so a single
+# broken variant still yields disks, a listener and a manifest that names what
+# is missing and why — then the target fails, because a partial matrix must
+# never be mistaken for a release. `-` on the first line lets make continue;
+# the status is recovered from the build-info records rather than from $?,
+# which `-` discards.
 PACKAGE_PYTHON ?= python3
 package:
-	bash tools/package/build_prgs.sh
+	-bash tools/package/build_prgs.sh
+	@grep -q 'result=OK' dist/build-info.txt 2>/dev/null \
+	    || { echo "[package] no variant built at all — nothing to package" >&2; exit 1; }
 	bash tools/package/build_d64.sh
 	$(PACKAGE_PYTHON) tools/package/build_listener.py
 	bash tools/package/write_manifest.sh
+	@if grep -q '^failreason=' dist/build-info.txt; then \
+	    echo ""; \
+	    echo "[package] ***** INCOMPLETE: the following variants did NOT build *****"; \
+	    grep '^failreason=' dist/build-info.txt | cut -d= -f2- | sed 's/^/[package]   /'; \
+	    echo "[package] dist/ holds the variants that DID build; see MANIFEST.txt."; \
+	    echo "[package] Do not tag a release from this."; \
+	    exit 1; \
+	fi
 
 # Acceptance gate for the release artifacts: rebuild every PRG a second time
 # and compare PRG hashes, boot every D64 in VICE and assert the banner, and run

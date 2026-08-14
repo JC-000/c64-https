@@ -38,6 +38,30 @@ echo "            WARNING: built from a DIRTY working tree, not a clean checkout
 fi
 echo "ip65 blob : $(info ip65_blob_bytes) bytes, sha256 $(info ip65_blob_sha256)"
 echo
+# A partial release must announce itself at the top, not bury the gap in a
+# checksum list that simply has fewer lines than it should. Anyone diffing two
+# manifests would otherwise have to notice an absence.
+if grep -q '^failreason=' "$BUILD_INFO"; then
+echo "!! INCOMPLETE RELEASE — some variants did not build !!"
+echo
+echo "   The artifacts below are real and usable, but this is NOT the full"
+echo "   matrix and must not be tagged as one. Missing:"
+echo
+grep '^failreason=' "$BUILD_INFO" | cut -d= -f2- | while read -r key reason; do
+    prg=""
+    for line in "${PACKAGE_VARIANTS[@]}"; do
+        [ "$(variant_field "$line" 1)" = "$key" ] || continue
+        prg="$(variant_field "$line" 2)"
+        echo "     $prg"
+        echo "       make $(variant_field "$line" 3)"
+    done
+    [ -n "$prg" ] || echo "     $key"
+    echo "       $reason"
+    echo
+done
+echo "------------------------------------------------------------------------------"
+echo
+fi
 echo "submodule pins:"
 grep '^submodule=' "$BUILD_INFO" | cut -d= -f2- | while read -r sub sha tag; do
     printf '  %-18s %s  %s\n' "$sub" "$tag" "$sha"
@@ -69,6 +93,12 @@ for line in "${PACKAGE_VARIANTS[@]}"; do
     key="$(variant_field "$line" 1)"
     prg="$(variant_field "$line" 2)"
     note="$(variant_field "$line" 6)"
+    if grep -q "^failreason=$key " "$BUILD_INFO"; then
+        echo "  $prg  — NOT IN THIS RELEASE (failed to build)"
+        echo "      $note"
+        echo
+        continue
+    fi
     echo "  $prg"
     echo "      $note"
     echo "      disk: c64-https-$key.d64   (also on c64-https-$(variant_field "$line" 5).d64)"
@@ -90,6 +120,9 @@ grep '^variant=' "$BUILD_INFO" | while read -r rec; do
         esac
     done
     args="$(printf '%s' "$rec" | sed -n 's/.*args=\(.*\) result=.*/\1/p')"
+    case "$rec" in
+        *" result=FAILED"*) bytes="FAILED" ;;
+    esac
     printf '  %-28s %8s  make %s\n' "$prg" "$bytes" "$args"
 done
 echo
