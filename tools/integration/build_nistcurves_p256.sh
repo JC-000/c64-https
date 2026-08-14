@@ -11,11 +11,14 @@
 # `make -C libs/nistcurves`, then performs adjustments before placing the
 # result at the location the top-level Makefile expects:
 #
-#   1. Rebuild `zp_config.o` with c64-https's ZP-slot overrides (the upstream
-#      defaults collide with c64-https's canonical map on three slots:
-#      zp_ptr2, fp_mul_i, fp_mul_j). The library's zp_config.s `.ifndef`-
-#      guards every slot, so an override-built version replaces the
-#      upstream default cleanly.
+#   1. Rebuild the archive's `zp_config*.o` member with c64-https's ZP-slot
+#      overrides (the upstream defaults collide with c64-https's canonical map
+#      on three slots: zp_ptr2, fp_mul_i, fp_mul_j). The library's zp_config.s
+#      `.ifndef`-guards every slot, so an override-built version replaces the
+#      upstream default cleanly. The member name is DISCOVERED from the
+#      archive, not hardcoded — upstream v0.9.0 gave each archive its own
+#      per-variant object (`zp_config_p256verify.o`), and a hardcoded name
+#      would drop the overrides silently. Post-checked with od65.
 #
 #   2. Drop `mul_8x8[_onchip].o` (REU profile) and `data_shared.o` (both
 #      profiles) from the archive. c64-https's in-tree
@@ -116,14 +119,62 @@ mkdir -p "$STAGING" "$OUT_DIR"
 cp "$UPSTREAM_ARCHIVE" "$STAGING/upstream.a"
 (cd "$STAGING" && "$AR65" x upstream.a $( "$AR65" t upstream.a ))
 
-# --- 3. Rebuild zp_config.o with c64-https overrides ---
+# --- 3. Rebuild the archive's zp_config member with c64-https overrides ---
+# The member NAME is discovered, never hardcoded. Upstream v0.9.0 (issue #90)
+# gave each of the nine archives its own per-variant ZP object, so
+# `nistcurves-p256-verify.a` ships `zp_config_p256verify.o` and only the FULL
+# archive still ships a plain `zp_config.o`. Step 5 re-archives strictly by
+# `ar65 t upstream.a`, so writing to a hardcoded `zp_config.o` here would have
+# been SILENTLY DROPPED from the output and the upstream-default object
+# archived in its place — reinstating exactly the ZP collisions these
+# overrides exist to prevent (zp_ptr2 $fd vs c64-https zp_temp/zp_count during
+# cert parsing; fp_mul_i/j $2c/$2d inside the fe25519 claim $2c-$37). That is
+# memory corruption at runtime, not a link error, so it must fail loudly here.
+ZP_MEMBER=""
+for m in $( "$AR65" t "$STAGING/upstream.a" ); do
+    case "$m" in zp_config*.o)
+        [ -z "$ZP_MEMBER" ] || { echo "ERROR: upstream archive has more than one zp_config member ($ZP_MEMBER, $m) — teach this script which one to override" >&2; exit 1; }
+        ZP_MEMBER="$m" ;;
+    esac
+done
+[ -n "$ZP_MEMBER" ] || { echo "ERROR: no zp_config*.o member in $UPSTREAM_ARCHIVE — upstream layout changed; the c64-https ZP overrides would be silently lost" >&2; exit 1; }
+
+# The variant gate decides which slots the object .exportzp's (zp_config.s
+# lines ~132-141), so it must match what upstream built the member with.
+case "$ZP_MEMBER" in
+    zp_config.o)             ZP_VARIANT_DEFINE=() ;;
+    zp_config_p256verify.o)  ZP_VARIANT_DEFINE=('-D' 'LIB_P256_VERIFY_ONLY') ;;
+    zp_config_p384verify.o)  ZP_VARIANT_DEFINE=('-D' 'LIB_P384_VERIFY_ONLY') ;;
+    zp_config_p384curve.o)   ZP_VARIANT_DEFINE=('-D' 'LIB_P384_CURVE_ONLY') ;;
+    zp_config_sha384.o)      ZP_VARIANT_DEFINE=('-D' 'LIB_SHA384_ONLY') ;;
+    *) echo "ERROR: unrecognised zp_config member '$ZP_MEMBER' — add its upstream -D gate to this case block" >&2; exit 1 ;;
+esac
+
+echo "[p256/$PROFILE] rebuilding $ZP_MEMBER with c64-https ZP overrides..."
 "$CA65" \
     --cpu 6502 \
     -g \
     -I "$LIB_SRC" \
+    "${ZP_VARIANT_DEFINE[@]+"${ZP_VARIANT_DEFINE[@]}"}" \
     "${ZP_OVERRIDES[@]}" \
-    -o "$STAGING/zp_config.o" \
+    -o "$STAGING/$ZP_MEMBER" \
     "$LIB_SRC/zp_config.s"
+
+# 3b. Prove the overrides actually landed in the object that gets archived.
+# A ZP collision here is silent at link time and only shows up as corrupted
+# cert parsing at runtime, so assert the values rather than trusting the -D.
+check_zp_slot() {
+    local name="$1" want="$2" got
+    got=$("${OD65:-od65}" --dump-exports "$STAGING/$ZP_MEMBER" \
+          | awk -v n="\"$name\"" '$1=="Name:" && $2==n {f=1; next} f && $1=="Value:" {gsub(/[()]/,"",$3); print $3; exit}')
+    if [ "$got" != "$want" ]; then
+        echo "ERROR: $ZP_MEMBER exports $name = ${got:-<absent>}, expected $want (c64-https ZP override did not take)" >&2
+        exit 1
+    fi
+}
+check_zp_slot zp_ptr2  61      # $3d
+check_zp_slot fp_mul_i 57      # $39
+check_zp_slot fp_mul_j 58      # $3a
 
 # --- 4. Drop conflicting members / rebuild the onchip mul object ---
 rm -f "$STAGING/mul_8x8.o" "$STAGING/data_shared.o"
