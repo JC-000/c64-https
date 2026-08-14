@@ -866,29 +866,83 @@ C64U, fits T(f)=D+C/f, residuals <=4.1%):
   whose device has to be inferred from a heading is not interpretable.
   64 MHz exists only on the C64U (the U64E's CPU Speed enum stops at 48):
 
-  device profile             1 MHz      8 MHz    48 MHz   64 MHz
-  C64U   v0.3.0 REU          --         --       73.0 s   64.7-65.9 s
-  C64U   v0.5.0 onchip       --         --       59.9 s   47.5 s (n=3)
-  C64U   v0.6.0 onchip       --         --       51.0 s   39.7 s
-  C64U   v0.6.0 onchip+comb  --         --       38.4 s   **31.0 s**
-  U64E   REU @ 2ceb5b1       1157.7 s   196.5 s  80.8 s   n/a (no enum)
+  device profile             1 MHz     8 MHz    16 MHz   20 MHz   48 MHz  64 MHz
+  C64U   v0.3.0 REU          --        --       --       --       73.0 s  64.7-65.9 s
+  C64U   v0.5.0 onchip       --        --       --       --       59.9 s  47.5 s (n=3)
+  C64U   v0.6.0 onchip       --        --       --       --       51.0 s  39.7 s
+  C64U   v0.6.0 onchip+comb  --        --       --       --       38.4 s  **31.0 s**
+  U64E   REU @ 2ceb5b1       1157.7 s  196.5 s  124.0 s  108.9 s  80.8 s  n/a (no enum)
+  U64E   onchip @ 2ceb5b1    2120.7 s  264.5 s  131.8 s  103.9 s  45.5 s  n/a (no enum)
 
-  The U64E row is a 2026-08-13 clock sweep at master 2ceb5b1, one clean
-  `BACKEND=uci` build reused across all three runs so clock is the only
-  variable, all three PASS with server-side evidence (the listener
-  decrypted the full GET; no TLS error). Times are handshake + GET
-  measured C64-side from `run_prg`, not whole-script wall-clock.
+  The U64E rows are a 2026-08-13 sweep at master 2ceb5b1. One clean
+  build per profile, reused across that profile's clocks, so clock is
+  the only variable within a row. Every run PASSes with server-side
+  evidence (the listener decrypted the full GET; no TLS error). Times
+  are handshake + GET measured C64-side from `run_prg`, not
+  whole-script wall-clock (which runs ~35-55% higher: boot, table init
+  and turbo setup).
 
-  Fitting T(f) = D + C/f to that row gives **D = 58.5 s, C = 1099 MHz*s**,
-  residuals <= 0.69% across a 48x clock range. Two things follow. The
-  floor is ~58 s, and the documented REU-profile *verify* floor is
-  48.2 s, so roughly **10 s of the e2e is clock-invariant non-verify
-  cost** — UCI firmware round-trips and network latency, which no amount
-  of turbo touches. And the returns are visibly diminishing: 1->8 MHz
-  (8x clock) bought 5.9x, while 8->48 MHz (6x clock) bought only 2.4x.
-  Extrapolating the fit to 64 MHz predicts 75.6 s, which is why the
-  REU profile is the wrong choice above ~7 MHz — compare the C64U comb
-  rows above.
+  The onchip 16 MHz entry is the median of two retries (132.4 / 131.2).
+  Its first attempt died on `net_last_error = $88 UCI_ERR_NO_SOCKET` —
+  the TCP_CONNECT bridge glitch, not a result. Note that failure
+  occurred with the REU *enabled*, which is evidence against the
+  REU-quiet-boot explanation for this device and in favour of the
+  turbo-switch settle race.
+
+  **Footnote — an inactive REU costs nothing.** The onchip rows above
+  ran with the device's REU enabled but unused. Re-running that
+  byte-identical PRG with `RAM Expansion Unit = Disabled`: 48 MHz
+  44.9 s (-1.32%), 8 MHz 262.0 s (-0.95%), 1 MHz 2130.9 s (+0.48%).
+  Sub-1.5% and not consistently signed, i.e. noise, not an effect.
+  All three PASS with zero `NO_SOCKET` hits, so a REU-quiet boot did
+  **not** drop the first TCP_CONNECT on the U64E — behaviour the C64U
+  notes record as general. This is also the first confirmation of the
+  shipped "no REU required" onchip claim on UCI hardware rather than
+  in VICE.
+
+  Fitting T(f) = D + C/f across all five clocks:
+
+    U64E REU     D = 56.4 s   C = 1101 MHz*s   max|resid| 2.35%
+    U64E onchip  D = -0.6 s   C = 2121 MHz*s   max|resid| 4.09%
+
+  **The two profiles differ in floor, not just slope**, and that is the
+  whole story of the crossover. REU carries a ~56 s floor that no clock
+  touches, because `fp_mul`'s row fetches are anchored to the ~1 MHz
+  bus; onchip has none, paying instead ~1.9x the clock-scaling work.
+  The fits cross at **17.9 MHz** (17.6 from the three-point version),
+  against the independently-derived verify-only figure of ~18 MHz.
+
+  That crossover is **measured, not just fitted**: REU wins at 16 MHz
+  by 5.9% and onchip wins at 20 MHz by 4.6%, so the sign flips inside
+  [16, 20]. There is no 18 in the CPU Speed enum, so that interval is
+  the finest bracket this hardware can produce.
+
+  Read the onchip D as *indistinguishable from zero*, never as a
+  quantity: the five-point fit returns -0.6 s, a physically impossible
+  floor. At 48 MHz the C/f term is ~99% of the total, so D is fitted
+  from rounding. This is the same ill-conditioning the turbo campaign
+  hit with 2-point fits.
+
+  Two cautions on reading these fits. The onchip D is **poorly
+  conditioned** — at 48 MHz the C/f term is ~99% of the total, so D is
+  fitted from what little is left; treat it as "under ~2 s", not as
+  0.5 s. And an earlier revision of this section claimed the REU floor
+  minus the 48.2 s verify floor localised "~10 s of clock-invariant
+  non-verify cost". **That was wrong**: a genuinely clock-invariant
+  cost would appear in the onchip floor too, and it does not (forcing
+  D=10 on the onchip points throws the 8 MHz prediction off by 16%).
+  The fixed network cost is instead ~0.6 s — 16 drain polls at ~40 ms,
+  matching the onchip floor — and the REU floor is almost entirely DMA.
+
+  Returns diminish steeply on the REU profile: 1->8 MHz (8x clock)
+  bought 5.9x, 8->48 MHz (6x clock) bought only 2.4x. Extrapolating it
+  to 64 MHz predicts 75.6 s, which is the quantitative case for the REU
+  profile being wrong above the crossover — compare the C64U comb rows.
+
+  A cross-validation worth keeping: the onchip fit built from only the
+  8 and 48 MHz points predicted 1 MHz at 2104 s before that run
+  happened; the measurement came in at 2120.7 s, +0.8% over a 48x
+  extrapolation.
 
   Those rows are the 2026-07-20 campaign state. **Current HEAD is
   faster** — see "Post-#74 e2e numbers" below; the onchip rows in
@@ -952,6 +1006,7 @@ feth/pcap rig (see "VICE ip65 rig" under Smoke tests). These are the
   ip65 + onchip, no REU    honest 1 MHz      **2,159.7 s (36.0 min)**
   ip65 + onchip, no REU    ~1.2x accelerated 1,813.9 s
   ip65 + REU profile       ~1.2x accelerated   988.9 s
+  ip65 + onchip @ 2ceb5b1  ~1.2x accelerated 1,876.0 s  (2026-08-13)
 
   Honest-1 MHz phase breakdown (seconds after 'G'):
   TCP CONNECTED 3.0 | CH 329.2 | SH 700.7 | PROC 718.9 |
@@ -962,7 +1017,18 @@ feth/pcap rig (see "VICE ip65 rig" under Smoke tests). These are the
     holds at 1 MHz, three orders of magnitude from where it was fit.
   - X25519 scalarmults measured 326 s / ~356 s vs ~324 s analytical.
   - ip65's drain budget is **unchanged by #74** (the ip65 PRG is
-    byte-identical across it), so these numbers stand at HEAD.
+    byte-identical across it), so those numbers stand at HEAD.
+  - **Re-validated at master 2ceb5b1 on 2026-08-13**: PASS,
+    `http_status=200`, `resp_len=22`, body match, 1,876.0 s
+    accelerated (+3.4% vs the 1,813.9 s reference). Phase shape
+    unchanged: TCP 3.0 | CH 276.0 | SH 585.4 | PROC 600.6 |
+    FIN 1,823.0 | REQUEST SENT 1,838.2 | CLOSED 1,841.2. This matters
+    beyond the number — the ip65 PRG is **no longer** byte-identical
+    to the #71-era build (`417c708594...` vs `db31111031e2...`)
+    because #75's span-input parser is real code, and until this run
+    that change had only ever been exercised on the UCI backend. It
+    was also ip65's first end-to-end run since July, so it is the
+    first to cover #74, #75 and the ten audit PRs.
   - VICE 3.10 SDL2 has no usable runtime warp: its `Speed` resource
     caps at ~1.2x and `WarpMode` is gone, so "accelerated" runs are
     only ~1.2x. Divide accelerated figures by ~1.2 for honest 1 MHz.
