@@ -7,6 +7,31 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
 
 **For demonstration and educational purposes only — not cryptographically secure.**
 
+## I just want to run it
+
+Grab a release: every build is prebuilt, as a `.prg` and as a bootable `.d64`.
+No assembler, no cc65, no Python packages, no build step. Two questions pick
+your image, and `MANIFEST.txt` in the release walks through them:
+
+| | REU present | no REU |
+|---|---|---|
+| **Ultimate 64 / C64 Ultimate** | `c64-https-uci-reu` | `c64-https-uci-onchip` |
+| **stock C64 + RR-Net** | `c64-https-ip65-reu` | `c64-https-ip65-onchip` |
+
+The `reu` images are faster below roughly 18 MHz — which is every real stock
+C64 — because they offload the ECDSA verify to REU DMA. The `onchip` images
+need no REU at all and win above that crossover, so they are the right pick
+for Ultimate turbo modes. `ip65-onchip` is the only image a bone-stock
+machine with no expansion RAM can run end to end.
+
+`c64-https-listener.py` in the same release is a single self-extracting file
+that stands up the server side to point the C64 at: it mints its own
+certificate and needs nothing installed, only a `python3` whose `ssl` has
+TLS 1.3. Run `python3 c64-https-listener.py --selftest` to check that before
+involving a C64.
+
+To build these yourself: `make package && make package-verify`.
+
 ## Architecture
 
 ```

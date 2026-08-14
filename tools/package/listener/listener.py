@@ -29,6 +29,11 @@ protocol; the C64 client parses a fixed shape):
   * Writes server_result.json with the same schema the reference harness
     emits (listening / client_addr / request / error).
 
+DEPENDENCIES: the Python standard library, and nothing else. Cert generation
+is pure-Python P-256 (see gen_certs.py, which explains why). The one thing
+this cannot supply for itself is a TLS 1.3-capable ``ssl`` module, which is a
+property of the interpreter — checked below, reported in one line.
+
 Environment / CLI:
   HTTPS_PORT env or --port   listener port. Default 443, auto-falls back to
                              4433 if the privileged bind fails (clones the
@@ -36,12 +41,19 @@ Environment / CLI:
   --bind                     bind address (default 0.0.0.0 so the C64 on the
                              LAN can reach it; the reference binds the dev
                              host's LAN IP).
-  --cert / --key             cert + key paths (default ./certs/server.{pem,key}).
+  --cert / --key             cert + key paths (default ./certs/server.{pem,key},
+                             relative to the CURRENT DIRECTORY — the single-file
+                             build runs from a throwaway temp dir, so anchoring
+                             on __file__ would hide the certs).
   --result                   server_result.json path (default ./server_result.json).
   --accept-timeout           accept + per-connection timeout seconds (default 600).
   --serve-forever            keep accepting connections instead of exiting
                              after the first (convenience; off by default to
                              match the reference one-shot behavior).
+  --selftest                 prove the whole thing works without a C64: mint
+                             certs, serve on loopback, connect with a Python
+                             ``ssl`` client, assert TLS 1.3 + the canonical
+                             response. Exits 0 on PASS.
 """
 from __future__ import annotations
 
@@ -49,14 +61,15 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import socket
 import ssl
+import subprocess
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
-
-HERE = Path(__file__).resolve().parent
 
 # --- Canonical response bytes (cloned verbatim from test_https_local.py) ---
 EXPECTED_BODY = "HELLO FROM TLS SERVER"
@@ -76,7 +89,7 @@ def _ensure_certs(cert_path: Path, key_path: Path) -> None:
     if cert_path.is_file() and key_path.is_file():
         return
     print(f"cert/key missing ({cert_path} / {key_path}); generating...")
-    # Import lazily so `listener.py --help` works without cryptography.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     import gen_certs
     gen_certs.generate(
         cn="www.foo.bar",
@@ -211,6 +224,152 @@ def _handle_one(srv: socket.socket, ctx: ssl.SSLContext,
             pass
 
 
+def selftest() -> int:
+    """Prove the listener works end to end with no C64 and no network.
+
+    Mints a fresh cert into a temp dir, serves on loopback, and drives itself
+    with a Python ``ssl`` client — the same shape as
+    ``tools/https_e2e/evil_listener.py --selftest`` — then again with a client
+    pinned to the C64's single cipher suite. This is what makes the shipped
+    single-file artifact checkable by whoever cuts the release.
+    """
+    import tempfile
+    print("== c64-https listener selftest ==")
+    with tempfile.TemporaryDirectory(prefix="c64-listener-selftest-") as tmp:
+        tmp_path = Path(tmp)
+        cert_path = tmp_path / "certs" / "server.pem"
+        key_path = tmp_path / "certs" / "server.key"
+        _ensure_certs(cert_path, key_path)
+        ctx = _make_ssl_context(cert_path, key_path)
+
+        srv = _try_bind("127.0.0.1", 0)
+        if srv is None:
+            print("FAIL: could not bind 127.0.0.1:0")
+            return 1
+        port = srv.getsockname()[1]
+        srv.listen(1)
+        print(f"  server listening on 127.0.0.1:{port}")
+
+        def one_round(label: str):
+            """Serve one connection, drive it with a client, return findings."""
+            result: dict = {"listening": True, "port": port}
+            server_exc: list = []
+
+            def _serve():
+                try:
+                    _handle_one(srv, ctx, 30.0, result)
+                except BaseException as exc:   # noqa: BLE001 - reported below
+                    server_exc.append(exc)
+
+            thread = threading.Thread(target=_serve, daemon=True)
+            thread.start()
+
+            client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client_ctx.check_hostname = False
+            client_ctx.verify_mode = ssl.CERT_REQUIRED
+            client_ctx.load_verify_locations(cafile=str(cert_path))
+            got = b""
+            version = cipher = None
+            try:
+                with socket.create_connection(("127.0.0.1", port),
+                                              timeout=30) as raw:
+                    with client_ctx.wrap_socket(raw) as tls:
+                        version = tls.version()
+                        cipher = tls.cipher()[0]
+                        print(f"  [{label}] client handshake: "
+                              f"{version} / {cipher}")
+                        tls.sendall(
+                            b"GET / HTTP/1.1\r\nHost: www.foo.bar\r\n\r\n")
+                        while len(got) < len(HTTP_RESPONSE):
+                            chunk = tls.recv(4096)
+                            if not chunk:
+                                break
+                            got += chunk
+            except Exception as exc:                 # noqa: BLE001
+                return {"error": f"client: {type(exc).__name__}: {exc}"}
+            thread.join(timeout=30)
+            if server_exc:
+                exc = server_exc[0]
+                return {"error": f"server: {type(exc).__name__}: {exc}"}
+            return {"version": version, "cipher": cipher, "body": got,
+                    "request": result.get("request")}
+
+        checks: list = []
+
+        # Round 1 — a stock Python client: does this thing serve at all.
+        out = one_round("stdlib client")
+        if "error" in out:
+            print(f"  [FAIL] stdlib client: {out['error']}")
+            print("SELFTEST FAILED")
+            srv.close()
+            return 1
+        checks += [
+            ("stdlib client: TLS 1.3 negotiated", out["version"] == "TLSv1.3"),
+            ("stdlib client: server saw a request",
+             bool(out["request"]) and out["request"] != b"<timeout>"),
+            ("stdlib client: canonical response received",
+             out["body"] == HTTP_RESPONSE),
+        ]
+
+        # Round 2 — force TLS_CHACHA20_POLY1305_SHA256, the ONLY suite the C64
+        # offers (src/tls_handshake.s, 0x1303). Round 1 cannot cover this: the
+        # stdlib client prefers AES-256-GCM, and CPython exposes no API to
+        # restrict TLS 1.3 suites (set_ciphers() drives SSL_CTX_set_cipher_list,
+        # which TLS 1.3 ignores). So this round shells out to `openssl
+        # s_client -ciphersuites`, and SKIPs rather than fails where that is
+        # unavailable — a missing openssl says nothing about the listener.
+        openssl = shutil.which("openssl")
+        have_flag = False
+        if openssl:
+            probe = subprocess.run([openssl, "s_client", "-help"],
+                                   capture_output=True, text=True)
+            have_flag = "-ciphersuites" in (probe.stdout + probe.stderr)
+        if not have_flag:
+            print("  [SKIP] C64 suite TLS_CHACHA20_POLY1305_SHA256: needs an "
+                  "`openssl s_client` supporting -ciphersuites")
+        else:
+            server_exc: list = []
+            result2: dict = {}
+
+            def _serve2():
+                try:
+                    _handle_one(srv, ctx, 30.0, result2)
+                except BaseException as exc:          # noqa: BLE001
+                    server_exc.append(exc)
+
+            t2 = threading.Thread(target=_serve2, daemon=True)
+            t2.start()
+            proc = subprocess.run(
+                [openssl, "s_client", "-connect", f"127.0.0.1:{port}",
+                 "-tls1_3", "-ciphersuites", "TLS_CHACHA20_POLY1305_SHA256",
+                 "-CAfile", str(cert_path), "-servername", "www.foo.bar",
+                 "-quiet", "-ign_eof"],
+                input=b"GET / HTTP/1.1\r\nHost: www.foo.bar\r\n\r\n",
+                capture_output=True, timeout=60)
+            t2.join(timeout=30)
+            blob = proc.stdout + proc.stderr
+            if server_exc:
+                print(f"  [FAIL] C64 suite round, server side: {server_exc[0]}")
+                checks.append(("C64 suite TLS_CHACHA20_POLY1305_SHA256", False))
+            else:
+                checks.append(
+                    ("C64 suite TLS_CHACHA20_POLY1305_SHA256 negotiates and "
+                     "gets the canonical body",
+                     EXPECTED_BODY.encode() in blob
+                     and result2.get("cipher") == "TLS_CHACHA20_POLY1305_SHA256"))
+        srv.close()
+
+        ok = True
+        for label, passed in checks:
+            print(f"  [{'PASS' if passed else 'FAIL'}] {label}")
+            ok = ok and passed
+        if not ok:
+            print("SELFTEST FAILED")
+            return 1
+        print(f"SELFTEST PASSED ({len(checks)} checks)")
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="TLS 1.3 test listener for the c64-https client.")
@@ -219,17 +378,30 @@ def main(argv: list[str] | None = None) -> int:
                         f"auto-falls back to {FALLBACK_PORT})")
     p.add_argument("--bind", default="0.0.0.0",
                    help="bind address (default 0.0.0.0)")
-    p.add_argument("--cert", default=str(HERE / "certs" / "server.pem"),
+    p.add_argument("--cert", default=None,
                    help="server cert PEM (default ./certs/server.pem)")
-    p.add_argument("--key", default=str(HERE / "certs" / "server.key"),
+    p.add_argument("--key", default=None,
                    help="server key PEM (default ./certs/server.key)")
-    p.add_argument("--result", default=str(HERE / "server_result.json"),
+    p.add_argument("--result", default=None,
                    help="server_result.json path (default ./server_result.json)")
     p.add_argument("--accept-timeout", type=float, default=600.0,
                    help="accept + per-connection timeout seconds (default 600)")
     p.add_argument("--serve-forever", action="store_true",
                    help="keep serving after the first connection")
+    p.add_argument("--selftest", action="store_true",
+                   help="run a loopback TLS 1.3 self-test and exit")
     args = p.parse_args(argv)
+
+    if args.selftest:
+        return selftest()
+
+    # Paths default relative to the CURRENT DIRECTORY, not __file__: the
+    # shipped single-file build extracts itself into a throwaway temp dir, and
+    # certs written next to __file__ there would vanish on exit.
+    cwd = Path.cwd()
+    args.cert = args.cert or str(cwd / "certs" / "server.pem")
+    args.key = args.key or str(cwd / "certs" / "server.key")
+    args.result = args.result or str(cwd / "server_result.json")
 
     cert_path = Path(args.cert)
     key_path = Path(args.key)
@@ -287,5 +459,39 @@ def main(argv: list[str] | None = None) -> int:
     return exit_code
 
 
+def cli() -> int:
+    """Entry point that never shows the operator a traceback.
+
+    A stack trace is the wrong failure mode for a single-file artifact handed
+    to someone who does not want to build anything: every plausible failure
+    here (no TLS 1.3 in this Python, port in use, unreadable cert) has a
+    one-line explanation, and the trace only buries it. ``--debug`` puts the
+    traceback back for anyone who is actually debugging this file.
+    """
+    debug = "--debug" in sys.argv
+    argv = [a for a in sys.argv[1:] if a != "--debug"]
+    try:
+        return main(argv)
+    except SystemExit:
+        # argparse and the TLS 1.3 check exit this way, already having said
+        # something readable. Pass it through untouched.
+        raise
+    except KeyboardInterrupt:
+        print("\ninterrupted")
+        return 130
+    except OSError as exc:
+        print(f"ERROR: {exc.strerror or exc} "
+              f"({getattr(exc, 'filename', None) or 'listener'})",
+              file=sys.stderr)
+    except Exception as exc:                          # noqa: BLE001
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+    if debug:
+        traceback.print_exc()
+    else:
+        print("       (re-run with --debug for the full traceback)",
+              file=sys.stderr)
+    return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli())

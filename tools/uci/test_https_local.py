@@ -203,7 +203,7 @@ HTTP_RESPONSE    = (
 # --- External-listener mode ----------------------------------------------
 # When EXTERNAL_LISTENER=1 the script does NOT stand up its own inline TLS
 # listener and does NOT load the repo cert/key: the server side is provided
-# out-of-band (e.g. the packaged dist/c64-https-listener.zip listener). The
+# out-of-band (e.g. the packaged dist/c64-https-listener.py listener). The
 # C64 client is pointed at EXTERNAL_HOST:EXTERNAL_PORT and the pass criteria
 # come purely from C64-side state (http_resp_buf / screen RAM). Default OFF —
 # behavior is unchanged unless the var is set.

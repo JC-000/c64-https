@@ -1,102 +1,120 @@
 #!/usr/bin/env bash
 # =============================================================================
-# tools/package/build_prgs.sh - Build the release PRG matrix into dist/.
+# tools/package/build_prgs.sh — build the release PRG matrix into dist/.
 #
-# Produces the shippable PRG variants and starts a fresh dist/MANIFEST.txt
-# build log (git HEAD, per-variant result + PRG size). The D64 assembly step
-# (build_d64.sh) appends to the same manifest and writes the final checksum
-# section, so this script MUST run first.
+# Four variants, every combination of networking backend x crypto profile:
 #
-# Variants:
-#   1. c64-https-uci-reu.prg     — make BACKEND=uci                (default REU
-#                                   profile, nistcurves v0.6.0)
-#   2. c64-https-uci-onchip.prg  — make BACKEND=uci USE_NISTCURVES_ONCHIP=1
-#                                   (no-REU on-chip verify path)
-#   3. ip65/RR-Net               — make BACKEND=ip65. Expected to FAIL to link
-#                                   at the current nistcurves pin
-#                                   (CRYPTO_COLD_SHADOW overflow, tracked as
-#                                   c64-nist-curves#54). The exact ld65 error
-#                                   is captured to dist/ip65-link-error.txt and
-#                                   summarized in the manifest. If it links
-#                                   anyway, dist/c64-https-ip65-reu.prg is kept.
+#   c64-https-uci-reu.prg      make BACKEND=uci
+#   c64-https-uci-onchip.prg   make BACKEND=uci USE_NISTCURVES_ONCHIP=1
+#   c64-https-ip65-reu.prg     make BACKEND=ip65
+#   c64-https-ip65-onchip.prg  make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1
 #
-# A `make clean` runs between every flag combination: the build does NOT track
-# CA65FLAGS changes, so stale .o files cause spurious unresolved externals.
+# The matrix itself lives in _common.sh; this script has no per-variant
+# knowledge and nothing version-specific, so it survives a library bump with
+# zero edits.
+#
+# TWO TRAPS this script exists to avoid, both observed in this repo:
+#
+#   1. `make clean` runs before EVERY variant. `BACKEND=` is not a -D flag, it
+#      selects an include path, and make's dependency graph cannot see it.
+#      Skipping the clean yields either a mixed binary at exactly the right
+#      size, or (macOS GNU Make 3.81, 1-second mtime resolution) no relink at
+#      all, leaving the *other* variant's PRG in place. Exit 0 either way.
+#   2. Every build is checked by PRG sha256, recorded in dist/build-info.txt.
+#      Object hashes are worthless as evidence — ca65 stamps wall-clock time
+#      into every .o header — but ld65 does not propagate it, so the PRG is
+#      deterministic and comparable.
+#
+# Also bootstraps the ip65 blob (`ip65-build/ip65-c64.bin`), which is a
+# gitignored artifact a plain `make` will NOT build: a fresh clone dies in the
+# ca65 `.incbin` before any link.
+#
+# Writes dist/build-info.txt (git HEAD, submodule pins, per-variant args/size/
+# sha256). write_manifest.sh consumes it.
 #
 # Usage:  tools/package/build_prgs.sh
 # =============================================================================
-set -eo pipefail
+set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"
-
-DIST="$PROJECT_ROOT/dist"
-BUILT_PRG="$PROJECT_ROOT/build/c64-https.prg"
-MANIFEST="$DIST/MANIFEST.txt"
-IP65_ERR="$DIST/ip65-link-error.txt"
+# shellcheck source=tools/package/_common.sh
+. "$PROJECT_ROOT/tools/package/_common.sh"
 
 mkdir -p "$DIST"
 
 GIT_HEAD="$(git rev-parse HEAD)"
 GIT_HEAD_SHORT="$(git rev-parse --short HEAD)"
+GIT_DIRTY=""
+git diff --quiet HEAD -- 2>/dev/null || GIT_DIRTY=" (working tree DIRTY)"
 
-# Fresh manifest — this script owns the header + build-log section.
-{
-    echo "c64-https release manifest"
-    echo "generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "git HEAD:  $GIT_HEAD"
-    echo
-    echo "== build variants =="
-} > "$MANIFEST"
-
-# build_variant <dist-basename> <make-args...>
-# Runs `make clean && make <args>`, copies the resulting PRG to dist/ and
-# records size + git sha in the manifest.
-build_variant() {
-    local out="$1"; shift
-    echo "[package] make clean && make $*"
-    make clean >/dev/null
-    make "$@"
-    if [ ! -f "$BUILT_PRG" ]; then
-        echo "ERROR: expected $BUILT_PRG after 'make $*', not found" >&2
+# --- ip65 blob bootstrap ------------------------------------------------------
+IP65_BIN="$PROJECT_ROOT/ip65-build/ip65-c64.bin"
+if [ ! -f "$IP65_BIN" ]; then
+    echo "[package] ip65 blob absent — bootstrapping (make ip65-libs && make ip65-blob)"
+    if [ ! -e "$PROJECT_ROOT/ip65/Makefile" ]; then
+        echo "ERROR: ip65 submodule not checked out. Run:" >&2
+        echo "         git submodule update --init --recursive" >&2
         exit 1
     fi
-    cp "$BUILT_PRG" "$DIST/$out"
-    local bytes
-    bytes=$(wc -c < "$DIST/$out" | tr -d ' ')
-    printf '%-28s %8s bytes   make %s   (HEAD %s)\n' \
-        "$out" "$bytes" "$*" "$GIT_HEAD_SHORT" >> "$MANIFEST"
-    echo "[package] wrote dist/$out ($bytes bytes)"
-}
-
-# --- Variant 1: UCI, default REU profile ---
-build_variant "c64-https-uci-reu.prg" BACKEND=uci
-
-# --- Variant 2: UCI, on-chip (no-REU) verify path ---
-build_variant "c64-https-uci-onchip.prg" BACKEND=uci USE_NISTCURVES_ONCHIP=1
-
-# --- Variant 3: ip65 / RR-Net (expected link failure at current pin) ---
-echo "[package] make clean && make BACKEND=ip65 (expected to fail at current nistcurves pin)"
-make clean >/dev/null
-if make BACKEND=ip65 >"$IP65_ERR" 2>&1; then
-    # Surprise: it linked. Keep the artifact.
-    cp "$BUILT_PRG" "$DIST/c64-https-ip65-reu.prg"
-    bytes=$(wc -c < "$DIST/c64-https-ip65-reu.prg" | tr -d ' ')
-    printf '%-28s %8s bytes   make BACKEND=ip65   (HEAD %s)\n' \
-        "c64-https-ip65-reu.prg" "$bytes" "$GIT_HEAD_SHORT" >> "$MANIFEST"
-    echo "[package] ip65 UNEXPECTEDLY linked — wrote dist/c64-https-ip65-reu.prg ($bytes bytes)"
-    { echo; echo "== ip65 result =="; echo "ip65 linked successfully (unexpected — see prior campaign notes)."; } >> "$MANIFEST"
-else
-    echo "[package] ip65 build failed as expected — error captured to dist/ip65-link-error.txt"
-    {
-        echo
-        echo "== ip65 result =="
-        echo "ip65 FAILED to link (expected; c64-nist-curves#54). Last lines of ld65 output:"
-        echo "----------------------------------------------------------------"
-        tail -n 12 "$IP65_ERR"
-        echo "----------------------------------------------------------------"
-        echo "(full output: dist/ip65-link-error.txt)"
-    } >> "$MANIFEST"
+    make ip65-libs >/dev/null
+    make ip65-blob >/dev/null
+    echo "[package] ip65 blob built: $(wc -c < "$IP65_BIN" | tr -d ' ') bytes, $(sha256_of "$IP65_BIN")"
 fi
 
-echo "[package] PRG matrix complete."
+# --- Fresh build-info ---------------------------------------------------------
+{
+    echo "# c64-https release build info"
+    echo "# generated by tools/package/build_prgs.sh"
+    echo "generated=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "git_head=$GIT_HEAD"
+    echo "git_head_short=$GIT_HEAD_SHORT"
+    echo "git_dirty=$([ -n "$GIT_DIRTY" ] && echo yes || echo no)"
+    echo "ip65_blob_sha256=$(sha256_of "$IP65_BIN")"
+    echo "ip65_blob_bytes=$(wc -c < "$IP65_BIN" | tr -d ' ')"
+    submodule_pins | while read -r sub sha tag; do
+        echo "submodule=$sub $sha $tag"
+    done
+} > "$BUILD_INFO"
+
+# --- Build every variant ------------------------------------------------------
+echo "[package] HEAD $GIT_HEAD_SHORT$GIT_DIRTY"
+failed=0
+for line in "${PACKAGE_VARIANTS[@]}"; do
+    key="$(variant_field "$line" 1)"
+    prg="$(variant_field "$line" 2)"
+    args="$(variant_field "$line" 3)"
+
+    echo "[package] === $key ==="
+    echo "[package] make clean && make $args"
+    make clean >/dev/null
+    log="$DIST/build-$key.log"
+    # Word-splitting $args is intentional — it is a make argument list.
+    # shellcheck disable=SC2086
+    if ! make $args >"$log" 2>&1; then
+        echo "[package] BUILD FAILED for $key — see $log" >&2
+        tail -n 15 "$log" >&2
+        echo "variant=$key prg=$prg args=$args result=FAILED log=$(basename "$log")" \
+            >> "$BUILD_INFO"
+        failed=1
+        continue
+    fi
+    if [ ! -f "$BUILT_PRG" ]; then
+        echo "[package] ERROR: make $args exited 0 but $BUILT_PRG is missing" >&2
+        failed=1
+        continue
+    fi
+    cp "$BUILT_PRG" "$DIST/$prg"
+    rm -f "$log"
+    bytes="$(wc -c < "$DIST/$prg" | tr -d ' ')"
+    sha="$(sha256_of "$DIST/$prg")"
+    echo "variant=$key prg=$prg args=$args result=OK bytes=$bytes sha256=$sha" \
+        >> "$BUILD_INFO"
+    printf '[package] wrote dist/%s  %s bytes  %s\n' "$prg" "$bytes" "$sha"
+done
+
+if [ "$failed" -ne 0 ]; then
+    echo "[package] PRG matrix INCOMPLETE — at least one variant failed to build." >&2
+    exit 1
+fi
+echo "[package] PRG matrix complete (${#PACKAGE_VARIANTS[@]} variants)."
