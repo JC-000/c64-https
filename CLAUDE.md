@@ -446,7 +446,23 @@ post-W1) ip65 layout:
 
 Scripts under `tools/uci/` require a U64E (default 192.168.1.81,
 overridable via the `U64_HOST` environment variable) and use
-`DeviceLock` + `enable_uci`/`disable_uci`:
+`DeviceLock` + `enable_uci`/`disable_uci`.
+
+They also require the `c64-test-harness` package, which is a **separate
+public repo, not vendored here** — `requirements.txt` lists only
+`cryptography`. Install it into the same interpreter you run the scripts
+with:
+
+    git clone https://github.com/JC-000/c64-test-harness   # sibling dir
+    pip install -e ../c64-test-harness
+
+Without it every script here dies at import with `ModuleNotFoundError:
+No module named 'c64_test_harness'` (issue #90). The instruction already
+existed under the VICE testing section of README.md, but nothing on the
+UCI path mentioned it, so anyone who built with `make BACKEND=uci` and
+went straight to these scripts never crossed it.
+
+The scripts:
 
   - `boot_check.py`       — boot the PRG and assert the backend banner
                             (`BACKEND=uci|ip65`, default uci), the

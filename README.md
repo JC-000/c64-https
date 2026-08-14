@@ -214,6 +214,15 @@ The setup script creates `br-c64` with `tap-c64-0`/`tap-c64-1`, assigns `10.0.65
 
 Scripts under `tools/uci/` drive a real Ultimate 64 Elite over the network (default `192.168.1.81`, overridable via the `U64_HOST` environment variable), exercising the **UCI backend only** (built with `make BACKEND=uci`). They DMA the PRG into RAM, run the boot, and snapshot UCI/TLS state on completion or timeout. These scripts do not run under VICE.
 
+**Prerequisite — `c64-test-harness` (same as the VICE suites above).** It is a separate public package, not vendored here; `requirements.txt` carries only `cryptography`. Without it every script in this directory dies at import with `ModuleNotFoundError: No module named 'c64_test_harness'`:
+
+```bash
+git clone https://github.com/JC-000/c64-test-harness    # sibling of this repo
+pip install -e ../c64-test-harness
+```
+
+Install it into the **same interpreter you run the scripts with** — if you use a virtualenv, `pip` and `python3` must both be that venv's, or the import fails despite the install appearing to succeed.
+
 ```bash
 python3 tools/uci/boot_check.py          # UCI firmware detection
 python3 tools/uci/phase2_check.py        # DHCP + local IP readback
