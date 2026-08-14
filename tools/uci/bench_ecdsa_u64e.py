@@ -66,6 +66,7 @@ from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
 
 from _memory_policy import build_policy_and_arbiter
+from _reu_preflight import ReuPreflightError, preflight_reu
 
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
@@ -440,6 +441,16 @@ def main() -> int:
         print("Enabling UCI...")
         enable_uci(client)
         uci_enabled = True
+
+        # REU preflight (issue #97). The REU-profile archive's fp_mul
+        # DMAs its multiply rows; with no REU it returns a*255*b mod p
+        # and every vector "verifies" as a REJECT with no diagnostic —
+        # a silently wrong benchmark, which is worse than a slow one.
+        try:
+            preflight_reu(client, LABELS_PATH)
+        except ReuPreflightError as exc:
+            print(str(exc), file=sys.stderr)
+            return 4
 
         # Boot at the first sweep speed: comb-profile boots run
         # ec_precompute_256 (~30-50 s even at 64 MHz, ~40 min at stock),

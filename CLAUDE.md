@@ -507,6 +507,27 @@ existed under the VICE testing section of README.md, but nothing on the
 UCI path mentioned it, so anyone who built with `make BACKEND=uci` and
 went straight to these scripts never crossed it.
 
+**REU preflight (issue #97).** Every script here that exercises the
+crypto path — `test_https_local.py` (and its `test_https_print_body.py`
+/ `test_https_local_p384.py` wrappers), `test_https_bad_finished.py`,
+`bench_ecdsa_u64e.py` — calls `preflight_reu()` from
+`tools/uci/_reu_preflight.py` under the DeviceLock, right after
+`enable_uci` and before the reset. A REU-profile build meeting a device
+with `RAM Expansion Unit: Disabled` now exits **4** in ~2 s with both
+remedies named, instead of spinning ~44 min at `KEYS ENC1 RX`. The
+profile is read from `build/labels.txt` — onchip markers are checked as
+a **union** (`LIB_NISTCURVES_REU_BANKS_USED == 0`, `gen_mul_row`,
+`fe_gen_mul_row`, `sqtab_reserved`) so renaming one upstream cannot
+silently reclassify an onchip build and block the configuration we
+recommend to REU-less users. On an onchip build no REST call is made at
+all (measured 0.001-0.002 s vs 0.073-0.081 s for the REU path). It
+**never writes device config**: the U64E is queue-shared and config
+writes persist until power cycle, so auto-enabling would swap a legible
+error for a mystery on someone else's branch. `C64_SKIP_REU_PREFLIGHT=1`
+bypasses. Scripts that never touch the REU (`boot_check`, `phase2`,
+`phase3_tcp_echo`, `test_http_local`, `test_http_live`) are deliberately
+not guarded.
+
 The scripts:
 
   - `boot_check.py`       — boot the PRG and assert the backend banner
@@ -608,6 +629,10 @@ Disabled ⇒ stalls at RX (issue #97).
   `tls_recv_sub_progress` is `$02` in BOTH and distinguishes nothing.
   Do not act on the screen alone — that mistake was made on #97 and
   cost an outside contributor a wasted cold power cycle.
+
+  The REU half of that ambiguity is now caught before the run: see
+  "REU preflight" under "UCI test scripts". If a guarded script got as
+  far as printing `RX`, the REU cause has already been excluded.
 
   - ClientHello → ServerHello (X25519 key share)
   - EncryptedExtensions, Certificate, CertificateVerify (sibling
