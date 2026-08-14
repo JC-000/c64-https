@@ -159,11 +159,29 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; tools/integration/build_nistcurves_p256.sh. Measured $0007 on both
 ; the REU and FP_ONCHIP_MUL variants at the v0.6.0 pin.
 ;
-; If this fires, upstream changed which §8 primitives it owns. Re-derive
-; which archive members the wrapper must drop (or which `SHARED_*`
-; deferral switches it must pass) BEFORE updating the expected value.
+; THE MASKS SPLIT AT v0.9.x. Under `-D FP_ONCHIP_MUL` upstream drops the
+; reu_mul bit from both SHARED_PRIMITIVES and SHARED_CONSUMES, because
+; that profile has no REU multiply path at all. Confirmed with od65 on
+; the two archives we build: REU $0007, onchip $0005. That is upstream
+; behaving correctly for the profile, not drift — so the expectation is
+; profile-dependent, and a single hardcoded value breaks half the
+; release matrix (both onchip variants) at link time.
+;
+; If this fires, upstream changed which §8 primitives it owns FOR THE
+; PROFILE YOU ARE BUILDING. Read that profile's CHANGELOG row first.
+; Only re-derive the archive member drops in
+; tools/integration/build_nistcurves_p256.sh if the change is in which
+; primitives actually SHIP — a mask moving between profiles does not
+; imply the surgery is wrong, and chasing the wrapper first costs an
+; afternoon (it did).
 .import LIB_NISTCURVES_SHARED_PRIMITIVES
-.assert LIB_NISTCURVES_SHARED_PRIMITIVES = APP_OWNED, lderror, "libs/nistcurves shared-primitive ownership claim moved — re-derive the archive member drops in tools/integration/build_nistcurves_p256.sh before touching this assert"
+.ifdef USE_NISTCURVES_ONCHIP
+; FP_ONCHIP_MUL: no REU multiply path, so reu_mul leaves both masks.
+EXPECTED_SHARED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_CT_MUL_8X8
+.else
+EXPECTED_SHARED = APP_OWNED
+.endif
+.assert LIB_NISTCURVES_SHARED_PRIMITIVES = EXPECTED_SHARED, lderror, "libs/nistcurves shared-primitive ownership claim moved for this build profile (expected $0007 on the REU profile, $0005 under USE_NISTCURVES_ONCHIP where reu_mul correctly leaves the mask) — check that profile's CHANGELOG row before changing the expectation, and only re-derive the wrapper's member drops if which primitives SHIP has changed"
 
 
 ; =====================================================================
