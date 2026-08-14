@@ -49,16 +49,27 @@ c1541_list() {
 : > "$D64_LIST"
 
 # make_disk <image path> <disk label> <disk id> <host-prg> <1541-name> [...]
+# Silently drops PRGs that are not present and makes no disk at all when none
+# of its inputs exist. A missing PRG means its variant failed to build, which
+# build_prgs.sh has already reported and recorded; erroring out a second time
+# here would only stop the surviving variants from getting disks.
 make_disk() {
     local image="$1" label="$2" id="$3"; shift 3
-    rm -f "$image"
-    "$C1541" -format "$label,$id" d64 "$image" >/dev/null
     local -a writes=()
     while [ "$#" -gt 0 ]; do
-        [ -f "$1" ] || { echo "ERROR: missing $1 — run build_prgs.sh first." >&2; exit 1; }
-        writes+=(-write "$1" "$2,p")
+        if [ -f "$1" ]; then
+            writes+=(-write "$1" "$2,p")
+        else
+            echo "[package] skipping $(basename "$1") on $(basename "$image") — not built"
+        fi
         shift 2
     done
+    if [ "${#writes[@]}" -eq 0 ]; then
+        echo "[package] $(basename "$image"): no PRGs available, image not created"
+        return 0
+    fi
+    rm -f "$image"
+    "$C1541" -format "$label,$id" d64 "$image" >/dev/null
     "$C1541" -attach "$image" "${writes[@]}" >/dev/null
     local listing
     listing="$(c1541_list "$image")"
@@ -72,6 +83,8 @@ make_disk() {
 }
 
 # --- One image per variant ----------------------------------------------------
+rm -f "$DIST"/c64-https-*.d64      # stale images from a previous, fuller run
+
 for line in "${PACKAGE_VARIANTS[@]}"; do
     key="$(variant_field "$line" 1)"
     prg="$(variant_field "$line" 2)"

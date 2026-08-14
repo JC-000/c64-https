@@ -94,14 +94,26 @@ for line in "${PACKAGE_VARIANTS[@]}"; do
     if ! make $args >"$log" 2>&1; then
         echo "[package] BUILD FAILED for $key — see $log" >&2
         tail -n 15 "$log" >&2
-        echo "variant=$key prg=$prg args=$args result=FAILED log=$(basename "$log")" \
-            >> "$BUILD_INFO"
-        failed=1
+        # Pull the first ca65/ld65 diagnostic out of the log so the manifest
+        # can state WHY a variant is missing without anyone opening the log.
+        # Falls back to the last line for failures that are not toolchain
+        # diagnostics (a missing submodule, a full disk).
+        reason="$(grep -m1 -E '^(ld65|ca65|ar65|od65):|Error:' "$log" || true)"
+        [ -n "$reason" ] || reason="$(tail -n1 "$log")"
+        {
+            echo "variant=$key prg=$prg args=$args result=FAILED log=$(basename "$log")"
+            echo "failreason=$key $reason"
+        } >> "$BUILD_INFO"
+        failed=$((failed + 1))
         continue
     fi
     if [ ! -f "$BUILT_PRG" ]; then
         echo "[package] ERROR: make $args exited 0 but $BUILT_PRG is missing" >&2
-        failed=1
+        {
+            echo "variant=$key prg=$prg args=$args result=FAILED log=(none)"
+            echo "failreason=$key make exited 0 but produced no PRG"
+        } >> "$BUILD_INFO"
+        failed=$((failed + 1))
         continue
     fi
     cp "$BUILT_PRG" "$DIST/$prg"
@@ -113,8 +125,26 @@ for line in "${PACKAGE_VARIANTS[@]}"; do
     printf '[package] wrote dist/%s  %s bytes  %s\n' "$prg" "$bytes" "$sha"
 done
 
+# Exit status is three-valued on purpose, and the Makefile depends on it:
+#
+#   0  every variant built
+#   2  PARTIAL — some built, some did not
+#   1  nothing built at all
+#
+# A hard `exit 1` on the first failure used to abort `make package` before the
+# disk images, the listener and the manifest were ever produced, which meant a
+# single broken variant left the operator with no artifacts AND no written
+# record of what broke. Partial is the common case during a library bump (one
+# profile's archive trips a link assert while the other is fine), and the
+# useful outcome there is "here are the three that work, here is the error for
+# the fourth" — the release still cannot be cut, but the blocker is legible
+# and the good artifacts are testable. The non-zero status is what stops
+# anyone mistaking a partial run for a complete one.
+built=$(( ${#PACKAGE_VARIANTS[@]} - failed ))
 if [ "$failed" -ne 0 ]; then
-    echo "[package] PRG matrix INCOMPLETE — at least one variant failed to build." >&2
+    echo "[package] PRG matrix INCOMPLETE — $built/${#PACKAGE_VARIANTS[@]} variants built," \
+         "$failed FAILED (see dist/build-*.log and the manifest)." >&2
+    [ "$built" -gt 0 ] && exit 2
     exit 1
 fi
 echo "[package] PRG matrix complete (${#PACKAGE_VARIANTS[@]} variants)."

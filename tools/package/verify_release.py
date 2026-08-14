@@ -94,7 +94,9 @@ def check_reproducible(variants: list[dict]) -> None:
     print("\n=== 1. PRG byte-reproducibility (second build from clean) ===")
     for rec in variants:
         if rec.get("result") != "OK":
-            record(f"{rec['key']} rebuild", False, "first build had already failed")
+            # Not a reproducibility failure — there is nothing to reproduce.
+            # Reported once, up front, by report_missing_variants().
+            print(f"  [n/a ] {rec['key']} — did not build; see the blocker above")
             continue
         subprocess.run(["make", "clean"], cwd=REPO_ROOT, check=True,
                        stdout=subprocess.DEVNULL)
@@ -272,10 +274,39 @@ def check_listener() -> None:
                f"found {leftovers}" if leftovers else "clean")
 
 
+def report_missing_variants(variants: list[dict]) -> int:
+    """Surface variants that never built, with the toolchain's own reason.
+
+    These are release blockers, but they are not verification failures: there
+    is no artifact to verify. Counting them as failed checks would bury the
+    one line that says what to fix under a pile of consequential noise, so
+    they get their own section and their own exit path.
+    """
+    missing = [r for r in variants if r.get("result") != "OK"]
+    if not missing:
+        return 0
+    reasons = {}
+    if BUILD_INFO.is_file():
+        for line in BUILD_INFO.read_text().splitlines():
+            if line.startswith("failreason="):
+                key, _, why = line[len("failreason="):].partition(" ")
+                reasons[key] = why
+    print("\n" + "=" * 78)
+    print(f" BLOCKER — {len(missing)} of {len(variants)} variants did not build")
+    print("=" * 78)
+    for rec in missing:
+        print(f"\n  {rec['prg']}   (make {rec['args']})")
+        print(f"    {reasons.get(rec['key'], 'no reason recorded')}")
+    print("\n  dist/ holds only the variants that did build. This is not a"
+          "\n  releasable matrix; fix the build before tagging.")
+    return len(missing)
+
+
 def main() -> int:
     variants = parse_build_info()
     print(f"Verifying {len(variants)} PRG variants and "
           f"{len(d64_images())} disk images in {DIST}")
+    missing = report_missing_variants(variants)
 
     if os.environ.get("SKIP_REBUILD") != "1":
         check_reproducible(variants)
@@ -300,6 +331,11 @@ def main() -> int:
         print("FAILED:")
         for name in failed:
             print(f"  - {name}")
+        return 1
+    if missing:
+        print(f"Everything present verifies, but {missing} variant(s) are "
+              f"MISSING — see the blocker above.")
+        print("RELEASE INCOMPLETE")
         return 1
     print("RELEASE ARTIFACTS VERIFIED")
     return 0

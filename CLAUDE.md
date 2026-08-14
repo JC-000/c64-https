@@ -1515,6 +1515,19 @@ line per shipped PRG, every other script derives from it),
 Nothing is version-specific; re-running `make package` after a submodule
 bump regenerates every artifact with zero edits.
 
+**A variant that fails to build no longer takes the pipeline down.**
+`build_prgs.sh` is three-valued (0 all built / 2 partial / 1 nothing),
+records the first ld65/ca65 diagnostic per failed variant into
+`dist/build-info.txt`, and `make package` deliberately runs to
+completion on a partial matrix: disks are made from what exists,
+`MANIFEST.txt` is still written and opens with an `!! INCOMPLETE
+RELEASE !!` block naming each missing variant with its make line and
+exact error, and the target then exits 1. `package-verify` leads with a
+BLOCKER section and ends `RELEASE INCOMPLETE`. The point is that a
+library bump breaking one profile should leave a legible blocker plus
+testable artifacts for the profiles that still work — not an empty
+`dist/` and an aborted make.
+
 `make package-verify` is the acceptance gate (`tools/package/
 verify_release.py`): rebuilds every variant and compares **PRG** hashes
 (object hashes are not evidence — ca65 stamps build time into every
