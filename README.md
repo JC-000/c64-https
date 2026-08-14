@@ -32,6 +32,31 @@ involving a C64.
 
 To build these yourself: `make package && make package-verify`.
 
+## Before you build or test
+
+Skip this if you took a release above — it is only for building from source.
+
+Two prerequisites are not vendored here, and missing either fails with an error
+that does not name it. Both are one-time, per clone:
+
+```bash
+git submodule update --init --recursive
+
+# ip65 backend only — `make` will NOT build the blob for you
+make ip65-libs
+make ip65-blob
+
+# any test script, VICE or hardware — separate public repo, not in requirements.txt
+git clone https://github.com/JC-000/c64-test-harness    # sibling of this repo
+python3 -m pip install -e ../c64-test-harness
+```
+
+Skipping the first gives `ip65_blob.s(22): Error: Cannot open include file
+'.../ip65-c64.bin'` (reported as #89); skipping the second gives
+`ModuleNotFoundError: No module named 'c64_test_harness'` (#90). Use
+`python3 -m pip` so the package lands in the interpreter that runs the scripts —
+a venv mismatch reproduces #90 exactly after an install that appeared to succeed.
+
 ## Architecture
 
 ```
