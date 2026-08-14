@@ -201,7 +201,7 @@ sqtab_init:
 ; Uses identity: a*b = sqtab[a+b] - sqtab[|a-b|]
 ; Clobbers: A, X, Y
 ; =============================================================================
-.ifdef USE_NISTCURVES_ONCHIP
+.if .defined(USE_NISTCURVES_ONCHIP) .or .defined(USE_X25519_SIBLING)
 ; --- c64-lib-contract §8.3 canonical body (issue #69 integration) ---
 ; The sibling's FP_ONCHIP_MUL row generator (og_common, rebuilt with
 ; SHARED_CT_MUL_8X8) imports ct_mul_8x8 + the SMC bake sites from the
@@ -210,6 +210,22 @@ sqtab_init:
 ; smc_sum_a_imm+1 / smc_diff_a_imm+1 once per row, passes b in Y.
 ; The legacy in-tree convention (A=a, X=b, re-baked per call) is kept
 ; as the thin `mul_8x8` shim for poly1305/fe25519 call sites.
+;
+; USE_X25519_SIBLING selects this body too, as of the c64-x25519
+; v0.10.0 bump. From v0.7.0 the sibling's x25519_init.s imports
+; ct_mul_8x8 + both SMC bake sites UNCONDITIONALLY (it used to carry
+; its own copy in mul_8x8.s, which this wrapper does not stage because
+; that file's other exports collide with in-tree ones). Without this
+; arm the sibling link dies on three unresolved externals — and it
+; dies *behind* the memory-area overflows, so it only becomes visible
+; once the placement problem is solved.
+;
+; The two arms are functionally equivalent implementations of the same
+; a*b -> poly_prod_lo/hi contract, so widening the gate is a strict
+; no-op for every configuration that does not set one of these flags:
+; the default REU builds on both backends stay byte-identical (verified
+; by PRG sha256, not by inspection). The two flags are mutually
+; exclusive at Makefile:90, so this arm is never selected twice.
 .export ct_mul_8x8
 .export smc_sum_a_imm, smc_diff_a_imm
 
@@ -306,7 +322,7 @@ mul_8x8:
         sbc sqtab_hi,y
         sta poly_prod_hi
         rts
-.endif ; USE_NISTCURVES_ONCHIP
+.endif ; USE_NISTCURVES_ONCHIP / USE_X25519_SIBLING
 
 ; =============================================================================
 ; poly1305_multiply - Multiply h (17 bytes) by r (16 bytes), reduce mod 2^130-5

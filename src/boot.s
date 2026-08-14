@@ -994,11 +994,19 @@ reu_p384_overlay_init:
 ;
 ; The sibling's X25519_RODATA + X25519_BSS segments load into
 ; CRYPTO_OVERLAY at PRG-load time (see cfg/c64-https-uci.cfg).  Boot
-; STASHes the slot bytes to REU_OVERLAY_X25519 (bank 3, $30000) so a
-; later `crypto_swap_to_x25519` can refresh the slot after a P-256 /
-; P-384 swap has overwritten it.  Same SEI window + ~8 ms cost as the
-; P-256 stash above.  No .incbin -- the linker already pinned the
-; sibling image into CRYPTO_OVERLAY.
+; STASHes the slot bytes to REU_OVERLAY_X25519 (bank 6, $60000 under
+; this flag) so a later `crypto_swap_to_x25519` can refresh the slot
+; after a P-256 / P-384 swap has overwritten it.  Same SEI window +
+; ~8 ms cost as the P-256 stash above.  No .incbin -- the linker
+; already pinned the sibling image into CRYPTO_OVERLAY.
+;
+; THIS WRITE IS THE ONE THAT MATTERS FOR THE REU BANK MAP.  It runs
+; unconditionally at boot whether or not any swap ever happens, so it
+; is not covered by the "no TLS caller invokes crypto_swap_to_x25519"
+; argument that reu_layout.inc used to declare the bank-3 overlap
+; theoretical.  At $30000 it destroyed the sibling's 17th-bit-carry
+; table right after reu_mul_init built it, breaking fe25519_sqr (and
+; only fe25519_sqr) -- see the relocation note in reu_layout.inc.
 ;
 ; NB: this stashes the *initialized* portion of CRYPTO_OVERLAY (the
 ; sibling's rodata tables) plus any zero-init BSS bytes that fall in

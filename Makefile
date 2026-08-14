@@ -116,6 +116,30 @@ SIBLING_LIB_ARCHIVES += build/lib/x25519.a
 # Propagate the flag to ca65 so src/data.s suppresses the in-tree X25519
 # buffer declarations (the sibling's data_x25519_raw.s provides them).
 CA65FLAGS += -D USE_X25519_SIBLING=1
+
+# Split the sibling's code across CRYPTO_HOT and CRYPTO_OVERLAY. This is
+# what makes USE_X25519_SIBLING=1 link at all under UCI, so it is a
+# default rather than something the operator has to know.
+#
+# The sibling's 4,226 B of code does not fit either region whole:
+# CRYPTO_HOT has ~3.3 KB of room for it (measured), and CRYPTO_OVERLAY
+# has ~3.7 KB once the sibling's own 3,840 B of tables and BSS are in
+# there. Leaving the ladder (717 B) and the boot-only table init (666 B)
+# in CRYPTO_OVERLAY satisfies both. Under USE_X25519_SIBLING=1 that
+# region is not a paged overlay -- both embed flags that page it are
+# mutually exclusive with this one -- so it is plain resident RAM.
+#
+# X25519_RODATA is the wrong NAME for executable code; it is used only
+# because it is the one segment both backend cfgs already route into
+# CRYPTO_OVERLAY. The clean form is a cfg declaring the SPEC §4 names
+# (LIB_X25519_CODE / LIB_X25519_INIT_CODE / LIB_X25519_DATA); at that
+# point these two lines and the wrapper's sed both go away.
+#
+# ip65 does not link either way -- its CRYPTO_OVERLAY is 4,212 B and
+# already holds TLS_CODE + CRYPTO_AUX_CODE, so X25519_RODATA overflows
+# it by 2,048 B (2,816 B with these settings). See build_x25519.sh.
+export X25519_INIT_SEGMENT ?= X25519_RODATA
+export X25519_SEG_LADDER   ?= X25519_RODATA
 endif
 
 # Phase C.5: under USE_X25519_SIBLING=1, evict the in-tree X25519
@@ -278,6 +302,16 @@ ifeq ($(USE_NISTCURVES_ONCHIP),1)
 	# any TABLES_BSS layout drift silently corrupts every multiply.
 	@grep -q '^al C:BC00 \.sqtab_reserved' $(LABELS) || \
 		{ echo 'ERROR: sqtab_reserved is not at $$BC00 — TABLES_BSS layout drifted; realign LIB_SHARED_SQTAB_BASE in tools/integration/build_nistcurves_p256.sh'; exit 1; }
+endif
+ifeq ($(USE_X25519_SIBLING),1)
+	# Same invariant, other sibling: build_x25519.sh bakes sqtab_lo/hi
+	# into the sibling at X25519_SQTAB_BASE while in-tree sqtab_init
+	# fills the real table wherever ld65 put it. Disagreement is neither
+	# a link nor a boot failure, just a wrong shared secret. Rationale
+	# and the $$B800-vs-$$BC00 history: tools/integration/build_x25519.sh.
+	@grep -q '^al C:B800 \.sqtab_lo' $(LABELS) || \
+		{ echo 'ERROR: sqtab_lo is not at $$B800 — TABLES_BSS layout drifted; realign X25519_SQTAB_BASE in tools/integration/build_x25519.sh'; \
+		  grep ' \.sqtab_lo$$' $(LABELS); exit 1; }
 endif
 
 # Phase 5 Fix D: $(LABELS) is normally a side-effect of the $(PRG)
