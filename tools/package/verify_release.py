@@ -323,6 +323,53 @@ def check_listener() -> None:
                f"found {leftovers}" if leftovers else "clean")
 
 
+def summarize(results: list, missing: int, skipped: list) -> tuple:
+    """Turn the recorded checks into a verdict. Pure — see test_package_verify.py.
+
+    Split out of main() precisely because this is where the pressure to say
+    something reassuring lands. The ordering below is the whole contract:
+
+      1. zero checks   -> failure. A gate that ran nothing is not a gate that
+                          passed, and this is not hypothetical: the glob-driven
+                          disk checks used to record nothing on an empty dist/
+                          and the run reported RELEASE ARTIFACTS VERIFIED.
+      2. any failure   -> failure.
+      3. any missing   -> RELEASE INCOMPLETE. What is present may verify fine;
+                          the matrix is still not releasable.
+      4. any skip      -> PARTIAL VERIFICATION, exit 0 so SKIP_* stays usable
+                          for narrowing, but never the word VERIFIED — a run
+                          that skipped sections is evidence about what ran, not
+                          about the release.
+      5. otherwise     -> RELEASE ARTIFACTS VERIFIED.
+
+    Rule 1 is checked before rule 4 on purpose: skipping every section must
+    not launder an empty run into a cheerful PARTIAL.
+    """
+    failed = [n for n, ok, _ in results if not ok]
+    lines = ["\n" + "=" * 60,
+             f"{len(results) - len(failed)}/{len(results)} checks passed"]
+    if not results:
+        lines.append("NOTHING WAS VERIFIED — no check ran. This is a failure, "
+                     "not a pass.")
+        return 1, lines
+    if failed:
+        lines.append("FAILED:")
+        lines += [f"  - {name}" for name in failed]
+        return 1, lines
+    if missing:
+        lines.append(f"Everything present verifies, but {missing} variant(s) "
+                     f"are MISSING — see the blocker above.")
+        lines.append("RELEASE INCOMPLETE")
+        return 1, lines
+    if skipped:
+        lines.append(f"PARTIAL VERIFICATION — everything that ran passed, but "
+                     f"these were SKIPPED: {', '.join(skipped)}.")
+        lines.append("Not a release gate. Re-run without SKIP_* before tagging.")
+        return 0, lines
+    lines.append("RELEASE ARTIFACTS VERIFIED")
+    return 0, lines
+
+
 def report_missing_variants(variants: list[dict]) -> int:
     """Surface variants that never built, with the toolchain's own reason.
 
@@ -377,37 +424,10 @@ def main() -> int:
         print("\n=== 3. Listener SKIPPED (SKIP_LISTENER=1) ===")
         skipped.append("listener")
 
-    failed = [n for n, ok, _ in results if not ok]
-    print(f"\n{'=' * 60}")
-    print(f"{len(results) - len(failed)}/{len(results)} checks passed")
-
-    # A gate that ran nothing must never look like a gate that passed. This
-    # is not hypothetical: before the coverage checks above, an empty dist/
-    # produced "0/0 checks passed / RELEASE ARTIFACTS VERIFIED" and exit 0.
-    if not results:
-        print("NOTHING WAS VERIFIED — no check ran. This is a failure, not a "
-              "pass.")
-        return 1
-    if failed:
-        print("FAILED:")
-        for name in failed:
-            print(f"  - {name}")
-        return 1
-    if missing:
-        print(f"Everything present verifies, but {missing} variant(s) are "
-              f"MISSING — see the blocker above.")
-        print("RELEASE INCOMPLETE")
-        return 1
-    if skipped:
-        # Deliberately not the word "VERIFIED": sections were skipped, so this
-        # run is not evidence that the release is good, only that what ran
-        # was. Still exit 0 so SKIP_* stays usable for narrowing.
-        print(f"PARTIAL VERIFICATION — everything that ran passed, but these "
-              f"were SKIPPED: {', '.join(skipped)}.")
-        print("Not a release gate. Re-run without SKIP_* before tagging.")
-        return 0
-    print("RELEASE ARTIFACTS VERIFIED")
-    return 0
+    code, lines = summarize(results, missing, skipped)
+    for line in lines:
+        print(line)
+    return code
 
 
 if __name__ == "__main__":
