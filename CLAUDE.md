@@ -866,32 +866,62 @@ C64U, fits T(f)=D+C/f, residuals <=4.1%):
   whose device has to be inferred from a heading is not interpretable.
   64 MHz exists only on the C64U (the U64E's CPU Speed enum stops at 48):
 
-  device profile             1 MHz      8 MHz    48 MHz   64 MHz
-  C64U   v0.3.0 REU          --         --       73.0 s   64.7-65.9 s
-  C64U   v0.5.0 onchip       --         --       59.9 s   47.5 s (n=3)
-  C64U   v0.6.0 onchip       --         --       51.0 s   39.7 s
-  C64U   v0.6.0 onchip+comb  --         --       38.4 s   **31.0 s**
-  U64E   REU @ 2ceb5b1       1157.7 s   196.5 s  80.8 s   n/a (no enum)
-  U64E   onchip @ 2ceb5b1    2120.7 s   264.5 s  45.5 s   n/a (no enum)
+  device profile             1 MHz     8 MHz    16 MHz   20 MHz   48 MHz  64 MHz
+  C64U   v0.3.0 REU          --        --       --       --       73.0 s  64.7-65.9 s
+  C64U   v0.5.0 onchip       --        --       --       --       59.9 s  47.5 s (n=3)
+  C64U   v0.6.0 onchip       --        --       --       --       51.0 s  39.7 s
+  C64U   v0.6.0 onchip+comb  --        --       --       --       38.4 s  **31.0 s**
+  U64E   REU @ 2ceb5b1       1157.7 s  196.5 s  124.0 s  108.9 s  80.8 s  n/a (no enum)
+  U64E   onchip @ 2ceb5b1    2120.7 s  264.5 s  131.8 s  103.9 s  45.5 s  n/a (no enum)
 
-  The U64E row is a 2026-08-13 clock sweep at master 2ceb5b1, one clean
-  `BACKEND=uci` build reused across all three runs so clock is the only
-  variable, all three PASS with server-side evidence (the listener
-  decrypted the full GET; no TLS error). Times are handshake + GET
-  measured C64-side from `run_prg`, not whole-script wall-clock.
+  The U64E rows are a 2026-08-13 sweep at master 2ceb5b1. One clean
+  build per profile, reused across that profile's clocks, so clock is
+  the only variable within a row. Every run PASSes with server-side
+  evidence (the listener decrypted the full GET; no TLS error). Times
+  are handshake + GET measured C64-side from `run_prg`, not
+  whole-script wall-clock (which runs ~35-55% higher: boot, table init
+  and turbo setup).
 
-  Fitting T(f) = D + C/f to those two rows:
+  The onchip 16 MHz entry is the median of two retries (132.4 / 131.2).
+  Its first attempt died on `net_last_error = $88 UCI_ERR_NO_SOCKET` —
+  the TCP_CONNECT bridge glitch, not a result. Note that failure
+  occurred with the REU *enabled*, which is evidence against the
+  REU-quiet-boot explanation for this device and in favour of the
+  turbo-switch settle race.
 
-    U64E REU     D = 58.5 s   C = 1099 MHz*s   residuals <= 0.69%
-    U64E onchip  D =  0.5 s   C = 2120 MHz*s   residuals <= 1.92%
+  **Footnote — an inactive REU costs nothing.** The onchip rows above
+  ran with the device's REU enabled but unused. Re-running that
+  byte-identical PRG with `RAM Expansion Unit = Disabled`: 48 MHz
+  44.9 s (-1.32%), 8 MHz 262.0 s (-0.95%), 1 MHz 2130.9 s (+0.48%).
+  Sub-1.5% and not consistently signed, i.e. noise, not an effect.
+  All three PASS with zero `NO_SOCKET` hits, so a REU-quiet boot did
+  **not** drop the first TCP_CONNECT on the U64E — behaviour the C64U
+  notes record as general. This is also the first confirmation of the
+  shipped "no REU required" onchip claim on UCI hardware rather than
+  in VICE.
+
+  Fitting T(f) = D + C/f across all five clocks:
+
+    U64E REU     D = 56.4 s   C = 1101 MHz*s   max|resid| 2.35%
+    U64E onchip  D = -0.6 s   C = 2121 MHz*s   max|resid| 4.09%
 
   **The two profiles differ in floor, not just slope**, and that is the
-  whole story of the crossover. REU carries a ~58 s floor that no clock
+  whole story of the crossover. REU carries a ~56 s floor that no clock
   touches, because `fp_mul`'s row fetches are anchored to the ~1 MHz
-  bus; onchip has essentially none, paying instead ~1.9x the
-  clock-scaling work. Solving the two fits gives a measured e2e
-  crossover at **17.6 MHz**, against the independently-derived
-  verify-only figure of ~18 MHz.
+  bus; onchip has none, paying instead ~1.9x the clock-scaling work.
+  The fits cross at **17.9 MHz** (17.6 from the three-point version),
+  against the independently-derived verify-only figure of ~18 MHz.
+
+  That crossover is **measured, not just fitted**: REU wins at 16 MHz
+  by 5.9% and onchip wins at 20 MHz by 4.6%, so the sign flips inside
+  [16, 20]. There is no 18 in the CPU Speed enum, so that interval is
+  the finest bracket this hardware can produce.
+
+  Read the onchip D as *indistinguishable from zero*, never as a
+  quantity: the five-point fit returns -0.6 s, a physically impossible
+  floor. At 48 MHz the C/f term is ~99% of the total, so D is fitted
+  from rounding. This is the same ill-conditioning the turbo campaign
+  hit with 2-point fits.
 
   Two cautions on reading these fits. The onchip D is **poorly
   conditioned** — at 48 MHz the C/f term is ~99% of the total, so D is
