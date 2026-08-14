@@ -581,11 +581,33 @@ to its power button) and a hard power cycle fixed everything.
 Firmware 3.14d was UNCHANGED throughout (same image passed May-2026
 e2e) — this is transient device instability, not a firmware update,
 not client code (the 2026-05-20 known-good commit failed identically
-while wedged; the identical setup passed on the C64U). **If you see
-the no-GOT2 signature on healthy-looking transport: do not bisect
-code — power cycle the device (hard, at the wall).** Tracked with
+while wedged; the identical setup passed on the C64U). Tracked with
 full evidence in
 [c64-test-harness#141](https://github.com/JC-000/c64-test-harness/issues/141).
+
+**READ THIS BEFORE ACTING ON THE ABOVE — the screen is NOT diagnostic.**
+A second, unrelated cause produces a character-for-character identical
+display (`CH / SH / HK1 / KEYS / ENC1 / RX`, never GOT2): running the
+**REU-profile build on a machine whose REU is absent or disabled**. In
+that profile `src/crypto/fe25519.s:440` fetches every multiply row from
+the REU by DMA; with no REU the DMA silently no-ops, the rows keep
+`reu_mul_init`'s residue, the X25519 shared secret is wrong, and the
+first encrypted record fails its AEAD tag. It is not even hung —
+`tls13.s` spins 65,536 net_polls at ~40 ms each, about **44 minutes**,
+which reads as a lockup. Reproduced on the U64E 2026-08-14 with one
+PRG and only `RAM Expansion Unit` varying: Enabled ⇒ PASS 83.4 s,
+Disabled ⇒ stalls at RX (issue #97).
+
+  **The discriminator is `net_last_error`:**
+
+    $86 (UCI_ERR_READ_FAIL) → device wedge; power cycle at the wall
+    $00                     → no REU behind a REU-profile build;
+                              enable the REU, or use an onchip build
+                              (c64-https-uci-onchip.prg needs none)
+
+  `tls_recv_sub_progress` is `$02` in BOTH and distinguishes nothing.
+  Do not act on the screen alone — that mistake was made on #97 and
+  cost an outside contributor a wasted cold power cycle.
 
   - ClientHello → ServerHello (X25519 key share)
   - EncryptedExtensions, Certificate, CertificateVerify (sibling
