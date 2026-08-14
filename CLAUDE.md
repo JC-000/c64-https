@@ -1006,6 +1006,7 @@ feth/pcap rig (see "VICE ip65 rig" under Smoke tests). These are the
   ip65 + onchip, no REU    honest 1 MHz      **2,159.7 s (36.0 min)**
   ip65 + onchip, no REU    ~1.2x accelerated 1,813.9 s
   ip65 + REU profile       ~1.2x accelerated   988.9 s
+  ip65 + onchip @ 2ceb5b1  ~1.2x accelerated 1,876.0 s  (2026-08-13)
 
   Honest-1 MHz phase breakdown (seconds after 'G'):
   TCP CONNECTED 3.0 | CH 329.2 | SH 700.7 | PROC 718.9 |
@@ -1016,7 +1017,18 @@ feth/pcap rig (see "VICE ip65 rig" under Smoke tests). These are the
     holds at 1 MHz, three orders of magnitude from where it was fit.
   - X25519 scalarmults measured 326 s / ~356 s vs ~324 s analytical.
   - ip65's drain budget is **unchanged by #74** (the ip65 PRG is
-    byte-identical across it), so these numbers stand at HEAD.
+    byte-identical across it), so those numbers stand at HEAD.
+  - **Re-validated at master 2ceb5b1 on 2026-08-13**: PASS,
+    `http_status=200`, `resp_len=22`, body match, 1,876.0 s
+    accelerated (+3.4% vs the 1,813.9 s reference). Phase shape
+    unchanged: TCP 3.0 | CH 276.0 | SH 585.4 | PROC 600.6 |
+    FIN 1,823.0 | REQUEST SENT 1,838.2 | CLOSED 1,841.2. This matters
+    beyond the number — the ip65 PRG is **no longer** byte-identical
+    to the #71-era build (`417c708594...` vs `db31111031e2...`)
+    because #75's span-input parser is real code, and until this run
+    that change had only ever been exercised on the UCI backend. It
+    was also ip65's first end-to-end run since July, so it is the
+    first to cover #74, #75 and the ten audit PRs.
   - VICE 3.10 SDL2 has no usable runtime warp: its `Speed` resource
     caps at ~1.2x and `WarpMode` is gone, so "accelerated" runs are
     only ~1.2x. Divide accelerated figures by ~1.2 for honest 1 MHz.
