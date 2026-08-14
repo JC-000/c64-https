@@ -1528,6 +1528,16 @@ library bump breaking one profile should leave a legible blocker plus
 testable artifacts for the profiles that still work — not an empty
 `dist/` and an aborted make.
 
+**The gate cannot pass vacuously.** Both disk checks derive the set of
+images that MUST exist from the build record rather than iterating
+whatever `*.d64` happens to be in `dist/`, so an absent image is a
+failed check instead of a check nobody ran. An empty `dist/` used to
+print `0/0 checks passed / RELEASE ARTIFACTS VERIFIED` and exit 0 — a
+green light over a release containing nothing. A run that records zero
+checks now fails, and the word `VERIFIED` is reserved for a run where
+every section executed: any `SKIP_*` downgrades the verdict to
+`PARTIAL VERIFICATION`.
+
 `make package-verify` is the acceptance gate (`tools/package/
 verify_release.py`): rebuilds every variant and compares **PRG** hashes
 (object hashes are not evidence — ca65 stamps build time into every

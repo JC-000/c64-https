@@ -120,7 +120,10 @@ for line in "${PACKAGE_VARIANTS[@]}"; do
     rm -f "$log"
     bytes="$(wc -c < "$DIST/$prg" | tr -d ' ')"
     sha="$(sha256_of "$DIST/$prg")"
-    echo "variant=$key prg=$prg args=$args result=OK bytes=$bytes sha256=$sha" \
+    # backend= lets verify_release.py derive which disk images MUST exist
+    # without re-parsing this matrix, keeping _common.sh the only place a
+    # variant is declared.
+    echo "variant=$key prg=$prg args=$args result=OK bytes=$bytes sha256=$sha backend=$(variant_field "$line" 5)" \
         >> "$BUILD_INFO"
     printf '[package] wrote dist/%s  %s bytes  %s\n' "$prg" "$bytes" "$sha"
 done
