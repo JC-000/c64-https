@@ -49,19 +49,29 @@
 ;   src/crypto/poly1305.s:21,24,213; mul_tables_init in
 ;   src/crypto/shared/mul_tables.s:32; reu_mul_init in src/boot.s:31;
 ;   mul_dma_lo/hi in src/data.s:123) — but the library's manifest still
-;   exports LIB_NISTCURVES_SHARED_PRIMITIVES = $0007, i.e. it claims to
-;   own all three. The disjointness assert would therefore FAIL, and
-;   correctly so: we resolve the double-ownership by *deleting archive
-;   members* (tools/integration/build_nistcurves_p256.sh drops
-;   mul_8x8.o and data_shared.o) rather than by the contract's
-;   `SHARED_*` deferral switches, so the shipped mask describes the
-;   upstream archive and not the one we link. The fix is to rebuild
-;   lib_manifest.o with those switches — the wrapper already does
-;   exactly this for zp_config.o — and is sequenced in c64-https#70.
-;   Until then the tripwire below pins the value we measured.
+;   claims ownership of primitives we provide ($0007 on the REU archive,
+;   $0005 on the FP_ONCHIP_MUL one at the v0.9.1 pin). The disjointness
+;   assert would therefore FAIL, and correctly so: we resolve the
+;   double-ownership by *deleting archive members*
+;   (tools/integration/build_nistcurves_p256.sh drops mul_8x8.o and
+;   data_shared.o, and rebuilds mul_8x8_onchip.o under the SHARED_*
+;   switches) rather than by declaring the deferral in the manifest, so
+;   the shipped mask describes the upstream archive and not the one we
+;   link. After our surgery the linked archive owns NONE of the three.
+;   The clean fix is to rebuild the lib_manifest object with those
+;   switches — the wrapper already does exactly this for zp_config —
+;   and is sequenced in c64-https#70. It is deliberately not done here:
+;   it changes what the manifest reports for every consumer-side §5
+;   check at once, which is not a change to make under release
+;   pressure. Until then the tripwire below pins the values we measured.
 ;
-; §5 LIB_NISTCURVES_SHARED_CONSUMES (contract v0.5.0): absent at the
-;   v0.6.0 pin. Nothing to import.
+; §5 LIB_NISTCURVES_SHARED_CONSUMES (contract v0.5.0): present from the
+;   v0.9.0 pin ($0007 REU / $0005 onchip, mirroring PRIMITIVES). Not
+;   imported yet — the §8.0 coverage assert it enables
+;   (`CONSUMES & ~(APP_OWNED | LIB_OWNED) = 0`) is part of the same #70
+;   work as the deferral switches above, and asserting on a mask that
+;   describes the pre-surgery archive would encode the same mismatch
+;   twice.
 
 .include "constants.inc"
 
@@ -156,14 +166,50 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; See the header note: the contract's disjointness assert is not
 ; writable here yet. What IS checkable is that upstream's ownership
 ; claim has not moved out from under the archive surgery in
-; tools/integration/build_nistcurves_p256.sh. Measured $0007 on both
-; the REU and FP_ONCHIP_MUL variants at the v0.6.0 pin.
+; tools/integration/build_nistcurves_p256.sh.
 ;
-; If this fires, upstream changed which §8 primitives it owns. Re-derive
-; which archive members the wrapper must drop (or which `SHARED_*`
-; deferral switches it must pass) BEFORE updating the expected value.
+; THE MASK IS PROFILE-DEPENDENT. This is the same exported symbol in
+; both builds, but the REU and FP_ONCHIP_MUL archives ship different
+; `lib_manifest*` objects, so its VALUE differs by profile and one
+; expected constant cannot describe both. Measured with od65 on the
+; staged archives:
+;
+;   profile                    v0.6.0   v0.9.1
+;   default (REU)              $0007    $0007
+;   FP_ONCHIP_MUL              $0007    $0005    <- split
+;   FP_ONCHIP_MUL + comb       $0007    $0005    <- split
+;
+; $0007 -> $0005 is the §8.2 `reu_mul` bit dropping out, upstream at
+; **v0.8.0** (c64-nist-curves #78). It is correct behaviour, not drift:
+; the onchip profile has no REU multiply path, so owning nothing there
+; is the truthful claim, and the CHANGELOG records that a profile switch
+; drops the bit from `SHARED_PRIMITIVES` and `SHARED_CONSUMES` alike.
+; An earlier revision of this file pinned $0007 for both profiles —
+; correct when measured at v0.6.0, and the reason every onchip build
+; failed to link at the v0.9.1 pin.
+;
+; THE ARCHIVE SURGERY IS UNAFFECTED. Checked rather than assumed, since
+; the wrong remedy here is expensive: the §8 primitive bodies each
+; archive actually exports are the SAME SET at v0.6.0 and v0.9.1 —
+; REU ships only `reu_mul_init`/`reu_mul_tables_init` (never pulled;
+; src/boot.s:31 exports its own, so ld65 has no undefined symbol to
+; resolve from the member), onchip ships `sqtab_lo`/`sqtab_hi` (absolute
+; equates baked to LIB_SHARED_SQTAB_BASE=$BC00, not bodies) plus
+; `reu_fetch_mul_row`, `og_common`, `og_src_ld`. Neither ships
+; `sqtab_init`, `ct_mul_8x8`, `mul_8x8`, `poly_prod_*` or `smc_*`.
+; So `build_nistcurves_p256.sh`'s member drops need no re-derivation
+; for this change, and none was made.
 .import LIB_NISTCURVES_SHARED_PRIMITIVES
-.assert LIB_NISTCURVES_SHARED_PRIMITIVES = APP_OWNED, lderror, "libs/nistcurves shared-primitive ownership claim moved — re-derive the archive member drops in tools/integration/build_nistcurves_p256.sh before touching this assert"
+
+.ifdef USE_NISTCURVES_ONCHIP
+  ; FP_ONCHIP_MUL, and the comb variant which sets the same -D.
+  NISTCURVES_EXPECTED_PRIMITIVES = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_CT_MUL_8X8
+  .assert LIB_NISTCURVES_SHARED_PRIMITIVES = NISTCURVES_EXPECTED_PRIMITIVES, lderror, "libs/nistcurves FP_ONCHIP_MUL archive: SHARED_PRIMITIVES is not $0005 (sqtab|ct_mul_8x8). This mask is PROFILE-DEPENDENT - the onchip archive drops the reu_mul bit that the REU archive keeps, so read the onchip lib_manifest, not the REU one. If upstream moved it again, update the USE_NISTCURVES_ONCHIP arm in src/lib_contract_asserts.s; only re-derive the wrapper's member drops if the archive's exported primitive BODIES changed too."
+.else
+  ; Default REU profile: all three.
+  NISTCURVES_EXPECTED_PRIMITIVES = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SHARED_PRIMITIVES_CT_MUL_8X8
+  .assert LIB_NISTCURVES_SHARED_PRIMITIVES = NISTCURVES_EXPECTED_PRIMITIVES, lderror, "libs/nistcurves REU archive: SHARED_PRIMITIVES is not $0007 (sqtab|reu_mul|ct_mul_8x8). This mask is PROFILE-DEPENDENT - the onchip archive legitimately reports $0005, so check which profile this build selected. If upstream moved the REU value, update the .else arm in src/lib_contract_asserts.s; only re-derive the wrapper's member drops if the archive's exported primitive BODIES changed too."
+.endif
 
 
 ; =====================================================================
