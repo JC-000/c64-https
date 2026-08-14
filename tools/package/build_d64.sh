@@ -1,97 +1,95 @@
 #!/usr/bin/env bash
 # =============================================================================
-# tools/package/build_d64.sh - Assemble dist/c64-https.d64 and finalize the
-# release manifest.
+# tools/package/build_d64.sh — assemble the release 1541 disk images.
 #
-# Bundles both UCI PRGs (produced by build_prgs.sh) onto a single 1541 disk
-# image via VICE's `c1541`, verifies the directory reads back, then appends the
-# D64 section and the final sha256 checksum section to dist/MANIFEST.txt. This
-# script runs LAST in the package flow so its checksum section covers every
-# artifact in dist/ (PRGs, the D64, and the optional listener zip).
+# Produces, from the PRGs build_prgs.sh left in dist/:
 #
-# Disk filenames are <=16 char PETSCII:
-#   HTTPS-REU   <- c64-https-uci-reu.prg    (default REU verify profile)
-#   HTTPS-NOREU <- c64-https-uci-onchip.prg (on-chip / no-REU verify path)
+#   c64-https-<key>.d64        one per variant, one PRG each (4 images)
+#   c64-https-<backend>.d64    one per backend, both of that backend's
+#                              profiles on one disk (2 images)
 #
-# Usage:  tools/package/build_d64.sh
+# WHY NOT ONE DISK WITH ALL FOUR: it does not fit, and that is arithmetic, not
+# preference. A .d64 holds 664 free blocks = 168,656 usable bytes; the four
+# PRGs total ~220 KB (2 x 62,977 UCI + 2 x 47,105 ip65). Each backend's pair
+# does fit (UCI ~496 blocks, ip65 ~371), so the per-backend disk is the largest
+# useful bundle. The per-variant singles are the "I know what I want, give me
+# one disk" case and are what the release notes point at.
+#
+# Every image is bootable with LOAD"*",8,1 (the wanted PRG is the first file on
+# the single-variant disks). File names are shared between the single and the
+# per-backend disk so a user only ever learns one name.
+#
+# Usage:  tools/package/build_d64.sh     [C1541=... to override the tool]
 # =============================================================================
-set -eo pipefail
+set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"
+# shellcheck source=tools/package/_common.sh
+. "$PROJECT_ROOT/tools/package/_common.sh"
 
-DIST="$PROJECT_ROOT/dist"
-MANIFEST="$DIST/MANIFEST.txt"
-D64="$DIST/c64-https.d64"
 C1541="${C1541:-c1541}"
-
-REU_PRG="$DIST/c64-https-uci-reu.prg"
-ONCHIP_PRG="$DIST/c64-https-uci-onchip.prg"
+D64_LIST="$DIST/d64-listings.txt"   # write_manifest.sh reads this
 
 if ! command -v "$C1541" >/dev/null 2>&1; then
-    echo "ERROR: c1541 not found in PATH (ships with VICE). Set C1541=... to override." >&2
-    exit 1
-fi
-for f in "$REU_PRG" "$ONCHIP_PRG"; do
-    if [ ! -f "$f" ]; then
-        echo "ERROR: missing $f — run tools/package/build_prgs.sh first." >&2
-        exit 1
-    fi
-done
-if [ ! -f "$MANIFEST" ]; then
-    echo "ERROR: missing $MANIFEST — run tools/package/build_prgs.sh first." >&2
+    echo "ERROR: c1541 not found in PATH (it ships with VICE). Set C1541=... to override." >&2
     exit 1
 fi
 
-# --- Assemble the disk image ---
-# c1541 -write takes a host path + a target 1541 filename; PRGs are written as
-# PRG-type files. -format wipes/labels the image first.
-rm -f "$D64"
-echo "[package] formatting $D64"
-"$C1541" -format "c64-https,01" d64 "$D64" >/dev/null
-echo "[package] writing PRGs to disk image"
-"$C1541" -attach "$D64" \
-    -write "$REU_PRG"    "https-reu,p" \
-    -write "$ONCHIP_PRG" "https-noreu,p" >/dev/null
+# c1541 interleaves its own chatter with the directory: a harmless OPENCBM line
+# when the real-drive backend is absent (i.e. always, on a dev box), plus
+# attach/detach/recognised notices naming absolute host paths. Strip all of it
+# so the recorded listing is the disk directory and nothing machine-specific —
+# otherwise the manifest would differ between two builders' checkouts.
+c1541_list() {
+    "$C1541" -attach "$1" -list \
+        | grep -Ev '^(OPENCBM:|D64 disk image |Unit [0-9]+ drive )'
+}
 
-# --- Read back the directory to verify ---
-# c1541 prints a harmless "OPENCBM: ... libopencbm.dylib failed!" line when the
-# real-drive backend is absent (always, on a dev box); drop it so the recorded
-# listing is just the disk directory.
-echo "[package] directory listing:"
-LISTING="$("$C1541" -attach "$D64" -list | grep -v '^OPENCBM:')"
-echo "$LISTING"
+: > "$D64_LIST"
 
-# --- Append D64 section to the manifest ---
-{
-    echo
-    echo "== d64 image =="
-    echo "c64-https.d64 (1541 image, both UCI PRGs)"
-    echo "directory listing:"
-    echo "----------------------------------------------------------------"
-    echo "$LISTING"
-    echo "----------------------------------------------------------------"
-} >> "$MANIFEST"
+# make_disk <image path> <disk label> <disk id> <host-prg> <1541-name> [...]
+make_disk() {
+    local image="$1" label="$2" id="$3"; shift 3
+    rm -f "$image"
+    "$C1541" -format "$label,$id" d64 "$image" >/dev/null
+    local -a writes=()
+    while [ "$#" -gt 0 ]; do
+        [ -f "$1" ] || { echo "ERROR: missing $1 — run build_prgs.sh first." >&2; exit 1; }
+        writes+=(-write "$1" "$2,p")
+        shift 2
+    done
+    "$C1541" -attach "$image" "${writes[@]}" >/dev/null
+    local listing
+    listing="$(c1541_list "$image")"
+    echo "[package] $(basename "$image"):"
+    printf '%s\n' "$listing" | sed 's/^/[package]   /'
+    {
+        echo "image=$(basename "$image")"
+        printf '%s\n' "$listing"
+        echo "---"
+    } >> "$D64_LIST"
+}
 
-# --- Final section: sha256 of every artifact in dist/ (except the manifest) ---
-{
-    echo
-    echo "== sha256 checksums =="
-} >> "$MANIFEST"
-
-# Prefer sha256sum; fall back to `shasum -a 256` on macOS.
-if command -v sha256sum >/dev/null 2>&1; then
-    SHA_CMD=(sha256sum)
-else
-    SHA_CMD=(shasum -a 256)
-fi
-
-# Stable, sorted list of artifacts, manifest excluded so the checksum section
-# never has to hash the file it is being written into. BSD find (macOS) lacks
-# -printf, so strip the leading ./ with sed.
-( cd "$DIST" && find . -maxdepth 1 -type f ! -name 'MANIFEST.txt' | sed 's|^\./||' | sort ) \
-| while IFS= read -r f; do
-    ( cd "$DIST" && "${SHA_CMD[@]}" "$f" ) >> "$MANIFEST"
+# --- One image per variant ----------------------------------------------------
+for line in "${PACKAGE_VARIANTS[@]}"; do
+    key="$(variant_field "$line" 1)"
+    prg="$(variant_field "$line" 2)"
+    name="$(variant_field "$line" 4)"
+    # Disk label is the variant key: <=16 PETSCII chars, and it makes the
+    # directory header self-identifying when four near-identical disks are
+    # sitting in a downloads folder.
+    make_disk "$DIST/c64-https-$key.d64" "$key" "01" "$DIST/$prg" "$name"
 done
 
-echo "[package] wrote $D64 and finalized $MANIFEST"
+# --- One image per backend, carrying that backend's profiles ------------------
+for backend in $(package_backends); do
+    args=()
+    for line in "${PACKAGE_VARIANTS[@]}"; do
+        [ "$(variant_field "$line" 5)" = "$backend" ] || continue
+        args+=("$DIST/$(variant_field "$line" 2)" "$(variant_field "$line" 4)")
+    done
+    make_disk "$DIST/c64-https-$backend.d64" "c64-https $backend" "01" "${args[@]}"
+done
+
+echo "[package] disk images complete."

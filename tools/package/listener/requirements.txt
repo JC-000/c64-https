@@ -1,5 +1,0 @@
-# c64-https test listener dependencies.
-# The TLS server itself uses only the Python stdlib `ssl` module; the sole
-# third-party requirement is `cryptography`, used by gen_certs.py to mint
-# the self-signed ECDSA P-256 certificate.
-cryptography>=41.0

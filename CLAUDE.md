@@ -541,7 +541,7 @@ The scripts:
                             `EXTERNAL_PORT`, default 4433) skips the
                             inline listener + repo-cert load and points
                             the C64 at an out-of-band server — e.g. the
-                            packaged `dist/c64-https-listener.zip`
+                            packaged `dist/c64-https-listener.py`
                             listener; pass criteria then come from
                             C64-side state only. Default OFF.
                             Each run writes a timestamped artifact dir
@@ -1462,50 +1462,74 @@ ld65 and ca65 edge cases; they are intentional and should stay:
 
 ## Packaging
 
-`make package` builds the release artifacts into `dist/` (gitignored):
+`make package` builds the release artifacts into `dist/` (gitignored).
+**All four backend x profile combinations ship**, `make clean` between
+every one:
 
-  - `c64-https-uci-reu.prg`    — default REU profile (`make BACKEND=uci`).
-                                 Requires REU hardware/enabled; fastest
-                                 at stock 1 MHz (the REU profile is the
-                                 right default below ~7 MHz).
-  - `c64-https-uci-onchip.prg` — `USE_NISTCURVES_ONCHIP=1`. **No REU
-                                 required** — for stock machines without
-                                 an REU (~3.9x the verify CPU work; at
-                                 1 MHz expect ~23 min for the ECDSA
-                                 verify alone).
-  - `c64-https.d64`            — both PRGs on one 1541 image
-                                 (`HTTPS-REU`, `HTTPS-NOREU`), built
-                                 with VICE's `c1541`.
-  - `c64-https-listener.zip`   — self-contained Python TLS 1.3 test
-                                 listener (source: `tools/package/
-                                 listener/`): `run.sh` creates a venv,
-                                 installs `cryptography`, **generates
-                                 fresh P-256 certs** (`gen_certs.py`),
-                                 and serves the canonical response.
-                                 Requires an OpenSSL 1.1.1+/3.x python
-                                 (refuses LibreSSL, e.g. macOS system
-                                 python, with a clear error).
-  - `MANIFEST.txt`             — sizes, git HEAD, sha256 checksums.
+  - `c64-https-uci-reu.prg`      `make BACKEND=uci`
+  - `c64-https-uci-onchip.prg`   `+ USE_NISTCURVES_ONCHIP=1`
+  - `c64-https-ip65-reu.prg`     `make BACKEND=ip65`
+  - `c64-https-ip65-onchip.prg`  `+ USE_NISTCURVES_ONCHIP=1`
 
-Scripts live in `tools/package/` (`build_prgs.sh`, `build_d64.sh`,
-`build_listener_zip.sh`); each variant build does `make clean` first
-(flag changes are not tracked by make). Builds are deterministic —
-`make package` reproduces the validated hashes at the same HEAD.
+ip65 is now packaged (it was previously excluded on a link failure that
+the #68 refit closed) — it is the only artifact that serves a stock C64
++ RR-Net cartridge, and `ip65-onchip` is the only image a bone-stock
+machine with no REU can run at all.
 
-**ip65 is not packaged yet, but it now LINKS.** The historical blocker
-(`BSS overflows CRYPTO_COLD_SHADOW by 1406 bytes`) was closed by the
-#68 refit — the overflow was exactly `LIB_NISTCURVES_P256_BSS`, which
-now time-shares `cert_buf`'s RAM via the `SCRATCH_UNION` region (their
-lifetimes are disjoint; see the cfg comment block and the lifetime
-contract at `cert_buf` in `src/der_decode.s`). Both ip65 profiles
-build, and the REU-less ip65+onchip image is validated end-to-end in
-VICE (see "ip65 / stock-C64 wall-clock"). Adding it to `make package`
-is a live option — it is the only artifact that serves a stock C64 +
-RR-Net cartridge, which today has no shipped PRG at all. Note
-c64-nist-curves#54 is CLOSED-as-completed and already inside our pin,
-so it is not headroom in reserve. The comb profile stays deliberately excluded (REU
-bank 2 residency + ~40 min boot precompute at 1 MHz make it wrong for
-a general release).
+The REU-vs-onchip guidance in `MANIFEST.txt` is the measured **~18 MHz**
+crossover, not the older ~7 MHz figure: the REU profile carries a
+wall-clock floor (DMA anchored to the ~1 MHz bus) that turbo cannot
+touch, the onchip profile has none, and on a U64E the sign flips between
+the 16 and 20 MHz CPU-speed settings. See the ECDSA wall-clock section.
+
+Disk images:
+
+  - `c64-https-<variant>.d64` x4 — one PRG each, `LOAD"*",8,1`
+  - `c64-https-uci.d64`, `c64-https-ip65.d64` — both of that backend's
+    profiles on one disk
+
+There is deliberately **no all-in-one image**: the four PRGs total 868
+blocks against a .d64's 664 free. Each backend's pair does fit (UCI 496,
+ip65 372), which makes the per-backend disk the largest useful bundle.
+
+`c64-https-listener.py` is a **single self-extracting Python file** (was
+a zip + `run.sh` + venv + pip). It has **no third-party dependency at
+all**: `cryptography` was only ever used to mint the self-signed P-256
+cert, and `tools/package/listener/gen_certs.py` now does that in pure
+Python (P-256 point arithmetic + minimal DER encoder + ECDSA-SHA256).
+TLS was always stdlib `ssl`. What remains is a property of the
+*interpreter*, not an installable package — an `ssl` with TLS 1.3
+(OpenSSL 1.1.1+); macOS's `/usr/bin/python3` is LibreSSL 2.8.3 and
+cannot serve this client at any price. That is detected at startup and
+reported in one line (never a traceback, `--debug` restores it), and it
+is stated in `MANIFEST.txt` rather than left to be discovered.
+`--selftest` proves the whole path with no C64: mint cert, serve on
+loopback, drive it with a Python `ssl` client, then again with `openssl
+s_client -ciphersuites TLS_CHACHA20_POLY1305_SHA256` — the C64's only
+suite, which the stdlib client can never force because CPython exposes
+no API to restrict TLS 1.3 suites.
+
+Scripts live in `tools/package/`: `_common.sh` (the variant matrix — one
+line per shipped PRG, every other script derives from it),
+`build_prgs.sh`, `build_d64.sh`, `build_listener.py`, `write_manifest.sh`.
+Nothing is version-specific; re-running `make package` after a submodule
+bump regenerates every artifact with zero edits.
+
+`make package-verify` is the acceptance gate (`tools/package/
+verify_release.py`): rebuilds every variant and compares **PRG** hashes
+(object hashes are not evidence — ca65 stamps build time into every
+`.o`), reads each PRG back out of its .d64 with `c1541` and
+byte-compares, boots every image in VICE asserting the banner, and runs
+the listener selftest. `SKIP_REBUILD` / `SKIP_VICE` / `SKIP_LISTENER`
+narrow it.
+
+Booting a .d64 in VICE needs `-trapdevice8 +drive8truedrive`: under true
+drive emulation the ~250-block load never completes inside any sane
+budget, and the symptom is a screen stuck on `LOADING` that looks like a
+bad image rather than a slow one. `verify_release.py` passes both flags.
+
+The comb profile stays deliberately excluded (REU bank 2 residency +
+~40 min boot precompute at 1 MHz make it wrong for a general release).
 
 Validation record (2026-07-27, HEAD cb6eab4):
   - onchip PRG passes the 3-vector ECDSA KAT in VICE **without** REU

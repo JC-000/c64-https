@@ -231,7 +231,7 @@ ALL_OBJS := $(TOP_OBJS) $(CRYPTO_OBJS) $(CRYPTO_SHARED_OBJS) $(NET_OBJS)
 PRG    := build/c64-https.prg
 LABELS := build/labels.txt
 
-.PHONY: all link run clean ip65-libs ip65-blob package
+.PHONY: all link run clean ip65-libs ip65-blob package package-verify
 
 all: $(PRG)
 
@@ -443,17 +443,28 @@ run: $(PRG)
 clean:
 	rm -rf build
 
-# Release packaging: build the PRG matrix, bundle both UCI PRGs onto a D64,
-# and write dist/MANIFEST.txt (sizes, git HEAD, sha256 checksums). The scripts
-# run `make clean` between flag combinations themselves, so `package` does not
-# depend on any build artifact. build_listener_zip.sh is skipped gracefully
-# when absent so a partial checkout can still package the PRGs.
+# Release packaging: build all four PRG variants (both backends x both crypto
+# profiles), put each on its own D64 plus a per-backend D64, generate the
+# single-file test listener, and write dist/MANIFEST.txt.
+#
+# The scripts run `make clean` between flag combinations themselves, so
+# `package` deliberately depends on no build artifact — and re-running it after
+# a submodule bump regenerates everything with no edits anywhere. Order
+# matters: build_prgs.sh writes dist/build-info.txt and build_d64.sh writes
+# dist/d64-listings.txt, both of which write_manifest.sh consumes.
+#
+# PACKAGE_PYTHON must be an interpreter that can run the listener's own
+# selftest — see `make package-verify`.
+PACKAGE_PYTHON ?= python3
 package:
 	bash tools/package/build_prgs.sh
-	@if [ -x tools/package/build_listener_zip.sh ]; then \
-	    echo "[package] running tools/package/build_listener_zip.sh"; \
-	    bash tools/package/build_listener_zip.sh; \
-	else \
-	    echo "[package] tools/package/build_listener_zip.sh absent — skipping listener zip"; \
-	fi
 	bash tools/package/build_d64.sh
+	$(PACKAGE_PYTHON) tools/package/build_listener.py
+	bash tools/package/write_manifest.sh
+
+# Acceptance gate for the release artifacts: rebuild every PRG a second time
+# and compare PRG hashes, boot every D64 in VICE and assert the banner, and run
+# the built listener end to end against a Python ssl client. Measures; does not
+# assert. Run it after `make package`.
+package-verify:
+	$(PACKAGE_PYTHON) tools/package/verify_release.py
