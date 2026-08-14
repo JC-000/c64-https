@@ -292,9 +292,11 @@ def _decode_screen_ram(data: bytes) -> str:
 def main() -> int:
     if not PRG_PATH.is_file():
         print(f"ERROR: PRG not found at {PRG_PATH}", file=sys.stderr)
+        print("Run: make BACKEND=uci", file=sys.stderr)
         return 2
     if not LABELS_PATH.is_file():
         print(f"ERROR: labels.txt not found", file=sys.stderr)
+        print("Run: make BACKEND=uci", file=sys.stderr)
         return 2
 
     labels = _load_labels()

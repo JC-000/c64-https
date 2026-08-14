@@ -256,7 +256,7 @@ python3 tools/uci/test_http_local.py     # HTTP GET against local listener
 python3 tools/uci/test_https_local.py    # HTTPS GET (TLS 1.3 + ECDSA-P256)
 ```
 
-`test_https_local.py` is the end-to-end HTTPS demo (UCI backend only): it boots the U64E at 48 MHz turbo, connects to a local Python TLS listener using the test cert under `tools/https_e2e/certs/`, and confirms a full TLS 1.3 handshake + HTTP GET. With `DEBUG_CAPTURE=1`, each run writes a timestamped artifact directory under `$UCI_DEBUG_DIR` (default `/tmp/uci_https_debug/`) with raw 6510 bus trace, TLS state snapshot, and listener result.
+`test_https_local.py` is the end-to-end HTTPS demo (UCI backend only): it boots the U64E at 48 MHz turbo, connects to a local Python TLS listener using the test cert under `tools/https_e2e/certs/`, and confirms a full TLS 1.3 handshake + HTTP GET. That cert is gitignored throwaway material — the directory is empty in a fresh clone and the pair is generated on first use, with no dependency beyond the standard library (`python3 tools/https_e2e/ensure_certs.py` mints it by hand). With `DEBUG_CAPTURE=1`, each run writes a timestamped artifact directory under `$UCI_DEBUG_DIR` (default `/tmp/uci_https_debug/`) with raw 6510 bus trace, TLS state snapshot, and listener result.
 
 Environment variables honored by `test_https_local.py`:
 

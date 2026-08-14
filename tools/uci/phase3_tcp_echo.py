@@ -311,6 +311,7 @@ def main() -> int:
         return 2
     if not LABELS_PATH.is_file():
         print(f"ERROR: labels.txt not found at {LABELS_PATH}", file=sys.stderr)
+        print("Run: make BACKEND=uci", file=sys.stderr)
         return 2
 
     labels = _load_labels()

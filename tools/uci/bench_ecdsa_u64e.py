@@ -358,9 +358,11 @@ def _keep_cycle(word: int) -> bool:
 def main() -> int:
     if not PRG_PATH.is_file():
         print(f"ERROR: PRG not found at {PRG_PATH}", file=sys.stderr)
+        print("Run: make BACKEND=uci", file=sys.stderr)
         return 2
     if not LABELS_PATH.is_file():
         print(f"ERROR: labels.txt not found", file=sys.stderr)
+        print("Run: make BACKEND=uci", file=sys.stderr)
         return 2
     if not VECTORS_PATH.is_file():
         print(f"ERROR: vectors JSON not found at {VECTORS_PATH}."

@@ -136,6 +136,49 @@ LABELS_PATH = REPO_ROOT / "build" / "labels.txt"
 CERT_PATH = REPO_ROOT / "tools" / "https_e2e" / "certs" / "server.pem"
 KEY_PATH = REPO_ROOT / "tools" / "https_e2e" / "certs" / "server.key"
 
+# The cert/key are gitignored throwaway test material, so a fresh clone has
+# none and this script used to die with "cert/key not found" (issue #93).
+# They are generated on demand instead — see _ensure_certs_or_fail(), called
+# from main() and skipped under EXTERNAL_LISTENER=1, which by contract loads
+# no repo certs at all.  CERT_PROFILE is what the P-384 sibling overrides.
+CERT_PROFILE = "p256"
+
+
+def _ensure_certs_or_fail() -> int:
+    """Generate the local test cert pair if absent.  0 on success, 2 on failure."""
+    global CERT_PATH, KEY_PATH
+
+    if CERT_PATH.is_file() and KEY_PATH.is_file():
+        return 0
+
+    https_e2e_dir = str(REPO_ROOT / "tools" / "https_e2e")
+    if https_e2e_dir not in sys.path:
+        sys.path.insert(0, https_e2e_dir)
+    try:
+        from ensure_certs import cert_paths, ensure_certs  # noqa: PLC0415
+    except ImportError as exc:
+        print(f"ERROR: cert/key not found at {CERT_PATH} / {KEY_PATH}, and "
+              f"the generator could not be imported ({exc})", file=sys.stderr)
+        return 2
+
+    # Only generate into the canonical location.  If someone has pointed
+    # CERT_PATH somewhere else, generating the default pair would not help,
+    # so say what is actually missing instead.
+    canonical = cert_paths(CERT_PROFILE)
+    if (CERT_PATH, KEY_PATH) != canonical:
+        print(f"ERROR: cert/key not found at {CERT_PATH} / {KEY_PATH}\n"
+              f"       (these are not the generated {CERT_PROFILE} paths "
+              f"{canonical[0]} / {canonical[1]}, so they must be supplied)",
+              file=sys.stderr)
+        return 2
+
+    try:
+        CERT_PATH, KEY_PATH = ensure_certs(CERT_PROFILE)
+    except SystemExit as exc:          # one-line actionable message, no traceback
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
 # NOTE: ROUTINE_ADDR and friends MUST sit in a region that does NOT
 # collide with the production CRYPTO_OVERLAY layout.  Under
 # USE_X25519_SIBLING=1 the sibling X25519 rodata + bss buffers occupy
@@ -1178,15 +1221,18 @@ def _process_debug_trace(cap_result,
 def main() -> int:
     if not PRG_PATH.is_file():
         print(f"ERROR: PRG not found at {PRG_PATH}", file=sys.stderr)
+        print("Run: make BACKEND=uci", file=sys.stderr)
         return 2
     if not LABELS_PATH.is_file():
         print(f"ERROR: labels.txt not found", file=sys.stderr)
+        print("Run: make BACKEND=uci", file=sys.stderr)
         return 2
-    if not EXTERNAL_LISTENER and (not CERT_PATH.is_file()
-                                  or not KEY_PATH.is_file()):
-        print(f"ERROR: cert/key not found at {CERT_PATH} / {KEY_PATH}",
-              file=sys.stderr)
-        return 2
+    # EXTERNAL_LISTENER=1 serves TLS out of band and loads no repo cert, so
+    # do not generate one it will never use.
+    if not EXTERNAL_LISTENER:
+        rc = _ensure_certs_or_fail()
+        if rc:
+            return rc
 
     labels = _load_labels()
     required = [

@@ -6,6 +6,11 @@ These are self-signed certs used by the local TLS 1.3 listener
 against `www.foo.bar`. They are NOT trust-anchors for anything; do not
 deploy them anywhere real.
 
+**This directory is empty in a fresh clone.** The cert files are
+gitignored (see the repo `.gitignore`) because they are throwaway
+material that should be minted locally, not shipped. Nothing is wrong
+if `ls` shows only this README.
+
 Two cert profiles are supported:
 
   server.pem      / server.key       -- P-256 (secp256r1 / prime256v1),
@@ -16,23 +21,48 @@ Two cert profiles are supported:
 CN is `www.foo.bar` and SAN covers `foo.bar` + `www.foo.bar` for both.
 Validity is 10 years from generation.
 
-The cert files themselves are gitignored (see the repo `.gitignore`);
-they are generated on demand by the listener.
-
 Auto-generation (default path)
 ------------------------------
 
-Both pairs are auto-generated lazily by `https_listener._ensure_certs_*()`
-the first time the listener is started under each profile, using the
-Python `cryptography` package. To force regeneration, delete the
-files and start the listener once with the matching `cert_profile`.
+Each pair is generated the first time something needs it, and reused
+thereafter. Every in-tree consumer goes through
+`tools/https_e2e/ensure_certs.py`, which delegates to
+`tools/package/listener/gen_certs.py` so the in-tree tests and the
+packaged listener mint identical material:
+
+  - `https_listener.py` (via `_ensure_certs(cert_profile)`), and so
+    everything built on it -- `tests/test_vice_https_macos.py`,
+    `evil_listener.py`, `tools/uci/test_https_bad_finished.py`
+  - `tools/uci/test_https_local.py`, which inlines its own listener
+    (this one used to fail with `ERROR: cert/key not found` instead --
+    issue #93)
+  - `tools/uci/test_https_local_p384.py`, same, P-384 profile
+
+Generation needs nothing beyond the Python standard library: PR #96
+reimplemented `gen_certs.py` in pure Python (curve arithmetic, a
+minimal DER encoder, ECDSA) so the packaged listener has no
+third-party dependency, and the P-384 profile rides on the same code.
+No pip, no venv.
+
+Under `EXTERNAL_LISTENER=1` no repo cert is loaded or generated at
+all, by design: the server is out of band.
+
+Minting a pair by hand
+----------------------
+
+    python3 tools/https_e2e/ensure_certs.py                  # P-256
+    python3 tools/https_e2e/ensure_certs.py --profile p384   # P-384
+    python3 tools/https_e2e/ensure_certs.py --force          # regenerate
+
+To regenerate, either pass `--force` or delete the files and let the
+next run recreate them.
 
 Manual regeneration with openssl
 --------------------------------
 
-If you need to (re)create the P-384 pair without invoking the
-listener (e.g. for debugging with `openssl s_client` directly), the
-following openssl invocation produces the same cert:
+If you need to (re)create a pair without Python (e.g. for debugging
+with `openssl s_client` directly), this produces an equivalent P-384
+cert:
 
     cat > /tmp/p384_san.cnf <<'EOF'
     [req]
@@ -56,8 +86,8 @@ following openssl invocation produces the same cert:
         -days 3650 -sha384 -config /tmp/p384_san.cnf
 
 The P-256 pair can be (re)created the same way with
-`-name prime256v1` and `-sha256` — but the listener's auto-generator
-is the canonical source.
+`-name prime256v1` and `-sha256` -- but `ensure_certs.py` is the
+canonical source.
 
 Selecting which cert the listener presents
 ------------------------------------------
