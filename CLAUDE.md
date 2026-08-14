@@ -261,10 +261,38 @@ below for the post-W1 hot/cold split):
 
 ## Networking backend ABI
 
-Public net API is fronted by `src/net_abi.inc`. TLS/HTTP sources consume
-networking only through those symbols. Switching backend = picking a
-different `cfg/c64-https-$(BACKEND).cfg` and linking different
-`src/net/<backend>/*.o` files.
+Switching backend = picking a different `cfg/c64-https-$(BACKEND).cfg`
+and linking different `src/net/<backend>/*.o` files.
+
+**`src/net_abi.inc` is documentation, not an enforced interface.** This
+section used to claim the net API was "fronted by" it and that TLS/HTTP
+consume networking "only through those symbols". Both are false, and the
+distinction is load-bearing for anyone sizing the §13 work (issue #70):
+the starting point is prose, not an interface. Measured 2026-08-14:
+
+  - **Nothing `.include`s it.** `grep -rn 'net_abi' src/ tools/ cfg/
+    Makefile` returns only comments. It is not in the build, so none of
+    its twelve `.import`s is checked by anything.
+  - **Declared and used surfaces overlap in 6 symbols out of 17.** The
+    surface TLS/HTTP/boot actually import is `net_init`, `net_dhcp`,
+    `net_poll`, `net_print_ip`, `net_dns_resolve`, `net_tcp_connect`,
+    `net_tcp_close`, `net_tcp_send`, `net_send_len`, `net_recv_byte`,
+    `net_banner_str` (`src/boot.s:107-114`, `src/http.s:61-67`,
+    `src/tls_record_io.s:28-30`, `src/tls13.s:96`). Five of those are
+    absent from the header; six of the header's are imported by nobody.
+  - **The ip65 backend does not provide half of what the header
+    declares** — no `net_dhcp_acquire`, `net_tcp_set_recv_cb`,
+    `net_local_ip`, `net_resolved_ip`, `net_last_error` or
+    `net_tcp_state` (`src/net/ip65/net.s:28` calls them "deferred to
+    Phase 7"; Phase 7 shipped). It exports `net_dhcp` instead — the
+    exact name c64-lib-contract §13.1 tells c64-wireguard to rename
+    away from. The UCI adapter exports both, so the divergence §13
+    exists to stop also runs between our own two backends.
+  - `net_last_error` in particular exists **only** under UCI, so ip65
+    has no error channel at all.
+
+Consequence: the symbol list below describes an intent, not a contract
+the linker checks. Treat it as a TODO list until #70's item P1 lands.
 
 Current backends:
   - `src/net/ip65/` — ip65/RR-Net (cs8900a driver). The ip65 blob is
@@ -278,10 +306,12 @@ Current backends:
     produces a working PRG; `cfg/c64-https-uci.cfg` defines the
     UCI-specific memory map.
 
-Public symbols (see `src/net_abi.inc`):
-  net_init, net_poll, net_dhcp_acquire
-  net_tcp_connect, net_tcp_send, net_tcp_close, net_tcp_set_recv_cb
-  net_dns_resolve
+Symbols declared in `src/net_abi.inc` — aspirational, see the caveat
+above. UCI exports all twelve; ip65 exports only the six marked `*`:
+
+  net_init *, net_poll *, net_dhcp_acquire
+  net_tcp_connect *, net_tcp_send *, net_tcp_close *, net_tcp_set_recv_cb
+  net_dns_resolve *
   net_local_ip, net_resolved_ip, net_last_error, net_tcp_state
 
 ## UCI backend
