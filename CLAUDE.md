@@ -20,16 +20,34 @@ backend needs none of this):
 
     git submodule update --init --recursive
     make ip65-libs        # once per clone
+    make ip65-blob        # once per clone — `make` will NOT do this for you
     make
 
 `ip65-build/ip65-c64.bin` is a **gitignored local build artifact**
 (`.gitignore` line `ip65-build/*.bin`; `git ls-files ip65-build/` returns
-only `ip65.cfg` and `ip65_stub.s`), *not* a committed file. A plain `make`
-does try to build it, but the link step consumes ip65 `.lib` archives that
-the submodule does not ship — it ships the sources for them — so without
-`make ip65-libs` first it dies with:
+only `ip65.cfg` and `ip65_stub.s`), *not* a committed file.
+
+**A plain `make` does not build it and cannot.** `ip65-blob` is a phony
+target, and `src/net/ip65/ip65_blob.s` pulls the file in through a ca65
+`.incbin` that make's dependency graph never sees — so there is no rule
+connecting the two. A fresh clone therefore fails at assembly, before any
+link, with:
+
+    src/net/ip65/ip65_blob.s(22): Error: Cannot open include file
+    '../../../ip65-build/ip65-c64.bin': No such file or directory
+
+and it fails identically whether or not `make ip65-libs` has been run.
+Running `make ip65-blob` *without* the libs is what produces the other
+error you may see, since the blob's link step consumes ip65 `.lib`
+archives that the submodule ships sources for rather than binaries:
 
     ld65: Error: Input file '../ip65/ip65/ip65_tcp.lib' not found
+
+Both orderings are recoverable by running the four commands above in
+order. Verified end to end on 2026-08-14 from a clean `git clone` of
+master: plain `make` fails with the `.incbin` error, still fails after
+`make ip65-libs`, and succeeds after `make ip65-blob` — yielding the
+6,951 B blob (`cf1a5ff7...`) and a 47,105 B ip65 PRG.
 
 `make clean` only removes `build/`, so once built the blob survives and is
 never rebuilt; that persistence, not a committed file, is why the rebuild
