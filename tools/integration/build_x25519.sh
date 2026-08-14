@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# tools/integration/build_x25519.sh - Build c64-x25519 v0.6.0
+# tools/integration/build_x25519.sh - Build c64-x25519 v0.10.0
 # X25519 primitives as a resident .a archive linked into the main PRG.
 #
 # Optional sibling-library integration (Phase C.5). Produces
@@ -12,15 +12,32 @@
 #   - data buffers (x25_*, fe25519_tmp*, mul_*, sqr_*, a24_*, fe_p)
 #   - util (vic_blank, vic_unblank, bench helpers — pulled in if referenced)
 #
-# Submodule pin: v0.6.0 (95fdd70) — adopts c64-lib-contract §8.1 (the
-# canonical shared 1 KB quarter-square table) plus RAM reclamation in
-# x25519_init.s (bank-2 stash removed) and bench rehab (bench_start/stop
-# php/plp shape so jiffy-based benches measure real cycles again).
-# Earlier contract-§1/§2/§3/§5 adoption landed in v0.4.0-7-g4d1c752 and
-# remains in place: every ZP slot is `.exportzp`-ed (zp_config.s),
-# LIB_VERSION_*/LIB_ABI_VERSION absolute exports (lib_version.s),
-# X25519_REU_BANK configurable REU base (reu_config.s), and the
-# LIB_X25519_* aggregate manifest equates.
+# Submodule pin: v0.10.0 (68ae0ef). What the v0.6.0 -> v0.10.0 bump
+# changed that this wrapper had to be migrated through:
+#
+#   v0.7.0  RFC 7748 decodeUCoordinate fix (upstream #64) — adds the
+#           `x25_x1` buffer, declared in the BSS module below. This is
+#           a CORRECTNESS fix, not a refactor: v0.4.0-v0.6.0 return a
+#           deterministically wrong shared secret for any peer u with
+#           bit 255 set.
+#   v0.8.0  SPEC §4 segment-prefix migration (CODE -> LIB_X25519_CODE)
+#           plus the cold/init split (LIB_X25519_INIT_CODE). Handled by
+#           the segment-rewrite block near the bottom of this script.
+#           Also adds the X25519_ONCHIP_MUL no-REU profile.
+#   v0.9.0  contract v0.7.0/v0.5.0 manifest migration: lib_manifest.s,
+#           prefixed exports, SHARED_CONSUMES. Not staged — c64-https
+#           imports no contract manifest equate, so nothing to do.
+#   v0.10.0 LIB_ABI_VERSION 1 -> 2 (v0.9.0 erratum) + contract v0.7.4
+#           precalc macro. No source-level consumer impact here.
+#
+# Zero-page layout (src/zp_config.s) is BYTE-IDENTICAL across the whole
+# range — `git diff v0.6.0 v0.10.0 -- src/zp_config.s` is empty — so the
+# time-sharing analysis below did not need revisiting.
+#
+# Earlier contract-§1/§2/§3/§5 adoption remains in place: every ZP slot
+# is `.exportzp`-ed (zp_config.s), LIB_VERSION_*/LIB_ABI_VERSION
+# absolute exports (lib_version.s), X25519_REU_BANK configurable REU
+# base (reu_config.s), and the LIB_X25519_* aggregate manifest equates.
 #
 # Activated only when `make USE_X25519_SIBLING=1`. Default is OFF; the
 # in-tree src/crypto/fe25519.s + src/crypto/x25519.s remain the
@@ -148,8 +165,32 @@ REU_DEFINES=(-D X25519_REU_BANK=0)
 # own `sqtab_init` body collapses to a no-op stub
 # (libs/x25519/src/mul_8x8.s::sqtab_init .ifdef SHARED_SQTAB_INIT) so
 # the two libs don't duplicate work.
+#
+# THE BASE ADDRESS IS NOT $BC00 ON THIS PATH, AND SAYING SO SILENTLY
+# PRODUCES WRONG CRYPTO. `src/data.s` drops `mul_dma_lo` + `mul_dma_hi`
+# (512 B) from TABLES_BSS under `.ifndef USE_X25519_SIBLING` — the
+# sibling's own data module supplies them instead — so everything after
+# them in TABLES_BSS shifts down 512 B and `sqtab_lo` links at **$B800**
+# (`sqtab_hi` $BA00), not the $BC00 this script hardcoded for years.
+#
+# Nothing caught it because the two halves disagree in opposite
+# directions and neither is a link error: in-tree `sqtab_init` fills the
+# real table at $B800, while the sibling's `fe25519_sqr` mult66 path
+# reads $BC00 through the equate below. The link succeeds, boot
+# succeeds, and `x25519_scalarmult` returns a deterministically wrong
+# shared secret. Measured on the first build in which the sibling ever
+# linked: both RFC 7748 §5.2 vectors failed with correct `x25_x1`
+# masking, i.e. the ladder was right and the multiply table was not.
+#
+# The value is therefore paired with a post-link assertion in the
+# Makefile's $(PRG) recipe (the `ifeq ($(USE_X25519_SIBLING),1)` grep on
+# $(LABELS)), exactly as the USE_NISTCURVES_ONCHIP path already does for
+# `sqtab_reserved`. If TABLES_BSS is reordered again, the build fails
+# and names this variable, rather than the KATs failing somewhere
+# downstream — or worse, not being run at all.
+X25519_SQTAB_BASE="${X25519_SQTAB_BASE:-\$B800}"
 SQTAB_DEFINES=(
-    -D 'LIB_SHARED_SQTAB_BASE=$BC00'
+    -D "LIB_SHARED_SQTAB_BASE=$X25519_SQTAB_BASE"
     -D SHARED_SQTAB_INIT=1
 )
 
@@ -225,7 +266,7 @@ cat > "$STAGING/data_x25519_bss_raw.s" <<'BSS_EOF'
 .export fe25519_tmp1, fe25519_tmp2, fe25519_tmp3, fe25519_tmp4
 .export x25_x2, x25_z2, x25_x3, x25_z3
 .export x25_a, x25_b, x25_da, x25_cb, x25_e
-.export x25_scalar, x25_u, x25_result
+.export x25_scalar, x25_u, x25_result, x25_x1
 .export mul_cached_a, mul_src2_buf
 .export mul_dma_lo, mul_dma_hi, mul_dma_carry
 
@@ -252,6 +293,27 @@ x25_e:          .res 32, 0
 x25_scalar:     .res 32, 0
 x25_u:          .res 32, 0
 x25_result:     .res 32, 0
+
+; --- RFC 7748 decoded u-coordinate (upstream #64 fix, v0.7.0) ---
+;
+; x25519_scalarmult writes the bit-255-masked copy of x25_u here once
+; at ladder init, and the ladder's z_3 = x_1 * (DA-CB)^2 step reads
+; THIS buffer rather than x25_u.
+;
+; It exists because v0.4.0 stopped mutating the caller's x25_u (so a
+; caller's peer-key buffer survives the call) but left the x_1 read
+; pointing at the unmasked original. For any peer u with bit 255 set,
+; 2^255 = 19 (mod p), so x_1 desynchronized from the masked x_3 by 19
+; and x25519_scalarmult returned a deterministically wrong shared
+; secret. Broken v0.4.0 through v0.6.0 — i.e. throughout the pin this
+; wrapper previously staged.
+;
+; If this declaration is ever dropped, the sibling link fails on an
+; unresolved `x25_x1` import from x25519.s rather than silently
+; reverting to the bug. The behavioural gate is RFC 7748 §5.2 vector 2
+; in tools/test_x25519.py, whose u ends 0x93.
+        .align 32
+x25_x1:         .res 32, 0
 
 ; --- fe25519_mul optimization scratch (unaligned) ---
 ;
@@ -289,6 +351,7 @@ mul_dma_carry:  .res 256, 0
 .assert (x25_scalar & $1F) = 0, lderror, "x25_scalar must be 32-byte aligned"
 .assert (x25_u & $1F) = 0, lderror, "x25_u must be 32-byte aligned"
 .assert (x25_result & $1F) = 0, lderror, "x25_result must be 32-byte aligned"
+.assert (x25_x1 & $1F) = 0, lderror, "x25_x1 must be 32-byte aligned"
 BSS_EOF
 
 cat > "$STAGING/data_x25519_rodata_raw.s" <<'RODATA_EOF'
@@ -381,19 +444,101 @@ RODATA_EOF
 # sqtab_lo / sqtab_hi. The sibling's fe25519 + x25519_init imports those
 # symbols; the in-tree link satisfies them.
 
-# --- Route CODE segments to CRYPTO_CODE ---
-# The sibling uses `.segment "CODE"` (LOADER under c64-https) for all
-# code sources. constants.s has no segment directive (pure equates),
-# and the data was already split into purpose-built staged files above
-# (data_x25519_bss_raw.s + data_x25519_rodata_raw.s).
+# --- Route the sibling's code segments into c64-https segments ---
+#
+# Segment naming moved twice across the v0.6.0 -> v0.10.0 bump:
+#
+#   v0.6.0   `.segment "CODE"`               (single code segment)
+#   v0.8.0   `.segment "LIB_X25519_CODE"`    SPEC §4 prefix migration
+#            `.segment "LIB_X25519_INIT_CODE"`  cold/init split (#68)
+#   v0.10.0  unchanged from v0.8.0
+#
+# c64-https's cfgs do not declare the `LIB_X25519_*` names, so every
+# code segment is rewritten to a name both backend cfgs already carry.
+#
+# WHY THIS IS A `case`, NOT A LOOSE `sed`: the old rule matched the
+# literal `.segment "CODE"`, which does not exist anywhere in v0.10.0's
+# sources. A no-op rewrite is silent — the sources assemble fine and the
+# failure only surfaces at ld65 as an unplaced segment, several minutes
+# and one confusing error message later. The post-rewrite assertion
+# below therefore checks for *any* surviving `LIB_X25519_*` segment
+# rather than for the one name we happened to rewrite, so the next
+# upstream rename fails loudly here instead of at link time.
+#
+# X25519_INIT_SEGMENT selects where the sibling's init-only code
+# (reu_mul_init + its table-generation loop, ~800 B, dead after boot)
+# lands. Default CRYPTO_CODE preserves the pre-bump layout exactly.
+# Setting it to X25519_RODATA moves that code into the CRYPTO_OVERLAY
+# slot which the sibling build already claims for its tables — see the
+# integrator's report for the fit arithmetic.
+# X25519_CODE_SEGMENT does the same for the sibling's runtime-hot code.
+#
+# Both default to CRYPTO_CODE here, which reproduces the pre-bump
+# placement byte for byte and does NOT link. The top-level Makefile
+# exports X25519_INIT_SEGMENT and X25519_SEG_LADDER as X25519_RODATA
+# under USE_X25519_SIBLING=1, which is the combination that does link;
+# see the comment block beside those two `export` lines. Running this
+# script by hand therefore gives you the historical (non-linking)
+# layout unless you set the variables yourself — deliberate, so the
+# knobs stay explorable in isolation.
+X25519_INIT_SEGMENT="${X25519_INIT_SEGMENT:-CRYPTO_CODE}"
+X25519_CODE_SEGMENT="${X25519_CODE_SEGMENT:-CRYPTO_CODE}"
+
+# Per-source overrides of X25519_CODE_SEGMENT. These exist because the
+# sibling does not fit CRYPTO_HOT whole and does not fit CRYPTO_OVERLAY
+# whole either, so making it link at all requires splitting it — and the
+# only split that matters is per-source, since ca65 emits one segment
+# per source. Measured sizes at v0.10.0 (od65, --dump-segments):
+#
+#   X25519_SEG_FE25519  fe25519.s        2,711 B   field arithmetic
+#   X25519_SEG_LADDER   x25519.s           717 B   Montgomery ladder
+#   X25519_SEG_REU      x25519_init.s      132 B   REU fetch helpers (hot)
+#   X25519_INIT_SEGMENT x25519_init.s      666 B   table init (boot-only)
+#
+# Anything routed to X25519_RODATA lands in CRYPTO_OVERLAY, which under
+# USE_X25519_SIBLING=1 is not a paged overlay at all — the two embed
+# flags that page it are mutually exclusive with this one, so it is
+# plain resident RAM at $4200-$5FFF and holding executable code there
+# is safe. It is still the wrong NAME for code; see the integrator's
+# report for the cfg change that does this properly.
+X25519_SEG_FE25519="${X25519_SEG_FE25519:-$X25519_CODE_SEGMENT}"
+X25519_SEG_LADDER="${X25519_SEG_LADDER:-$X25519_CODE_SEGMENT}"
+X25519_SEG_REU="${X25519_SEG_REU:-$X25519_CODE_SEGMENT}"
+
 for src in fe25519_raw x25519_raw x25519_init_raw; do
-    sed -i '' 's/^\.segment "CODE"$/.segment "CRYPTO_CODE"/' "$STAGING/$src.s"
+    case "$src" in
+        fe25519_raw)     hot_seg="$X25519_SEG_FE25519" ;;
+        x25519_raw)      hot_seg="$X25519_SEG_LADDER"  ;;
+        x25519_init_raw) hot_seg="$X25519_SEG_REU"     ;;
+    esac
+    sed -i '' \
+        -e 's/^\.segment "LIB_X25519_INIT_CODE"$/.segment "'"$X25519_INIT_SEGMENT"'"/' \
+        -e 's/^\.segment "LIB_X25519_CODE"$/.segment "'"$hot_seg"'"/' \
+        -e 's/^\.segment "CODE"$/.segment "'"$hot_seg"'"/' \
+        "$STAGING/$src.s"
 done
 
-# --- Sanity: no leftover CODE segments in patched sources ---
+# --- Sanity: every sibling code segment must now be one we placed ---
+# Catches a leftover pre-§4 `CODE` and any `LIB_X25519_*` segment a
+# future bump introduces. Failing here costs one second; failing at ld65
+# costs a full build plus a memory-area message that names the segment
+# but not the reason.
+#
+# The two configured targets are exempt: a consumer cfg that declares
+# the SPEC §4 names outright can set X25519_CODE_SEGMENT and
+# X25519_INIT_SEGMENT to them, making the rewrite an identity and this
+# check a no-op — which is the shape this wrapper should eventually
+# take, once a cfg carries `LIB_X25519_CODE` / `LIB_X25519_INIT_CODE`.
 for src in fe25519_raw x25519_raw x25519_init_raw; do
-    if grep -qE '^\.segment "CODE"$' "$STAGING/$src.s"; then
-        echo "ERROR: leftover .segment \"CODE\" in $src.s" >&2
+    leftover=$(grep -E '^\.segment "(CODE|LIB_X25519_[A-Z_]*)"$' "$STAGING/$src.s" \
+               | grep -vxF ".segment \"$X25519_SEG_FE25519\"" \
+               | grep -vxF ".segment \"$X25519_SEG_LADDER\"" \
+               | grep -vxF ".segment \"$X25519_SEG_REU\"" \
+               | grep -vxF ".segment \"$X25519_INIT_SEGMENT\"" || true)
+    if [ -n "$leftover" ]; then
+        echo "ERROR: unrewritten sibling segment in $src.s:" >&2
+        echo "$leftover" >&2
+        echo "  -> no c64-https cfg declares it; extend the rewrite above." >&2
         exit 1
     fi
 done
@@ -413,6 +558,7 @@ for src in fe25519_raw x25519_raw x25519_init_raw data_x25519_bss_raw data_x2551
         "${ZP_DEFINES[@]}" \
         "${REU_DEFINES[@]}" \
         "${SQTAB_DEFINES[@]}" \
+        ${X25519_EXTRA_DEFINES:-} \
         -o "$OBJ_DIR/$src.o" "$STAGING/$src.s"
 done
 
@@ -502,6 +648,18 @@ else
     }
 
     DEF_MUL_8X8=$(bin_lookup_label mul_8x8 '$0000')
+    # v0.7.0+ : x25519_init.s unconditionally imports the canonical
+    # c64-lib-contract §8.3 multiply body and its two SMC operand sites.
+    # In the main PRG these resolve against in-tree
+    # src/crypto/poly1305.s (which exports ct_mul_8x8 / smc_sum_a_imm /
+    # smc_diff_a_imm for exactly this purpose); the standalone .bin has
+    # no in-tree objects, so they have to be --define'd like the rest.
+    # Without these three the .bin link fails on unresolved externals
+    # and the artifact silently stops being produced — best-effort by
+    # design, but it should still be produced.
+    DEF_CT_MUL_8X8=$(bin_lookup_label ct_mul_8x8 '$0000')
+    DEF_SMC_SUM_A_IMM=$(bin_lookup_label smc_sum_a_imm '$0000')
+    DEF_SMC_DIFF_A_IMM=$(bin_lookup_label smc_diff_a_imm '$0000')
     DEF_SQTAB_LO=$(bin_lookup_label sqtab_lo '$0000')
     DEF_SQTAB_HI=$(bin_lookup_label sqtab_hi '$0000')
     DEF_POLY_PROD_LO=$(bin_lookup_label poly_prod_lo '$CFFE')
@@ -524,6 +682,9 @@ else
         --define reu_len_hi=\$df08 \
         --define reu_addr_ctrl=\$df0a \
         --define mul_8x8="$DEF_MUL_8X8" \
+        --define ct_mul_8x8="$DEF_CT_MUL_8X8" \
+        --define smc_sum_a_imm="$DEF_SMC_SUM_A_IMM" \
+        --define smc_diff_a_imm="$DEF_SMC_DIFF_A_IMM" \
         --define sqtab_lo="$DEF_SQTAB_LO" \
         --define sqtab_hi="$DEF_SQTAB_HI" \
         --define poly_prod_lo="$DEF_POLY_PROD_LO" \

@@ -71,13 +71,55 @@ REU_OVERLAY_P256_VERIFY    = REU_OVERLAY_P256
 ; bank-3 image staging.  Until then, USE_X25519_SIBLING=1 + a real
 ; `crypto_swap_to_x25519` overwrite of CRYPTO_OVERLAY is gated behind
 ; W1's hot/cold partition (no current TLS caller).
+;
+; *** RELOCATED OFF BANK 3 — THE COLLISION BELOW IS NOT THEORETICAL ***
+;
+; The "collision note" at the bottom of this file called the bank-3/4/5
+; overlap with the sibling's tables theoretical, on the grounds that no
+; TLS caller ever invokes `crypto_swap_to_x25519`. That reasoning misses
+; the write that actually happens: `src/boot.s` STASHes the whole 8 KB
+; CRYPTO_OVERLAY slot to REU_OVERLAY_X25519 unconditionally under
+; `.ifdef USE_X25519_SIBLING`, at boot, whether or not a swap is ever
+; performed. At $30000 that landed exactly on bank 3 =
+; X25519_REU_BANK + 3, the sibling's 17th-bit-carry table, after
+; `reu_mul_init` had filled it.
+;
+; Measured symptom, once the sibling first linked (see the integrator's
+; report): `fe25519_mul` correct, `fe25519_add`/`sub`/`mul_a24` correct,
+; `fe25519_sqr` WRONG, and therefore both RFC 7748 §5.2 vectors wrong.
+; That signature is diagnostic — banks 0/1 (mul lo/hi) are untouched by
+; the stash, bank 3 (carry, read only by fe25519_sqr's SQR_DMA_K>0
+; path) is destroyed. Moving this base to bank 6 makes all seven field
+; ops and both RFC 7748 vectors pass at the default SQR_DMA_K=22.
+;
+; Bank 6 is safe here specifically: it belongs to the P-384 split
+; overlays below, and `USE_OVERLAY_P384_EMBED` is forced off whenever
+; USE_X25519_SIBLING=1 (Makefile, "ifneq ($(USE_X25519_SIBLING),1)"),
+; so the two never coexist. The sibling owns banks 0-5 (six contiguous
+; from X25519_REU_BANK=0), which is why 6 is the first free one.
+;
+; Scoped to the flag rather than applied globally, deliberately. The
+; symbol is referenced UNCONDITIONALLY by
+; `src/crypto/shared/crypto_swap.s::crypto_swap_to_x25519` — a routine
+; with no caller in any build — so changing it outright moves an
+; immediate operand in every PRG, including the two that ship. There is
+; no behavioural reason for that: bank 3 is only wrong when the sibling
+; is actually linked and actually owns the bank. Keeping the default
+; arm at $30000 leaves both default PRGs byte-identical (verified by
+; sha256), which is what makes this diff reviewable.
 .ifndef REU_OVERLAY_X25519
+.ifdef USE_X25519_SIBLING
+REU_OVERLAY_X25519         = $60000
+.else
 REU_OVERLAY_X25519         = $30000
+.endif
 .endif
 
 ; --- P-256 precompute (1 bank) ---
-; NB: REU_OVERLAY_X25519 above lives at the same bank ($30000).  Both
-; are reservations -- the P-256 precompute is unused at runtime (the
+; NB: REU_OVERLAY_X25519 shares this bank ONLY in the non-sibling arm
+; above; under USE_X25519_SIBLING=1 it now sits at bank 6, because the
+; sibling owns bank 3 for real.  Both are reservations -- the P-256
+; precompute is unused at runtime (the
 ; TLS dispatcher uses variable-base scalar mul, no Lim-Lee table),
 ; and the X25519 sibling image is similarly cold until W1 wires a
 ; real swap into TLS.  When either becomes hot, the cfg has to pick
@@ -125,8 +167,21 @@ REU_OVERLAY_P384_CURVE     = $70000
 ; The sibling c64-x25519 v0.4.0 reu_mul_init populates banks 3, 4, and 5
 ; with its own doubled-product and 17th-bit-carry tables for fe25519_sqr.
 ; Banks 3 / 4 / 5 are also nominally reserved here for P-256 precompute
-; (bank 3) and P-384 precompute (banks 4-5). The collision is THEORETICAL
-; under the current TLS path:
+; (bank 3) and P-384 precompute (banks 4-5).
+;
+; UPDATE — one of these was NOT theoretical, and the reasoning below is
+; the reason it was missed. It asks only "does anything READ the
+; reservation?", and every answer was no. The write nobody looked for
+; was boot.s's unconditional STASH of CRYPTO_OVERLAY into
+; REU_OVERLAY_X25519, which sat on bank 3 and silently destroyed the
+; sibling's carry table. It was invisible because the sibling had never
+; linked on either backend, so no build existed in which the collision
+; could be observed. Fixed by relocating REU_OVERLAY_X25519 to bank 6
+; (see the block at that definition). Treat the remaining reservations
+; below as unverified rather than safe: a reservation with no reader can
+; still have a writer.
+;
+; The rest of the collision analysis, for the reservations that remain:
 ;   - P-256 always uses ec_scalar_mul_var (variable-base) which does not
 ;     touch REU_P256_PRECOMPUTE_BASE.
 ;   - P-384 is stubbed at the TLS layer (see project_p384_stubbed memory
