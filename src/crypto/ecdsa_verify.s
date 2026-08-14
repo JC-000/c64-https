@@ -27,6 +27,29 @@
 .import ec_gx256, ec_gy256
 .import ec_base_x, ec_base_y
 
+; --- c64-lib-contract §1/§5: sibling version floor, checked at link time ---
+; Two things depend on the pin being >= v0.9.0 and NEITHER fails loudly by
+; itself, which is why this assert exists rather than a comment:
+;
+;   - v0.7.0's FIPS 186-5 §3.3 public-key validation gate. The Q packed
+;     below reaches `ecdsa_verify_256` straight out of an attacker-supplied
+;     certificate (src/tls_cert.s -> ecdsa_pubkey_x/y) and c64-https performs
+;     no range or on-curve check of its own. Silently dropping back to a
+;     pre-v0.7.0 archive would reopen that gap with every test still green,
+;     because our KAT vectors all carry well-formed public keys.
+;
+;   - v0.9.0's per-variant `zp_config_<variant>.o`, which
+;     tools/integration/build_nistcurves_p256.sh locates by name in order to
+;     re-apply c64-https's ZP overrides. Against an older archive that lookup
+;     changes shape.
+;
+; From v0.9.0 the version equates are exported `:abs` (upstream #95/#96), so
+; importing them here costs no `ld65: Warning: Address size mismatch`.
+.import LIB_NISTCURVES_VERSION_MAJOR
+.import LIB_NISTCURVES_VERSION_MINOR
+.assert LIB_NISTCURVES_VERSION_MAJOR = 0, lderror, "libs/nistcurves: expected MAJOR 0"
+.assert LIB_NISTCURVES_VERSION_MINOR >= 9, lderror, "libs/nistcurves: pin is older than v0.9.0"
+
 ; --- Phase 4a: P-384 TLS dispatcher (src/crypto/ecdsa_verify_384.s) ---
 .import ecdsa_verify_384_tls
 

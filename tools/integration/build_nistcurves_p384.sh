@@ -107,18 +107,78 @@ cp "$UPSTREAM_CURVE_ARCHIVE" "$STAGING/curve/upstream.a"
 (cd "$STAGING/sha"   && "$AR65" x upstream.a $( "$AR65" t upstream.a ))
 (cd "$STAGING/curve" && "$AR65" x upstream.a $( "$AR65" t upstream.a ))
 
-# --- 3. Rebuild zp_config.o with c64-https overrides (shared by both archives) ---
-"$CA65" \
-    --cpu 6502 \
-    -g \
-    -I "$LIB_SRC" \
-    "${ZP_OVERRIDES[@]}" \
-    -o "$STAGING/zp_config.o" \
-    "$LIB_SRC/zp_config.s"
+# --- 3. Rebuild each archive's zp_config member with c64-https overrides ---
+# Member names are DISCOVERED, never hardcoded. Upstream v0.9.0 (issue #90)
+# gave every archive its own per-variant manifest + ZP objects, so
+# `zp_config.o` / `lib_manifest.o` no longer exist in these archives —
+# they are `zp_config_sha384.o` / `lib_manifest_p384verify.o` and friends.
+# Hardcoding the old names made this script die at the ar65 staging step.
+#
+# The variant gate matters twice over: it selects which slots the object
+# `.exportzp`s, and the SHA-384 variant deliberately exports only the four
+# sha_* slots — so the c64-https overrides below are a legitimate no-op there
+# and the post-check must tolerate their absence rather than demand them.
+find_member() {
+    # find_member <staging-dir> <glob>   -> echoes the single matching member
+    local dir="$1" glob="$2" hit="" m
+    for m in $( "$AR65" t "$dir/upstream.a" ); do
+        case "$m" in $glob)
+            [ -z "$hit" ] || { echo "ERROR: $dir/upstream.a has >1 member matching '$glob' ($hit, $m)" >&2; exit 1; }
+            hit="$m" ;;
+        esac
+    done
+    [ -n "$hit" ] || { echo "ERROR: no member matching '$glob' in $dir/upstream.a — upstream layout changed" >&2; exit 1; }
+    echo "$hit"
+}
 
-# Distribute the overridden zp_config.o into both staging trees.
-cp "$STAGING/zp_config.o" "$STAGING/sha/zp_config.o"
-cp "$STAGING/zp_config.o" "$STAGING/curve/zp_config.o"
+zp_variant_define() {
+    case "$1" in
+        zp_config.o)             ;;
+        zp_config_p256verify.o)  echo '-D LIB_P256_VERIFY_ONLY' ;;
+        zp_config_p384verify.o)  echo '-D LIB_P384_VERIFY_ONLY' ;;
+        zp_config_p384curve.o)   echo '-D LIB_P384_CURVE_ONLY' ;;
+        zp_config_sha384.o)      echo '-D LIB_SHA384_ONLY' ;;
+        *) echo "ERROR: unrecognised zp_config member '$1' — add its upstream -D gate" >&2; exit 1 ;;
+    esac
+}
+
+# Present ⇒ must carry the c64-https value. Absent ⇒ this variant does not
+# export the slot, which is fine. A wrong value is silent memory corruption
+# at runtime, never a link error, so it has to be caught here.
+check_zp_slot_if_present() {
+    local obj="$1" name="$2" want="$3" got
+    got=$("${OD65:-od65}" --dump-exports "$obj" \
+          | awk -v n="\"$name\"" '$1=="Name:" && $2==n {f=1; next} f && $1=="Value:" {gsub(/[()]/,"",$3); print $3; exit}')
+    [ -z "$got" ] && return 0
+    if [ "$got" != "$want" ]; then
+        echo "ERROR: $(basename "$obj") exports $name = $got, expected $want (c64-https ZP override did not take)" >&2
+        exit 1
+    fi
+}
+
+for tree in sha curve; do
+    zp_member="$(find_member "$STAGING/$tree" 'zp_config*.o')"
+    echo "[p384] rebuilding $tree/$zp_member with c64-https ZP overrides..."
+    # shellcheck disable=SC2046  # deliberate word-split of the -D pair
+    "$CA65" \
+        --cpu 6502 \
+        -g \
+        -I "$LIB_SRC" \
+        $(zp_variant_define "$zp_member") \
+        "${ZP_OVERRIDES[@]}" \
+        -o "$STAGING/$tree/$zp_member" \
+        "$LIB_SRC/zp_config.s"
+    check_zp_slot_if_present "$STAGING/$tree/$zp_member" zp_ptr2  61   # $3d
+    check_zp_slot_if_present "$STAGING/$tree/$zp_member" fp_mul_i 57   # $39
+    check_zp_slot_if_present "$STAGING/$tree/$zp_member" fp_mul_j 58   # $3a
+done
+
+SHA_ZP="$(find_member "$STAGING/sha" 'zp_config*.o')"
+CURVE_ZP="$(find_member "$STAGING/curve" 'zp_config*.o')"
+SHA_MANIFEST="$(find_member "$STAGING/sha" 'lib_manifest*.o')"
+CURVE_MANIFEST="$(find_member "$STAGING/curve" 'lib_manifest*.o')"
+SHA_PRECALC="$(find_member "$STAGING/sha" 'precalc_manifest*.o')"
+CURVE_PRECALC="$(find_member "$STAGING/curve" 'precalc_manifest*.o')"
 
 # --- 4. Drop conflicting members from the curve archive ---
 # Same reasoning as P-256: mul_8x8.o + data_shared.o collide with
@@ -184,8 +244,9 @@ SHIM_EOF
 rm -f "$ARCHIVE_SHA"
 "$AR65" a "$ARCHIVE_SHA" \
     "$STAGING/sha/lib_version.o" \
-    "$STAGING/sha/lib_manifest.o" \
-    "$STAGING/sha/zp_config.o" \
+    "$STAGING/sha/$SHA_MANIFEST" \
+    "$STAGING/sha/$SHA_PRECALC" \
+    "$STAGING/sha/$SHA_ZP" \
     "$STAGING/sha/sha384.o" \
     "$STAGING/sha/data_sha.o"
 
@@ -195,8 +256,9 @@ rm -f "$ARCHIVE_SHA"
 rm -f "$ARCHIVE_CURVE"
 "$AR65" a "$ARCHIVE_CURVE" \
     "$STAGING/curve/lib_version.o" \
-    "$STAGING/curve/lib_manifest.o" \
-    "$STAGING/curve/zp_config.o" \
+    "$STAGING/curve/$CURVE_MANIFEST" \
+    "$STAGING/curve/$CURVE_PRECALC" \
+    "$STAGING/curve/$CURVE_ZP" \
     "$STAGING/curve/constants.o" \
     "$STAGING/curve/reu_config.o" \
     "$STAGING/curve/fp384.o" \
@@ -210,7 +272,7 @@ rm -f "$ARCHIVE_CURVE"
 # --- 7. Per-source byte counts ---
 {
     echo "# nistcurves-p384-sha384.a per-source byte counts (ca65 .o file sizes)"
-    for src in lib_version lib_manifest zp_config sha384 data_sha; do
+    for src in lib_version "${SHA_MANIFEST%.o}" "${SHA_PRECALC%.o}" "${SHA_ZP%.o}" sha384 data_sha; do
         if [ -f "$STAGING/sha/$src.o" ]; then
             bytes=$(wc -c < "$STAGING/sha/$src.o")
             printf '%-32s %d bytes (.o)\n' "$src" "$bytes"
@@ -220,7 +282,7 @@ rm -f "$ARCHIVE_CURVE"
 
 {
     echo "# nistcurves-p384-curve.a per-source byte counts (ca65 .o file sizes)"
-    for src in lib_version lib_manifest zp_config constants reu_config \
+    for src in lib_version "${CURVE_MANIFEST%.o}" "${CURVE_PRECALC%.o}" "${CURVE_ZP%.o}" constants reu_config \
                fp384 mod384 curve384 points384_core ecdsa384_nocomb \
                ec_scalar_mul_384_shim data_p384; do
         if [ -f "$STAGING/curve/$src.o" ]; then

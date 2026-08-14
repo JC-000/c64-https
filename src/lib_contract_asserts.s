@@ -132,7 +132,7 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; working: re-check the integration against the new export surface, then
 ; update the expected value on the next line — do not delete the assert.
 .import LIB_ABI_VERSION
-.assert LIB_ABI_VERSION = 0, lderror, "libs/nistcurves: exported-surface generation changed (LIB_ABI_VERSION != 0) — re-check the integration, then bump the expected value in src/lib_contract_asserts.s"
+.assert LIB_ABI_VERSION = 1, lderror, "libs/nistcurves: exported-surface generation changed (LIB_ABI_VERSION != 1) — re-check the integration, then bump the expected value in src/lib_contract_asserts.s"
 
 
 ; =====================================================================

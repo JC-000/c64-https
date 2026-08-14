@@ -194,7 +194,7 @@ buffers in the crypto BSS — see per-module headers for details):
   SHA-256                   (in-tree; no sibling)
     sha256_init, sha256_update, sha256_final
 
-  ECDSA P-256                (`libs/nistcurves@v0.6.0` sibling,
+  ECDSA P-256                (`libs/nistcurves@v0.9.1` sibling,
                               c64-lib-contract SPEC §1-§8.1 aligned)
     ecdsa_verify_256      — TLS dispatcher in src/crypto/ecdsa_verify.s
                             packs the BE struct + calls the sibling entry
@@ -203,11 +203,26 @@ buffers in the crypto BSS — see per-module headers for details):
     archive built via `make -C libs/nistcurves lib-p256-verify` — see
     `tools/integration/build_nistcurves_p256.sh` for the wrapper.)
 
+    **From v0.7.0 the sibling validates the public key at entry**
+    (FIPS 186-5 §3.3: `Qx,Qy ∈ [0,p-1]` plus on-curve
+    `Qy² ≡ Qx³ − 3Qx + b (mod p)`, C=1 returned before any scalar
+    multiplication). This matters to c64-https specifically: the `Q`
+    handed to `ecdsa_verify_256` comes straight from an
+    attacker-supplied certificate via `src/tls_cert.s` →
+    `ecdsa_pubkey_x/y`, and c64-https performs no range or on-curve
+    check of its own. `src/crypto/ecdsa_verify.s` therefore carries a
+    link-time `.assert LIB_NISTCURVES_VERSION_MINOR >= 9` so a silent
+    downgrade below that pin is a loud `ld65: Error` rather than a
+    quietly reopened gap — every KAT vector we own has a well-formed
+    public key, so the tests would not notice. The assert costs zero
+    PRG bytes (hashes identical with and without it) and, from v0.9.0,
+    zero ld65 warnings, since the version equates are exported `:abs`.
+
 P-384 is *stubbed at the TLS layer* (see `project_p384_stubbed` memory
 note). The sibling `libs/nistcurves` P-384 primitives were meant to be
 buildable as an external overlay image (Phase C.3b, `make
-p384-overlay`) but every P-384 build target is broken at the v0.6.0
-pin — see "Known issues" for the current failure chain. Fix the build
+p384-overlay`) but no P-384 build target has ever completed — see
+"Known issues" for the current failure chain. Fix the build
 before wiring P-384 into the TLS path.
 
 MEMORY requirements for a drop-in sibling library (see "Memory layout"
@@ -812,25 +827,76 @@ Five latent bugs and three new ones were cleared to get here:
     #32 and #45 were closed as stale; file fresh issues against this
     chain when P-384 enablement resumes. TLS-level P-384 verify
     remains stubbed regardless (see `project_p384_stubbed`).
-  - **A `libs/nistcurves` bump to v0.7.0/v0.8.0 does not link under
-    UCI** (measured 2026-08-13). `LIB_NISTCURVES_P256_RODATA`
-    overflows `CRYPTO_HOT` by **207 B**, because CRYPTO_HOT is
-    already *one byte* from full at the v0.6.0 pin (`build/
-    c64-https.map`: rodata `009E1F..009FFE`, region ends `$9FFF`) and
-    v0.7.0's FIPS 186-5 §3.3 public-key validation gate adds +512 B.
-    ip65 links fine at v0.8.0, and both `tools/test_ecdsa_kat_oracle.py`
-    (3/3) and `tools/test_x509.py` (11/11) pass there — so the blocker
-    is placement, not function. A link-verified remedy exists (route
-    `cfg/c64-https-uci.cfg` `LIB_NISTCURVES_P256_RODATA` to the
-    otherwise-unused `CRYPTO_OVERLAY`; v0.8.0 UCI then links at the
-    same 62,977 B with 7,200 B of the slot still free) but it has had
-    no hardware run and it changes what `tools/uci/_memory_policy.py`
-    sees at $4200-$5FFF, so it needs a UCI e2e before it ships. The
-    bump is worth taking eventually: the gate validates the
-    attacker-supplied certificate public key that `src/tls_cert.s`
-    feeds to `ecdsa_verify_256`, which c64-https does not check
-    itself. No export was renamed or removed in v0.7.0/v0.8.0 —
-    `LIB_ABI_VERSION` is still 0.
+    The v0.9.1 bump briefly moved this failure *earlier* — upstream
+    #90's per-variant manifests renamed `lib_manifest.o` /
+    `zp_config.o` to `lib_manifest_sha384.o` / `zp_config_p384verify.o`
+    etc., which the wrapper's hardcoded archive list could not find.
+    Both P-384 wrappers now **discover** those member names instead, so
+    the chain again stops exactly at the SHA-384 `OVERLAY_REGION`
+    overflow above — verified, same 1536 B, at the v0.9.1 pin.
+  - **Sibling-archive member names are DISCOVERED, never hardcoded —
+    and this is load-bearing.** Upstream v0.9.0 gave each of its nine
+    archives its own per-variant `zp_config_*.o` /
+    `lib_manifest_*.o` / `precalc_manifest_*.o`.
+    `tools/integration/build_nistcurves_p256.sh` rebuilds the ZP object
+    with c64-https's slot overrides (`zp_ptr2 = $3d`,
+    `fp_mul_i = $39`, `fp_mul_j = $3a`) and then re-archives strictly by
+    `ar65 t upstream.a`. Writing that rebuild to a hardcoded
+    `zp_config.o`, as it did before the v0.9.1 bump, means the override
+    object is **silently dropped** and the upstream-default member
+    archived in its place — restoring `zp_ptr2 = $fd` (collides with
+    c64-https `zp_temp`/`zp_count` during cert parsing) and
+    `fp_mul_i/j = $2c/$2d` (inside the fe25519 claim `$2c-$37`). There
+    is no link error for this; it is runtime memory corruption several
+    layers from its cause. The wrappers now fail loudly on an absent,
+    ambiguous or unrecognised member name, apply the matching upstream
+    `-D` variant gate (it selects which slots get `.exportzp`), and
+    **post-check the emitted object with `od65`** so the override is
+    proven rather than assumed. Verify from the link if you ever doubt
+    it: `build/labels.txt` must show `fp_mul_i=$39`, `fp_mul_j=$3A`,
+    `zp_ptr2=$3D`.
+  - **The v0.7.0/v0.8.0 UCI `CRYPTO_HOT` overflow is RESOLVED at
+    v0.9.1 — and no cfg change was needed.** Recorded here because the
+    obvious remedy was nearly taken and would have been the wrong
+    trade. The failure was real: `LIB_NISTCURVES_P256_RODATA` overflowed
+    `CRYPTO_HOT` by **207 B** at v0.7.0/v0.8.0, because CRYPTO_HOT sat
+    *one byte* from full at the v0.6.0 pin (rodata `009E1F..009FFE`,
+    region ends `$9FFF`) and v0.7.0's validation gate adds +208 B of
+    **code**. 1 − 208 = −207. Exact.
+
+    v0.9.0 then deleted 288 B of dead RFC 6979 self-test vectors from
+    `curve256.o` (upstream #91) — an object our archive ships — and the
+    rodata half of the pressure went away:
+
+      segment                     v0.6.0        v0.9.1        delta
+      LIB_..._P256_CODE           $1FB4 (8116)  $2084 (8324)  +208
+      LIB_..._P256_RODATA         $01E0 (480)   $00C0 (192)   -288
+      LIB_..._P256_BSS            $0520 (1312)  $0520 (1312)     0
+
+      UCI CRYPTO_HOT last byte used: $9FFE -> $9FAE (**81 B free**)
+
+    So the shelved remedy (routing `LIB_NISTCURVES_P256_RODATA` to
+    `CRYPTO_OVERLAY`) was **not adopted**: `CRYPTO_OVERLAY` stays
+    entirely free, the three mutually exclusive flags that contend for
+    it keep exactly the contention they had, and
+    `tools/uci/_memory_policy.py` sees an unchanged `$4200-$5FFF`.
+    Both cfgs are byte-identical across this bump. Note the corollary
+    for the next bump: **81 B is the whole margin**, and 288 B of it
+    was a one-off recovery of dead weight that cannot be recovered
+    twice.
+
+    v0.9.0 is an ABI break upstream (`LIB_ABI_VERSION` 0 → 1, 17
+    exports removed). Measured against our tree rather than assumed:
+    dumping every export of the staged archive at both pins and every
+    import of c64-https's own objects, **31** symbols left the archive
+    (upstream's 17 plus 14 more that the new per-variant
+    `zp_config_p256verify.o` / `precalc_manifest_p256verify.o` narrow
+    away) and the intersection with what c64-https imports is
+    **empty**. The whole library surface we consume is four symbols:
+    `ec_base_x`, `ec_gx256`, `ec_scalar_mul_var`, `ecdsa_verify_256`.
+    The removed ZP slots could not have bitten us either way —
+    c64-https contains zero `.importzp` directives and defines every
+    slot locally in `src/constants.inc` / `src/crypto/shared/zp_canon.inc`.
   - **VICE harness gotcha**: any test that exercises sibling
     `libs/nistcurves` P-256 primitives (`fp_mul`, `fp_inv`,
     `ec_scalar_mul_var`, `ecdsa_verify_256`, ...) MUST launch VICE with
@@ -878,13 +944,23 @@ list. With `-reu` enabled, `tools/test_x509.py` 3c PASSes cleanly in
 ~60 s wall-clock under VICE warp.
 
 Under the then-current `libs/nistcurves@v0.3.0` pin (post-PR #55,
-c64-lib-contract-aligned; the pin is v0.6.0 today) the U64E 48 MHz
+c64-lib-contract-aligned) the U64E 48 MHz
 handshake measured **82.1 s**
 end-to-end (verified 2026-05-20 against the local listener; the prior
 v0.2.0 measurement was 86.7 s, and the pre-Phase-C.4 in-tree path was
-~110 s). The pin has since moved to **v0.6.0** — the tables below are
-the current numbers; the v0.3.0 row is kept only as the REU-profile
-baseline.
+~110 s).
+
+**Every wall-clock figure below was measured at the v0.6.0 pin; the
+pin is now v0.9.1 and none of them has been re-measured.** Treat them
+as the v0.6.0 baseline, not as HEAD. The expected drift is small but
+its sign is known: v0.7.0's public-key validation gate adds 2 `fp_cmp`
++ 3 mod-p muls + 4 mod-p add/subs to every verify, which is noise
+against a multi-second scalar multiplication, and nothing else in
+v0.7.0-v0.9.1 touches a hot path (the rest is manifest equates, dead
+data removal and export hygiene). So expect a small *regression*, not
+a speedup, and do not quote these rows as v0.9.1 numbers until someone
+re-runs `bench_ecdsa_u64e.py` on hardware. The v0.3.0 row is kept only
+as the REU-profile baseline.
 
 On the **C64 Ultimate** (10.53.21.158, see "C64 Ultimate notes"),
 measured 2026-07-19 with the INNER=217 fence and boot-at-speed flow:
@@ -1345,8 +1421,14 @@ Tight regions (post-W1):
     commit `7cb59f7` before upstream v0.4.0, so it has been inside our
     v0.6.0 pin all along and is not available as future headroom.
     `LIB_NISTCURVES_P256_BSS` measures $0520 (1,312 B) at v0.6.0 and
-    is unchanged at v0.8.0, so the union's cap is not threatened by a
-    bump.
+    is **unchanged through v0.9.1** (re-measured at the bump), so the
+    union's cap is not threatened. The segment is genuinely
+    uninitialised — `libs/nistcurves/src/data_p256.s` is 32 `.res`
+    directives with no `.byte`/`.word` — which is what makes our
+    `type = bss` declaration safe under c64-lib-contract §4, where a
+    `rw`→`bss` flip would drop initialised bytes with no ld65
+    diagnostic at all. Re-check that if `data_p256.s` ever grows a
+    literal.
   - **CRYPTO_OVERLAY** under UCI doubles as P-384 SHA-384/curve overlay
     paging slot, the W3 P-256 overlay embed slot, AND the
     USE_X25519_SIBLING=1 X25519 sibling rodata + BSS slot. Mutually
