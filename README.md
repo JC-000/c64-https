@@ -7,6 +7,29 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
 
 **For demonstration and educational purposes only — not cryptographically secure.**
 
+## Before you build or test
+
+Two prerequisites are not vendored in this repo, and missing either produces an error that
+does not name it. Both are one-time, per clone:
+
+```bash
+git submodule update --init --recursive
+
+# ip65 backend only — `make` will NOT build the blob for you
+make ip65-libs
+make ip65-blob
+
+# any test script, VICE or hardware — separate public repo, not in requirements.txt
+git clone https://github.com/JC-000/c64-test-harness    # sibling of this repo
+python3 -m pip install -e ../c64-test-harness
+```
+
+Skipping the first gives `ip65_blob.s(22): Error: Cannot open include file
+'.../ip65-c64.bin'`; skipping the second gives `ModuleNotFoundError: No module named
+'c64_test_harness'`. Use `python3 -m pip` so the package lands in the same interpreter that
+runs the scripts — a venv mismatch reproduces the identical error after an install that
+appeared to succeed.
+
 ## Architecture
 
 ```
