@@ -86,6 +86,9 @@ import test_https_local  # type: ignore
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 test_https_local.CERT_PATH = _REPO_ROOT / "tools" / "https_e2e" / "certs" / "server-p384.pem"
 test_https_local.KEY_PATH  = _REPO_ROOT / "tools" / "https_e2e" / "certs" / "server-p384.key"
+# Both are gitignored and generated on demand; the profile tells the parent's
+# _ensure_certs_or_fail() which pair to mint (issue #93).
+test_https_local.CERT_PROFILE = "p384"
 
 
 # --------------------------------------------------------------------------
@@ -105,19 +108,9 @@ test_https_local.KEY_PATH  = _REPO_ROOT / "tools" / "https_e2e" / "certs" / "ser
 # adopted as the default in PR #...
 # --------------------------------------------------------------------------
 
-# Sanity check that the certs exist before delegating to main().
-if not test_https_local.CERT_PATH.is_file():
-    print(
-        f"ERROR: P-384 cert not found at {test_https_local.CERT_PATH}",
-        file=sys.stderr,
-    )
-    sys.exit(2)
-if not test_https_local.KEY_PATH.is_file():
-    print(
-        f"ERROR: P-384 key not found at {test_https_local.KEY_PATH}",
-        file=sys.stderr,
-    )
-    sys.exit(2)
+# No cert existence check here: the parent's main() generates the P-384 pair
+# on demand from CERT_PROFILE above.  To mint it by hand:
+#     python3 tools/https_e2e/ensure_certs.py --profile p384
 
 
 def main() -> int:

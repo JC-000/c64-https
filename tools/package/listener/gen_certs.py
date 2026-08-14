@@ -21,6 +21,7 @@ The certificate this produces is byte-shaped like the one the previous
   * key   : ECDSA on NIST P-256 (secp256r1 / prime256v1)
   * sig   : ecdsa-with-SHA256
   * CN    : www.foo.bar  (overridable via --cn)
+  * files : server.pem / server.key
   * SAN   : foo.bar, www.foo.bar  (overridable via --san, repeatable)
   * valid : now-5min .. now+3650 days, UTCTime
   * exts  : subjectAltName ONLY, non-critical
@@ -31,6 +32,13 @@ is the one it has been validated against end to end. Do not add
 basicConstraints/keyUsage/EKU here "for correctness" without re-running the
 hardware e2e — this cert is a test fixture, never a trust anchor, and must not
 be deployed anywhere real.
+
+`--curve p384` mints the same shape on secp384r1 with ecdsa-with-SHA384,
+into server-p384.{pem,key}. The packaged listener never asks for it; it
+exists so the in-tree P-384 e2e tests (tools/https_e2e/ensure_certs.py)
+have a generator, which previously meant `cryptography` and now means
+none. P-384 is the same algorithm over different numbers — the arithmetic
+above is parameterised by curve rather than duplicated.
 
 Idempotent: refuses to overwrite existing files unless --force. Writes into
 ./certs/ relative to the current directory unless --out-dir is given.
@@ -45,7 +53,14 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# NIST P-256 (secp256r1) domain parameters — SEC 2 / FIPS 186-4.
+# Domain parameters — SEC 2 / FIPS 186-4.
+#
+# P-256 is what the packaged listener ships and all the constants below with
+# bare names are its. P-384 exists for the in-tree e2e tests
+# (tools/https_e2e/certs/server-p384.*), which used to need `cryptography`
+# purely to mint a cert on a different curve — the same algorithm over
+# different numbers. Carrying it here keeps the dependency at zero on both
+# paths and leaves one generator to maintain rather than two.
 # ---------------------------------------------------------------------------
 P = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
 A = P - 3
@@ -54,15 +69,28 @@ N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 GX = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296
 GY = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5
 
-# Affine point arithmetic. None is the point at infinity. This runs a handful
-# of times per invocation (one keygen, one signature), so clarity beats speed.
+P384_P = int("fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe"
+             "ffffffff0000000000000000ffffffff", 16)
+P384_A = P384_P - 3
+P384_B = int("b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875a"
+             "c656398d8a2ed19d2a85c8edd3ec2aef", 16)
+P384_N = int("ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf"
+             "581a0db248b0a77aecec196accc52973", 16)
+P384_GX = int("aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a38"
+              "5502f25dbf55296c3a545e3872760ab7", 16)
+P384_GY = int("3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c0"
+              "0a60b1ce1d7e819d7a431d7c90ea0e5f", 16)
+
+# Affine point arithmetic, parameterised by curve. None is the point at
+# infinity. This runs a handful of times per invocation (one keygen, one
+# signature), so clarity beats speed.
 
 
 def _inv(x: int, m: int) -> int:
     return pow(x, m - 2, m)
 
 
-def _add(p1, p2):
+def _add(p1, p2, p: int = P, a: int = A):
     if p1 is None:
         return p2
     if p2 is None:
@@ -70,24 +98,24 @@ def _add(p1, p2):
     x1, y1 = p1
     x2, y2 = p2
     if x1 == x2:
-        if (y1 + y2) % P == 0:
+        if (y1 + y2) % p == 0:
             return None
-        lam = (3 * x1 * x1 + A) * _inv(2 * y1, P) % P
+        lam = (3 * x1 * x1 + a) * _inv(2 * y1, p) % p
     else:
-        lam = (y2 - y1) * _inv(x2 - x1, P) % P
-    x3 = (lam * lam - x1 - x2) % P
-    return (x3, (lam * (x1 - x3) - y1) % P)
+        lam = (y2 - y1) * _inv(x2 - x1, p) % p
+    x3 = (lam * lam - x1 - x2) % p
+    return (x3, (lam * (x1 - x3) - y1) % p)
 
 
-def _mul(k: int, point):
+def _mul(k: int, point, p: int = P, a: int = A):
     """Double-and-add. Not constant time — this is a test fixture minting a
     throwaway key on the operator's own machine, not a production signer."""
     result = None
     addend = point
     while k:
         if k & 1:
-            result = _add(result, addend)
-        addend = _add(addend, addend)
+            result = _add(result, addend, p, a)
+        addend = _add(addend, addend, p, a)
         k >>= 1
     return result
 
@@ -165,9 +193,40 @@ def _explicit(num: int, body: bytes) -> bytes:
 
 OID_EC_PUBLIC_KEY = "1.2.840.10045.2.1"
 OID_PRIME256V1 = "1.2.840.10045.3.1.7"
+OID_SECP384R1 = "1.3.132.0.34"
 OID_ECDSA_SHA256 = "1.2.840.10045.4.3.2"
+OID_ECDSA_SHA384 = "1.2.840.10045.4.3.3"
 OID_COMMON_NAME = "2.5.4.3"
 OID_SUBJECT_ALT_NAME = "2.5.29.17"
+
+
+class _Curve:
+    """Everything that differs between the two supported profiles."""
+
+    def __init__(self, name, p, a, n, gx, gy, size, curve_oid, sig_oid,
+                 hasher, cert_name, key_name, label):
+        self.name = name              # profile key: "p256" / "p384"
+        self.p, self.a, self.n = p, a, n
+        self.gx, self.gy = gx, gy
+        self.size = size              # coordinate width in bytes
+        self.curve_oid = curve_oid
+        self.sig_oid = sig_oid
+        self.hasher = hasher          # hashlib constructor
+        self.cert_name = cert_name
+        self.key_name = key_name
+        self.label = label            # for the human-readable summary
+
+
+CURVES = {
+    "p256": _Curve("p256", P, A, N, GX, GY, 32,
+                   OID_PRIME256V1, OID_ECDSA_SHA256, hashlib.sha256,
+                   "server.pem", "server.key",
+                   "ECDSA P-256 (secp256r1), sig = ecdsa-with-SHA256"),
+    "p384": _Curve("p384", P384_P, P384_A, P384_N, P384_GX, P384_GY, 48,
+                   OID_SECP384R1, OID_ECDSA_SHA384, hashlib.sha384,
+                   "server-p384.pem", "server-p384.key",
+                   "ECDSA P-384 (secp384r1), sig = ecdsa-with-SHA384"),
+}
 
 
 def _pem(label: str, der: bytes) -> bytes:
@@ -178,28 +237,45 @@ def _pem(label: str, der: bytes) -> bytes:
             % (label, "\n".join(lines), label)).encode("ascii")
 
 
-def _ecdsa_sign(digest: bytes, d: int) -> bytes:
-    """ECDSA-SHA256 over P-256. Returns the DER SEQUENCE{r,s}."""
-    e = int.from_bytes(digest, "big")  # SHA-256 and n are both 256 bits
+def _ecdsa_sign(digest: bytes, d: int, curve) -> bytes:
+    """ECDSA over *curve*. Returns the DER SEQUENCE{r,s}.
+
+    Each profile pairs its curve with the equal-width hash (P-256/SHA-256,
+    P-384/SHA-384), so the digest is exactly as wide as n and FIPS 186-4's
+    leftmost-bits truncation is a no-op. Pair them differently and this
+    needs the truncation put back.
+    """
+    n = curve.n
+    e = int.from_bytes(digest, "big")
     while True:
-        k = secrets.randbelow(N - 1) + 1
-        point = _mul(k, (GX, GY))
-        r = point[0] % N
+        k = secrets.randbelow(n - 1) + 1
+        point = _mul(k, (curve.gx, curve.gy), curve.p, curve.a)
+        r = point[0] % n
         if r == 0:
             continue
-        s = _inv(k, N) * (e + r * d) % N
+        s = _inv(k, n) * (e + r * d) % n
         if s == 0:
             continue
         return _seq(_int(r), _int(s))
 
 
 def generate(cn: str, sans: list, out_dir: Path,
-             force: bool = False):
-    """Generate key + self-signed cert into out_dir. Returns (cert, key)."""
+             force: bool = False, curve: str = "p256"):
+    """Generate key + self-signed cert into out_dir. Returns (cert, key).
+
+    *curve* selects a profile from CURVES; it also picks the filenames, so
+    a P-256 and a P-384 pair coexist in one directory.
+    """
+    try:
+        crv = CURVES[curve]
+    except KeyError:
+        raise ValueError(f"unknown curve profile {curve!r}; "
+                         f"expected one of {sorted(CURVES)}") from None
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cert_path = out_dir / "server.pem"
-    key_path = out_dir / "server.key"
+    cert_path = out_dir / crv.cert_name
+    key_path = out_dir / crv.key_name
 
     if cert_path.exists() and key_path.exists() and not force:
         print(f"certs already present: {cert_path} / {key_path} "
@@ -207,9 +283,10 @@ def generate(cn: str, sans: list, out_dir: Path,
         return cert_path, key_path
 
     # --- key ---
-    d = secrets.randbelow(N - 1) + 1
-    qx, qy = _mul(d, (GX, GY))
-    pub_point = b"\x04" + qx.to_bytes(32, "big") + qy.to_bytes(32, "big")
+    d = secrets.randbelow(crv.n - 1) + 1
+    qx, qy = _mul(d, (crv.gx, crv.gy), crv.p, crv.a)
+    pub_point = (b"\x04" + qx.to_bytes(crv.size, "big")
+                 + qy.to_bytes(crv.size, "big"))
 
     # --- names / validity ---
     name = _seq(_set(_seq(_oid(OID_COMMON_NAME), _utf8(cn))))
@@ -217,9 +294,9 @@ def generate(cn: str, sans: list, out_dir: Path,
     not_before = now - datetime.timedelta(minutes=5)
     not_after = now + datetime.timedelta(days=3650)
 
-    sig_alg = _seq(_oid(OID_ECDSA_SHA256))
+    sig_alg = _seq(_oid(crv.sig_oid))
     spki = _seq(
-        _seq(_oid(OID_EC_PUBLIC_KEY), _oid(OID_PRIME256V1)),
+        _seq(_oid(OID_EC_PUBLIC_KEY), _oid(crv.curve_oid)),
         _bitstring(pub_point),
     )
     # GeneralNames: dNSName is [2] IMPLICIT IA5String, i.e. tag 0x82.
@@ -239,15 +316,15 @@ def generate(cn: str, sans: list, out_dir: Path,
         extensions,
     )
 
-    signature = _ecdsa_sign(hashlib.sha256(tbs).digest(), d)
+    signature = _ecdsa_sign(crv.hasher(tbs).digest(), d, crv)
     cert_der = _seq(tbs, sig_alg, _bitstring(signature))
 
     # SEC1 / RFC 5915 ECPrivateKey — "EC PRIVATE KEY" PEM, which is what the
     # previous generator's TraditionalOpenSSL format produced.
     key_der = _seq(
         _int(1),
-        _octetstring(d.to_bytes(32, "big")),
-        _explicit(0, _oid(OID_PRIME256V1)),
+        _octetstring(d.to_bytes(crv.size, "big")),
+        _explicit(0, _oid(crv.curve_oid)),
         _explicit(1, _bitstring(pub_point)),
     )
 
@@ -262,7 +339,7 @@ def generate(cn: str, sans: list, out_dir: Path,
     print(f"wrote {key_path}")
     print(f"  CN  = {cn}")
     print(f"  SAN = {', '.join(sans)}")
-    print("  key = ECDSA P-256 (secp256r1), sig = ecdsa-with-SHA256")
+    print(f"  key = {crv.label}")
     print("  (generated with the Python stdlib only — no 'cryptography')")
     return cert_path, key_path
 
@@ -281,12 +358,16 @@ def main(argv=None) -> int:
                         "(default: ./certs)")
     p.add_argument("--force", action="store_true",
                    help="overwrite existing cert/key")
+    p.add_argument("--curve", default="p256", choices=sorted(CURVES),
+                   help="curve profile (default: p256, which is what the "
+                        "listener serves). p384 writes "
+                        "server-p384.{pem,key} so both pairs can coexist")
     args = p.parse_args(argv)
 
     sans = args.san if args.san else ["foo.bar", "www.foo.bar"]
     out_dir = Path(args.out_dir) if args.out_dir else Path.cwd() / "certs"
 
-    generate(args.cn, sans, out_dir, force=args.force)
+    generate(args.cn, sans, out_dir, force=args.force, curve=args.curve)
     return 0
 
 
