@@ -106,6 +106,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _memory_policy import (  # noqa: E402
     build_policy_and_arbiter_with_overlay_carveout,
 )
+from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "https_e2e"))
@@ -515,6 +516,16 @@ def main() -> int:
         except Ultimate64RunnerStuckError as exc:
             print(f"[fatal] runner wedged at {HOST}: {exc}", file=sys.stderr)
             return 3
+
+        # REU preflight (issue #97): a REU-profile build on a REU-less
+        # device fails its first AEAD tag and spins ~44 min. Both the good
+        # and bad Finished modes need a working handshake up to Finished,
+        # so this run is worthless either way without the REU.
+        try:
+            preflight_reu(client, LABELS_PATH)
+        except ReuPreflightError as exc:
+            print(str(exc), file=sys.stderr)
+            return 4
 
         # Set turbo BEFORE boot, and skip a redundant write — the config write
         # itself is what glitches the UCI bridge on a C64U (see the long note

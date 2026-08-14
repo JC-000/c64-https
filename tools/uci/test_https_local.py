@@ -100,6 +100,7 @@ from _memory_policy import (
     build_policy_and_arbiter,
     build_policy_and_arbiter_with_overlay_carveout,
 )
+from _reu_preflight import ReuPreflightError, preflight_reu
 
 
 DEBUG_CAPTURE_ENABLED = os.environ.get("DEBUG_CAPTURE", "1") != "0"
@@ -1420,6 +1421,20 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 3
+
+        # --- REU preflight (issue #97) ---
+        # A REU-profile PRG on a device with the REU disabled does not
+        # fail: it derives a wrong X25519 shared secret from silently
+        # no-op'd DMA and then spins ~44 minutes on the first encrypted
+        # record. Check the one setting that decides it, in one REST call,
+        # before committing to the run. On-chip builds need no REU and are
+        # not checked at all. This never writes device config — see the
+        # module docstring for why.
+        try:
+            preflight_reu(client, LABELS_PATH)
+        except ReuPreflightError as exc:
+            print(str(exc), file=sys.stderr)
+            return 4
 
         # --- Set turbo BEFORE booting the PRG ---
         # C64 Ultimate quirk (firmware 1.1.0, core 1.49): a runtime CPU

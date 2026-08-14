@@ -394,6 +394,27 @@ python3 tools/uci/test_https_local.py    # HTTPS GET (TLS 1.3 + ECDSA-P256)
 python3 tools/uci/test_https_bad_finished.py  # client must ABORT on a forged server Finished
 ```
 
+**Prerequisite — the REU, unless you build the on-chip profile.** The default
+`make BACKEND=uci` image is the *REU profile*: X25519's field multiply and the
+P-256 archive both fetch their multiply rows from REU banks by DMA. On a device
+with **Settings → C64 and Cartridge Settings → RAM Expansion Unit → Disabled**
+(the C64 Ultimate's factory setting) that DMA silently no-ops, the handshake
+derives a wrong shared secret, and the client spins ~44 minutes on a screen
+ending `KEYS ENC1 RX` — which reads as a lockup (issue #97). Either enable the
+REU, or build the profile that needs none:
+
+```bash
+make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1
+```
+
+Every script that exercises the crypto path (`test_https_local.py`,
+`test_https_bad_finished.py`, `test_https_print_body.py`,
+`test_https_local_p384.py`, `bench_ecdsa_u64e.py`) now **preflights this in one
+REST call and exits 4 in seconds** if a REU-profile build meets a device with no
+REU. On-chip builds skip the check entirely. The preflight never writes device
+config — the U64E is queue-shared and config writes persist until power cycle,
+so enabling the REU is yours to do. `C64_SKIP_REU_PREFLIGHT=1` bypasses it.
+
 `test_https_bad_finished.py` is the negative path: it talks to
 `tools/https_e2e/evil_listener.py`, a hand-rolled TLS 1.3 server that
 flips one bit of the server Finished `verify_data` before encryption
