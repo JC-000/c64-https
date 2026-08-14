@@ -472,9 +472,15 @@ RODATA_EOF
 # slot which the sibling build already claims for its tables — see the
 # integrator's report for the fit arithmetic.
 # X25519_CODE_SEGMENT does the same for the sibling's runtime-hot code.
-# Both default to CRYPTO_CODE, which reproduces the pre-bump placement
-# byte for byte; they exist so the fit can be explored without editing
-# a cfg.
+#
+# Both default to CRYPTO_CODE here, which reproduces the pre-bump
+# placement byte for byte and does NOT link. The top-level Makefile
+# exports X25519_INIT_SEGMENT and X25519_SEG_LADDER as X25519_RODATA
+# under USE_X25519_SIBLING=1, which is the combination that does link;
+# see the comment block beside those two `export` lines. Running this
+# script by hand therefore gives you the historical (non-linking)
+# layout unless you set the variables yourself — deliberate, so the
+# knobs stay explorable in isolation.
 X25519_INIT_SEGMENT="${X25519_INIT_SEGMENT:-CRYPTO_CODE}"
 X25519_CODE_SEGMENT="${X25519_CODE_SEGMENT:-CRYPTO_CODE}"
 

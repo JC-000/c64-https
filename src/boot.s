@@ -27,6 +27,9 @@
         ; imports `reu_mul_init` from the sibling archive instead.
         .ifdef USE_X25519_SIBLING
         .import reu_mul_init
+        ; Needed for its autoload-latch restore tail, not for the ZP
+        ; clear — see the X25519 slot stash near the end of this file.
+        .import reu_clear_wide
         .else
         .export reu_mul_init
         ; Under USE_NISTCURVES_ONCHIP the sibling's rebuilt
@@ -1036,6 +1039,32 @@ reu_p384_overlay_init:
         lda #$90                ; execute + STASH (C64->REU)
         sta reu_command
         plp
+
+        ; RESTORE THE MUL-ROW AUTOLOAD LATCH. The stash above is a full
+        ; six-register REU setup (c64 addr, reu addr, bank, len=$2000,
+        ; addr_ctrl) and it runs AFTER `jsr reu_mul_init` in the boot
+        ; sequence. `reu_fetch_mul_row` is a three-register primitive —
+        ; it writes only reu_reu_hi / reu_reu_bank / reu_command and
+        ; trusts the latch for everything else — so leaving it stomped
+        ; makes the next fetch pull $2000 bytes into $4200 instead of
+        ; $0200 bytes into mul_dma_lo.
+        ;
+        ; The blast radius is asymmetric and that is what made this hard
+        ; to see: fe25519 re-establishes the latch itself on every op
+        ; (reu_clear_wide's tail), so X25519 is unaffected and both
+        ; RFC 7748 vectors pass. libs/nistcurves' fp_mul does NOT — it
+        ; relies on the boot-time latch — so ECDSA P-256 verify is the
+        ; only visible casualty: tools/test_ecdsa_kat_oracle.py went
+        ; 3/6, all three VALID vectors rejected, which reads exactly
+        ; like the "missing -reu" garbage-fp_mul failure documented in
+        ; CLAUDE.md and would have been misdiagnosed as one.
+        ;
+        ; reu_clear_wide is the library's own canonical restorer (its
+        ; tail is documented as one of the two establishers of this
+        ; latch), so we call it rather than open-coding the register
+        ; writes and drifting from it later. Its ZP clear of fe_wide is
+        ; incidental and harmless at boot.
+        jsr reu_clear_wide
 .endif ; .ifdef USE_X25519_SIBLING
         rts
 
