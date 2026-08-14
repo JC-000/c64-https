@@ -120,6 +120,29 @@ def d64_images() -> list[Path]:
     return sorted(DIST.glob("*.d64"))
 
 
+def expected_d64_images(variants: list[dict]) -> list[Path]:
+    """The disk images that MUST exist, given which variants built.
+
+    This is the antidote to a vacuous pass. Both disk checks used to iterate
+    whatever `*.d64` happened to be in dist/, so an empty dist/ meant zero
+    checks ran, zero failed, and the run reported RELEASE ARTIFACTS VERIFIED —
+    a green light over a release with no disks in it at all. Deriving the
+    expected set from the build record instead means an absent image is a
+    failed check rather than a check nobody ran.
+    """
+    ok = [r for r in variants if r.get("result") == "OK"]
+    images = [DIST / f"c64-https-{r['key']}.d64" for r in ok]
+    backends: list[str] = []
+    for r in ok:
+        # backend= is written by build_prgs.sh; older build-info files predate
+        # it, so fall back to the key's prefix rather than crashing.
+        b = r.get("backend") or r["key"].split("-")[0]
+        if b not in backends:
+            backends.append(b)
+    images += [DIST / f"c64-https-{b}.d64" for b in backends]
+    return sorted(set(images))
+
+
 def check_d64_contents(variants: list[dict]) -> None:
     """Read each PRG back out of each disk and byte-compare it."""
     print("\n=== 2a. D64 contents (c1541 read-back, byte-compare) ===")
@@ -127,8 +150,24 @@ def check_d64_contents(variants: list[dict]) -> None:
     if not shutil.which(c1541):
         record("c1541 available", False, "not on PATH")
         return
+    expected = expected_d64_images(variants)
+    if not expected:
+        record("disk images expected", False,
+               "no variant built, so no disk image could be expected — "
+               "nothing here was verified")
+        return
+    present = set(d64_images())
+    for image in expected:
+        if image not in present:
+            record(f"{image.name} exists", False,
+                   "expected from the build record but absent from dist/ — "
+                   "did build_d64.sh run?")
+    stray = sorted(p.name for p in present - set(expected))
+    if stray:
+        record("no unexpected disk images", False,
+               f"dist/ carries images no variant accounts for: {stray}")
     by_prg = {r["prg"]: r for r in variants}
-    for image in d64_images():
+    for image in [i for i in expected if i in present]:
         listing = subprocess.run([c1541, "-attach", str(image), "-list"],
                                  capture_output=True, text=True).stdout
         names = [ln.split('"')[1] for ln in listing.splitlines()
@@ -160,7 +199,7 @@ def check_d64_contents(variants: list[dict]) -> None:
             record(f"{image.name} carries the built PRGs", ok, "; ".join(detail))
 
 
-def check_d64_boots() -> None:
+def check_d64_boots(variants: list[dict]) -> None:
     """Autostart every disk image in VICE and assert the boot banner.
 
     Two flags are load-bearing, and both were found the hard way:
@@ -191,7 +230,17 @@ def check_d64_boots() -> None:
         return
     timeout = float(os.environ.get("VICE_BOOT_TIMEOUT", "240"))
     import time
-    for image in d64_images():
+    expected = expected_d64_images(variants)
+    present = set(d64_images())
+    if not expected:
+        record("disk images to boot", False,
+               "no variant built, so nothing was booted — "
+               "nothing here was verified")
+        return
+    for image in expected:
+        if image not in present:
+            record(f"{image.name} bootable", False, "image absent from dist/")
+    for image in [i for i in expected if i in present]:
         # Backend is in the filename by construction (see _common.sh); the
         # per-backend disks autostart their first file, which is that
         # backend's REU profile.
@@ -274,6 +323,53 @@ def check_listener() -> None:
                f"found {leftovers}" if leftovers else "clean")
 
 
+def summarize(results: list, missing: int, skipped: list) -> tuple:
+    """Turn the recorded checks into a verdict. Pure — see test_package_verify.py.
+
+    Split out of main() precisely because this is where the pressure to say
+    something reassuring lands. The ordering below is the whole contract:
+
+      1. zero checks   -> failure. A gate that ran nothing is not a gate that
+                          passed, and this is not hypothetical: the glob-driven
+                          disk checks used to record nothing on an empty dist/
+                          and the run reported RELEASE ARTIFACTS VERIFIED.
+      2. any failure   -> failure.
+      3. any missing   -> RELEASE INCOMPLETE. What is present may verify fine;
+                          the matrix is still not releasable.
+      4. any skip      -> PARTIAL VERIFICATION, exit 0 so SKIP_* stays usable
+                          for narrowing, but never the word VERIFIED — a run
+                          that skipped sections is evidence about what ran, not
+                          about the release.
+      5. otherwise     -> RELEASE ARTIFACTS VERIFIED.
+
+    Rule 1 is checked before rule 4 on purpose: skipping every section must
+    not launder an empty run into a cheerful PARTIAL.
+    """
+    failed = [n for n, ok, _ in results if not ok]
+    lines = ["\n" + "=" * 60,
+             f"{len(results) - len(failed)}/{len(results)} checks passed"]
+    if not results:
+        lines.append("NOTHING WAS VERIFIED — no check ran. This is a failure, "
+                     "not a pass.")
+        return 1, lines
+    if failed:
+        lines.append("FAILED:")
+        lines += [f"  - {name}" for name in failed]
+        return 1, lines
+    if missing:
+        lines.append(f"Everything present verifies, but {missing} variant(s) "
+                     f"are MISSING — see the blocker above.")
+        lines.append("RELEASE INCOMPLETE")
+        return 1, lines
+    if skipped:
+        lines.append(f"PARTIAL VERIFICATION — everything that ran passed, but "
+                     f"these were SKIPPED: {', '.join(skipped)}.")
+        lines.append("Not a release gate. Re-run without SKIP_* before tagging.")
+        return 0, lines
+    lines.append("RELEASE ARTIFACTS VERIFIED")
+    return 0, lines
+
+
 def report_missing_variants(variants: list[dict]) -> int:
     """Surface variants that never built, with the toolchain's own reason.
 
@@ -308,37 +404,30 @@ def main() -> int:
           f"{len(d64_images())} disk images in {DIST}")
     missing = report_missing_variants(variants)
 
+    skipped: list[str] = []
     if os.environ.get("SKIP_REBUILD") != "1":
         check_reproducible(variants)
     else:
         print("\n=== 1. PRG reproducibility SKIPPED (SKIP_REBUILD=1) ===")
+        skipped.append("reproducibility")
 
     check_d64_contents(variants)
     if os.environ.get("SKIP_VICE") != "1":
-        check_d64_boots()
+        check_d64_boots(variants)
     else:
         print("\n=== 2b. VICE boots SKIPPED (SKIP_VICE=1) ===")
+        skipped.append("VICE boots")
 
     if os.environ.get("SKIP_LISTENER") != "1":
         check_listener()
     else:
         print("\n=== 3. Listener SKIPPED (SKIP_LISTENER=1) ===")
+        skipped.append("listener")
 
-    failed = [n for n, ok, _ in results if not ok]
-    print(f"\n{'=' * 60}")
-    print(f"{len(results) - len(failed)}/{len(results)} checks passed")
-    if failed:
-        print("FAILED:")
-        for name in failed:
-            print(f"  - {name}")
-        return 1
-    if missing:
-        print(f"Everything present verifies, but {missing} variant(s) are "
-              f"MISSING — see the blocker above.")
-        print("RELEASE INCOMPLETE")
-        return 1
-    print("RELEASE ARTIFACTS VERIFIED")
-    return 0
+    code, lines = summarize(results, missing, skipped)
+    for line in lines:
+        print(line)
+    return code
 
 
 if __name__ == "__main__":

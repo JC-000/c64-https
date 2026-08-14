@@ -484,5 +484,17 @@ package:
 # and compare PRG hashes, boot every D64 in VICE and assert the banner, and run
 # the built listener end to end against a Python ssl client. Measures; does not
 # assert. Run it after `make package`.
+#
+# The gate's own verdict logic is unit-tested first, and that ordering is the
+# point: verify_release.py shipped with a bug where it reported RELEASE
+# ARTIFACTS VERIFIED having checked nothing, so "the gate said yes" is only
+# worth something if the gate's yes still means what it should. The tests need
+# no VICE and no build; they cost milliseconds. A failure here stops the run
+# rather than letting a broken verdict bless a release.
+#
+# tools/run_all_tests.py deliberately does not carry these: it allocates a VICE
+# instance per suite and dispatches `run_tests(transport, labels, seed)`, a
+# shape a pure-logic test does not fit. The gate is the right home for them.
 package-verify:
+	$(PACKAGE_PYTHON) tools/test_package_verify.py
 	$(PACKAGE_PYTHON) tools/package/verify_release.py
