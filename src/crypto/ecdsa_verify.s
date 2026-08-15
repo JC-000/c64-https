@@ -21,6 +21,10 @@
 
 .include "constants.inc"
 
+; --- VIC-II blanking around the CPU-bound verify (src/vic.s) ---
+.import vic_blank
+.import vic_unblank
+
 ; --- External sibling (c64-nist-curves) entry points ---
 .import ecdsa_verify_256
 .import ec_scalar_mul_var
@@ -87,12 +91,28 @@ ecdsa_verify:
         ; Boot banks out BASIC ROM before any crypto runs (src/boot.s
         ; writes $36 to $01); the legacy defensive re-bank here was
         ; redundant and has been removed to save bytes.
+        ;
+        ; Blank the VIC across the whole dispatch: this is the single
+        ; longest CPU-bound stretch of the handshake, and it produces no
+        ; screen output of its own, so badline DMA here is pure loss.
+        ; At the v0.6.0 REU pin the verify was 59.2 s of a U64E's 80.8 s
+        ; handshake at 48 MHz, and 1,416.7 s of a stock 1 MHz ip65 run's
+        ; 2,159.7 s — i.e. roughly two thirds of the whole handshake in
+        ; both cases. See src/vic.s for why blanking is scoped to the
+        ; heavy primitives rather than wrapped around tls_connect.
+        ;
+        ; Both dispatch arms were tail-calls before blanking landed. They
+        ; are now JSRs so there is a return site to unblank at; the carry
+        ; that each arm returns is the verify result and is preserved
+        ; across the unblank by the PHP/PLP pair below.
+        jsr vic_blank
+
         lda ecdsa_curve_id
         beq @p256
         ; Phase 4a: P-384 dispatcher composes the dual-overlay swap
-        ; (sha384 -> curve) + sibling ecdsa_verify_384.  Tail-call so
-        ; the dispatcher's carry return propagates as our return.
-        jmp ecdsa_verify_384_tls
+        ; (sha384 -> curve) + sibling ecdsa_verify_384.
+        jsr ecdsa_verify_384_tls
+        jmp @done
 
 @p256:
         ; The TLS-populated ecdsa_sig_r, ecdsa_sig_s, ecdsa_hash,
@@ -101,7 +121,13 @@ ecdsa_verify:
         ; the sibling's ecdsa_verify_256 ingests.  Just hand it the base.
         lda #<ecdsa_sig_r
         ldx #>ecdsa_sig_r
-        jmp ecdsa_verify_256            ; carry = verify result, returns to caller
+        jsr ecdsa_verify_256            ; carry = verify result
+
+@done:
+        php                             ; save the verify carry
+        jsr vic_unblank
+        plp                             ; ...and hand it to our caller
+        rts
 
 
 ; =============================================================================

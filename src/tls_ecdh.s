@@ -27,6 +27,8 @@
 
 .import x25519_base
 .import x25519_scalarmult
+.import vic_blank
+.import vic_unblank
 .import x25519_clamp
 .import x25_scalar
 .import x25_u
@@ -56,8 +58,12 @@ tls_ecdh_generate_keypair:
         bpl @copy_priv
 
         ; Compute public key = scalar * basepoint(9)
-        ; x25519_base handles clamping and copies basepoint to x25_u
+        ; x25519_base handles clamping and copies basepoint to x25_u.
+        ; Blanked: no screen output happens inside, and badline DMA costs
+        ; ~6.3% of the 6510 (measured, see src/vic.s).
+        jsr vic_blank
         jsr x25519_base
+        jsr vic_unblank
 
         ; Copy x25_result -> tls_ecdhe_pubkey
         ldx #31
@@ -98,7 +104,9 @@ tls_ecdh_compute_shared:
         bpl @copy_srv
 
         ; Compute shared secret = scalar * server_pubkey
+        jsr vic_blank
         jsr x25519_scalarmult
+        jsr vic_unblank
 
         ; Copy x25_result -> tls_shared_secret
         ldx #31

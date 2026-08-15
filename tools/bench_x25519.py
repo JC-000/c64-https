@@ -69,7 +69,10 @@ def build_trampoline(labels, blank=True):
     code += bytes([0x85, 0xA2])                 # STA $A2
     code += bytes([0x58])                       # CLI
 
-    # Blank VIC-II (disable DEN bit 4 of $D011) for ~20-25% speedup
+    # Blank VIC-II (disable DEN bit 4 of $D011). Worth ~6.3%, NOT the
+    # "~20-25%" this comment used to claim -- see the measurement in
+    # CLAUDE.md's "VIC-II blanking" section. Run this script with and
+    # without --no-blank to reproduce.
     if blank:
         code += bytes([0xAD, 0x11, 0xD0])       # LDA $D011
         code += bytes([0x29, 0xEF])              # AND #$EF

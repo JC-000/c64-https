@@ -5,11 +5,25 @@
 ; only *believes* about its vendored libraries become link-time errors
 ; when they stop being true.
 ;
-; Contract: https://github.com/JC-000/c64-lib-contract — read SPEC.md on
-; `main`, NOT the newest git tag (tags lag: newest tag v0.4.0, main is
-; v0.8.0 as of 2026-08-14). Clauses referenced here: §1 (version
-; identification), §3 (REU layout), §5 (aggregate manifest equates),
-; §8.0 (shared-primitive ownership bitmask), §13.3 (rx ring shape).
+; Contract: https://github.com/JC-000/c64-lib-contract — **pin the tag**.
+;
+; That advice INVERTED at contract v0.10.3 (2026-08-15), the repo's first
+; GitHub release. This file used to say "read SPEC.md on `main`, NOT the
+; newest git tag", and it was right at the time: tags lagged badly, newest
+; v0.4.0 against a v0.8.0 main. They no longer do — v0.10.3 is both the
+; newest tag and the newest SPEC.
+;
+; One caveat, because the release notes state it wrongly. They claim
+; "every version since v0.4.1 is tagged (gapless series)"; it is not.
+; Measured against the v0.10.3 changelog: 31 changelog versions, 30 tags,
+; and **0.10.1 has no tag**. It was a doc-only section reorder with zero
+; normative change, so the hole costs nothing — but do not write tooling
+; that assumes every changelog version is resolvable as a ref. Pin
+; v0.10.3 or later.
+;
+; Clauses referenced here: §1 (version identification), §3 (REU layout),
+; §5 (aggregate manifest equates), §8.0 (shared-primitive ownership
+; bitmask), §13.3 (rx ring shape).
 ;
 ; ---------------------------------------------------------------------
 ; WHY `.assert ..., lderror` AND NOT `.if ... .error`
@@ -29,9 +43,20 @@
 ; The form that works is `.assert <expr>, lderror, "<msg>"`, which defers
 ; evaluation to ld65 — the same reasoning the contract itself applies in
 ; §13.0/§13.8 ("NET_BACKEND_FAMILIES is .import'ed, so its value is not
-; known until link") — so §1 and §13 of the contract disagree, and §1 is
-; the one that does not run. Written up in c64-https#70 for escalation
-; upstream. Do not "fix" the asserts below back into `.if` form.
+; known until link") — so §1 and §13 of the contract disagreed, and §1 was
+; the one that did not run.
+;
+; **Fixed upstream at contract v0.10.2** (c64-lib-contract#107, filed off
+; this repo's v0.10.0 alignment pass): §7's ABI-gate bullet had restated
+; the same broken `.if`-on-import form that v0.8.1 had already corrected
+; in §1, and it is now `.assert`/`lderror` with a §1 cross-reference. The
+; companion defect in the same issue — §8.0's consumes-mask snippet using
+; `.if ::` on an unset `-D` selector, which fails to assemble in the
+; adopter's own default build — is now `.ifdef`.
+;
+; Both were copy-paste hazards rather than anything c64-https shipped:
+; the asserts below were written in the working form from the start, which
+; is how the defect was noticed. Do not "fix" them back into `.if` form.
 ;
 ; ---------------------------------------------------------------------
 ; WHAT IS *NOT* ASSERTED HERE, AND WHY

@@ -131,15 +131,12 @@ def expected_d64_images(variants: list[dict]) -> list[Path]:
     failed check rather than a check nobody ran.
     """
     ok = [r for r in variants if r.get("result") == "OK"]
+    # One image per variant, and ONLY that. The per-backend combo disks were
+    # retired when the UCI lineup reached three variants: 3 x 248 = 744
+    # blocks does not fit a .d64's 664, so a combo image would have had to
+    # silently omit a product. Every disk now carries exactly the one
+    # variant named on its label.
     images = [DIST / f"c64-https-{r['key']}.d64" for r in ok]
-    backends: list[str] = []
-    for r in ok:
-        # backend= is written by build_prgs.sh; older build-info files predate
-        # it, so fall back to the key's prefix rather than crashing.
-        b = r.get("backend") or r["key"].split("-")[0]
-        if b not in backends:
-            backends.append(b)
-    images += [DIST / f"c64-https-{b}.d64" for b in backends]
     return sorted(set(images))
 
 

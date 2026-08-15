@@ -79,6 +79,15 @@ endif
 ifdef HTTPS_PORT
 CA65FLAGS += -D HTTPS_PORT=$(HTTPS_PORT)
 endif
+# VIC-II blanking around the CPU-bound crypto primitives (src/vic.s).
+# ON by default and that is what ships; `make VIC_BLANK=0` degrades
+# vic_blank/vic_unblank to bare RTS so the badline tax can be measured
+# A/B with everything else in the image identical. That control build is
+# a measurement tool, not a shipping configuration — see the "VIC-II
+# blanking" section of CLAUDE.md for the numbers it produced.
+ifeq ($(VIC_BLANK),0)
+CA65FLAGS += -D NO_VIC_BLANK=1
+endif
 # Lazy (=) so the USE_NISTCURVES_ONCHIP_COMB block below can retarget
 # CFG to the cfg variant after this line.
 LD65FLAGS = -C $(CFG) -Ln build/labels.txt -m build/c64-https.map --dbgfile build/c64-https.dbg

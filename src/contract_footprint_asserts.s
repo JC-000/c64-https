@@ -6,9 +6,11 @@
 ; profile-dependent in a way the §1/§3/§8.0/§13.3 gates are not (see the
 ; comb exclusion below).
 ;
-; Contract: https://github.com/JC-000/c64-lib-contract — read SPEC.md on
-; `main`, NOT the newest git tag (tags lag; main is v0.10.0 as of
-; 2026-08-15). Clause referenced here: §6.6 (consumer footprint asserts).
+; Contract: https://github.com/JC-000/c64-lib-contract — pin the tag
+; (v0.10.3 or later; the old "read `main`, tags lag" advice inverted at
+; that release — see the header of src/lib_contract_asserts.s, including
+; the one hole in the tag series). Clause referenced here: §6.6 (consumer
+; footprint asserts).
 ;
 ; ---------------------------------------------------------------------
 ; WHAT §6.6 IS FOR
@@ -70,36 +72,39 @@
 ; leaving an opaque segment overflow to be bisected.
 ;
 ; ---------------------------------------------------------------------
-; WHY THE COMB PROFILE IS EXCLUDED
+; THE COMB EXCLUSION IS GONE (libs/nistcurves v0.11.0)
 ; ---------------------------------------------------------------------
-; The comb archive would FAIL this assert today (27,000 + 1,650 = 28,650
-; against 16,384) and the failure would be a false alarm: the comb PRG
-; links and runs, so the declared number is wrong, not the build.
+; This file used to wrap everything below in `.ifndef USE_NISTCURVES_COMB`,
+; because the comb archive would have FAILED the assert with 27,000 + 1,650
+; = 28,650 against 16,384 — and that failure would have been a false alarm:
+; the comb PRG linked and ran, so the declared number was wrong, not the
+; build.
 ;
-; The cause is ours, not upstream's. `tools/integration/build_nistcurves_p256.sh`
-; builds the comb profile from upstream's FULL `lib-onchip` archive and
-; then `rm -f`s ~7 members (fp384, mod384, curve384, points384_*, ...) to
-; narrow it to the P-256 comb set. Upstream's `lib_manifest_onchip.o`
-; legitimately describes the archive upstream shipped; it survives our
-; member surgery still describing the pre-surgery set. The `reu` and
-; `onchip` profiles are unaffected because they build from upstream's
-; already-minimal `lib-p256-verify` / `lib-p256-verify-onchip` targets,
-; which carry per-variant manifests.
+; The cause was ours. `tools/integration/build_nistcurves_p256.sh` built the
+; comb profile from upstream's FULL `lib-onchip` archive and then `rm -f`d
+; ~13 non-P-256 members to narrow it. Upstream's `lib_manifest_onchip.o`
+; legitimately described the archive upstream shipped, and it survived that
+; surgery still describing the pre-surgery set — exactly the harm SPEC §6.1
+; names ("an archive whose member set a consumer has edited is outside every
+; §5/§8.0 manifest claim it ships").
 ;
-; This is precisely the harm SPEC §6.1 names: "an archive whose member set
-; a consumer has edited is outside every §5/§8.0 manifest claim it ships."
-; The sanctioned remedy is §6.2 `CONTRACT_DEFINES` / `CONTRACT_ZP_DEFINES`
-; plus §6.3's `lib-app-owned` target, so the configuration is reachable
-; without surgery. Neither exists in the pinned v0.9.1; both ARE implemented
-; on libs/nistcurves master (v0.10.1, measured). Retiring the surgery is
-; therefore unblocked by the wave bump and is sequenced in c64-https#70 —
-; when it lands, delete the .ifdef below and the comb profile is covered
-; by the same assert as the other two.
+; Fixed at the v0.11.0 pin. Upstream added `lib-p256-comb` /
+; `lib-p256-comb-onchip` in response to c64-nist-curves#117, each carrying
+; its own §6.4 manifest triple under the `LIB_P256_COMB_ONLY` switch, so the
+; wrapper stages a narrow archive that upstream actually ships and the
+; declared footprint describes what we link. The comb profile is now covered
+; by the same assert as `reu` and `onchip`, with no gating at all.
 ;
-; The comb profile is deliberately excluded from `make package`, so no
-; shipped artifact is affected by the gap this exclusion leaves open.
+; Two things worth knowing if this ever needs re-litigating:
+;   - the switch was PRG-NEUTRAL — the comb image is byte-identical
+;     (`63c7ce868cdd…`) built either way, so the archive change altered the
+;     manifest and nothing else;
+;   - the wrapper still drops three members for other reasons
+;     (`mul_8x8.o`, `data_shared.o`, `reu_mul_init.o` — the §8.0 APP_OWNED
+;     collision set, c64-https#119). That surgery does not affect the
+;     numbers this assert reads, because those are per-variant §6.4 values,
+;     but it is why the §8.0 disjointness asserts are still not writable.
 
-.ifndef USE_NISTCURVES_COMB
 
 .import LIB_NISTCURVES_RESIDENT_BYTES
 .import LIB_NISTCURVES_COLD_BYTES
@@ -116,4 +121,3 @@
     .assert LIB_NISTCURVES_RESIDENT_BYTES + LIB_NISTCURVES_COLD_BYTES <= __CRYPTO_RESIDENT_SIZE__, lderror, "libs/nistcurves declared footprint (LIB_NISTCURVES_RESIDENT_BYTES + _COLD_BYTES) exceeds CRYPTO_RESIDENT. Contract SPEC 6.6. Most likely cause is a 6.4 regression: the archive ships a whole-library manifest instead of a per-variant one (27000 B is the whole-library value). Check with od65 --dump-exports on the staged lib_manifest*.o before assuming the library really grew."
 .endif
 
-.endif ; USE_NISTCURVES_COMB
