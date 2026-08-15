@@ -795,6 +795,29 @@ Five latent bugs and three new ones were cleared to get here:
     rather than the sibling's — a different routine writing through a
     different buffer set, with no diagnostic.
 
+    **This was a semantic merge collision, not a regression in either
+    change, and PR #102 should not be read as having been wrong.** Its
+    evidence that the sibling links was honest on its own branch: at
+    76d876c the nistcurves pin was still v0.6.0
+    (`git ls-tree 76d876c libs/nistcurves` -> 00d2626), and at v0.6.0
+    no *archive* carries `reu_mul_tables_init`. The symbol exists in
+    that tree — `src/main.s:254` exports it — but `main.o` is
+    deliberately excluded from every `lib-*` archive target
+    (Makefile:223), and c64-https links archives only. Upstream #81
+    later moved the provider out of the never-archived driver into
+    `src/reu_mul_init.s` precisely so it would ship to consumers,
+    which is what put it in our link at v0.9.1. Meanwhile the
+    nistcurves bump (f87d76d) landed on a parallel branch that is not
+    an ancestor of 76d876c
+    (`git merge-base --is-ancestor f87d76d 76d876c` -> false), so
+    neither branch could see the collision; it existed only on merged
+    master.
+
+    (Archaeology contributed by the deferred-followups lane. The
+    "v0.6.0 does not export it at all" phrasing that came with it is
+    too strong and would not survive a grep — the export is right
+    there in main.s. The load-bearing fact is *never archived*.)
+
     ip65's remaining overflow is structural: its `CRYPTO_OVERLAY` is
     4,212 B against UCI's 7,680 B, and it already holds TLS_CODE +
     CRYPTO_AUX_CODE before the sibling's `X25519_RODATA` (2,304 B) +
