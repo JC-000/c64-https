@@ -53,3 +53,42 @@ mul_tables_init:
 sqtab_lo:       .res 512
 sqtab_hi:       .res 512
 .endif
+
+; =============================================================================
+; c64-lib-contract SPEC §6.5 — canonical names for the shared multiply
+; buffers c64-https provides.
+;
+; c64-https owns these four buffers (src/data.s under the default build;
+; the sibling's data module under USE_X25519_SIBLING=1) and the
+; integration wrapper therefore DROPS libs/nistcurves' `data_shared.o`
+; from the archive — two providers of the same RAM would be a duplicate
+; symbol at best and two disjoint copies at worst.
+;
+; From libs/nistcurves v0.10.0 the library's own objects reference these
+; buffers by their §6.5 canonical names (`nistcurves_mul_*`), because
+; `mul_` is registered to c64-x25519 in the §2 prefix registry. Upstream
+; keeps the bare `mul_*` spellings as same-address aliases *inside*
+; data_shared.o — which is exactly the object we drop — so at the v0.10.1
+; pin the link fails with four unresolved externals:
+;
+;   Unresolved external 'nistcurves_mul_cached_a' referenced in:
+;     src/fp256.s(188) ...            (likewise _dma_hi, _dma_lo, _src2_buf)
+;
+; The aliases below close that. They are deliberately *here* rather than
+; beside either definition site: `src/data.s` declares the buffers only
+; under `.ifndef USE_X25519_SIBLING`, and the sibling's generated data
+; module declares them otherwise, so a definition-site alias would have to
+; be written twice and kept in step. Importing the bare name binds to
+; whichever provider the link selected, with no duplication and no gating.
+;
+; When upstream drops the bare `mul_*` aliases at its next MAJOR, the
+; migration is to rename the definitions and delete this block — not to
+; add a second set of buffers.
+        .import mul_dma_lo, mul_dma_hi, mul_cached_a, mul_src2_buf
+        .export nistcurves_mul_dma_lo, nistcurves_mul_dma_hi
+        .export nistcurves_mul_cached_a, nistcurves_mul_src2_buf
+
+nistcurves_mul_dma_lo   = mul_dma_lo
+nistcurves_mul_dma_hi   = mul_dma_hi
+nistcurves_mul_cached_a = mul_cached_a
+nistcurves_mul_src2_buf = mul_src2_buf

@@ -127,9 +127,9 @@ Variables:
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65).
                           Changing it requires `make clean` — see above.
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
-                          `libs/x25519@v0.6.0` sibling. **Does not link
-                          on either backend at present** — both
-                          overflow, differently; see "Known issues"
+                          `libs/x25519@v0.11.0` sibling. **UCI links;
+                          ip65 overflows CRYPTO_OVERLAY** — see
+                          "Known issues". Off by default either way.
   - `EMBED_P256_OVERLAY=1` — stage the P-256 verify image into the
                           CRYPTO_OVERLAY slot at PRG-load (UCI; mutually
                           exclusive with USE_X25519_SIBLING /
@@ -176,10 +176,9 @@ buffers in the crypto BSS — see per-module headers for details):
 
   X25519 / field arithmetic
     Default: in-tree `src/crypto/{x25519,fe25519}.s`.
-    Opt-in: sibling `libs/x25519@v0.6.0` via `make USE_X25519_SIBLING=1`
-    — **currently unbuildable on both backends**, and the pinned
-    v0.6.0 additionally carries an upstream correctness bug; see
-    Known issues before relying on either fact.
+    Opt-in: sibling `libs/x25519@v0.11.0` via `make USE_X25519_SIBLING=1`
+    — links under UCI from the v0.10.1/v0.11.0 wave pins, still
+    overflows under ip65, and ships in nothing; see Known issues.
     The v0.6.0 pin is c64-lib-contract-aligned (SPEC §8.1) and adds the
     bank-2 drop + RAM-reclaim work; older v0.4.0 pin is historical only.
     Sibling and in-tree both expose the same ABI:
@@ -194,7 +193,7 @@ buffers in the crypto BSS — see per-module headers for details):
   SHA-256                   (in-tree; no sibling)
     sha256_init, sha256_update, sha256_final
 
-  ECDSA P-256                (`libs/nistcurves@v0.9.1` sibling,
+  ECDSA P-256                (`libs/nistcurves@v0.10.1` sibling,
                               c64-lib-contract SPEC §1-§8.1 aligned)
     ecdsa_verify_256      — TLS dispatcher in src/crypto/ecdsa_verify.s
                             packs the BE struct + calls the sibling entry
@@ -766,63 +765,91 @@ Five latent bugs and three new ones were cleared to get here:
     overflow and is fixed (see the CRYPTO_COLD_SHADOW entry under
     "Memory layout").
 
-    **`USE_X25519_SIBLING=1` links on NEITHER backend** (re-measured
-    2026-08-13 at f0127a0, fresh submodules, cc65 from homebrew). The
-    two failures are different and independent:
+    **`USE_X25519_SIBLING=1` LINKS UNDER UCI from the v0.10.1 /
+    v0.11.0 wave pins** (issue #112), and still does not under ip65.
+    Both backends previously died on the same symbol collision; that
+    half is closed, and what remains on ip65 is a fit problem:
 
+      make BACKEND=uci USE_X25519_SIBLING=1     # 62,977 B PRG, links
       make USE_X25519_SIBLING=1                 # ip65
-        X25519_RODATA overflows CRYPTO_OVERLAY by 2048 bytes
-        LIB_NISTCURVES_P256_CODE overflows CRYPTO_RESIDENT by 103 bytes
+        Segment 'X25519_RODATA' overflows memory area
+        'CRYPTO_OVERLAY' by 3584 bytes
 
-      make BACKEND=uci USE_X25519_SIBLING=1     # UCI
-        LIB_NISTCURVES_P256_CODE overflows CRYPTO_HOT by 381 bytes
+    The collision was `ld65: Error: Duplicate external identifier:
+    'reu_mul_tables_init'` — both libraries shipped a SPEC §8.2
+    `reu_mul` provider, and c64-https pulled both: under
+    `USE_X25519_SIBLING=1` `src/boot.s` *imports* `reu_mul_init`
+    (the sibling owns the table), so ld65 pulls nistcurves'
+    `reu_mul_init.o` to satisfy it because `nistcurves-p256.a`
+    precedes `x25519.a` on the link line, and then the sibling's own
+    provider arrives anyway via `reu_clear_wide`. The remedy is one
+    line in `tools/integration/build_nistcurves_p256.sh`: drop
+    `reu_mul_init.o` alongside the `mul_8x8.o` / `data_shared.o`
+    drops already there. c64-https is the §8.0 APP_OWNED case for
+    that primitive, so the member is surplus in every configuration —
+    and provably inert in the shipped ones, since all four REU-profile
+    PRGs are byte-identical with and without the drop.
 
-      make BACKEND=uci                          # control: links clean
+    Note the near miss: had ld65 resolved instead of erroring,
+    `reu_mul_init` would have bound to nistcurves' table builder
+    rather than the sibling's — a different routine writing through a
+    different buffer set, with no diagnostic.
 
-    Earlier revisions of this file called UCI "the supported
-    sibling-on path"; that was wrong — nothing links the sibling
-    today, and no shipped artifact contains it. The UCI overflow is
-    simply the sibling's larger code claim: sibling CRYPTO_CODE is
-    4,207 B (fe25519 2,711 + x25519 698 + x25519_init 798) against the
-    in-tree pair's 2,769 B (fe25519 2,093 + x25519 676), i.e. +1,438 B
-    into a CRYPTO_HOT with ~1,057 B of slack. ip65 additionally has
-    only a 4,212 B `CRYPTO_OVERLAY` (vs UCI's 7.5 KB) to hold
-    `X25519_RODATA` (2,304 B) + `X25519_BSS` (1,536 B) on top of
-    TLS_CODE + CRYPTO_AUX_CODE.
+    **This was a semantic merge collision, not a regression in either
+    change, and PR #102 should not be read as having been wrong.** Its
+    evidence that the sibling links was honest on its own branch: at
+    76d876c the nistcurves pin was still v0.6.0
+    (`git ls-tree 76d876c libs/nistcurves` -> 00d2626), and at v0.6.0
+    no *archive* carries `reu_mul_tables_init`. The symbol exists in
+    that tree — `src/main.s:254` exports it — but `main.o` is
+    deliberately excluded from every `lib-*` archive target
+    (Makefile:223), and c64-https links archives only. Upstream #81
+    later moved the provider out of the never-archived driver into
+    `src/reu_mul_init.s` precisely so it would ship to consumers,
+    which is what put it in our link at v0.9.1. Meanwhile the
+    nistcurves bump (f87d76d) landed on a parallel branch that is not
+    an ancestor of 76d876c
+    (`git merge-base --is-ancestor f87d76d 76d876c` -> false), so
+    neither branch could see the collision; it existed only on merged
+    master.
 
-    **The pinned v0.6.0 also carries an upstream correctness bug.**
-    c64-x25519 #64 (fixed in v0.7.0): `x25519_scalarmult` returns
-    deterministically wrong results for a peer u-coordinate with bit
-    255 set, across v0.4.0-v0.6.0. v0.4.0 stopped writing the RFC 7748
-    `decodeUCoordinate` mask back into `x25_u` but left the ladder's
-    `z_3 = x_1 * (DA-CB)^2` site reading the unmasked buffer, so
-    x1 = x3 + 19 (mod p). **The in-tree implementation is NOT
-    affected** — `src/crypto/x25519.s` still writes the mask back
-    (`sta x25_u+31`), so its x_1 read sees the masked value;
-    `tools/test_x25519.py --slow` RFC 7748 vector 2 (whose u ends
-    `0x93`, bit 255 set) PASSes on the in-tree build, 73/73.
-    That same vector would catch the sibling bug the moment the
-    sibling links, so **do not flip the sibling default at the v0.6.0
-    pin** — bump to >= v0.7.0 first.
+    (Archaeology contributed by the deferred-followups lane. The
+    "v0.6.0 does not export it at all" phrasing that came with it is
+    too strong and would not survive a grep — the export is right
+    there in main.s. The load-bearing fact is *never archived*.)
 
-    Upstream is at v0.8.0. A bump is not a one-line submodule move:
-    v0.8.0 renames `CODE`/`DATA` to `LIB_X25519_CODE`/`LIB_X25519_DATA`
-    and adds `LIB_X25519_INIT_CODE`, all three of which the consumer
-    cfgs must declare (`LIB_X25519_INIT_CODE` must be the last
-    file-emitting segment before any bss-type segment in a file-backed
-    area), and v0.7.0's #64 fix adds an `x25_x1` buffer that
-    `build_x25519.sh`'s hand-written BSS stub does not yet export.
-    v0.8.0 also ships an `X25519_ONCHIP_MUL` profile with no REU
-    surface at all (`LIB_X25519_REU_BANKS_USED = 0`, no
-    `reu_fetch_mul_row` export) — which would dissolve the
-    `USE_NISTCURVES_ONCHIP` / `USE_X25519_SIBLING` mutual exclusion at
-    `Makefile:90`, whose stated reason is that both archives export
-    that symbol. Note that v0.8.0's headline
-    `LIB_X25519_RESIDENT_BYTES` drop (9224 -> 8383) is **not** a
-    shrink: 826 B of it simply moved to the reclaimable
-    `LIB_X25519_COLD_BYTES`, and our wrapper stages only three of the
-    sibling's sources anyway, so upstream manifest deltas do not
-    subtract from the overflows above.
+    ip65's remaining overflow is structural: its `CRYPTO_OVERLAY` is
+    4,212 B against UCI's 7,680 B, and it already holds TLS_CODE +
+    CRYPTO_AUX_CODE before the sibling's `X25519_RODATA` (2,304 B) +
+    `X25519_BSS` (1,536 B) + the ladder/init code the Makefile routes
+    there arrive. Fixing it is a cfg restructure, not a flag.
+
+    **The flag stays OFF by default.** Nothing ships the sibling, and
+    flipping the default is a separate decision that wants a hardware
+    handshake behind it, not just a link and a KAT. (The old warning
+    against flipping at the v0.6.0 pin — upstream #64, wrong result
+    for a peer u with bit 255 set — is moot at v0.11.0, which is well
+    past the v0.7.0 fix. The in-tree implementation never had that
+    bug: `src/crypto/x25519.s` writes the RFC 7748 mask back to
+    `x25_u+31`, so its x_1 read sees the masked value, and
+    `tools/test_x25519.py` RFC 7748 vector 2 — whose u ends `0x93` —
+    passes 73/73 on the in-tree build.)
+
+    The pin is now **v0.11.0**. The v0.6.0 -> v0.10.0 migrations the
+    wrapper had to absorb (the §4 `LIB_X25519_CODE` /
+    `LIB_X25519_INIT_CODE` segment renames, the `x25_x1` buffer added
+    by v0.7.0's #64 fix) are done and documented in
+    `tools/integration/build_x25519.sh`'s header. v0.11.0 itself is a
+    pure export-surface change — upstream states the library PRG is
+    byte-identical to v0.8.0 — so it needed no wrapper work at all.
+
+    The `USE_NISTCURVES_ONCHIP` / `USE_X25519_SIBLING` mutual
+    exclusion at `Makefile:90` still stands, and its stated reason is
+    still true: both archives export `reu_fetch_mul_row`. Upstream's
+    `X25519_ONCHIP_MUL` profile (`LIB_X25519_REU_BANKS_USED = 0`, no
+    `reu_fetch_mul_row`) would dissolve it, but our wrapper stages
+    sources directly rather than calling `make -C libs/x25519`, so
+    adopting that profile is wrapper work, not a flag.
 
     `tools/integration/build_x25519.sh` is the integration wrapper. It
     does **not** call `make -C libs/x25519` — it stages three sibling
@@ -902,6 +929,49 @@ Five latent bugs and three new ones were cleared to get here:
     proven rather than assumed. Verify from the link if you ever doubt
     it: `build/labels.txt` must show `fp_mul_i=$39`, `fp_mul_j=$3A`,
     `zp_ptr2=$3D`.
+
+    **The slot is spelled `nistcurves_zp_ptr2` from v0.10.0.** The
+    §6.5 rename window made the four general-purpose scratch slots
+    canonically `nistcurves_zp_{tmp1,tmp2,ptr1,ptr2}` and left the
+    bare `zp_*` names as aliases — but the alias *assignment* is not
+    `.ifndef`-guarded, so the old `-D zp_ptr2=$3d` stopped being an
+    override and became `zp_config.s(56): Error: Symbol 'zp_ptr2' is
+    already defined`. That is the good outcome for once: this class
+    of mistake is normally silent. The od65 post-check now reads the
+    canonical name, because the bare one disappears under
+    `-D LIB_NO_BARE_EXPORTS=1` and a guard that can go vacuous under a
+    build-tightening flag is worse than no guard.
+  - **`poly_prod_lo` / `poly_prod_hi` are a RENDEZVOUS, not private
+    scratch — and under `USE_NISTCURVES_ONCHIP` the sibling owns
+    them.** Two bytes, and getting them wrong is silent wrong crypto
+    with no link error anywhere. The onchip row generator
+    `og_common` (in the sibling's `mul_8x8_onchip.o`) does
+    `jsr ct_mul_8x8` — which under `SHARED_CT_MUL_8X8` resolves to
+    c64-https's body in `src/crypto/poly1305.s` — and then reads the
+    product back out of `poly_prod_lo/hi`. Writer and reader must
+    address the *same* two bytes.
+
+    Through the v0.9.1 pin upstream gated those bytes with the
+    `ct_mul_8x8` body, so the sibling had none and the wrapper's glue
+    TU `.import`ed c64-https's pair. libs/nistcurves v0.10.0 moved
+    them **outside** the gate (contract v0.9.1 adopter-private-buffer
+    rule: `fp_sqr`'s diagonal path writes them with no `ct_mul_8x8`
+    involved), which surfaced as
+    `mul_8x8.s(223): Error: Symbol 'poly_prod_lo' is already an
+    import`. The fix inverts ownership under this profile only: the
+    glue TU drops the import, and `poly1305.s` imports the sibling's
+    pair instead of defining its own. Had the glue simply dropped the
+    import without the consumer-side change, the link would have
+    SUCCEEDED with two disjoint pairs, `og_common` would have read
+    two zero bytes for every product, and every on-chip-generated
+    multiply row would have been wrong.
+
+    Guarded behaviourally, not structurally: `tools/test_ecdsa_kat_oracle.py`
+    on an onchip build is the test that would catch it (6/6 including
+    3 negative CAVP vectors; a zeroed row set fails the 3 positive
+    ones). Run it against **an onchip PRG specifically** after any
+    change in this area — the REU-profile build does not link
+    `mul_8x8_onchip.o` at all and will pass regardless.
   - **The v0.7.0/v0.8.0 UCI `CRYPTO_HOT` overflow is RESOLVED at
     v0.9.1 — and no cfg change was needed.** Recorded here because the
     obvious remedy was nearly taken and would have been the wrong
