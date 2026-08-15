@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""test_https_bad_finished.py — the client must refuse a forged server Finished.
+"""rig_https_bad_finished.py — the client must refuse a forged server Finished.
 
 Audit finding F2: the client verifies the server's Finished HMAC and aborts on
 mismatch (``tls_verify_finished`` in ``src/tls_keyschedule.s``, ``bcs
@@ -158,7 +158,7 @@ def _state_name(v: int) -> str:
     return f"{_STATE_NAMES.get(v, '?')} (${v:02X})"
 
 
-# Arbiter-assigned; see the long note in test_https_local.py about why these
+# Arbiter-assigned; see the long note in rig_https_local.py about why these
 # must never be hardcoded.
 ROUTINE_ADDR = HOST_STR_ADDR = PATH_STR_ADDR = -1
 SENTINEL_ADDR = PROGRESS_ADDR = CARRY_FLAG_ADDR = -1
@@ -187,7 +187,7 @@ def _try_bind(bind_ip: str, port: int) -> socket.socket | None:
 def _build_http_routine(labels: dict[str, int], port: int) -> tuple[bytes, int]:
     """6502 stub: set up http_get's inputs, call it, latch carry, signal done.
 
-    Mirrors tools/uci/test_https_local.py's routine — same real code path
+    Mirrors tools/uci/rig_https_local.py's routine — same real code path
     (``http_get`` -> ``tls_connect``), so the only thing this test changes
     relative to the passing e2e is what the server puts on the wire.
     """
@@ -529,7 +529,7 @@ def main() -> int:
 
         # Set turbo BEFORE boot, and skip a redundant write — the config write
         # itself is what glitches the UCI bridge on a C64U (see the long note
-        # in test_https_local.py and the c64u_starlight_device memory).
+        # in rig_https_local.py and the c64u_starlight_device memory).
         try:
             cat = client.get_config_category(CAT_U64_SPECIFIC)
             inner = cat.get(CAT_U64_SPECIFIC, cat)

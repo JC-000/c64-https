@@ -7,7 +7,7 @@ means a fresh clone has none, and every script that starts a local TLS
 listener needs them.
 
 ``https_listener.py`` has always generated its own pair, but
-``tools/uci/test_https_local.py`` inlines its own listener and so never
+``tools/uci/rig_https_local.py`` inlines its own listener and so never
 crossed that path: it just printed ``ERROR: cert/key not found`` and exited
 2, leaving the reader to discover that a generator existed somewhere else
 entirely (issue #93). This module is the single entry point both now use.

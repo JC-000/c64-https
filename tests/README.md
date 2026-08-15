@@ -57,3 +57,8 @@ when pytest is run from the repo root. `conftest.py` then prints what a
 pytest run does and does not cover, in the header and again in the
 summary. `tools/test_pytest_boundary.py` fails if a `test_*.py` file
 reappears here.
+
+`tools/uci/` is the same directory shape for real U64E/C64U hardware and
+was renamed the same way in the follow-up to #111; see
+`tools/uci/README.md`. The guard covers both directories, and also fails
+if `pytest.ini`'s `norecursedirs` stops listing either of them.

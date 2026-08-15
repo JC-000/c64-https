@@ -17,6 +17,20 @@
 
 .segment "NET_CODE"
 
-; ca65 resolves .incbin paths relative to the including source file, so
-; from src/net/ip65/ip65_blob.s the blob is three levels up from repo root.
+; Three levels up from this file's directory (src/net/ip65/) is the repo
+; root, where ip65-build/ lives.
+;
+; CAUTION: ca65 does NOT resolve .incbin relative to the including source
+; file only — it also tries the path relative to the current directory,
+; which is the repo root when make runs. From there `../../../` escapes
+; three levels ABOVE the checkout. A git worktree under
+; <repo>/.claude/worktrees/<name>/ sits at exactly that depth, so if its
+; own ip65-build/ip65-c64.bin is missing this silently picks up the parent
+; checkout's blob and the build looks fine. Measure blob behaviour in a
+; real clone, never in a nested worktree.
+;
+; The build order is guaranteed by an explicit dependency edge in the
+; Makefile (build/net/ip65/ip65_blob.o: $(IP65_BIN)) — make cannot see
+; through .incbin, so without it this object could be assembled before
+; the blob exists (issue #89).
 .incbin "../../../ip65-build/ip65-c64.bin"

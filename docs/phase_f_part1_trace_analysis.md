@@ -5,7 +5,7 @@
 **The captured `trace.bin` artifacts from runs 20260420_151301, _152431,
 _154548 and _160911 do NOT contain sufficient signal to pinpoint the
 exact instruction where `x25519_scalarmult` hangs.** The 6510 bus tap,
-as filtered by `test_https_local.py::_keep_cycle`, is a periodic sampler
+as filtered by `rig_https_local.py::_keep_cycle`, is a periodic sampler
 (one sample every ~1/48th of a CPU cycle at 48 MHz turbo); what surfaces
 in the PC histogram is a *cadence* artifact, not a hot-loop fingerprint.
 
@@ -16,7 +16,7 @@ but the trace *data* is not what will identify the specific loop.
 ## What the trace actually shows
 
 1. **All captured cycles have PHI2 = 1** (CPU-phase), by construction.
-   `_keep_cycle` in `tools/uci/test_https_local.py:134` drops PHI2 = 0
+   `_keep_cycle` in `tools/uci/rig_https_local.py:134` drops PHI2 = 0
    samples. Every window I sampled (cyc 0, 10k, 50k, 200k, 1M, …, 13M)
    reports `CPU: 100%  VIC: 0%`.
 2. **A dominant address stride of exactly $2F** (47 bytes) across the
@@ -156,7 +156,7 @@ Given the trace does not distinguish them, the prior agent's leads
 
 ## No fix applied
 
-I did not modify any source, and I did not run `test_https_local.py`.
+I did not modify any source, and I did not run `rig_https_local.py`.
 Running one more 10-minute U64E test without a sharper hypothesis
 would consume the hardware time without adding a single new signal
 beyond what the four existing captures already show. The next step

@@ -6,7 +6,7 @@ certificate. No dependency on the c64-https repo, on `c64-test-harness`, or on
 any third-party Python package.
 
 It is a stand-alone clone of the inline listener in the c64-https repo
-(`tools/uci/test_https_local.py`). The protocol behavior is copied verbatim so
+(`tools/uci/rig_https_local.py`). The protocol behavior is copied verbatim so
 the Commodore 64 client sees exactly what it expects.
 
 ## Dependencies: none. Requirement: a Python that can do TLS 1.3.

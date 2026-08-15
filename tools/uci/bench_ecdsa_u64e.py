@@ -34,7 +34,7 @@ Env:
   ECDSA_DEBUG_CAPTURE — "1" to enable U64 6510 debug-stream capture for
                      the FIRST 48 MHz positive run; artifacts written
                      under $ECDSA_DEBUG_DIR (default /tmp/ecdsa_debug/).
-  KEEP_DEBUG_ON_PASS — as in test_https_local.py.
+  KEEP_DEBUG_ON_PASS — as in rig_https_local.py.
 """
 from __future__ import annotations
 

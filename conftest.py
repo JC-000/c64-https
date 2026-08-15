@@ -2,7 +2,8 @@
 
 c64-https is an assembly project. Its real test suites drive VICE or real
 Ultimate 64 hardware and are launched by `python3 tools/run_all_tests.py`
-and by the manual rig scripts in `tests/` — not by pytest. Only a few
+and by the manual rig scripts in `tests/` and `tools/uci/` — not by
+pytest. Only a few
 pure-logic host-side modules are pytest-runnable, and `pytest.ini` pins
 `testpaths` to exactly those.
 
@@ -18,15 +19,16 @@ _BOUNDARY = [
     "c64-https: pytest runs ONLY the pure-logic host-side modules pinned in",
     "pytest.ini `testpaths`. It does NOT run the C64 suites (those need VICE:",
     "`python3 tools/run_all_tests.py`) and it does NOT run the live-rig",
-    "scripts in tests/ (manual, sudo + network rig: see tests/README.md).",
-    "A green run here says nothing about either.",
+    "scripts in tests/ (sudo + network rig) or tools/uci/ (real U64E/C64U",
+    "hardware). A green run here says nothing about any of them.",
 ]
 
 _EMPTY_RUN = [
     "pytest collected nothing from the paths you gave it.",
-    "If that was `pytest tests/`: tests/ holds manual live-rig scripts",
-    "(tests/rig_*.py, main() programs needing sudo and a network rig), not",
-    "pytest tests. See tests/README.md for how to run them.",
+    "If that was `pytest tests/` or `pytest tools/uci/`: both hold manual",
+    "live-rig scripts (rig_*.py, main() programs needing sudo + a network",
+    "rig, or real U64E/C64U hardware), not pytest tests. See",
+    "tests/README.md and tools/uci/README.md for how to run them.",
 ]
 
 

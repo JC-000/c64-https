@@ -32,11 +32,11 @@ packaged listener mint identical material:
 
   - `https_listener.py` (via `_ensure_certs(cert_profile)`), and so
     everything built on it -- `tests/rig_vice_https_macos.py`,
-    `evil_listener.py`, `tools/uci/test_https_bad_finished.py`
-  - `tools/uci/test_https_local.py`, which inlines its own listener
+    `evil_listener.py`, `tools/uci/rig_https_bad_finished.py`
+  - `tools/uci/rig_https_local.py`, which inlines its own listener
     (this one used to fail with `ERROR: cert/key not found` instead --
     issue #93)
-  - `tools/uci/test_https_local_p384.py`, same, P-384 profile
+  - `tools/uci/rig_https_local_p384.py`, same, P-384 profile
 
 Generation needs nothing beyond the Python standard library: PR #96
 reimplemented `gen_certs.py` in pure Python (curve arithmetic, a

@@ -44,17 +44,21 @@ that does not name it. Both are one-time, per clone:
 ```bash
 git submodule update --init --recursive
 
-# ip65 backend only — `make` will NOT build the blob for you
+# ip65 backend only — `make` builds the blob itself, but not these
 make ip65-libs
-make ip65-blob
 
 # any test script, VICE or hardware — separate public repo, not in requirements.txt
 git clone https://github.com/JC-000/c64-test-harness    # sibling of this repo
 python3 -m pip install -e ../c64-test-harness
 ```
 
-Skipping the first gives `ip65_blob.s(22): Error: Cannot open include file
-'.../ip65-c64.bin'` (reported as #89); skipping the second gives
+Skipping the first gives `ld65: Error: Input file
+'../ip65/ip65/ip65_tcp.lib' not found`, from the blob link step that plain
+`make` runs for you. (Issue #89 originally reported a different symptom from
+the same missing step — `ip65_blob.s(22): Error: Cannot open include file` —
+because make could assemble that object before building the blob; a
+dependency edge in the Makefile now orders it correctly, so the ld65 message
+above is what you get today.) Skipping the second gives
 `ModuleNotFoundError: No module named 'c64_test_harness'` (#90). Use
 `python3 -m pip` so the package lands in the interpreter that runs the scripts —
 a venv mismatch reproduces #90 exactly after an install that appeared to succeed.
@@ -230,13 +234,26 @@ what makes the PRG deterministic.)
 
 ip65 is built from the submodule into a flat binary blob at $2000, using
 a custom ld65 linker config (`ip65-build/ip65.cfg`), and linked into the
-ca65 build via `.incbin`. **A plain `make` does not produce that blob and
-cannot** — `.incbin` is invisible to make's dependency graph, so there is
-no rule connecting the two. Run `make ip65-libs && make ip65-blob` once
-per clone, as in "Before you build or test" above. The build is
-deterministic: 6,951 B, sha256 `cf1a5ff7809af4e4655e385b378b936054f41046ff2b7604828af3240c2d90dd`.
+ca65 build via `.incbin`. **A plain `make` produces that blob for you** —
+`$(IP65_BIN)` is a real prerequisite of the PRG, and a dependency edge on
+`build/net/ip65/ip65_blob.o` forces it to be built before the object that
+`.incbin`s it. Verified from a genuinely fresh `git clone` on 2026-08-15:
+submodule init, `make ip65-libs`, then plain `make` yields the 47,105 B PRG
+with no intermediate step.
+
+What `make` cannot do for you is build the ip65 `.lib` archives the blob
+links against, so run `make ip65-libs` once per clone, as in "Before you
+build or test" above; `make ip65-blob` exists only to force a rebuild. The
+build is deterministic: 6,951 B, sha256 `cf1a5ff7809af4e4655e385b378b936054f41046ff2b7604828af3240c2d90dd`.
 `make clean` does not remove it, which is why the step is normally
 invisible. The UCI backend does not use the blob at all.
+
+One measurement trap, since it has already produced a wrong conclusion once:
+ca65 also resolves `.incbin` relative to the current directory, and
+`../../../` from a repo root escapes three levels up — which is exactly the
+depth of a git worktree under `.claude/worktrees/<name>/`. Such a worktree
+with no blob of its own silently assembles the parent checkout's blob and
+appears to build fine. Check blob behaviour in a real clone, not a worktree.
 
 ## Project Status
 
@@ -269,12 +286,12 @@ Progress:
 - [x] ECDSA P-256 signature verification — supplied by the `libs/nistcurves` submodule (`ecdsa_verify_256`), always resident under both backends; `src/crypto/ecdsa_verify.s` is a thin dispatcher that packs the big-endian input struct. P-384 verify is **not** built — see Known Issues.
 - [x] HTTP/1.1 GET request — build GET, parse response (status + headers + body), plain HTTP end-to-end
 - [x] **End-to-end HTTPS GET demo (both backends)** — TLS 1.3 handshake + HTTP GET completes against a local Python TLS listener (ECDSA-P256 cert). Returns `http_status=200`, body `"HELLO FROM TLS SERVER"`.
-  - UCI: real Ultimate 64 Elite hardware at both 48 MHz turbo and stock 1 MHz. See `tools/uci/test_https_local.py` (supports `TURBO_MHZ` env var).
+  - UCI: real Ultimate 64 Elite hardware at both 48 MHz turbo and stock 1 MHz. See `tools/uci/rig_https_local.py` (supports `TURBO_MHZ` env var).
   - ip65: VICE + RR-Net at stock 1 MHz, no warp. The bridge-rig script is `tests/rig_phase3_https_1mhz.py`; the hardware-free macOS feth/pcap rig is `tests/rig_vice_https_macos.py`, and that is where the wall-clock below was taken.
 
 ### Known Issues
 
-- **The handshake is slow, and the ECDSA P-256 verify dominates it.** Every figure here is quoted from the measurement record in `CLAUDE.md` and was taken at the **`libs/nistcurves` v0.6.0 pin**; HEAD is v0.9.1 and nobody has re-run the sweep, so treat them as a baseline rather than as HEAD. End-to-end handshake + GET against the local listener, U64E, master 2ceb5b1: **80.8 s** (REU profile, 48 MHz), **45.5 s** (onchip profile, 48 MHz), **1,157.7 s** (REU, stock 1 MHz). On the REU-less stock-C64 path (ip65 + onchip, no REU, honest 1 MHz in VICE) the whole run measured **2,159.7 s = 36.0 min**, of which the verify stretch alone was 1,416.7 s. That is fine for the local listener, which holds the connection open; it exceeds a typical 10-30 s real-world server handshake window.
+- **The handshake is slow, and the ECDSA P-256 verify dominates it.** Every figure here is quoted from the measurement record in `CLAUDE.md`. Except where noted they were taken at the **`libs/nistcurves` v0.6.0 pin**, and the pin is now v0.10.1, so treat them as a baseline rather than as current. End-to-end handshake + GET against the local listener, U64E, master 2ceb5b1: **80.8 s** (REU profile, 48 MHz), **45.5 s** (onchip profile, 48 MHz), **1,157.7 s** (REU, stock 1 MHz). One point of that sweep has been carried forward: 48 MHz REU measures **82.1 s** at v0.9.1 and **82.4 s** at v0.10.1 (n=1 each, so the 0.4% step between them is noise; the 1.6% from v0.6.0 is the FIPS 186-5 public-key validation gate v0.7.0 added). No other clock or profile has been re-measured. On the REU-less stock-C64 path (ip65 + onchip, no REU, honest 1 MHz in VICE) the whole run measured **2,159.7 s = 36.0 min**, of which the verify stretch alone was 1,416.7 s. That is fine for the local listener, which holds the connection open; it exceeds a typical 10-30 s real-world server handshake window.
 - **P-384** ECDSA is stubbed at the TLS layer. The dispatcher advertises `ecdsa_secp384r1_sha384` (0x0503) and routes to `src/crypto/ecdsa_verify_384.s`, but no P-384 build target completes. Measured 2026-08-14: `make p384-overlay` from a clean tree stops at `No rule to make target 'build/labels.txt'`, and after a main build has produced that file it stops at `Segment 'LIB_NISTCURVES_SHA384_TABLES' overflows memory area 'OVERLAY_REGION' by 1536 bytes`. Cert chains requiring P-384 will not verify.
 - **`USE_X25519_SIBLING=1` now links under UCI, and still does not under ip65.** The duplicate-symbol failure this entry used to record — `ld65: Error: Duplicate external identifier: 'reu_mul_tables_init'`, on **both** backends — was closed by the `libs/nistcurves` v0.10.1 / `libs/x25519` v0.11.0 bump plus one line of archive surgery: `tools/integration/build_nistcurves_p256.sh` now also drops `reu_mul_init.o`, the SPEC §8.2 `reu_mul` provider that `src/boot.s` supplies itself. Measured at those pins: `make clean && make BACKEND=uci USE_X25519_SIBLING=1` produces a 62,977 B PRG, and ip65 stops instead at `Segment 'X25519_RODATA' overflows memory area 'CRYPTO_OVERLAY' by 3584 bytes` — a placement problem (ip65's overlay slot is 4,212 B against UCI's 7,680 B), not a symbol collision. The flag remains **off by default** and no shipped artifact contains the sibling; the in-tree X25519 in `src/crypto/{x25519,fe25519}.s` is what every release PRG is built from. Flipping the default is a separate decision that wants a hardware handshake behind it.
 - **Live internet HTTP GET (UCI backend)** has not been re-verified since the FPGA-fence rework; only the local multi-segment listener is exercised regularly.
@@ -321,7 +338,7 @@ python3 tools/test_chained_hmac.py     # 10 cases: chained HMAC-SHA256 stability
 python3 tools/test_finished_verify.py  # 18 cases: the server-Finished REJECTION path, driven over DMA
 python3 tools/test_ecdsa_kat_oracle.py # 6 vectors: ECDSA P-256 KAT, 3 valid + 3 negative CAVP
 python3 tools/test_package_verify.py   # 31 cases: pure-logic tests for the release gate (no VICE, no build)
-python3 tools/test_pytest_boundary.py  # 4 checks: the pytest collection boundary below is intact
+python3 tools/test_pytest_boundary.py  # 5 checks: the pytest collection boundary below is intact
 
 # Benchmark
 python3 tools/bench_x25519.py         # X25519 basepoint multiply: 12,635 jiffies / 211 s C64 time, ~14 s wall under warp
@@ -346,21 +363,30 @@ positional arguments rather than fixtures, so pytest can only ever report
 several under `tools/` are `main()` programs with no `def test_` at all,
 so pytest collects zero from them and says nothing about it.
 
+The two rig directories are named `rig_*.py` for exactly that reason —
+`tests/` since #111, `tools/uci/` since its follow-up. A rename is what
+holds no matter which directory pytest is invoked from; `norecursedirs`
+is what keeps a root-level run out of them. Both halves are pinned by the
+guard.
+
 `pytest.ini` therefore pins `testpaths` to the three modules that really
 are pure-logic and pytest-runnable, and `conftest.py` prints the scope of
 the run in both the header and the summary. A bare `pytest` at the repo
-root reports **30 passed**, and says in the same breath that this is not a
-statement about the C64 suites or the rig scripts.
+root reports **31 passed** (exit 0), and says in the same breath that this
+is not a statement about the C64 suites or the rig scripts. `pytest tests/`
+and `pytest tools/uci/` both exit 5, "no tests ran", with an explanation
+naming the right README.
 
 `testpaths` applies only when pytest is invoked from the rootdir, so from
 a subdirectory you get that subdirectory instead — measured from `tools/`:
-30 passed, 74 `fixture 'transport' not found` errors, exit 1. That is the
+31 passed, 74 `fixture 'transport' not found` errors, exit 1. That is the
 honest signal (pytest genuinely cannot run those modules) and it is loud,
 which is the opposite of the problem being fixed here.
 
-`tools/test_pytest_boundary.py` fails if the boundary drifts in either
-direction — a pure-logic module missing from `testpaths`, or a `test_*.py`
-reappearing in `tests/`. See issue #109.
+`tools/test_pytest_boundary.py` fails if the boundary drifts in any
+direction — a pure-logic module missing from `testpaths`, a listed module
+pytest cannot run, a `test_*.py` reappearing in `tests/` or `tools/uci/`,
+or a rig directory dropping out of `norecursedirs`. See issue #109.
 
 ### End-to-End Bridge Tests (ip65 backend)
 
@@ -417,10 +443,16 @@ Install it into the **same interpreter you run the scripts with** — if you use
 python3 tools/uci/boot_check.py          # UCI firmware detection
 python3 tools/uci/phase2_check.py        # DHCP + local IP readback
 python3 tools/uci/phase3_tcp_echo.py     # TCP connect/send/recv
-python3 tools/uci/test_http_local.py     # HTTP GET against local listener
-python3 tools/uci/test_https_local.py    # HTTPS GET (TLS 1.3 + ECDSA-P256)
-python3 tools/uci/test_https_bad_finished.py  # client must ABORT on a forged server Finished
+python3 tools/uci/rig_http_local.py     # HTTP GET against local listener
+python3 tools/uci/rig_https_local.py    # HTTPS GET (TLS 1.3 + ECDSA-P256)
+python3 tools/uci/rig_https_bad_finished.py  # client must ABORT on a forged server Finished
 ```
+
+These are `rig_*.py`, not `test_*.py`, for the same reason as `tests/`: a
+hardware `main()` script named the pytest way gets walked by pytest, collects
+zero, and reports nothing — which reads as coverage it does not have (issue
+#109). `tools/uci/README.md` lists all of them; `tools/test_pytest_boundary.py`
+fails if a `test_*.py` file reappears in either rig directory.
 
 **Prerequisite — the REU, unless you build the on-chip profile.** The default
 `make BACKEND=uci` image is the *REU profile*: X25519's field multiply and the
@@ -435,24 +467,24 @@ REU, or build the profile that needs none:
 make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1
 ```
 
-Every script that exercises the crypto path (`test_https_local.py`,
-`test_https_bad_finished.py`, `test_https_print_body.py`,
-`test_https_local_p384.py`, `bench_ecdsa_u64e.py`) now **preflights this in one
+Every script that exercises the crypto path (`rig_https_local.py`,
+`rig_https_bad_finished.py`, `rig_https_print_body.py`,
+`rig_https_local_p384.py`, `bench_ecdsa_u64e.py`) now **preflights this in one
 REST call and exits 4 in seconds** if a REU-profile build meets a device with no
 REU. On-chip builds skip the check entirely. The preflight never writes device
 config — the U64E is queue-shared and config writes persist until power cycle,
 so enabling the REU is yours to do. `C64_SKIP_REU_PREFLIGHT=1` bypasses it.
 
-`test_https_bad_finished.py` is the negative path: it talks to
+`rig_https_bad_finished.py` is the negative path: it talks to
 `tools/https_e2e/evil_listener.py`, a hand-rolled TLS 1.3 server that
 flips one bit of the server Finished `verify_data` before encryption
 (corrupting the ciphertext instead would be caught by Poly1305 and never
 reach the Finished comparison). Run `FINISHED_MODE=good` first as the
 control. `tools/test_finished_verify.py` is the VICE-only equivalent.
 
-`test_https_local.py` is the end-to-end HTTPS demo (UCI backend only): it boots the U64E at 48 MHz turbo, connects to a local Python TLS listener using the test cert under `tools/https_e2e/certs/`, and confirms a full TLS 1.3 handshake + HTTP GET. That cert is gitignored throwaway material — the directory is empty in a fresh clone and the pair is generated on first use, with no dependency beyond the standard library (`python3 tools/https_e2e/ensure_certs.py` mints it by hand). With `DEBUG_CAPTURE=1`, each run writes a timestamped artifact directory under `$UCI_DEBUG_DIR` (default `/tmp/uci_https_debug/`) with raw 6510 bus trace, TLS state snapshot, and listener result.
+`rig_https_local.py` is the end-to-end HTTPS demo (UCI backend only): it boots the U64E at 48 MHz turbo, connects to a local Python TLS listener using the test cert under `tools/https_e2e/certs/`, and confirms a full TLS 1.3 handshake + HTTP GET. That cert is gitignored throwaway material — the directory is empty in a fresh clone and the pair is generated on first use, with no dependency beyond the standard library (`python3 tools/https_e2e/ensure_certs.py` mints it by hand). With `DEBUG_CAPTURE=1`, each run writes a timestamped artifact directory under `$UCI_DEBUG_DIR` (default `/tmp/uci_https_debug/`) with raw 6510 bus trace, TLS state snapshot, and listener result.
 
-Environment variables honored by `test_https_local.py`:
+Environment variables honored by `rig_https_local.py`:
 
 - `U64_HOST` (default `192.168.1.81`) — U64E address
 - `TURBO_MHZ` (default `48`) — C64 CPU speed. `TURBO_MHZ=1` runs the test at stock 1 MHz with every wall-clock budget auto-scaled, and is validated end-to-end on real U64E hardware; the handshake + GET itself measured 1,157.7 s (~19 min) there, not the full budget.
