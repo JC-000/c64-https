@@ -12,7 +12,7 @@ context-dependent.
 
 ```
 BACKEND=uci make clean && make
-python3 tools/uci/test_https_local.py    # ~10 min timeout
+python3 tools/uci/rig_https_local.py    # ~10 min timeout
 ```
 
 Expected: ~110 s handshake, body = "HELLO FROM TLS SERVER".

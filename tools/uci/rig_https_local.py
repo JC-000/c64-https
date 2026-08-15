@@ -56,7 +56,7 @@ Flow:
          contract has no inline listener.
 
 Offline re-check of an archived run (no hardware):
-  ./test_https_local.py --check-artifact <run-dir> [--host IP] [--path P]
+  ./rig_https_local.py --check-artifact <run-dir> [--host IP] [--path P]
 re-runs the server-side criteria against that run's server_result.json.
 """
 from __future__ import annotations
@@ -1743,7 +1743,7 @@ def _check_artifact_main(argv: list[str]) -> int:
     stored run can be re-adjudicated after the criteria change.
     """
     if not argv:
-        print("usage: test_https_local.py --check-artifact "
+        print("usage: rig_https_local.py --check-artifact "
               "<run-dir|server_result.json> [--host IP] [--path P]",
               file=sys.stderr)
         return 2

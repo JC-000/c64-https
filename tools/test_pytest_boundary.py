@@ -7,15 +7,22 @@ silent by construction: a file named ``test_*.py`` that pytest collects
 zero tests from disappears into a green pass count, and a pure-logic
 module that nobody adds to ``testpaths`` never runs at all.
 
-Three invariants, checked in both directions:
+Four invariants, checked in both directions:
 
-1. ``tests/`` contains no ``test_*.py``. Those are manual live-rig
-   scripts (``tests/rig_*.py``); named the pytest way they would be
-   walked, collected as zero, and reported as nothing.
+1. No rig directory contains ``test_*.py``. Both ``tests/`` and
+   ``tools/uci/`` hold manual live-rig scripts (``rig_*.py``); named the
+   pytest way they would be walked, collected as zero, and reported as
+   nothing. ``tests/`` was renamed by #111, ``tools/uci/`` by its
+   follow-up.
 
-2. Every path in ``pytest.ini``'s ``testpaths`` exists.
+2. ``pytest.ini``'s ``norecursedirs`` lists every rig directory. The
+   rename is what holds from an arbitrary working directory; the config
+   entry is what keeps a root-level run from descending there at all.
+   Both halves are load-bearing, so both are pinned.
 
-3. ``testpaths`` is exactly the set of ``tools/test_*.py`` modules pytest
+3. Every path in ``pytest.ini``'s ``testpaths`` exists.
+
+4. ``testpaths`` is exactly the set of ``tools/test_*.py`` modules pytest
    can actually run — that is, modules with at least one module-level
    ``test_*`` function where every such function's parameters all have
    defaults. A parameter without a default is a fixture request, and this
@@ -34,6 +41,14 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PYTEST_INI = REPO / "pytest.ini"
+
+# Directories of manual live-rig scripts. Every file in each is a `main()`
+# program needing hardware, sudo, or a network rig; none of them defines a
+# single `def test_`, so pytest collects zero from all of them. They are
+# named `rig_*.py` precisely so pytest never walks them looking.
+#   tests/     — VICE / bridge rigs (issue #109, PR #111)
+#   tools/uci/ — U64E + C64U hardware rigs (the #111 follow-up)
+RIG_DIRS = ("tests", "tools/uci")
 
 
 def _testpaths():
@@ -110,14 +125,44 @@ def _pytest_runnable_tools_modules():
     return runnable
 
 
-def test_tests_dir_holds_no_pytest_named_files() -> None:
-    """tests/ must not look collectable, because it is not."""
-    stray = sorted(p.name for p in (REPO / "tests").glob("test_*.py"))
+def test_rig_dirs_hold_no_pytest_named_files() -> None:
+    """A rig directory must not look collectable, because it is not."""
+    stray = sorted(
+        f"{d}/{p.name}"
+        for d in RIG_DIRS
+        for p in (REPO / d).glob("test_*.py")
+    )
     assert stray == [], (
-        f"tests/ contains pytest-named files {stray}, but everything in "
-        "tests/ is a manual live-rig script. pytest would walk them, collect "
-        "zero tests, and report nothing. Rename to rig_*.py — see "
-        "tests/README.md and issue #109."
+        f"rig directories contain pytest-named files {stray}, but every file "
+        f"in {list(RIG_DIRS)} is a manual live-rig script. pytest would walk "
+        "them, collect zero tests, and report nothing. Rename to rig_*.py — "
+        "see tests/README.md, tools/uci/README.md and issue #109."
+    )
+
+
+def _norecursedirs():
+    """The `norecursedirs` entries from pytest.ini, as a set of strings."""
+    parser = configparser.ConfigParser()
+    parser.read(PYTEST_INI)
+    return set(parser.get("pytest", "norecursedirs").split())
+
+
+def test_norecursedirs_covers_every_rig_dir() -> None:
+    """The rename and the config entry are both load-bearing; pin both.
+
+    The `rig_` prefix is what holds when pytest is invoked from an
+    arbitrary working directory. `norecursedirs` is what stops a
+    root-level run from descending into a rig directory at all — which
+    still matters, because a rig directory may legitimately grow a
+    non-rig helper, and because it documents the intent at the one place
+    a reader looks.
+    """
+    missing = sorted(d for d in RIG_DIRS if d not in _norecursedirs())
+    assert missing == [], (
+        f"pytest.ini norecursedirs omits rig directories: {missing}. A bare "
+        "`pytest` from the repo root would descend into them. Add them to "
+        "norecursedirs — the rig_*.py naming alone is the other half of this "
+        "boundary, not all of it."
     )
 
 

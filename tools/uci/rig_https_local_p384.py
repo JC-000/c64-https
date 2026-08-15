@@ -4,7 +4,7 @@ Phase 5 LOCAL HTTPS (P-384): exercise the real http_get (TLS 1.3) code
 path through the UCI backend on a real Ultimate 64 Elite, against a
 local listener serving an ECDSA secp384r1 certificate.
 
-This is the P-384 sibling of tools/uci/test_https_local.py.  Differences:
+This is the P-384 sibling of tools/uci/rig_https_local.py.  Differences:
 
   - Uses the P-384 cert/key bundle at tools/https_e2e/certs/
     (server-p384.pem / server-p384.key).  Equivalent to setting
@@ -21,9 +21,9 @@ This is the P-384 sibling of tools/uci/test_https_local.py.  Differences:
 
 Usage:
     /Users/someone/.local/share/c64-test-harness/venv/bin/python \\
-        tools/uci/test_https_local_p384.py
+        tools/uci/rig_https_local_p384.py
 
-Environment variables (same as test_https_local.py):
+Environment variables (same as rig_https_local.py):
   U64_HOST              - U64E IP (default 192.168.1.81)
   TURBO_MHZ             - C64 CPU MHz (default 48)
   HTTPS_PORT            - listener port (default 443; falls back to 4433)
@@ -42,7 +42,7 @@ Environment variables (same as test_https_local.py):
   KEEP_DEBUG_ON_PASS    - 1 to preserve artifacts on PASS (default 0)
   UCI_DEBUG_DIR         - artifact dir base (default /tmp/uci_https_debug)
 
-Flow mirrors test_https_local.py exactly; see that file's docstring
+Flow mirrors rig_https_local.py exactly; see that file's docstring
 for the per-step description.
 """
 from __future__ import annotations
@@ -76,7 +76,7 @@ os.environ.setdefault("ACCEPT_TIMEOUT", "5400")
 # Now import the parent module — it will pick up the timeout env vars
 # above, and we patch CERT_PATH / KEY_PATH below before main() runs.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import test_https_local  # type: ignore
+import rig_https_local  # type: ignore
 
 # --------------------------------------------------------------------------
 # Swap to the P-384 cert/key.  These live in the same dir as the P-256
@@ -84,11 +84,11 @@ import test_https_local  # type: ignore
 # load.
 # --------------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-test_https_local.CERT_PATH = _REPO_ROOT / "tools" / "https_e2e" / "certs" / "server-p384.pem"
-test_https_local.KEY_PATH  = _REPO_ROOT / "tools" / "https_e2e" / "certs" / "server-p384.key"
+rig_https_local.CERT_PATH = _REPO_ROOT / "tools" / "https_e2e" / "certs" / "server-p384.pem"
+rig_https_local.KEY_PATH  = _REPO_ROOT / "tools" / "https_e2e" / "certs" / "server-p384.key"
 # Both are gitignored and generated on demand; the profile tells the parent's
 # _ensure_certs_or_fail() which pair to mint (issue #93).
-test_https_local.CERT_PROFILE = "p384"
+rig_https_local.CERT_PROFILE = "p384"
 
 
 # --------------------------------------------------------------------------
@@ -98,7 +98,7 @@ test_https_local.CERT_PROFILE = "p384"
 # fully occupied at PRG-load time (OVERLAY_BLOB_SHA384) and is the
 # active overlay swap slot at runtime, so the default
 # CRYPTO_OVERLAY-scoped arbiter window finds no free range and raises
-# MemoryArbiterError. The parent test_https_local.py now defaults to
+# MemoryArbiterError. The parent rig_https_local.py now defaults to
 # ``build_policy_and_arbiter_with_overlay_carveout`` (which carves
 # harness scratch from the NET_CODE zero-fill tail $3xxx-$3FFF), so
 # the P-384 sibling inherits the correct arbiter window automatically —
@@ -117,14 +117,14 @@ def main() -> int:
     print("=" * 60)
     print("Phase 5 LOCAL HTTPS (P-384)")
     print("=" * 60)
-    print(f"P-384 cert : {test_https_local.CERT_PATH}")
-    print(f"P-384 key  : {test_https_local.KEY_PATH}")
+    print(f"P-384 cert : {rig_https_local.CERT_PATH}")
+    print(f"P-384 key  : {rig_https_local.KEY_PATH}")
     print()
     print("NOTE: ECDSA-P384 verify dominates handshake wall-clock;")
     print("      expect 4-7 minutes per handshake at U64E 48 MHz turbo.")
     print()
 
-    return test_https_local.main()
+    return rig_https_local.main()
 
 
 if __name__ == "__main__":

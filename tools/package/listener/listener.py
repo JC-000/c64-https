@@ -2,7 +2,7 @@
 """Self-contained TLS 1.3 test listener for the c64-https client.
 
 This is a stand-alone clone of the inline HTTPS listener in the c64-https
-repo's ``tools/uci/test_https_local.py``. It stands up the entire server
+repo's ``tools/uci/rig_https_local.py``. It stands up the entire server
 side of the end-to-end test — including generating its own certificate —
 with no dependency on the c64-https repo or the c64-test-harness package.
 
@@ -71,7 +71,7 @@ import time
 import traceback
 from pathlib import Path
 
-# --- Canonical response bytes (cloned verbatim from test_https_local.py) ---
+# --- Canonical response bytes (cloned verbatim from rig_https_local.py) ---
 EXPECTED_BODY = "HELLO FROM TLS SERVER"
 HTTP_RESPONSE = (
     b"HTTP/1.0 200 OK\r\n"
@@ -142,7 +142,7 @@ def _serialize_result(result: dict, path: Path) -> None:
 
     Bytes fields become {"__type__": "bytes-b64", "b64": ..., "len": ...};
     tuples become lists; exceptions are captured as type/str/traceback.
-    Matches _serialize_server_result() in test_https_local.py.
+    Matches _serialize_server_result() in rig_https_local.py.
     """
     out: dict = {}
     for key, val in result.items():
@@ -175,7 +175,7 @@ def _handle_one(srv: socket.socket, ctx: ssl.SSLContext,
                 accept_timeout: float, result: dict) -> None:
     """Accept one connection, handshake, serve the canonical response.
 
-    Mirrors _run_https_server() in test_https_local.py: the result dict is
+    Mirrors _run_https_server() in rig_https_local.py: the result dict is
     populated with listening / client_addr / request / error as it goes.
     """
     srv.settimeout(accept_timeout)

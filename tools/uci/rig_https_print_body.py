@@ -4,7 +4,7 @@ Issue #28 verification harness: runs the standard HTTPS GET flow but the
 injected 6502 stub also calls `print_resp_body` after `http_get`, so the
 decrypted response body actually lands on the C64 screen.
 
-Unlike the all-uppercase body used by test_https_local.py (which could
+Unlike the all-uppercase body used by rig_https_local.py (which could
 not detect the ASCII-vs-PETSCII rendering bug of issue #28), this harness
 serves a mixed-case body:
 
@@ -21,7 +21,7 @@ missing translator would produce (screen codes $41..$5A for lowercase
 e,l,o,f,... which render as hearts/spades/etc.) do NOT appear at the
 body's row.
 
-Reads all environment variables the same way as test_https_local.py
+Reads all environment variables the same way as rig_https_local.py
 (U64_HOST, TURBO_MHZ, HTTPS_PORT, ACCEPT_TIMEOUT, SENTINEL_POLL_TIMEOUT,
 UCI_DEBUG_DIR, etc.).
 
@@ -39,7 +39,7 @@ sys.path.insert(0, str(REPO))
 
 # Reuse the existing harness's helpers by importing the module as-is.
 # We override a narrow slice: the stub-building function and the body.
-from tools.uci import test_https_local as base
+from tools.uci import rig_https_local as base
 
 
 # -----------------------------------------------------------------------------

@@ -177,7 +177,7 @@ def build_policy(
         # portion so the unused tail is available as harness scratch.
         # The cfg comment on CRYPTO_OVERLAY explicitly designates the
         # tail as harness/overlay-test territory, and
-        # tools/uci/test_https_local.py has used this tail in
+        # tools/uci/rig_https_local.py has used this tail in
         # production since PR #41.
         #
         # Other memory regions (UCI_BSS_REGION, TCP_BUF, etc.) reserve
