@@ -1133,17 +1133,53 @@ end-to-end (verified 2026-05-20 against the local listener; the prior
 v0.2.0 measurement was 86.7 s, and the pre-Phase-C.4 in-tree path was
 ~110 s).
 
-**Every wall-clock figure below was measured at the v0.6.0 pin; the
-pin is now v0.9.1 and none of them has been re-measured.** Treat them
-as the v0.6.0 baseline, not as HEAD. The expected drift is small but
-its sign is known: v0.7.0's public-key validation gate adds 2 `fp_cmp`
-+ 3 mod-p muls + 4 mod-p add/subs to every verify, which is noise
-against a multi-second scalar multiplication, and nothing else in
-v0.7.0-v0.9.1 touches a hot path (the rest is manifest equates, dead
-data removal and export hygiene). So expect a small *regression*, not
-a speedup, and do not quote these rows as v0.9.1 numbers until someone
-re-runs `bench_ecdsa_u64e.py` on hardware. The v0.3.0 row is kept only
-as the REU-profile baseline.
+**Almost every wall-clock figure below was measured at the v0.6.0 pin.**
+Exactly one point of the sweep — 48 MHz UCI, REU profile — has been
+re-measured past it; see "The one re-measured point" immediately below.
+Treat everything else as the v0.6.0 baseline, not as HEAD. The expected
+drift is small but its sign is known: v0.7.0's public-key validation
+gate adds 2 `fp_cmp` + 3 mod-p muls + 4 mod-p add/subs to every verify,
+which is noise against a multi-second scalar multiplication, and
+nothing else through v0.10.1 touches a hot path (the rest is manifest
+equates, dead data removal and export hygiene). So expect a small
+*regression*, not a speedup, and do not quote the unrefreshed rows as
+current-pin numbers until someone re-runs `bench_ecdsa_u64e.py` on
+hardware. The v0.3.0 row is kept only as the REU-profile baseline.
+
+#### The one re-measured point (48 MHz UCI, REU profile)
+
+Three runs on the same rig and script, U64E at 10.43.23.81, handshake +
+GET against the local listener, measured C64-side from `run_prg`. All
+three PASS with server-side evidence (the listener decrypted the full
+`GET / HTTP/1.1`, no TLS error):
+
+  libs/nistcurves   c64-side   vs v0.6.0
+  v0.6.0             80.8 s     --
+  v0.9.1             82.1 s     +1.6%
+  v0.10.1            82.4 s     +2.0%
+
+  - **n = 1 per row.** These are single runs, not medians. The
+    v0.9.1 -> v0.10.1 step (+0.4%) is indistinguishable from
+    run-to-run variation and must not be presented as a measured
+    effect.
+  - **This is one point of the sweep, not a refresh of it.** Every
+    other clock (1 / 8 / 16 / 20 MHz), every onchip and comb row, and
+    every ip65 and C64U figure in this file is still v0.6.0-era.
+  - The v0.6.0 -> v0.9.1 step (+1.6%) is consistent in sign and rough
+    size with the FIPS 186-5 public-key validation gate v0.7.0 added.
+    That is the cost of an on-curve check on a point taken straight
+    from an attacker-supplied certificate, so it is a regression worth
+    paying rather than one to chase.
+  - v0.9.1 -> v0.10.1 is an export-surface change with both REU PRGs
+    byte-identical across it, so no timing change was expected there
+    and none is demonstrated.
+  - Provenance: measured in the release-prep session that produced
+    this entry, logs `bench/summary.txt` (v0.6.0, the 48 MHz row of
+    the clock sweep), `rel_e2e_uci48.log` (v0.9.1) and `e2e_wave.log`
+    (v0.10.1, against merged master). Those logs live in that
+    session, not in this repo, so the rows are not reproducible from
+    a clean checkout — re-run `bench_ecdsa_u64e.py` if you need to
+    confirm them.
 
 **Read the pin, not the commit.** Every table below labels its rows
 with the `libs/nistcurves` pin they were measured at, because that is
@@ -1157,10 +1193,12 @@ libs/nistcurves` plus `git -C libs/nistcurves tag --points-at`:
   c64-https commit   libs/nistcurves   libs/x25519
   2ceb5b1            v0.6.0 (00d2626)  v0.6.0 (95fdd70)
   f0127a0            v0.6.0 (00d2626)  v0.6.0 (95fdd70)
-  HEAD (3a43f61)     v0.9.1 (f9701e1)  v0.10.0 (68ae0ef)
+  3a43f61            v0.9.1 (f9701e1)  v0.10.0 (68ae0ef)
+  a6cf205 (#113)     v0.10.1 (1edd634) v0.11.0 (e9af04e)
 
-So every figure in this section is a v0.6.0 figure, including the ones
-labelled only by commit. None of them is a HEAD figure.
+So every figure in this section is a v0.6.0 figure — including the ones
+labelled only by commit — except the three-row 48 MHz UCI REU table
+above, which is the sole point carried forward to v0.9.1 and v0.10.1.
 
 On the **C64 Ultimate** (10.53.21.158, see "C64 Ultimate notes"),
 measured 2026-07-19 with the INNER=217 fence and boot-at-speed flow:
@@ -1213,6 +1251,10 @@ C64U, fits T(f)=D+C/f, residuals <=4.1%):
   C64U   v0.6.0 onchip+comb  --        --       --       --       38.4 s  **31.0 s**
   U64E   v0.6.0 REU         1157.7 s  196.5 s  124.0 s  108.9 s  80.8 s  n/a (no enum)
   U64E   v0.6.0 onchip      2120.7 s  264.5 s  131.8 s  103.9 s  45.5 s  n/a (no enum)
+
+  The 48 MHz REU cell (80.8 s) is the only one of these carried past
+  v0.6.0 — 82.1 s at v0.9.1, 82.4 s at v0.10.1, n=1 each. See "The one
+  re-measured point" above. Every other cell is v0.6.0-era.
 
   The U64E rows are a 2026-08-13 sweep at master 2ceb5b1, whose
   `libs/nistcurves` pin is v0.6.0 (see the pin table above). One clean
@@ -1771,8 +1813,9 @@ The comb profile stays deliberately excluded (REU bank 2 residency +
 ~40 min boot precompute at 1 MHz make it wrong for a general release).
 
 Validation record (2026-07-27, then-HEAD cb6eab4, `libs/nistcurves`
-pin v0.6.0 — the wall-clock rows below are v0.6.0 figures like every
-other table in this file, and have not been re-measured at v0.9.1):
+pin v0.6.0 — the wall-clock rows below are v0.6.0 figures and have not
+been re-measured at any later pin; the only point that has is the
+48 MHz UCI REU one, in "The one re-measured point" above):
   - onchip PRG passes the 3-vector ECDSA KAT in VICE **without** REU
     (and with, as control) — the no-REU claim is verified, and
     boot.s's unconditional reu_mul_init is harmless with no REU
