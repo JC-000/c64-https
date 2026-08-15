@@ -54,8 +54,20 @@ CA65="${CA65:-ca65}"
 AR65="${AR65:-ar65}"
 
 # --- ZP-slot overrides (c64-https canonical map + SHA-384 isolated window) ---
+# zp_ptr2's SPELLING is pin-dependent and probed, never hardcoded — see the
+# long rationale in build_nistcurves_p256.sh (contract SPEC §2 ZP prefix
+# registry + §6.5's loud-break alias shape: on a migrated pin the bare
+# spelling is an unguarded alias and `-D zp_ptr2=...` dies with
+# "Symbol 'zp_ptr2' is already defined"). `fp_`/`sha_` are registered §2
+# prefixes for c64-nist-curves and keep their `.ifndef` guards, so only this
+# one slot needs the probe.
+if grep -qE '^[[:space:]]*\.ifndef[[:space:]]+nistcurves_zp_ptr2[[:space:]]*$' "$LIB_SRC/zp_config.s"; then
+    ZP_PTR2_SLOT='nistcurves_zp_ptr2'
+else
+    ZP_PTR2_SLOT='zp_ptr2'
+fi
 ZP_OVERRIDES=(
-    '-D' 'zp_ptr2=$3d'
+    '-D' "$ZP_PTR2_SLOT=\$3d"
     '-D' 'fp_mul_i=$39'
     '-D' 'fp_mul_j=$3a'
     # SHA-384 streaming pointer slots (moved out of $04-$0b defaults
@@ -168,7 +180,15 @@ for tree in sha curve; do
         "${ZP_OVERRIDES[@]}" \
         -o "$STAGING/$tree/$zp_member" \
         "$LIB_SRC/zp_config.s"
-    check_zp_slot_if_present "$STAGING/$tree/$zp_member" zp_ptr2  61   # $3d
+    # Canonical spelling first (see build_nistcurves_p256.sh). Every check here
+    # is presence-tolerant because the sha and curve trees export disjoint slot
+    # subsets — the sha tree has no zp_ptr2 at all — so absence is legitimate
+    # per-tree and cannot be asserted away. The bare alias is additionally
+    # optional because `-D LIB_NO_BARE_EXPORTS=1` removes it (§1/§6.5).
+    check_zp_slot_if_present "$STAGING/$tree/$zp_member" "$ZP_PTR2_SLOT" 61   # $3d
+    if [ "$ZP_PTR2_SLOT" != "zp_ptr2" ]; then
+        check_zp_slot_if_present "$STAGING/$tree/$zp_member" zp_ptr2 61       # $3d — deprecated alias
+    fi
     check_zp_slot_if_present "$STAGING/$tree/$zp_member" fp_mul_i 57   # $39
     check_zp_slot_if_present "$STAGING/$tree/$zp_member" fp_mul_j 58   # $3a
 done

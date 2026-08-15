@@ -95,24 +95,49 @@ AR65="${AR65:-ar65}"
 #                 unused inside ZP_CRYPTO.
 # Other slots match upstream defaults — see libs/nistcurves/src/zp_config.s.
 #
-# THE POINTER SLOT IS SPELLED `nistcurves_zp_ptr2` FROM v0.10.0, AND THE
-# OLD SPELLING NOW HARD-ERRORS. The §6.5 rename window (upstream #107)
-# made the four general-purpose scratch slots canonically
-# `nistcurves_zp_{tmp1,tmp2,ptr1,ptr2}` and left the bare `zp_*` names as
-# unconditional same-address aliases:
+# THE POINTER SLOT IS SPELLED `nistcurves_zp_ptr2` FROM v0.10.0. The
+# spelling is PROBED, never hardcoded, because both spellings are wrong at
+# some pin this script has to build.
+#
+# c64-lib-contract SPEC §2 gained a ZP prefix registry at v0.9.0: a bare
+# `zp_ptr2` is unregistered (three adopters had independently converged on
+# bare zp_tmp1/zp_ptr1 — contract #83), so c64-nist-curves renamed its four
+# general-scratch slots to the registered `nistcurves_zp_*` family and left
+# the bare names as aliases for the §6.5 rename window, in the "loud-break"
+# shape that clause ratifies:
 #
 #     .ifndef nistcurves_zp_ptr2
 #       nistcurves_zp_ptr2 = $fd
 #     .endif
 #     zp_ptr2 = nistcurves_zp_ptr2        <- NOT .ifndef-guarded
 #
-# so `-D zp_ptr2=$3d` no longer suppresses a guarded definition; it
-# collides with the alias assignment and stops the build with
-# `zp_config.s(56): Error: Symbol 'zp_ptr2' is already defined`. That is
-# the good case — a loud failure, not a silently-dropped override. The
-# `fp_*` names are documented override knobs and were not renamed.
+# Measured, ca65 V2.18, against each pin's own zp_config.s:
+#
+#   spelling                      v0.9.1                v0.10.1
+#   -D 'zp_ptr2=$3d'              overrides correctly   Error: Symbol
+#                                                       'zp_ptr2' is
+#                                                       already defined
+#   -D 'nistcurves_zp_ptr2=$3d'   defines an unused     overrides both
+#                                 symbol; real slot     names to $3D
+#                                 stays at $fd
+#
+# Neither spelling is safe across both, so probe the library source and
+# follow it. Note the v0.9.1 + canonical cell is a *wrong value*, not a
+# silent one: the `check_zp_slot` guards below read the emitted object with
+# od65, so that combination stops the build (as `$fd` != `$3d`, or as
+# `<absent>` if the guard is aimed at the canonical name). The probe's value
+# is being loud AND correct at both pins, rather than merely loud at one.
+#
+# fp_mul_i / fp_mul_j need no probe: `fp_` is a registered §2 prefix for
+# c64-nist-curves, so those names are canonical already and keep their
+# `.ifndef` guards across the migration (verified on v0.10.1).
+if grep -qE '^[[:space:]]*\.ifndef[[:space:]]+nistcurves_zp_ptr2[[:space:]]*$' "$LIB_SRC/zp_config.s"; then
+    ZP_PTR2_SLOT='nistcurves_zp_ptr2'
+else
+    ZP_PTR2_SLOT='zp_ptr2'
+fi
 ZP_OVERRIDES=(
-    '-D' 'nistcurves_zp_ptr2=$3d'
+    '-D' "$ZP_PTR2_SLOT=\$3d"
     '-D' 'fp_mul_i=$39'
     '-D' 'fp_mul_j=$3a'
 )
@@ -189,14 +214,38 @@ check_zp_slot() {
         exit 1
     fi
 }
-# Check the CANONICAL name. The bare `zp_ptr2` alias is also exported in a
-# default build and carries the same value, but it disappears under
-# `-D LIB_NO_BARE_EXPORTS=1` (SPEC §6.5) and is removed outright at the
-# next MAJOR — checking it would make this guard silently vacuous exactly
-# when a consumer tightens the build.
-check_zp_slot nistcurves_zp_ptr2 61      # $3d
-check_zp_slot fp_mul_i           57      # $39
-check_zp_slot fp_mul_j           58      # $3a
+# Same as check_zp_slot, but tolerates the symbol being absent. Only correct
+# for a slot whose ABSENCE is legitimate — see the alias check below.
+check_zp_slot_if_present() {
+    local name="$1" want="$2" got
+    got=$("${OD65:-od65}" --dump-exports "$STAGING/$ZP_MEMBER" \
+          | awk -v n="\"$name\"" '$1=="Name:" && $2==n {f=1; next} f && $1=="Value:" {gsub(/[()]/,"",$3); print $3; exit}')
+    [ -z "$got" ] && return 0
+    if [ "$got" != "$want" ]; then
+        echo "ERROR: $ZP_MEMBER exports $name = $got, expected $want (c64-https ZP override did not take)" >&2
+        exit 1
+    fi
+}
+
+# The CANONICAL spelling is checked unconditionally — it is the name the
+# library's own code reads, so its absence or disagreement is always a defect.
+check_zp_slot "$ZP_PTR2_SLOT" 61   # $3d — canonical spelling for this pin
+
+# The deprecated bare alias is checked only WHEN PRESENT, and only when it is
+# a distinct symbol. On a §2-migrated pin this proves the alias tracks the
+# override rather than splitting one slot across two addresses (the silent
+# outcome contract §6.5 forbids) — but the alias legitimately disappears under
+# `-D LIB_NO_BARE_EXPORTS=1` (§1), and a hard check would then fail the build
+# over a symbol the contract expects to be gone. Checking the bare name
+# *instead* of the canonical one would be the worse error in the other
+# direction: it is the spelling that goes away, so the guard would stop
+# guarding exactly when a consumer tightens the build.
+if [ "$ZP_PTR2_SLOT" != "zp_ptr2" ]; then
+    check_zp_slot_if_present zp_ptr2 61    # $3d — deprecated alias, if still emitted
+fi
+
+check_zp_slot fp_mul_i 57      # $39
+check_zp_slot fp_mul_j 58      # $3a
 
 # --- 4. Drop conflicting members / rebuild the onchip mul object ---
 # `reu_mul_init.o` is the SPEC §8.2 `reu_mul` provider. c64-https is the

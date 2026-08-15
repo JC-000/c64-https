@@ -36,6 +36,19 @@ IP65_BUILD   := ip65-build
 IP65_BIN     := $(IP65_BUILD)/ip65-c64.bin
 
 CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net/$(BACKEND) -I build --debug-info
+# Which backend is selected, as a ca65 define. Sources that must name a
+# cfg-level symbol need this, because the two cfgs give the same region
+# different names: the crypto code+rodata region is CRYPTO_HOT under UCI and
+# CRYPTO_RESIDENT under ip65, so the ld65-published __<AREA>_SIZE__ symbol an
+# `.import` has to spell differs by backend (src/contract_footprint_asserts.s
+# is the current consumer). The `-I src/net/$(BACKEND)` path above cannot
+# serve this: it carries net tuning, and region naming is a cfg property, not
+# a networking one.
+ifeq ($(BACKEND),uci)
+CA65FLAGS += -D BACKEND_UCI=1
+else
+CA65FLAGS += -D BACKEND_IP65=1
+endif
 # Optional HTTPS target-port override (src/boot.s defaults to 443).
 # `make HTTPS_PORT=4433` lets a test rig's TLS listener bind unprivileged.
 ifdef HTTPS_PORT

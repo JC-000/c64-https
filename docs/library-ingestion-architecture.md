@@ -351,7 +351,7 @@ Suitable to file as GitHub issues against `JC-000/c64-https`. Each is sized for 
 
 **Scope:** Split `cfg/c64-https-uci.cfg`'s `CRYPTO_RESIDENT` ($6000-$BFFF, 24 KB) into `CRYPTO_HOT` ($6000-$9FFF, 16 KB) and `CRYPTO_COLD_SHADOW` ($A000-$BFFF, 8 KB, under-BASIC-ROM RAM). Move ChaCha20-Poly1305 + SHA-256 + HKDF + TLS state machine + HTTP + record I/O into CRYPTO_HOT; move ECDSA-verify dispatcher, X25519 ECDH glue, per-curve scratch BSS into CRYPTO_COLD_SHADOW. CRYPTO_OVERLAY ($4200-$5FFF, 7.5 KB) absorbs all cold-path *code* via REU-paged overlays.
 
-**Expected output:** `build/c64-https.prg` builds clean under `BACKEND=uci`. Smoke tests (`test_https_local.py`, `test_https_local_p384.py`) PASS. `build/labels.txt` shows CRYPTO_HOT under-allocated by ≥1 KB.
+**Expected output:** `build/c64-https.prg` builds clean under `BACKEND=uci`. Smoke tests (`rig_https_local.py`, `rig_https_local_p384.py`) PASS. `build/labels.txt` shows CRYPTO_HOT under-allocated by ≥1 KB.
 
 **Dependencies:** None; this work is c64-https-internal.
 
@@ -442,7 +442,7 @@ After all four cells build clean:
 **Tier 2 — U64E (slow, gated, ~10-90 minutes):**
 - Runs on self-hosted runner with LAN access to the U64E (probably `192.168.1.81` per the project memory).
 - Acquires DeviceLock via `c64-test-harness` (queue-aware). If queue depth exceeds threshold (W7), skip with `:warning: queue busy, skipping U64E tier; will retry in 6h`.
-- `tools/uci/test_https_local.py`, `test_https_local_p384.py`, `phase3_tcp_echo.py`, `boot_check.py`.
+- `tools/uci/rig_https_local.py`, `rig_https_local_p384.py`, `phase3_tcp_echo.py`, `boot_check.py`.
 - Wall-clock budgets per CLAUDE.md: ~82 s P-256 handshake, ~7 min P-384 handshake.
 
 ### 5.4 U64E hardware contention
