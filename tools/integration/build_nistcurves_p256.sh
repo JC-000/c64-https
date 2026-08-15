@@ -88,14 +88,31 @@ CA65="${CA65:-ca65}"
 AR65="${AR65:-ar65}"
 
 # --- ZP-slot overrides (c64-https canonical map) ---
-# zp_ptr2 = $3D : library default $fd collides with c64-https zp_temp/zp_count
-#                 used by der_decode.s during cert parsing.
+# nistcurves_zp_ptr2 = $3D : library default $fd collides with c64-https
+#                 zp_temp/zp_count used by der_decode.s during cert parsing.
 # fp_mul_i = $39, fp_mul_j = $3A : library defaults $2c/$2d collide with
 #                 c64-https fe25519 ZP claim ($2c-$37). $39-$3a is otherwise
 #                 unused inside ZP_CRYPTO.
 # Other slots match upstream defaults — see libs/nistcurves/src/zp_config.s.
+#
+# THE POINTER SLOT IS SPELLED `nistcurves_zp_ptr2` FROM v0.10.0, AND THE
+# OLD SPELLING NOW HARD-ERRORS. The §6.5 rename window (upstream #107)
+# made the four general-purpose scratch slots canonically
+# `nistcurves_zp_{tmp1,tmp2,ptr1,ptr2}` and left the bare `zp_*` names as
+# unconditional same-address aliases:
+#
+#     .ifndef nistcurves_zp_ptr2
+#       nistcurves_zp_ptr2 = $fd
+#     .endif
+#     zp_ptr2 = nistcurves_zp_ptr2        <- NOT .ifndef-guarded
+#
+# so `-D zp_ptr2=$3d` no longer suppresses a guarded definition; it
+# collides with the alias assignment and stops the build with
+# `zp_config.s(56): Error: Symbol 'zp_ptr2' is already defined`. That is
+# the good case — a loud failure, not a silently-dropped override. The
+# `fp_*` names are documented override knobs and were not renamed.
 ZP_OVERRIDES=(
-    '-D' 'zp_ptr2=$3d'
+    '-D' 'nistcurves_zp_ptr2=$3d'
     '-D' 'fp_mul_i=$39'
     '-D' 'fp_mul_j=$3a'
 )
@@ -172,12 +189,40 @@ check_zp_slot() {
         exit 1
     fi
 }
-check_zp_slot zp_ptr2  61      # $3d
-check_zp_slot fp_mul_i 57      # $39
-check_zp_slot fp_mul_j 58      # $3a
+# Check the CANONICAL name. The bare `zp_ptr2` alias is also exported in a
+# default build and carries the same value, but it disappears under
+# `-D LIB_NO_BARE_EXPORTS=1` (SPEC §6.5) and is removed outright at the
+# next MAJOR — checking it would make this guard silently vacuous exactly
+# when a consumer tightens the build.
+check_zp_slot nistcurves_zp_ptr2 61      # $3d
+check_zp_slot fp_mul_i           57      # $39
+check_zp_slot fp_mul_j           58      # $3a
 
 # --- 4. Drop conflicting members / rebuild the onchip mul object ---
-rm -f "$STAGING/mul_8x8.o" "$STAGING/data_shared.o"
+# `reu_mul_init.o` is the SPEC §8.2 `reu_mul` provider. c64-https is the
+# §8.0 APP_OWNED case for that primitive — src/boot.s::reu_mul_init builds
+# the 128 KB REU multiply table itself — so the library's provider is
+# surplus in every configuration. Dropping it is the archive-surgery
+# spelling of `-D SHARED_REU_MUL_INIT` (the wrapper cannot pass that
+# define: upstream's Makefile builds every module with one recipe, which
+# is why step 3 rebuilds rather than reconfigures).
+#
+# It is a NO-OP for the shipped builds and load-bearing for one that is
+# not shipped yet. Default build: boot.o defines `reu_mul_init` and
+# `reu_fetch_mul_row` itself, so ld65 has no undefined symbol this member
+# could satisfy and never pulls it — the four REU-profile PRGs are
+# byte-identical with and without the drop (measured). Onchip archives
+# never contained it. But under `USE_X25519_SIBLING=1`, boot.o *imports*
+# `reu_mul_init` (the sibling owns the table), ld65 pulls this member to
+# satisfy it because nistcurves-p256.a precedes x25519.a on the link line,
+# and then the sibling's own provider arrives via `reu_clear_wide` —
+# `ld65: Error: Duplicate external identifier: 'reu_mul_tables_init'`,
+# the failure README.md and CLAUDE.md both recorded as unconditional.
+# Note the near miss: had ld65 resolved instead of erroring, `reu_mul_init`
+# would have bound to the library's table builder rather than the
+# sibling's, which is a different routine writing through a different
+# buffer set.
+rm -f "$STAGING/mul_8x8.o" "$STAGING/data_shared.o" "$STAGING/reu_mul_init.o"
 # 4b. onchip-comb: the full onchip archive carries both curves + SHA-384 +
 # reference-inverse extras; keep only the P-256 comb verify set.
 if [ "$PROFILE" = "onchip-comb" ]; then
@@ -194,17 +239,39 @@ if [ "$PROFILE" = "onchip" ] || [ "$PROFILE" = "onchip-comb" ]; then
     # would collide with the in-tree providers (see header comment #3).
     #
     # Upstream gap (candidate c64-nist-curves issue): the og_common block
-    # references ct_mul_8x8 / smc_* / poly_prod_* as same-TU symbols, so
+    # references ct_mul_8x8 / smc_* as same-TU symbols, so
     # SHARED_CT_MUL_8X8 alone leaves them undefined — the guard combo was
     # never exercised upstream. Bridge it with a generated glue TU that
     # declares the .imports and then .includes the PRISTINE library source
     # (composition, not a source patch — libs/ stays untouched).
+    #
+    # THE IMPORT LIST SHRANK AT v0.10.1, AND SHRINKING IT WAS MANDATORY.
+    # Upstream moved three of the five symbols this glue used to supply
+    # into its own source, so re-declaring them is now a hard assemble
+    # error rather than a harmless duplicate:
+    #
+    #   poly_prod_lo / poly_prod_hi  defined unconditionally at
+    #       mul_8x8.s:223-225, deliberately OUTSIDE the SHARED_CT_MUL_8X8
+    #       gate (contract v0.9.1 adopter-private-buffer rule: fp_sqr's
+    #       diagonal path writes them with no ct_mul_8x8 involved).
+    #       Importing them here now yields
+    #       `mul_8x8.s(223): Error: Symbol 'poly_prod_lo' is already an
+    #       import`. The consumer side moved to match: under
+    #       USE_NISTCURVES_ONCHIP, src/crypto/poly1305.s IMPORTS this
+    #       object's pair instead of defining its own, so og_common's
+    #       `jsr ct_mul_8x8` and its poly_prod read-back address the same
+    #       two bytes. See the ownership comment in poly1305.s — getting
+    #       this wrong is silent wrong crypto, not a link error.
+    #   mul_cached_a                 upstream imports the §6.5 canonical
+    #       `nistcurves_mul_cached_a` itself (mul_8x8.s:30); the bare name
+    #       is aliased for it in src/crypto/shared/mul_tables.s.
+    #
+    # ct_mul_8x8 and the two SMC bake sites are still ours to supply:
+    # upstream declares no import for them under SHARED_CT_MUL_8X8.
     cat > "$STAGING/mul_8x8_onchip_glue.s" <<'EOF'
 ; generated by build_nistcurves_p256.sh (onchip profile) — do not edit
 .import ct_mul_8x8
 .import smc_sum_a_imm, smc_diff_a_imm
-.import poly_prod_lo, poly_prod_hi
-.import mul_cached_a
 .include "mul_8x8.s"
 EOF
     "$CA65" \

@@ -15,12 +15,45 @@
 .import poly_h, poly_r, poly_s, poly_product, poly1305_tag
 .import aead_scratch
 
+; --- poly_prod_lo / poly_prod_hi ownership (c64-lib-contract v0.9.1
+;     "adopter-private buffer" rule) ---
+;
+; These two bytes are the a*b -> 16-bit output of the §8.3 `ct_mul_8x8`
+; body below, and ordinary scratch for anything else that wants a 16-bit
+; product slot. Exactly ONE module in the link may define them, and every
+; writer and reader must agree on which — they are a rendezvous, not
+; private state, so a second copy is not a duplicate-symbol error but a
+; silent wrong answer.
+;
+; Under USE_NISTCURVES_ONCHIP the owner is the sibling's
+; `mul_8x8_onchip.o`, and it must be: from libs/nistcurves v0.10.0 that
+; object defines poly_prod_lo/hi OUTSIDE the SHARED_CT_MUL_8X8 gate,
+; because its own `fp_sqr` diagonal-squaring path writes them
+; independently of ct_mul_8x8 (upstream's comment at
+; libs/nistcurves/src/mul_8x8.s:207-222). Its `og_common` row generator
+; then does `jsr ct_mul_8x8` — resolving to the body below — and reads
+; the result back out of poly_prod_lo/hi. If this file kept its own pair,
+; og_common would read two zero bytes on every product and every
+; on-chip-generated multiply row would be wrong, with no link diagnostic
+; anywhere. So we import instead: one pair of bytes, in
+; LIB_NISTCURVES_MUL_CODE, written and read by both sides.
+;
+; Under every other profile the sibling's mul_8x8 object is dropped from
+; the archive entirely, nothing else defines them, and this file owns
+; them as before.
+.ifdef USE_NISTCURVES_ONCHIP
+.import poly_prod_lo
+.import poly_prod_hi
+.endif
+
 ; --- Exports ---
 .export poly1305_init
 .export poly1305_clamp
 .export sqtab_init
+.ifndef USE_NISTCURVES_ONCHIP
 .export poly_prod_lo
 .export poly_prod_hi
+.endif
 .export mul_8x8
 .export poly1305_multiply
 .export poly1305_reduce
@@ -33,8 +66,10 @@
 ; =============================================================================
 .segment "CRYPTO_BSS"
 
+.ifndef USE_NISTCURVES_ONCHIP
 poly_prod_lo:   .res 1
 poly_prod_hi:   .res 1
+.endif
 
 mul_a:          .res 1
 mul_b:          .res 1

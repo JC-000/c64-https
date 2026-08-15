@@ -136,13 +136,47 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; load-bearing breakage gate — pre-1.0 libraries take breaking changes
 ; on MINOR bumps, so MAJOR carries no signal.
 ;
-; nistcurves shipped 0 from v0.3.0 through v0.8.0 and bumped to 1 at
-; v0.9.0, where it also REMOVED 17 exported symbols (c64-nist-curves
-; #90/#91). If a submodule bump makes this assert fire, that is the gate
-; working: re-check the integration against the new export surface, then
-; update the expected value on the next line — do not delete the assert.
+; nistcurves shipped 0 from v0.3.0 through v0.8.0, bumped to 1 at v0.9.0
+; (17 exported symbols REMOVED, c64-nist-curves #90/#91), and to 2 at
+; v0.10.0 (the lib-contract phase-3 namespace wave, c64-nist-curves #103).
+; If a submodule bump makes this assert fire, that is the gate working:
+; re-check the integration against the new export surface, then update the
+; expected value on the next line — do not delete the assert.
+;
+; THE v0.9.1 -> v0.10.1 RE-CHECK, so the next person can audit the audit
+; rather than re-run it blind. Method: `git diff v0.9.1 v0.10.1 -- src/`
+; filtered to `.export`/`.exportzp` lines, cross-checked against every
+; import of c64-https's own objects (od65 --dump-imports over build/*.o,
+; build/crypto/**, build/net/**, excluding build/lib staging).
+;
+;   Removed, unconditionally: LIB_SHARED_REU_MUL_BANK,
+;   LIB_SHARED_REU_MUL_OFFSET, LIB_SHARED_REU_MUL_BANKS_USED — the three
+;   unprefixed §8.2 consumer-INPUT equates. c64-https imports **none** of
+;   them (grep count 0 over the import dump), and could not usefully have:
+;   every §8.2 consumer defines the same three, which is precisely why
+;   exporting them produced `ld65: Duplicate external identifier` in any
+;   two-library link. Replaced by the prefixed OUTPUT counterparts
+;   LIB_NISTCURVES_SHARED_REU_MUL_* (#105), which c64-https also does not
+;   import — it owns its REU layout in src/crypto/shared/reu_layout.inc.
+;
+;   Everything else in the wave is ADDITIVE at the default gate: the §6.5
+;   rename window (#107) adds canonical `nistcurves_zp_*` /
+;   `nistcurves_mul_*` names while KEEPING the bare forms as same-address
+;   aliases, export-gated behind -D LIB_NO_BARE_EXPORTS=1. c64-https links
+;   ungated, so `mul_dma_lo` / `mul_dma_hi` / `mul_cached_a` /
+;   `mul_src2_buf` — which src/data.s provides and boot.s imports — are
+;   untouched. The functional surface c64-https actually consumes is the
+;   same four symbols as at v0.9.1: ec_base_x, ec_gx256, ec_scalar_mul_var,
+;   ecdsa_verify_256, all still exported.
+;
+;   One INPUT-side break is real and was migrated: `-D zp_ptr2=$3d` in
+;   tools/integration/build_nistcurves_p256.sh now hard-errors, because
+;   the bare alias assignment is no longer `.ifndef`-guarded. The override
+;   is spelled `-D nistcurves_zp_ptr2=$3d` from this pin; the wrapper's
+;   od65 post-check was retargeted to the canonical name so it cannot go
+;   vacuous. See that script's ZP_OVERRIDES block.
 .import LIB_ABI_VERSION
-.assert LIB_ABI_VERSION = 1, lderror, "libs/nistcurves: exported-surface generation changed (LIB_ABI_VERSION != 1) — re-check the integration, then bump the expected value in src/lib_contract_asserts.s"
+.assert LIB_ABI_VERSION = 2, lderror, "libs/nistcurves: exported-surface generation changed (LIB_ABI_VERSION != 2) — re-check the integration, then bump the expected value in src/lib_contract_asserts.s"
 
 
 ; =====================================================================

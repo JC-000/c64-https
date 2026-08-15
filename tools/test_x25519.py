@@ -632,7 +632,13 @@ def run_tests(transport, labels, seed):
     total_passed = 0
     total_failed = 0
 
-    test_groups = [
+    # A USE_X25519_SIBLING=1 link contains no src/crypto/fe25519.s, so its
+    # private fe_* entry points are absent and these nine groups cannot
+    # run. main() has already verified that the absence is total (see the
+    # required-label split there) rather than a partial link.
+    sibling_build = labels.address("fe_copy") is None
+
+    fe_groups = [
         ("fe_copy/zero/one",
          lambda: test_fe_copy_zero_one(transport, labels)),
         ("fe_add",
@@ -651,11 +657,19 @@ def run_tests(transport, labels, seed):
          lambda: test_fe_cswap(transport, labels, rng)),
         ("fe_inv",
          lambda: test_fe_inv(transport, labels, rng)),
-        ("x25519_clamp",
-         lambda: test_x25519_clamp(transport, labels, rng)),
     ]
 
     skipped_groups = []
+    if sibling_build:
+        skipped_groups += [name for name, _ in fe_groups]
+        test_groups = []
+    else:
+        test_groups = list(fe_groups)
+
+    # x25519_clamp is public: both implementations export it.
+    test_groups.append(
+        ("x25519_clamp",
+         lambda: test_x25519_clamp(transport, labels, rng)))
     scalarmult_groups = [
         ("x25519 RFC 7748 vector 1",
          lambda: test_x25519_rfc7748_vector1(transport, labels)),
@@ -740,20 +754,73 @@ def main():
     # Load labels
     labels = Labels.from_file(LABELS_PATH)
 
-    required = [
-        "fe_src1", "fe_src2", "fe_dst",
-        "fe_copy", "fe_zero", "fe_one",
-        "fe_add", "fe_sub", "fe_mul", "fe_sqr", "fe_inv",
-        "fe_cswap", "fe_mul_a24",
-        "fe_tmp1", "fe_tmp2", "fe_tmp3",
+    # The fe_* unit-test groups drive the IN-TREE src/crypto/fe25519.s by
+    # its private symbol names. A `USE_X25519_SIBLING=1` build evicts that
+    # file from the link (Makefile CRYPTO_SRCS_EFFECTIVE) and the sibling
+    # exports the contract's `fe25519_*` surface instead, so none of these
+    # labels exist there and the script used to abort at
+    # `FATAL: 'fe_copy' label not found` before launching VICE — i.e. the
+    # sibling had NO runnable coverage at all, which is a bad thing to
+    # discover only after deciding to flip the default.
+    #
+    # The public path is spelled identically by both implementations, so
+    # the RFC 7748 vectors — the only end-to-end scalarmult coverage in
+    # this file — run against either. Split the requirement list
+    # accordingly: the public set is mandatory always, the fe_* set is
+    # mandatory only when the build claims to contain it.
+    #
+    # Detection is by ABSENCE OF THE WHOLE FAMILY, never by one probe
+    # label: a partially-linked in-tree build must still fail loudly
+    # rather than quietly downgrade itself to two vectors.
+    required_public = [
         "x25519_clamp", "x25519_scalarmult",
         "x25_scalar", "x25_u", "x25_result",
         "input_buffer",
     ]
+    # Detection reads the ROUTINE entry points only. `fe_src1/2/dst` are ZP
+    # equates from src/constants.inc and are present in every link,
+    # sibling or not (measured: those three are exactly what survives), so
+    # including them in the probe set makes it never fire.
+    required_intree_fe_routines = [
+        "fe_copy", "fe_zero", "fe_one",
+        "fe_add", "fe_sub", "fe_mul", "fe_sqr", "fe_inv",
+        "fe_cswap", "fe_mul_a24",
+    ]
+    required_intree_fe_data = [
+        "fe_src1", "fe_src2", "fe_dst",
+        "fe_tmp1", "fe_tmp2", "fe_tmp3",
+    ]
+    required_intree_fe = required_intree_fe_routines + required_intree_fe_data
+
+    fe_present = [n for n in required_intree_fe_routines
+                  if labels.address(n) is not None]
+    sibling_build = len(fe_present) == 0
+    if fe_present and len(fe_present) != len(required_intree_fe_routines):
+        # Partial presence is neither an in-tree build nor a sibling one.
+        # Fail rather than guess: silently downgrading to two vectors here
+        # is how a broken link passes as a green run.
+        missing = [n for n in required_intree_fe_routines
+                   if labels.address(n) is None]
+        print("FATAL: in-tree fe25519 is only partially linked — present "
+              f"{fe_present}, missing {missing}. Neither an in-tree nor a "
+              "USE_X25519_SIBLING build; not guessing.")
+        sys.exit(1)
+
+    required = list(required_public)
+    if not sibling_build:
+        required += required_intree_fe
+
     for name in required:
         if labels.address(name) is None:
             print(f"FATAL: '{name}' label not found in {LABELS_PATH}")
             sys.exit(1)
+
+    if sibling_build:
+        print("  NOTE: no in-tree fe_* symbols in this link — treating it as a")
+        print("        USE_X25519_SIBLING=1 build. The fe_* unit groups are")
+        print("        SKIPPED (they test src/crypto/fe25519.s internals, which")
+        print("        this PRG does not contain); the RFC 7748 end-to-end")
+        print("        vectors still run and are the whole of the coverage.")
 
     print(f"  Labels loaded: {len(required)} required labels verified")
 
@@ -791,9 +858,21 @@ def main():
         summary += (f" -- {len(skipped_groups)} group(s) SKIPPED: "
                     + ", ".join(skipped_groups))
     print(summary)
-    if skipped_groups:
+    # Two different skips are possible and they mean opposite things, so
+    # the warning must name the one that actually happened rather than
+    # firing on any skip at all. --fast drops the only end-to-end
+    # coverage; a sibling build drops the field-arithmetic units but
+    # KEEPS the end-to-end vectors.
+    scalarmult_skipped = any(g.startswith("x25519 RFC 7748")
+                             for g in skipped_groups)
+    fe_skipped = any(g.startswith("fe_") for g in skipped_groups)
+    if scalarmult_skipped:
         print("WARNING: end-to-end x25519_scalarmult coverage did NOT run; "
               "this run does not certify X25519.")
+    elif fe_skipped:
+        print("NOTE: field-arithmetic unit coverage did NOT run (no in-tree "
+              "fe25519 in this link). The RFC 7748 end-to-end vectors did, "
+              "and are the whole of this run's evidence.")
     print(f"{'='*60}")
     sys.exit(0 if failed == 0 else 1)
 
