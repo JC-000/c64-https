@@ -270,7 +270,7 @@ Progress:
 - [x] HTTP/1.1 GET request — build GET, parse response (status + headers + body), plain HTTP end-to-end
 - [x] **End-to-end HTTPS GET demo (both backends)** — TLS 1.3 handshake + HTTP GET completes against a local Python TLS listener (ECDSA-P256 cert). Returns `http_status=200`, body `"HELLO FROM TLS SERVER"`.
   - UCI: real Ultimate 64 Elite hardware at both 48 MHz turbo and stock 1 MHz. See `tools/uci/test_https_local.py` (supports `TURBO_MHZ` env var).
-  - ip65: VICE + RR-Net at stock 1 MHz, no warp. The bridge-rig script is `tests/test_phase3_https_1mhz.py`; the hardware-free macOS feth/pcap rig is `tests/test_vice_https_macos.py`, and that is where the wall-clock below was taken.
+  - ip65: VICE + RR-Net at stock 1 MHz, no warp. The bridge-rig script is `tests/rig_phase3_https_1mhz.py`; the hardware-free macOS feth/pcap rig is `tests/rig_vice_https_macos.py`, and that is where the wall-clock below was taken.
 
 ### Known Issues
 
@@ -321,6 +321,7 @@ python3 tools/test_chained_hmac.py     # 10 cases: chained HMAC-SHA256 stability
 python3 tools/test_finished_verify.py  # 18 cases: the server-Finished REJECTION path, driven over DMA
 python3 tools/test_ecdsa_kat_oracle.py # 6 vectors: ECDSA P-256 KAT, 3 valid + 3 negative CAVP
 python3 tools/test_package_verify.py   # 31 cases: pure-logic tests for the release gate (no VICE, no build)
+python3 tools/test_pytest_boundary.py  # 4 checks: the pytest collection boundary below is intact
 
 # Benchmark
 python3 tools/bench_x25519.py         # X25519 basepoint multiply: 12,635 jiffies / 211 s C64 time, ~14 s wall under warp
@@ -330,17 +331,44 @@ python3 tools/test_dns.py             # 4 tests: DNS resolution via ip65 over TA
 python3 tools/test_http_integration.py # 5 tests: end-to-end plain HTTP GET over TAP (DNS + TCP + request/response)
 
 # End-to-end bridge tests (require br-c64 bridge, RR-Net; see below)
-sudo PYTHONPATH=tools python3 tests/test_phase1_dhcp.py   # DHCP over RR-Net bridge
-sudo PYTHONPATH=tools python3 tests/test_phase2_http.py   # Plain HTTP GET over bridge
+sudo PYTHONPATH=tools python3 tests/rig_phase1_dhcp.py   # DHCP over RR-Net bridge
+sudo PYTHONPATH=tools python3 tests/rig_phase2_http.py   # Plain HTTP GET over bridge
 ```
+
+### `pytest` is not the runner here
+
+Almost nothing in this repo is a pytest test, and the file names hide
+that. The suites above are dispatched by `tools/run_all_tests.py`, which
+allocates a VICE instance per suite and calls
+`run_tests(transport, labels, seed)`; their `test_*` functions take
+positional arguments rather than fixtures, so pytest can only ever report
+`fixture 'transport' not found`. The scripts in `tests/`, `tools/uci/` and
+several under `tools/` are `main()` programs with no `def test_` at all,
+so pytest collects zero from them and says nothing about it.
+
+`pytest.ini` therefore pins `testpaths` to the three modules that really
+are pure-logic and pytest-runnable, and `conftest.py` prints the scope of
+the run in both the header and the summary. A bare `pytest` at the repo
+root reports **30 passed**, and says in the same breath that this is not a
+statement about the C64 suites or the rig scripts.
+
+`testpaths` applies only when pytest is invoked from the rootdir, so from
+a subdirectory you get that subdirectory instead — measured from `tools/`:
+30 passed, 74 `fixture 'transport' not found` errors, exit 1. That is the
+honest signal (pytest genuinely cannot run those modules) and it is loud,
+which is the opposite of the problem being fixed here.
+
+`tools/test_pytest_boundary.py` fails if the boundary drifts in either
+direction — a pure-logic module missing from `testpaths`, or a `test_*.py`
+reappearing in `tests/`. See issue #109.
 
 ### End-to-End Bridge Tests (ip65 backend)
 
-Full end-to-end tests that drive the real c64-https binary in VICE over a Linux bridge with RR-Net ethernet (the same pattern used by [`c64-test-harness` bridge networking](https://github.com/JC-000/c64-test-harness/blob/master/docs/bridge_networking.md)). These exercise the **ip65/RR-Net path only**: DHCP (phase1), plain HTTP (phase2), and HTTPS (phase3 via `tests/test_phase3_https_1mhz.py`). VICE runs at **normal speed** (warp breaks RR-Net DHCP), so these tests need generous timeouts (~90-120s per phase).
+Full end-to-end tests that drive the real c64-https binary in VICE over a Linux bridge with RR-Net ethernet (the same pattern used by [`c64-test-harness` bridge networking](https://github.com/JC-000/c64-test-harness/blob/master/docs/bridge_networking.md)). These exercise the **ip65/RR-Net path only**: DHCP (phase1), plain HTTP (phase2), and HTTPS (phase3 via `tests/rig_phase3_https_1mhz.py`). VICE runs at **normal speed** (warp breaks RR-Net DHCP), so these tests need generous timeouts (~90-120s per phase).
 
 The HTTPS phase is long. The nearest measured figure is from the
 hardware-free macOS rig rather than this Linux bridge:
-`tests/test_vice_https_macos.py`, ip65 + onchip profile with no REU,
+`tests/rig_vice_https_macos.py`, ip65 + onchip profile with no REU,
 honest 1 MHz, **2,159.7 s = 36.0 min** from `G` to `CONNECTION CLOSED`.
 Budget accordingly; do not assume the bridge rig matches it exactly.
 

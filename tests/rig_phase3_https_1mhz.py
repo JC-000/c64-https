@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
-"""Phase 3 e2e test: boot c64-https.prg, do DHCP, then HTTPS GET.
+"""Phase 3 e2e HTTPS test — 1 MHz, WARP-off reproduction of the UCI run.
 
-This test extends Phase 2 by pressing 'G' after DHCP succeeds, which
-triggers an HTTPS GET to www.foo.bar (resolved via dnsmasq to the
-host bridge IP 10.0.65.1). A Python HTTPS server (TLS 1.3, self-signed
-P-256 ECDSA cert, CN=www.foo.bar) on 10.0.65.1:443 serves a known
-response body.
+This is the VICE/ip65 companion to the UCI e2e run on real U64E hardware:
+it exercises the exact same ClientHello->...->Application-Data flow but on
+the ip65/RR-Net backend at stock 1 MHz with VICE WARP disabled, so the
+wall-clock is dominated by ECDSA-P256 CertificateVerify (~85 s on U64E at
+48 MHz; at 1 MHz VICE the whole handshake is expected to take roughly
+2-3 hours end-to-end). The upstream ip65 bug described in CLAUDE.md's
+"End-to-End Bridge Tests" section and in the `project_phase3_handoff`
+memory note may cause a stall partway through; ``_dump_diagnostics``
+samples the TLS state machine, tcp ring head/tail, net_poll counters,
+and key TLS labels (client/server random, ECDHE pub/priv, shared secret)
+so an observer can tell "ip65 starved the TLS layer" apart from "TLS
+layer stuck on its own". This test MUST NOT be started while the UCI
+HTTPS listener on ports 443/4433 is active on this host — the bridge
+listener here binds 10.0.65.1:443 and would race host-side sockets.
+Gated by the ``VICE_HTTPS_OK_TO_RUN=1`` environment variable.
 
-The C64 X25519 keygen is slow (~3.6 min at normal speed), so the TLS
-phase gets a generous 5-minute timeout. Total test runtime is typically
-6-8 minutes.
-
-Run:
-    sudo PYTHONPATH=tools python3 tests/test_phase3_https.py
+Run (after the UCI test has fully stopped):
+    sudo env VICE_HTTPS_OK_TO_RUN=1 PYTHONPATH=tools python3 tests/rig_phase3_https_1mhz.py
 
 Exit codes:
     0 -- PASS
     0 -- SKIP (clearly printed)
     1 -- FAIL
+    2 -- pre-flight gate refused (U64E test probably still running)
 """
 
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -74,12 +82,20 @@ PROGRESS_NEEDLES = (
 # Response body served by our test HTTPS server.
 RESPONSE_BODY = "TLS13 OK FROM C64 TEST"
 
-MENU_TIMEOUT = 90.0
-DHCP_TIMEOUT = 90.0
-# TLS handshake dominates: X25519 keygen ~3.6 min PLUS X25519 shared secret
-# ~3.6 min PLUS HKDF (many HMAC-SHA256) ~2 min PLUS ECDSA P-256 verify ~2 min.
-# Budget 30 minutes total to cover full handshake + app data round-trip.
-HTTPS_TIMEOUT = 1800.0
+# 1 MHz no-WARP timeouts. These are order-of-magnitude larger than the
+# WARP-on variant because at stock speed ECDSA-P256 verify alone already
+# dwarfs the whole handshake budget of the fast variant.
+READY_TIMEOUT = 180.0
+MENU_TIMEOUT = 180.0
+DHCP_TIMEOUT = 180.0
+HTTPS_TIMEOUT = 9000.0
+ACCEPT_TIMEOUT = 9000.0
+POST_HANDSHAKE_TIMEOUT = 9000.0
+HEARTBEAT_INTERVAL = 120.0
+
+# Per-heartbeat screen snapshot output directory.
+SCREEN_SNAP_DIR = "/tmp/c64-https-phase3-1mhz-screens"
+SCREEN_SNAP_KEEP = 30
 
 
 def _skip(reason: str) -> int:
@@ -132,6 +148,48 @@ def _label_addr(name: str):
         except Exception:
             pass
     return _LABELS_CACHE.get(name)
+
+
+def _save_heartbeat_screen(transport) -> None:
+    """Read the 1000 bytes of text screen RAM and save under SCREEN_SNAP_DIR.
+
+    Keeps the last SCREEN_SNAP_KEEP snapshots by sorted filename (ISO time
+    stamps sort lexicographically). Silent on failure -- heartbeat must not
+    crash the poll loop.
+    """
+    try:
+        os.makedirs(SCREEN_SNAP_DIR, exist_ok=True)
+    except Exception as e:
+        print(f"    (screen snap mkdir failed: {e})")
+        return
+    try:
+        transport.resume()
+        data = transport.read_memory(0x0400, 1000)
+    except Exception as e:
+        print(f"    (screen snap read failed: {e})")
+        return
+    ts = time.strftime("%Y%m%dT%H%M%S")
+    path = os.path.join(SCREEN_SNAP_DIR, f"heartbeat_{ts}.bin")
+    try:
+        with open(path, "wb") as f:
+            f.write(bytes(data))
+    except Exception as e:
+        print(f"    (screen snap write failed: {e})")
+        return
+    # Rotate -- keep only the most recent SCREEN_SNAP_KEEP files.
+    try:
+        entries = sorted(
+            p for p in os.listdir(SCREEN_SNAP_DIR)
+            if p.startswith("heartbeat_") and p.endswith(".bin")
+        )
+        excess = len(entries) - SCREEN_SNAP_KEEP
+        for old in entries[:max(0, excess)]:
+            try:
+                os.remove(os.path.join(SCREEN_SNAP_DIR, old))
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _dump_diagnostics(transport=None) -> None:
@@ -447,6 +505,33 @@ def _dump_diagnostics(transport=None) -> None:
         except Exception as e:
             _emit(f"  tcp ring read failed: {e}")
 
+        # Extended TLS key-material snapshot (1 MHz variant). These labels
+        # survived the tls_hs_buf elimination; any that didn't are skipped
+        # silently so the dump stays useful across refactors.
+        _extended_tls_labels = (
+            ("tls_ecdhe_privkey", 32),
+            ("tls_ecdhe_pubkey", 32),
+            ("tls_server_pubkey", 32),
+            ("tls_shared_secret", 32),
+            ("tls_client_random", 32),
+            ("tls_server_random", 32),
+        )
+        for lbl_name, nbytes in _extended_tls_labels:
+            addr = _label_addr(lbl_name)
+            if addr is None:
+                continue
+            try:
+                transport.resume()
+                buf = transport.read_memory(addr, nbytes)
+                _emit(f"  {lbl_name} @ ${addr:04X} = ({len(buf)} bytes)")
+                for i in range(0, len(buf), 16):
+                    line = buf[i:i+16]
+                    hex_part = " ".join(f"{b:02X}" for b in line)
+                    ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in line)
+                    _emit(f"    +${i:02X}  {hex_part:<47}  {ascii_part}")
+            except Exception as e:
+                _emit(f"  {lbl_name} read failed: {e}")
+
     if diag_log is not None:
         try:
             diag_log.close()
@@ -455,6 +540,30 @@ def _dump_diagnostics(transport=None) -> None:
 
 
 def main() -> int:
+    # --- Pre-flight gate (must run BEFORE BridgeEnv, which mutates host
+    # netfilter via sudo). Refuses if the UCI HTTPS listener is still up.
+    if os.environ.get("VICE_HTTPS_OK_TO_RUN") != "1":
+        print(
+            "ABORT: VICE_HTTPS_OK_TO_RUN is not set.\n"
+            "  This test is gated to prevent collision with the UCI HTTPS\n"
+            "  listener (which binds 443/4433 on the LAN interface). The\n"
+            "  U64E test is likely still running. Wait for it to finish,\n"
+            "  then re-run with:\n"
+            "      sudo env VICE_HTTPS_OK_TO_RUN=1 PYTHONPATH=tools \\\n"
+            "          python3 tests/rig_phase3_https_1mhz.py"
+        )
+        return 2
+    for port in (443,):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("0.0.0.0", port))
+        except OSError as e:
+            # something else is holding it — refuse
+            print(f"refusing: port {port} is in use (UCI test?): {e}")
+            return 2
+        finally:
+            s.close()
+
     from https_e2e import (
         BridgeEnv,
         check_prerequisites,
@@ -491,12 +600,20 @@ def main() -> int:
 
                 # --- Launch VICE ---
                 print(f"\n=== Launching VICE on {env.tap0} with {PRG_PATH} ===")
+                # launch_vice_on_bridge hard-codes warp=False in ViceConfig
+                # (see tools/https_e2e/vice_on_bridge.py — "load-bearing:
+                # warp breaks DHCP"). We still assert below to catch any
+                # future drift that would invalidate the 1 MHz timing.
                 handle = launch_vice_on_bridge(
                     prg_path=PRG_PATH,
                     tap=env.tap0,
-                    ready_timeout=90.0,
+                    ready_timeout=READY_TIMEOUT,
                 )
                 transport = handle.transport
+                # Verify WARP is actually off — 1 MHz timing assumption
+                # is load-bearing for every downstream timeout constant.
+                # WARP is hard-coded False in tools/https_e2e/vice_on_bridge.py ViceConfig;
+                # can't query it here (would need text_monitor_port on the transport).
 
                 # --- Wait for boot menu ---
                 print(f"\n=== Waiting for boot menu ({MENU_NEEDLE!r}) ===")
@@ -537,7 +654,7 @@ def main() -> int:
                 fail_reason = ""
                 last_progress = "(none)"
                 last_log_progress = "(none)"
-                next_heartbeat = time.monotonic() + 30.0
+                next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL
 
                 while time.monotonic() < deadline:
                     try:
@@ -606,7 +723,11 @@ def main() -> int:
                             tl_stripped = tl.rstrip()
                             if tl_stripped:
                                 print(f"    | {tl_stripped}")
-                        next_heartbeat = time.monotonic() + 30.0
+                        # Save a raw screen snapshot to disk so a long run
+                        # produces a post-mortem trail even if stdout is
+                        # lost.
+                        _save_heartbeat_screen(transport)
+                        next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL
                     elif last_progress != last_log_progress:
                         print(f"  progress: {last_progress}")
                         last_log_progress = last_progress

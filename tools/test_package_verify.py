@@ -187,7 +187,20 @@ def test_expected_images_tolerate_old_build_info() -> None:
 # build-info parsing
 # ---------------------------------------------------------------------------
 
-def test_parse_build_info_records(tmp_lines: list[str]) -> None:
+# Sample build-info lines. Defaulted rather than passed in, so that pytest
+# can run this module too: a parameter without a default is a fixture
+# request, and there is no `tmp_lines` fixture (issue #109).
+SAMPLE_BUILD_INFO = [
+    "variant=uci-onchip prg=x.prg args=BACKEND=uci USE_NISTCURVES_ONCHIP=1"
+    " result=OK bytes=62977 sha256=abc123 backend=uci",
+    "variant=ip65-onchip prg=y.prg args=BACKEND=ip65 result=FAILED"
+    " log=build-ip65-onchip.log",
+]
+
+
+def test_parse_build_info_records(tmp_lines: list[str] = None) -> None:
+    if tmp_lines is None:
+        tmp_lines = SAMPLE_BUILD_INFO
     print("\n-- build-info records parse, including args with spaces --")
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
@@ -221,12 +234,7 @@ def main() -> int:
     test_expected_images_skip_failed_variants()
     test_expected_images_empty_when_nothing_built()
     test_expected_images_tolerate_old_build_info()
-    test_parse_build_info_records([
-        "variant=uci-onchip prg=x.prg args=BACKEND=uci USE_NISTCURVES_ONCHIP=1"
-        " result=OK bytes=62977 sha256=abc123 backend=uci",
-        "variant=ip65-onchip prg=y.prg args=BACKEND=ip65 result=FAILED"
-        " log=build-ip65-onchip.log",
-    ])
+    test_parse_build_info_records(SAMPLE_BUILD_INFO)
     print(f"\n{'=' * 60}")
     print(f"{PASSED} passed, {FAILED} failed")
     return 1 if FAILED else 0

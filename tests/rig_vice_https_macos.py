@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """macOS hardware-free HTTPS e2e: ip65 PRG in ethernet-VICE vs local TLS 1.3 listener.
 
-The macOS counterpart to tests/test_phase3_https.py (which is Linux-only:
+The macOS counterpart to tests/rig_phase3_https.py (which is Linux-only:
 sysfs TAP checks + sudo dnsmasq). This variant expects the feth/pcap rig
 from tools/rig-up-macos.sh to be up already (one sudo command per boot)
 and runs everything else unprivileged:
@@ -92,7 +92,7 @@ def _rig_check() -> list[str]:
     """Return a list of missing-prerequisite messages (empty = rig OK)."""
     problems = []
     if sys.platform != "darwin":
-        problems.append("not macOS (use tests/test_phase3_https.py on Linux)")
+        problems.append("not macOS (use tests/rig_phase3_https.py on Linux)")
         return problems
     if not os.path.exists(VICE_BIN):
         problems.append(
@@ -340,7 +340,7 @@ def main() -> int:
             # Binary-monitor reads leave the CPU PAUSED — resume every
             # iteration or the emulation only runs between polls (seen
             # as 14 s of CPU in 38 min, "CH" forever). Mirrors
-            # wait_for_screen_text / tests/test_phase3_https.py.
+            # wait_for_screen_text / tests/rig_phase3_https.py.
             try:
                 transport.resume()
             except Exception:  # noqa: BLE001

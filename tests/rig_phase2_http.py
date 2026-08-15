@@ -7,7 +7,7 @@ host bridge IP 10.0.65.1). A Python HTTP server on 10.0.65.1:80 serves
 a known response body.
 
 Run:
-    sudo PYTHONPATH=tools python3 tests/test_phase2_http.py
+    sudo PYTHONPATH=tools python3 tests/rig_phase2_http.py
 
 Exit codes:
     0 -- PASS
