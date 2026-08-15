@@ -54,8 +54,20 @@ CA65="${CA65:-ca65}"
 AR65="${AR65:-ar65}"
 
 # --- ZP-slot overrides (c64-https canonical map + SHA-384 isolated window) ---
+# zp_ptr2's SPELLING is pin-dependent and probed, never hardcoded — see the
+# long rationale in build_nistcurves_p256.sh (contract SPEC §2 ZP prefix
+# registry + §6.5's loud-break alias shape: on a migrated pin the bare
+# spelling is an unguarded alias and `-D zp_ptr2=...` dies with
+# "Symbol 'zp_ptr2' is already defined"). `fp_`/`sha_` are registered §2
+# prefixes for c64-nist-curves and keep their `.ifndef` guards, so only this
+# one slot needs the probe.
+if grep -qE '^[[:space:]]*\.ifndef[[:space:]]+nistcurves_zp_ptr2[[:space:]]*$' "$LIB_SRC/zp_config.s"; then
+    ZP_PTR2_SLOT='nistcurves_zp_ptr2'
+else
+    ZP_PTR2_SLOT='zp_ptr2'
+fi
 ZP_OVERRIDES=(
-    '-D' 'zp_ptr2=$3d'
+    '-D' "$ZP_PTR2_SLOT=\$3d"
     '-D' 'fp_mul_i=$39'
     '-D' 'fp_mul_j=$3a'
     # SHA-384 streaming pointer slots (moved out of $04-$0b defaults
