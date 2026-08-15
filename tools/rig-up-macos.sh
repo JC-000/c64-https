@@ -42,8 +42,16 @@ echo "[ok] $HOST_IF up at $HOST_ADDR (bridge10 alias removed)"
 chmod o+rw /dev/bpf*
 echo "[ok] /dev/bpf* opened (o+rw, reverts on reboot)"
 
-# 4. dnsmasq: DHCP 10.0.65.2-10 + DNS records, bound to the feth peer.
+# 4. dnsmasq: DHCP 10.0.65.100-150 + DNS records, bound to the feth peer.
 #    Flags mirror tools/net_test_env.py::start_dnsmasq.
+#
+#    The pool starts at .100, NOT .2, because 10.0.65.0/24 is shared with
+#    c64-test-harness and it reserves the bottom of the range: .1 host side
+#    of the bridge, .2 and .3 the two emulated C64s its bridge tests
+#    hardcode (test_bridge_ping, test_ethernet_bridge, ...). A .2-.10 pool
+#    hands out exactly those two addresses, so whenever this rig was up the
+#    harness's bridge tests failed or behaved oddly with nothing on either
+#    side detecting it (c64-https#108). Keep this clear of .1-.3.
 if [[ -f "$DNSMASQ_PID" ]] && kill -0 "$(cat "$DNSMASQ_PID")" 2>/dev/null; then
     echo "[ok] dnsmasq already running (pid $(cat "$DNSMASQ_PID"))"
 else
@@ -59,7 +67,7 @@ else
         --interface="$HOST_IF" \
         --bind-interfaces \
         --listen-address="$HOST_ADDR" \
-        --dhcp-range=10.0.65.2,10.0.65.10,255.255.255.0,5m \
+        --dhcp-range=10.0.65.100,10.0.65.150,255.255.255.0,5m \
         --dhcp-option=6,"$HOST_ADDR" \
         --no-ping \
         --address=/www.foo.bar/"$HOST_ADDR" \
