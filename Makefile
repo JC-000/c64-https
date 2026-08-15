@@ -36,6 +36,31 @@ IP65_BUILD   := ip65-build
 IP65_BIN     := $(IP65_BUILD)/ip65-c64.bin
 
 CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net/$(BACKEND) -I build --debug-info
+# Binary-include search roots for `.incbin` (issue #116).
+#
+# `-I` above does NOT feed `.incbin` — that is a separate search path in ca65,
+# and pointing `-I` at a blob directory fails with "Cannot open include file"
+# even though the file is right there (measured, ca65 V2.18). Binary includes
+# need `--bin-include-dir`.
+#
+# Why this exists at all: ca65 resolves a relative `.incbin` operand against
+# the CURRENT DIRECTORY FIRST, falling back to the including source file's
+# directory only if that misses. Every `.incbin` here used to be spelled
+# `../../../<dir>/<file>` on the belief that source-relative was the rule. From
+# the repo root those two interpretations coincide, so it worked — but an agent
+# worktree lives at `.claude/worktrees/<name>/`, exactly three levels down, so
+# `../../../` climbed straight out into the PRIMARY checkout and every worktree
+# build silently embedded the primary's blob. The worktree's own freshly-built
+# copy was never read, by anything, while make's dependency graph tracked it.
+#
+# ABSOLUTE paths, not relative: a relative root would be cwd-relative and would
+# re-acquire the same class of bug the moment any recipe assembles from a
+# subdirectory. `$(abspath ...)` pins these to make's own working directory.
+# The operands in the sources are then written WITHOUT any `../`, so there is
+# no escape hatch left to resolve. A missing blob now fails the assemble
+# loudly instead of quietly resolving somewhere else.
+CA65FLAGS += --bin-include-dir $(abspath $(IP65_BUILD))
+CA65FLAGS += --bin-include-dir $(abspath build)
 # Which backend is selected, as a ca65 define. Sources that must name a
 # cfg-level symbol need this, because the two cfgs give the same region
 # different names: the crypto code+rodata region is CRYPTO_HOT under UCI and

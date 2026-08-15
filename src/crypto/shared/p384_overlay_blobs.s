@@ -87,13 +87,16 @@
 ; SHA-384 overlay image (REU bank 6 source)
 ;
 ; Loads into the live CRYPTO_OVERLAY slot at $4200-$5FFF at PRG load
-; time, then boot DMAs it to REU bank 6.  The .incbin path is resolved
-; by ca65 relative to this source file: from src/crypto/shared/ the
-; build/ tree is two levels up.
+; time, then boot DMAs it to REU bank 6.
+;
+; Path is relative to ca65's BINARY include path (absolute $(abspath
+; build), set by the Makefile).  The former `../../../` escaped the
+; checkout entirely when assembled from a git worktree — see issue #116
+; and the note in src/net/ip65/ip65_blob.s.
 ; -----------------------------------------------------------------------------
         .segment "OVERLAY_BLOB_SHA384"
 p384_overlay_sha384_blob:
-        .incbin "../../../build/lib/overlay-p384-sha384.bin"
+        .incbin "lib/overlay-p384-sha384.bin"
 p384_overlay_sha384_blob_end:
 
 ; -----------------------------------------------------------------------------
@@ -104,7 +107,7 @@ p384_overlay_sha384_blob_end:
 ; -----------------------------------------------------------------------------
         .segment "OVERLAY_BLOB_CURVE"
 p384_overlay_curve_blob:
-        .incbin "../../../build/lib/overlay-p384-curve.bin"
+        .incbin "lib/overlay-p384-curve.bin"
 p384_overlay_curve_blob_end:
 
 .endif ; .ifdef USE_OVERLAY_P384_EMBED
