@@ -180,7 +180,15 @@ for tree in sha curve; do
         "${ZP_OVERRIDES[@]}" \
         -o "$STAGING/$tree/$zp_member" \
         "$LIB_SRC/zp_config.s"
-    check_zp_slot_if_present "$STAGING/$tree/$zp_member" zp_ptr2  61   # $3d
+    # Canonical spelling first (see build_nistcurves_p256.sh). Every check here
+    # is presence-tolerant because the sha and curve trees export disjoint slot
+    # subsets — the sha tree has no zp_ptr2 at all — so absence is legitimate
+    # per-tree and cannot be asserted away. The bare alias is additionally
+    # optional because `-D LIB_NO_BARE_EXPORTS=1` removes it (§1/§6.5).
+    check_zp_slot_if_present "$STAGING/$tree/$zp_member" "$ZP_PTR2_SLOT" 61   # $3d
+    if [ "$ZP_PTR2_SLOT" != "zp_ptr2" ]; then
+        check_zp_slot_if_present "$STAGING/$tree/$zp_member" zp_ptr2 61       # $3d — deprecated alias
+    fi
     check_zp_slot_if_present "$STAGING/$tree/$zp_member" fp_mul_i 57   # $39
     check_zp_slot_if_present "$STAGING/$tree/$zp_member" fp_mul_j 58   # $3a
 done

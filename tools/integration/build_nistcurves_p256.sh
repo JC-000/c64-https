@@ -214,13 +214,36 @@ check_zp_slot() {
         exit 1
     fi
 }
-# Both spellings are checked. On the pinned v0.9.1 these are the same symbol
-# and the second call is a no-op restatement; on a §2-migrated pin they are
-# the canonical slot and its deprecated alias, and checking both proves the
-# alias tracks the override rather than splitting one slot across two
-# addresses — the silent outcome contract §6.5 forbids.
+# Same as check_zp_slot, but tolerates the symbol being absent. Only correct
+# for a slot whose ABSENCE is legitimate — see the alias check below.
+check_zp_slot_if_present() {
+    local name="$1" want="$2" got
+    got=$("${OD65:-od65}" --dump-exports "$STAGING/$ZP_MEMBER" \
+          | awk -v n="\"$name\"" '$1=="Name:" && $2==n {f=1; next} f && $1=="Value:" {gsub(/[()]/,"",$3); print $3; exit}')
+    [ -z "$got" ] && return 0
+    if [ "$got" != "$want" ]; then
+        echo "ERROR: $ZP_MEMBER exports $name = $got, expected $want (c64-https ZP override did not take)" >&2
+        exit 1
+    fi
+}
+
+# The CANONICAL spelling is checked unconditionally — it is the name the
+# library's own code reads, so its absence or disagreement is always a defect.
 check_zp_slot "$ZP_PTR2_SLOT" 61   # $3d — canonical spelling for this pin
-check_zp_slot zp_ptr2  61      # $3d
+
+# The deprecated bare alias is checked only WHEN PRESENT, and only when it is
+# a distinct symbol. On a §2-migrated pin this proves the alias tracks the
+# override rather than splitting one slot across two addresses (the silent
+# outcome contract §6.5 forbids) — but the alias legitimately disappears under
+# `-D LIB_NO_BARE_EXPORTS=1` (§1), and a hard check would then fail the build
+# over a symbol the contract expects to be gone. Checking the bare name
+# *instead* of the canonical one would be the worse error in the other
+# direction: it is the spelling that goes away, so the guard would stop
+# guarding exactly when a consumer tightens the build.
+if [ "$ZP_PTR2_SLOT" != "zp_ptr2" ]; then
+    check_zp_slot_if_present zp_ptr2 61    # $3d — deprecated alias, if still emitted
+fi
+
 check_zp_slot fp_mul_i 57      # $39
 check_zp_slot fp_mul_j 58      # $3a
 
