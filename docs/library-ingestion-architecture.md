@@ -359,7 +359,7 @@ Suitable to file as GitHub issues against `JC-000/c64-https`. Each is sized for 
 
 **Scope:** Same as W1 but for `cfg/c64-https-ip65.cfg`. Reclaim `NET_BSS_TAIL` ($4F8C-$5FFF, ~4.1 KB) as `CRYPTO_OVERLAY_IP65`. Confirm that with TLS_CODE + sha256 *back* in CRYPTO_HOT (instead of NET_BSS_TAIL), CRYPTO_HOT still fits in 16 KB.
 
-**Expected output:** `make BACKEND=ip65` PRG builds clean, `make USE_X25519_SIBLING=1 BACKEND=ip65` now builds clean too (closes the long-standing ip65 sibling-fit issue), `test_phase3_https_1mhz.py` PASSes.
+**Expected output:** `make BACKEND=ip65` PRG builds clean, `make USE_X25519_SIBLING=1 BACKEND=ip65` now builds clean too (closes the long-standing ip65 sibling-fit issue), `tests/rig_phase3_https_1mhz.py` PASSes.
 
 **Dependencies:** W1 (proves the hot/cold split works) and Issue A/B (smaller P-256 verify archive that fits in 4 KB overlay slot).
 

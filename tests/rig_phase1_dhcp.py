@@ -7,7 +7,7 @@ end-to-end. It touches NO TLS/HTTP logic -- it only asserts that the
 boot menu appears and that pressing 'I' produces the 'DHCP OK' banner.
 
 Run:
-    PYTHONPATH=tools python3 tests/test_phase1_dhcp.py
+    PYTHONPATH=tools python3 tests/rig_phase1_dhcp.py
 
 Exit codes:
     0 -- PASS

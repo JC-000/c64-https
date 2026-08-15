@@ -1,6 +1,6 @@
 """https_e2e -- End-to-end test helpers for the c64-https program.
 
-Public API used by tests/test_phase1_dhcp.py and (later) higher phases:
+Public API used by tests/rig_phase1_dhcp.py and (later) higher phases:
 
     from https_e2e import (
         BridgeEnv,

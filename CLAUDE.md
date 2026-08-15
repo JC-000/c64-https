@@ -156,9 +156,9 @@ Test harness expectations:
   - Most `tools/test_*.py` scripts run `make clean && make` themselves
     before launching VICE. Set `C64_SKIP_BUILD=1` in the environment to
     reuse the already-built PRG. 14 scripts honor it as of 2026-08-13
-    (13 under `tools/`, plus `tests/test_vice_https_macos.py`); the
+    (13 under `tools/`, plus `tests/rig_vice_https_macos.py`); the
     current list is `grep -ln 'environ.*C64_SKIP_BUILD' tools/test_*.py
-    tests/test_*.py` rather than a number that goes stale here.
+    tests/rig_*.py` rather than a number that goes stale here.
   - Use the `c64-test-harness` Python package to launch VICE; never run
     `x64sc` directly from tests.
 
@@ -588,7 +588,7 @@ The TLS 1.3 handshake now completes end-to-end against the local test
 listener (ECDSA-P256 cert, `tools/https_e2e/certs/`) on **both** backends:
 UCI/U64E at 48 MHz turbo and stock 1 MHz, and ip65/VICE at stock 1 MHz
 no-WARP (after the 255-byte TCP RX clamp fix in `src/net/ip65/net.s`;
-see `tests/test_phase3_https_1mhz.py`). The flow, identical across both
+see `tests/rig_phase3_https_1mhz.py`). The flow, identical across both
 backends:
 
 **U64E wedge episode (2026-07-27/28, resolved — know the signature):**
@@ -1652,6 +1652,35 @@ the TLS state machine. For a quick sanity check after a build:
 
 All 7 pass as of the ca65-conversion branch (97/97 assertions).
 
+### `pytest` is not the runner — the collection boundary
+
+Do not reach for `pytest` to check this repo. Its suites are dispatched by
+`tools/run_all_tests.py` as `run_tests(transport, labels, seed)`, so the
+`test_*` functions take positional arguments, not fixtures; under pytest
+they can only produce `fixture 'transport' not found`. Measured on master
+before the fix, a bare `pytest` at the repo root gave **25 passed, 75
+errors**, and `tests/` contributed a silent zero because its five live-rig
+`main()` scripts had no `def test_` at all (issue #109).
+
+The boundary is now pinned rather than accidental:
+
+  - the rig scripts are `tests/rig_*.py`, outside pytest's discovery
+    namespace whatever the working directory (`tests/README.md` says how
+    to run them; they need `sudo` and a live rig)
+  - `pytest.ini` pins `testpaths` to the three genuinely pure-logic
+    modules and keeps collection out of `libs/`, `ip65/`, `tests/` and
+    `tools/uci/` (all of which are `test_*.py`-named and collect zero)
+  - root `conftest.py` prints what the run does and does not cover, in
+    both the header and the summary — no skips, because a vague skip
+    reads like coverage
+  - `tools/test_pytest_boundary.py` fails if either direction drifts
+
+Bare `pytest` at the repo root is now **30 passed** (exit 0), and
+`pytest tests/` still exits 5, now with an explanation. `testpaths` only
+applies at the rootdir, so `pytest` from a subdirectory collects that
+subdirectory: from `tools/` it is 30 passed + 74 fixture errors, exit 1 —
+loud and correct, since those modules cannot run under pytest at all.
+
 ### Negative-path coverage — the server Finished
 
 `tools/test_finished_verify.py` and `tools/uci/test_https_bad_finished.py`
@@ -1716,7 +1745,7 @@ correct for a submodule that was never `--init`'d.
 
 ### VICE ip65 rig (hardware-free e2e)
 
-`tests/test_vice_https_macos.py` runs the **full HTTPS handshake + GET
+`tests/rig_vice_https_macos.py` runs the **full HTTPS handshake + GET
 over the ip65 backend with no hardware at all** — emulated RR-Net
 (cs8900a) in VICE talking to a host-side TLS 1.3 listener. This is how
 the REU-less stock-C64 numbers above were measured. Knobs:
