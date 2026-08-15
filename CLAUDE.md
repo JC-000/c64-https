@@ -162,7 +162,7 @@ Variables:
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65).
                           Changing it requires `make clean` — see above.
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
-                          `libs/x25519@v0.11.0` sibling. **UCI links;
+                          `libs/x25519@v0.11.1` sibling. **UCI links;
                           ip65 overflows CRYPTO_OVERLAY** — see
                           "Known issues". Off by default either way.
   - `EMBED_P256_OVERLAY=1` — stage the P-256 verify image into the
@@ -218,7 +218,7 @@ buffers in the crypto BSS — see per-module headers for details):
 
   X25519 / field arithmetic
     Default: in-tree `src/crypto/{x25519,fe25519}.s`.
-    Opt-in: sibling `libs/x25519@v0.11.0` via `make USE_X25519_SIBLING=1`
+    Opt-in: sibling `libs/x25519@v0.11.1` via `make USE_X25519_SIBLING=1`
     — links under UCI from the v0.10.1/v0.11.0 wave pins, still
     overflows under ip65, and ships in nothing; see Known issues.
     The v0.6.0 pin is c64-lib-contract-aligned (SPEC §8.1) and adds the
@@ -235,7 +235,7 @@ buffers in the crypto BSS — see per-module headers for details):
   SHA-256                   (in-tree; no sibling)
     sha256_init, sha256_update, sha256_final
 
-  ECDSA P-256                (`libs/nistcurves@v0.10.1` sibling,
+  ECDSA P-256                (`libs/nistcurves@v0.11.0` sibling,
                               c64-lib-contract SPEC §1-§8.1 aligned)
     ecdsa_verify_256      — TLS dispatcher in src/crypto/ecdsa_verify.s
                             packs the BE struct + calls the sibling entry
@@ -283,9 +283,18 @@ below for the post-W1 hot/cold split):
     [c64-lib-contract](https://github.com/JC-000/c64-lib-contract)
     for the contract spec and `docs/library-ingestion-architecture.md`
     for the c64-https rollout plan.
-  - **Read `SPEC.md` on `main`, not the latest git tag.** The contract's
-    tags lag badly: newest tag is v0.4.0 while `main` is **v0.7.2**
-    (checked 2026-08-13). Sections added since v0.4.0 that bind a
+  - **Pin the contract tag — this advice inverted on 2026-08-15.** It
+    used to read "read `SPEC.md` on `main`, not the latest git tag",
+    because tags lagged badly (newest v0.4.0 against a v0.7.2 `main`).
+    v0.10.3 is the contract repo's first GitHub release and is both the
+    newest tag and the newest SPEC, so tag-pinning is now correct.
+    One caveat the release notes get wrong: they claim "every version
+    since v0.4.1 is tagged (gapless series)", and **0.10.1 has no tag**
+    (31 changelog versions against 30 tags, measured 2026-08-15). It was
+    a doc-only reorder, so nothing is lost — but tooling must not assume
+    every changelog version resolves as a ref.
+
+    Sections added since v0.4.0 that bind a
     *consumer* rather than an adopter: **§13 Network backend ABI**
     (v0.6.0 — written from c64-https's own net surface; our intake
     issue [#70](https://github.com/JC-000/c64-https/issues/70) is
@@ -842,8 +851,10 @@ Five latent bugs and three new ones were cleared to get here:
     `reu_mul_init.o` alongside the `mul_8x8.o` / `data_shared.o`
     drops already there. c64-https is the §8.0 APP_OWNED case for
     that primitive, so the member is surplus in every configuration —
-    and provably inert in the shipped ones, since all four REU-profile
-    PRGs are byte-identical with and without the drop.
+    and provably inert in the shipped ones, since the REU-profile PRGs
+    were byte-identical with and without the drop. (Measured when four
+    variants shipped; the lineup is three now and carries no REU-profile
+    image at all, so the drop is inert in the release by construction.)
 
     Note the near miss: had ld65 resolved instead of erroring,
     `reu_mul_init` would have bound to nistcurves' table builder
@@ -890,13 +901,19 @@ Five latent bugs and three new ones were cleared to get here:
     `tools/test_x25519.py` RFC 7748 vector 2 — whose u ends `0x93` —
     passes 73/73 on the in-tree build.)
 
-    The pin is now **v0.11.0**. The v0.6.0 -> v0.10.0 migrations the
+    The pin is now **v0.11.1**. The v0.6.0 -> v0.10.0 migrations the
     wrapper had to absorb (the §4 `LIB_X25519_CODE` /
     `LIB_X25519_INIT_CODE` segment renames, the `x25_x1` buffer added
     by v0.7.0's #64 fix) are done and documented in
-    `tools/integration/build_x25519.sh`'s header. v0.11.0 itself is a
-    pure export-surface change — upstream states the library PRG is
-    byte-identical to v0.8.0 — so it needed no wrapper work at all.
+    `tools/integration/build_x25519.sh`'s header. v0.11.0 and v0.11.1
+    are both pure export-surface / link-guard changes — upstream states
+    the library PRG is byte-identical across v0.8.0 through v0.11.1 —
+    so neither needed any wrapper work. v0.11.1 adds §6.6/§6.7
+    placement guards (the previously-silent SQTAB placement hazard now
+    dies as a named `lderror` in both directions) and makes
+    `ZP_CONFIG_NO_EXPORTS` / `REU_CONFIG_NO_EXPORTS` actually reachable
+    from a consumer `-D`; none of that binds c64-https while the flag
+    stays off.
 
     The `USE_NISTCURVES_ONCHIP` / `USE_X25519_SIBLING` mutual
     exclusion at `Makefile:90` still stands, and its stated reason is
@@ -1099,6 +1116,116 @@ Five latent bugs and three new ones were cleared to get here:
     runnable test — see the packaging validation record for the exact
     invocation. Never set it for a REU-profile build: that is precisely
     the silent-garbage case above.
+
+### VIC-II blanking — worth 6.3%, not the fleet's "20-25%"
+
+`src/vic.s` provides `vic_blank` / `vic_unblank` (clear/set DEN, bit 4 of
+`$D011`). Until 2026-08-15 c64-https did **no** blanking anywhere, so
+every shipped PRG paid full badline DMA through the whole handshake.
+
+**Blanking is scoped to the three CPU-bound primitives, deliberately** —
+`x25519_base` and `x25519_scalarmult` (`src/tls_ecdh.s`) and the
+`ecdsa_verify` dispatch (`src/crypto/ecdsa_verify.s`). Those are the great
+majority of handshake wall-clock and produce no screen output of their
+own. Wrapping `tls_connect` instead would be slightly smaller and faster
+but would hide the CH / SH / HK1 / KEYS / ENC1 / RX progress markers,
+which are this project's primary field diagnostic — a stock-C64 user
+would get a black screen for 36 minutes with no way to tell a slow run
+from a wedged one. Blanking mid-run also means `ecdsa_verify`'s two
+dispatch arms are now `jsr` + `php`/`plp` + `rts` rather than tail-calls,
+so the verify carry survives the unblank; the 3 negative CAVP vectors in
+`tools/test_ecdsa_kat_oracle.py` are what prove that carry handling.
+
+**The measurement — and the correction.** `c64-nist-curves` and
+`c64-x25519` both label their benchmark tables "VIC blanked", and
+`tools/bench_x25519.py` carried the comment "for ~20-25% speedup". That
+figure is wrong by about 3.5x. VICE, NTSC, stock 1 MHz, `x25519_base`,
+same PRG, only the trampoline's blank flag varying:
+
+  config       jiffies    note
+  blanked      12,637     reproduced exactly on a repeat run
+  unblanked    13,494
+  delta         6.35% reduction / 6.78% speedup
+
+Reproduce with `tools/bench_x25519.py` and the same with `--no-blank`.
+n=1 per arm is adequate here because VICE's simulated cycle counter is
+deterministic (the repeat confirmed it) **and** the result matches
+first-principles badline cost: a 25-row text display takes 25 badlines
+per frame at ~43 cycles each against a 17,045-cycle NTSC frame —
+
+  25 x 43 / 17,045   = 6.31% predicted
+  measured             1,083 cycles/frame vs 1,075 predicted (+0.7%)
+
+20-25% is roughly the figure you would get with sprite DMA in play; for
+a text-mode screen with no sprites — every screen c64-https draws — it
+overstates the win threefold. **The sibling repos' tables still carry the
+old claim**; that has not been reported upstream yet.
+
+Still worth doing: 6.3% of a ~36-minute stock-C64 handshake is over two
+minutes, for 18 bytes of code. Just do not plan around it as a quarter.
+
+#### The turbo sweep — the tax does NOT shrink with clock
+
+`make VIC_BLANK=0` degrades `vic_blank`/`vic_unblank` to a bare `RTS`, so
+the A/B pair differs only in whether DEN is touched — same call sites,
+same JSR overhead, same 62,977 B image size. That is the software control
+that made this measurable without waiting on
+[c64-test-harness#150](https://github.com/JC-000/c64-test-harness/issues/150).
+
+U64E (10.43.23.81), `bench_ecdsa_u64e.py`, **onchip** profile — the
+CPU-bound one, where the effect is not diluted:
+
+  MHz  vector  blanked    unblanked   reduction   n
+   48  pos     28.433 s   30.502 s    **6.78%**   3   <- tight, spreads <0.2%
+   48  pos     28.924 s   31.137 s      7.11%     1
+   48  neg     26.636 s   28.674 s      7.11%     1
+   16  pos     82.605 s   86.515 s      4.52%     1
+   16  neg     78.049 s   85.067 s      8.25%     1
+    8  pos    163.446 s  174.400 s      6.28%     1
+    8  neg    157.246 s  166.837 s      5.75%     1
+
+**Read the n=3 row and treat the n=1 rows as bracketing, not as a trend.**
+The n=1 spread is 4.5-8.3%, which is wide enough to invent a clock trend
+that is not there; the n=3 pair at 48 MHz has spreads under 0.2% and
+lands at 6.78%.
+
+And the **REU** profile at 48 MHz, n=3, as a cross-check:
+
+  profile   blanked     unblanked   reduction
+  onchip    28.433 s    30.502 s    6.78%
+  REU       56.844 s    60.859 s    6.60%
+
+**Two predictions, both wrong, both wrong the same way — and the second
+failure is what explains the first.**
+
+  1. *"The tax shrinks with turbo."* The VIC runs at ~1 MHz while the CPU
+     runs up to 64, so the steal should become a rounding error. It does
+     not: 6.78% at 48 MHz against 6.35% in VICE at 1 MHz — flat across a
+     48x clock range.
+  2. *"The REU profile dilutes it."* REU verify carries a ~48 s DMA floor
+     that turbo cannot touch, so if badlines only taxed CPU execution the
+     REU reduction should have been ~1.3%. Measured 6.60% — no dilution
+     at all.
+
+The reconciliation is that **badline DMA is a tax on the bus, not on the
+CPU.** Everything that needs the bus pays the same ~6.3%: 6502 execution
+and REU DMA transfers alike, at any clock, on either profile. Once that
+is the model, all four numbers are the same number —
+
+  6.31%  first-principles (25 badlines x ~43 cyc / 17,045-cyc NTSC frame)
+  6.35%  VICE, 1 MHz, x25519 (pure CPU)
+  6.60%  U64E, 48 MHz, REU profile (CPU + REU DMA)
+  6.78%  U64E, 48 MHz, onchip profile (pure CPU)
+
+— and the REU floor's clock-invariance and the badline tax's
+fraction-invariance stop looking like a contradiction. Do not reason from
+one to the other without measuring; that is exactly what produced both
+wrong predictions above.
+
+Still unmeasured: **1 MHz on real hardware** (VICE covers that point
+honestly and agrees; a hardware run costs ~23 min per arm and was judged
+not worth the shared-device time), and **the C64U**, which was offline
+(no ICMP, no REST) for this campaign.
 
 ### ECDSA P-256 verify wall-clock
 
@@ -1447,15 +1574,70 @@ RFC 6979 vector,
   - **comb profile: parity at 16/32 MHz, +12% at 48 MHz** (18.4 vs
     16.5 s). The U64E side is confirmed: a 2026-07-26 rerun at n=6
     per positive vector gave median 18.39 s, spread 18.31-18.45 s
-    (±0.4%) across all three vectors. Plausibly the Lim-Lee table
+    (±0.4%) across all three vectors.
+
+    **CAUSE UNKNOWN — and the previously recorded one is arithmetically
+    impossible.** This entry used to read "plausibly the Lim-Lee table
     fetches from REU bank 2 — a DMA-anchored cost whose share grows
-    with clock. The residual uncertainty is the C64U's 16.5 s
-    (itself n=2); re-measure that side before treating the gap as
-    exactly 12%.
+    with clock". That cannot produce this delta. The Lim-Lee comb moves
+    32 window steps x 64 B = **2 KB** of REU traffic per verify
+    (`points256_comb.s:168`, h=8 over a 256-bit scalar), i.e. about
+    **2 ms** at the REU's ~1 MB/s. The delta is **1.9 s** — roughly
+    900x larger. No plausible device-to-device REU speed difference
+    closes a factor of 900.
+
+    For contrast, the figure that legitimately IS DMA-anchored: the REU
+    *profile's* 48.2 s floor comes from `reu_fetch_mul_row` moving 512 B
+    per call (`mul_8x8.s:280`) at 32 rows per `fp_mul`
+    (`fp256.s:191`) = 16 KB per field multiply. At ~1 MB/s that floor
+    implies ~48 MB and therefore ~2,900 `fp_mul` calls per verify, which
+    is the right order for P-256 — so the row-fetch path accounts for
+    its floor completely, with nothing left to attribute elsewhere.
+
+    Do not re-attach a mechanism to this delta without checking the
+    magnitude first (see the `causal-claims-need-measurement` memory
+    note; this is a textbook instance). The residual uncertainty is
+    also still live: the C64U's 16.5 s is n=2, so re-measure **both**
+    devices at n>=3 before treating the gap as real at all, let alone
+    as exactly 12%.
   - Crossovers vs REU shift down on the U64E because its REU floor
     is higher: onchip wins above ~18 MHz (C64U: ~22), comb above
     ~5 MHz (C64U: ~7). Comb still dominates no-comb onchip at
-    every clock. Best U64E verify: **18.4 s @ 48 MHz** (comb).
+    every clock. Best U64E verify at the v0.6.0 pin: 18.4 s @ 48 MHz.
+
+#### Comb re-measured at the current pin (2026-08-15)
+
+The comb rows above are v0.6.0-era. Re-run on the U64E against the
+**shipped `c64-https-uci-comb.prg`** (hash-matched to `dist/`), at the
+`libs/nistcurves` **v0.11.0** pin and **with VIC blanking active**,
+n=3 medians, RFC 6979 vector, all correctness=PASS:
+
+  MHz   v0.6.0    current    delta
+   16    49.1 s   46.986 s   -4.3%
+   32    24.6 s   24.440 s   -0.7%
+   48    18.4 s   16.402 s  -10.9%
+
+  refit T(f) = 1.4 + 731/f   (max |resid| 1.1%; was D=2.2, C=747)
+  extrapolated 64 MHz: ~12.8 s
+
+**Do not read the per-clock deltas individually.** They are against
+n=2 medians taken months earlier, and the 32 MHz arm has an 8%
+internal spread this run (min 22.683, med 24.440, max 24.662) against
+1.8% at 48 MHz and 0.4% at 16 MHz. The refit is the trustworthy
+summary: C moved 747 -> 731, i.e. the CPU work is essentially where it
+was and the gain is mostly blanking plus noise.
+
+**Best U64E verify is now 16.4 s @ 48 MHz**, and comb is **1.73x**
+faster than no-comb onchip at that clock (16.402 vs 28.433, both n=3,
+both blanked, same session). The MANIFEST's user-facing claim is
+worded from these two numbers.
+
+**Corroboration for the unexplained device gap above.** The v0.6.0
+data had C64U 16.5 s against U64E 18.4 s at 48 MHz — the "+12%" whose
+stated cause was refuted earlier in this section. The U64E now measures
+**16.402 s**, essentially the old C64U figure, so the gap has closed
+without anyone addressing it. That is what a measurement artefact looks
+like, and it is further reason not to re-attach a mechanism to it.
 
 v0.3.0's hot-path code is essentially unchanged from v0.2.0;
 the small wall-clock improvement is within measurement noise across
@@ -1721,34 +1903,41 @@ ld65 and ca65 edge cases; they are intentional and should stay:
 ## Packaging
 
 `make package` builds the release artifacts into `dist/` (gitignored).
-**All four backend x profile combinations ship**, `make clean` between
-every one:
+**Three products ship**, `make clean` between every one, matrix in
+`tools/package/_common.sh`:
 
-  - `c64-https-uci-reu.prg`      `make BACKEND=uci`
-  - `c64-https-uci-onchip.prg`   `+ USE_NISTCURVES_ONCHIP=1`
-  - `c64-https-ip65-reu.prg`     `make BACKEND=ip65`
-  - `c64-https-ip65-onchip.prg`  `+ USE_NISTCURVES_ONCHIP=1`
+  - `c64-https-ip65-onchip.prg`  `make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1`
+        MAXIMUM COMPATIBILITY. Bone-stock C64 + RR-Net, no REU, no
+        turbo. The only image a completely unmodified machine runs.
+  - `c64-https-uci-onchip.prg`   `make BACKEND=uci USE_NISTCURVES_ONCHIP=1`
+        Turbo, no REU.
+  - `c64-https-uci-comb.prg`     `make BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1`
+        Turbo + REU, fastest. 1.73x quicker verify than uci-onchip
+        (16.402 s vs 28.433 s, U64E 48 MHz, n=3, both blanked).
 
-ip65 is now packaged (it was previously excluded on a link failure that
-the #68 refit closed) — it is the only artifact that serves a stock C64
-+ RR-Net cartridge, and `ip65-onchip` is the only image a bone-stock
-machine with no REU can run at all.
+**The two REU-profile images were retired from the lineup**
+(`uci-reu`, `ip65-reu`). They are still buildable and still the fastest
+choice below ~18 MHz — the REU profile's DMA floor is a floor, but its
+CPU work is lower — so this is a curation decision, not a measurement
+one. The cost is borne by a stock C64 *with* an REU, which now gets
+`ip65-onchip` at ~1,820 s per handshake where `ip65-reu` would have done
+~1,082 s at 1 MHz. If that user group matters, `ip65-reu` is one line in
+`PACKAGE_VARIANTS` away from returning.
 
-The REU-vs-onchip guidance in `MANIFEST.txt` is the measured **~18 MHz**
-crossover, not the older ~7 MHz figure: the REU profile carries a
-wall-clock floor (DMA anchored to the ~1 MHz bus) that turbo cannot
-touch, the onchip profile has none, and on a U64E the sign flips between
-the 16 and 20 MHz CPU-speed settings. See the ECDSA wall-clock section.
+`uci-comb` is the newest and needs three things stated plainly: it is
+**not** a no-REU image despite building on the on-chip field layer (it
+claims REU bank 2 for the 16 KB Lim-Lee table,
+`LIB_NISTCURVES_REU_BANKS_USED = $04`); it pays a boot precompute of
+**45 s at 48 MHz / ~34 s at 64 MHz / ~36 min at 1 MHz** (measured, see
+below); and it only wins above ~5 MHz, so it is strictly a turbo
+product. Its archive comes from upstream's `lib-p256-comb-onchip`
+(v0.11.0), not from member surgery.
 
-Disk images:
-
-  - `c64-https-<variant>.d64` x4 — one PRG each, `LOAD"*",8,1`
-  - `c64-https-uci.d64`, `c64-https-ip65.d64` — both of that backend's
-    profiles on one disk
-
-There is deliberately **no all-in-one image**: the four PRGs total 868
-blocks against a .d64's 664 free. Each backend's pair does fit (UCI 496,
-ip65 372), which makes the per-backend disk the largest useful bundle.
+Disk images: **one product per disk, three disks**, `LOAD"*",8,1`.
+Per-backend combo images were retired with the lineup change — three
+UCI variants are 3 x 248 = 744 blocks against a .d64's 664 free, so a
+combo disk would have had to silently omit a product. One variant per
+disk means the label is the whole contents.
 
 `c64-https-listener.py` is a **single self-extracting Python file** (was
 a zip + `run.sh` + venv + pip). It has **no third-party dependency at
@@ -1809,13 +1998,23 @@ drive emulation the ~250-block load never completes inside any sane
 budget, and the symptom is a screen stuck on `LOADING` that looks like a
 bad image rather than a slow one. `verify_release.py` passes both flags.
 
-The comb profile stays deliberately excluded (REU bank 2 residency +
-~40 min boot precompute at 1 MHz make it wrong for a general release).
+**The comb profile now SHIPS** (`uci-comb`). It was excluded from the
+lineup while its costs — REU bank 2 residency plus the boot precompute —
+looked disqualifying for a general release. What changed: the precompute
+was measured properly at **45 s @48 MHz / ~34 s @64 MHz** (the ~36 min
+figure is the 1 MHz end, and nobody runs comb at 1 MHz — it loses to the
+plain REU profile below ~5 MHz anyway), and upstream v0.11.0 made the
+archive reachable without member surgery. It is a turbo product and the
+MANIFEST says so.
 
 Validation record (2026-07-27, then-HEAD cb6eab4, `libs/nistcurves`
-pin v0.6.0 — the wall-clock rows below are v0.6.0 figures and have not
-been re-measured at any later pin; the only point that has is the
-48 MHz UCI REU one, in "The one re-measured point" above):
+pin v0.6.0). **This record predates the three-product lineup** — it
+validates `uci-reu` / `ip65-reu`, which no longer ship, and does not
+cover `uci-comb`, which now does. Kept as history, not as current
+coverage; the current release's evidence is the `make package-verify`
+run plus the comb KAT and the re-measured comb sweep above. The
+wall-clock rows below are v0.6.0 figures except the 48 MHz UCI REU one
+("The one re-measured point") and the comb rows:
   - onchip PRG passes the 3-vector ECDSA KAT in VICE **without** REU
     (and with, as control) — the no-REU claim is verified, and
     boot.s's unconditional reu_mul_init is harmless with no REU

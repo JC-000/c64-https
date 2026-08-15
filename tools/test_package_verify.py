@@ -144,13 +144,16 @@ def test_expected_images_from_build_record() -> None:
         {"key": "ip65-onchip", "prg": "d.prg", "result": "OK", "backend": "ip65"},
     ]
     names = sorted(p.name for p in vr.expected_d64_images(variants))
-    check("four singles plus two per-backend images", names, [
+    # One disk per variant and nothing else. The per-backend combo images were
+    # retired when the UCI lineup reached three variants (3 x 248 blocks does
+    # not fit a .d64's 664), so a combo disk would have had to silently omit a
+    # product. This test previously pinned the combo contract and is what
+    # caught the change — keep it pinning the CURRENT one.
+    check("one disk per variant, no combo images", names, [
         "c64-https-ip65-onchip.d64",
         "c64-https-ip65-reu.d64",
-        "c64-https-ip65.d64",
         "c64-https-uci-onchip.d64",
         "c64-https-uci-reu.d64",
-        "c64-https-uci.d64",
     ])
 
 
@@ -162,8 +165,8 @@ def test_expected_images_skip_failed_variants() -> None:
         {"key": "uci-onchip", "prg": "b.prg", "result": "FAILED", "backend": "uci"},
     ]
     names = sorted(p.name for p in vr.expected_d64_images(variants))
-    check("only the built variant's disk plus its backend disk", names,
-          ["c64-https-uci-reu.d64", "c64-https-uci.d64"])
+    check("only the built variant's disk", names,
+          ["c64-https-uci-reu.d64"])
 
 
 def test_expected_images_empty_when_nothing_built() -> None:
@@ -175,12 +178,17 @@ def test_expected_images_empty_when_nothing_built() -> None:
 
 
 def test_expected_images_tolerate_old_build_info() -> None:
-    """backend= was added late; a build-info without it must not crash."""
+    """backend= was added late; a build-info without it must not crash.
+
+    The derivation no longer READS backend= (combo disks are gone), so this is
+    now purely a no-crash guard on old records rather than a check that the
+    backend is inferred correctly.
+    """
     print("\n-- a build record predating backend= still derives correctly --")
     variants = [{"key": "ip65-onchip", "prg": "d.prg", "result": "OK"}]
     names = sorted(p.name for p in vr.expected_d64_images(variants))
-    check("backend inferred from the key prefix", names,
-          ["c64-https-ip65-onchip.d64", "c64-https-ip65.d64"])
+    check("no crash without backend=", names,
+          ["c64-https-ip65-onchip.d64"])
 
 
 # ---------------------------------------------------------------------------

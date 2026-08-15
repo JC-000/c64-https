@@ -12,19 +12,20 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
 Grab a release — latest is
 [**v0.2.0**](https://github.com/JC-000/c64-https/releases/tag/v0.2.0).
 Every build is prebuilt, as a `.prg` and as a bootable `.d64`.
-No assembler, no cc65, no Python packages, no build step. Two questions pick
-your image, and `MANIFEST.txt` in the release walks through them:
+No assembler, no cc65, no Python packages, no build step. **Three products,
+one disk each** — the label is the whole contents, and `MANIFEST.txt` in the
+release walks you through the choice:
 
-| | REU present | no REU |
+| image | for | note |
 |---|---|---|
-| **Ultimate 64 / C64 Ultimate** | `c64-https-uci-reu` | `c64-https-uci-onchip` |
-| **stock C64 + RR-Net** | `c64-https-ip65-reu` | `c64-https-ip65-onchip` |
+| `c64-https-ip65-onchip` | bone-stock C64 + RR-Net cartridge | maximum compatibility: no REU, no turbo, nothing optional. If you are not sure what you have, this is the one that runs. ~36 min per handshake at 1 MHz. |
+| `c64-https-uci-onchip` | Ultimate 64 / C64 Ultimate at turbo, REU off | boots straight to the menu |
+| `c64-https-uci-comb` | Ultimate 64 / C64 Ultimate at turbo, REU **on** | fastest — 1.73x quicker verify (16.4 s vs 28.4 s, U64E at 48 MHz). Builds a 16 KB table into REU bank 2 at each boot first: ~34 s at 64 MHz, ~45 s at 48 MHz. |
 
-The `reu` images are faster below roughly 18 MHz — which is every real stock
-C64 — because they offload the ECDSA verify to REU DMA. The `onchip` images
-need no REU at all and win above that crossover, so they are the right pick
-for Ultimate turbo modes. `ip65-onchip` is the only image a bone-stock
-machine with no expansion RAM can run end to end.
+The screen blanks during the slow crypto on every image — that is deliberate,
+it stops the VIC-II stealing bus cycles and buys ~6.5%. The progress line
+returns between handshake phases, so a blank screen for minutes at a time is
+the crypto running, not a hang.
 
 `c64-https-listener.py` in the same release is a single self-extracting file
 that stands up the server side to point the C64 at: it mints its own
@@ -213,9 +214,10 @@ cd c64-https
 make                          # build/c64-https.prg (default BACKEND=ip65, REU profile)
 make BACKEND=uci              # the Ultimate 64 / C64 Ultimate (UCI) variant
 make USE_NISTCURVES_ONCHIP=1  # the no-REU "onchip" P-256 verify profile
+make VIC_BLANK=0              # measurement control only: VIC blanking off (never ship)
 make run                      # build and launch in VICE (x64sc)
 make clean                    # remove build artifacts
-make package                  # all four backend x profile release artifacts into dist/
+make package                  # the three release products into dist/
 ```
 
 **Run `make clean` whenever you change `BACKEND=` or any flag.** make
@@ -274,7 +276,8 @@ Progress:
 - [x] ip65 submodule integration — 6.8 KB binary blob at $2000 (TCP/UDP/DNS/DHCP/ARP + RR-Net CS8900a)
 - [x] Network wrapper with ZP time-sharing — save/restore $02-$1B around ip65 calls
 - [x] Crypto primitives — ChaCha20, Poly1305, AEAD (from c64-wireguard), SHA-256, HMAC-DRBG (from c64-aes256-ecdsa)
-- [x] Optimized X25519/fe25519 — REU DMA multiply tables, mult66 quarter-square, self-mod code, 4x-unrolled cswap. `tools/bench_x25519.py` measures one basepoint scalar multiply at **12,635 jiffies = 211 s (3.5 min)** of C64 time (NTSC, VIC-II blanked, ~14 s wall clock under VICE warp)
+- [x] Optimized X25519/fe25519 — REU DMA multiply tables, mult66 quarter-square, self-mod code, 4x-unrolled cswap. `tools/bench_x25519.py` measures one basepoint scalar multiply at **12,637 jiffies = 211 s (3.5 min)** of C64 time (NTSC, VIC-II blanked, ~21 s wall clock under VICE warp); the same multiply costs 13,494 jiffies unblanked
+- [x] VIC-II blanking during the CPU-bound crypto — `src/vic.s`, scoped to the two X25519 scalar multiplies and the ECDSA verify so the on-screen handshake progress markers stay visible between phases. Worth **6.3-6.8%**, measured both in VICE at 1 MHz and on a U64E at 8/16/48 MHz; see the VIC-II blanking section of `CLAUDE.md`
 - [x] HKDF-SHA256 — Extract, Expand, Expand-Label, Derive-Secret (RFC 5869 + TLS 1.3)
 - [x] TLS 1.3 record layer — encrypt/decrypt with ChaCha20-Poly1305, nonce construction, sequence numbers
 - [x] TLS 1.3 handshake — ClientHello builder (x25519 key_share, SNI), ServerHello parser, streaming transcript hash
@@ -291,9 +294,9 @@ Progress:
 
 ### Known Issues
 
-- **The handshake is slow, and the ECDSA P-256 verify dominates it.** Every figure here is quoted from the measurement record in `CLAUDE.md`. Except where noted they were taken at the **`libs/nistcurves` v0.6.0 pin**, and the pin is now v0.10.1, so treat them as a baseline rather than as current. End-to-end handshake + GET against the local listener, U64E, master 2ceb5b1: **80.8 s** (REU profile, 48 MHz), **45.5 s** (onchip profile, 48 MHz), **1,157.7 s** (REU, stock 1 MHz). One point of that sweep has been carried forward: 48 MHz REU measures **82.1 s** at v0.9.1 and **82.4 s** at v0.10.1 (n=1 each, so the 0.4% step between them is noise; the 1.6% from v0.6.0 is the FIPS 186-5 public-key validation gate v0.7.0 added). No other clock or profile has been re-measured. On the REU-less stock-C64 path (ip65 + onchip, no REU, honest 1 MHz in VICE) the whole run measured **2,159.7 s = 36.0 min**, of which the verify stretch alone was 1,416.7 s. That is fine for the local listener, which holds the connection open; it exceeds a typical 10-30 s real-world server handshake window.
+- **The handshake is slow, and the ECDSA P-256 verify dominates it.** Every figure here is quoted from the measurement record in `CLAUDE.md`. Except where noted they were taken at the **`libs/nistcurves` v0.6.0 pin**, and the pin is now v0.11.0, so treat them as a baseline rather than as current. The one profile re-measured at the current pin is comb: 46.986 / 24.440 / 16.402 s verify at 16 / 32 / 48 MHz (U64E, n=3, VIC blanking active). End-to-end handshake + GET against the local listener, U64E, master 2ceb5b1: **80.8 s** (REU profile, 48 MHz), **45.5 s** (onchip profile, 48 MHz), **1,157.7 s** (REU, stock 1 MHz). One point of that sweep has been carried forward: 48 MHz REU measures **82.1 s** at v0.9.1 and **82.4 s** at v0.10.1 (n=1 each, so the 0.4% step between them is noise; the 1.6% from v0.6.0 is the FIPS 186-5 public-key validation gate v0.7.0 added). No other clock or profile has been re-measured. On the REU-less stock-C64 path (ip65 + onchip, no REU, honest 1 MHz in VICE) the whole run measured **2,159.7 s = 36.0 min**, of which the verify stretch alone was 1,416.7 s. That is fine for the local listener, which holds the connection open; it exceeds a typical 10-30 s real-world server handshake window.
 - **P-384** ECDSA is stubbed at the TLS layer. The dispatcher advertises `ecdsa_secp384r1_sha384` (0x0503) and routes to `src/crypto/ecdsa_verify_384.s`, but no P-384 build target completes. Measured 2026-08-14: `make p384-overlay` from a clean tree stops at `No rule to make target 'build/labels.txt'`, and after a main build has produced that file it stops at `Segment 'LIB_NISTCURVES_SHA384_TABLES' overflows memory area 'OVERLAY_REGION' by 1536 bytes`. Cert chains requiring P-384 will not verify.
-- **`USE_X25519_SIBLING=1` now links under UCI, and still does not under ip65.** The duplicate-symbol failure this entry used to record — `ld65: Error: Duplicate external identifier: 'reu_mul_tables_init'`, on **both** backends — was closed by the `libs/nistcurves` v0.10.1 / `libs/x25519` v0.11.0 bump plus one line of archive surgery: `tools/integration/build_nistcurves_p256.sh` now also drops `reu_mul_init.o`, the SPEC §8.2 `reu_mul` provider that `src/boot.s` supplies itself. Measured at those pins: `make clean && make BACKEND=uci USE_X25519_SIBLING=1` produces a 62,977 B PRG, and ip65 stops instead at `Segment 'X25519_RODATA' overflows memory area 'CRYPTO_OVERLAY' by 3584 bytes` — a placement problem (ip65's overlay slot is 4,212 B against UCI's 7,680 B), not a symbol collision. The flag remains **off by default** and no shipped artifact contains the sibling; the in-tree X25519 in `src/crypto/{x25519,fe25519}.s` is what every release PRG is built from. Flipping the default is a separate decision that wants a hardware handshake behind it.
+- **`USE_X25519_SIBLING=1` now links under UCI, and still does not under ip65.** The duplicate-symbol failure this entry used to record — `ld65: Error: Duplicate external identifier: 'reu_mul_tables_init'`, on **both** backends — was closed by the `libs/nistcurves` v0.10.1 / `libs/x25519` v0.11.0 bump plus one line of archive surgery: `tools/integration/build_nistcurves_p256.sh` now also drops `reu_mul_init.o`, the SPEC §8.2 `reu_mul` provider that `src/boot.s` supplies itself. Re-measured at the current v0.11.0 / v0.11.1 pins, unchanged: `make clean && make BACKEND=uci USE_X25519_SIBLING=1` produces a 62,977 B PRG, and ip65 stops instead at `Segment 'X25519_RODATA' overflows memory area 'CRYPTO_OVERLAY' by 3584 bytes` — a placement problem (ip65's overlay slot is 4,212 B against UCI's 7,680 B), not a symbol collision. The flag remains **off by default** and no shipped artifact contains the sibling; the in-tree X25519 in `src/crypto/{x25519,fe25519}.s` is what every release PRG is built from. Flipping the default is a separate decision that wants a hardware handshake behind it.
 - **Live internet HTTP GET (UCI backend)** has not been re-verified since the FPGA-fence rework; only the local multi-segment listener is exercised regularly.
 - **VICE 3.9** previously appeared to crash on chained HMAC-SHA256 calls (backend-independent — affects the crypto-only test suites), but this was caused by hardcoded port numbers bypassing the test harness port allocator. With proper `ViceInstanceManager` usage (no hardcoded ports), all N=1..10 chained calls succeed reliably.
 
@@ -341,7 +344,8 @@ python3 tools/test_package_verify.py   # 31 cases: pure-logic tests for the rele
 python3 tools/test_pytest_boundary.py  # 5 checks: the pytest collection boundary below is intact
 
 # Benchmark
-python3 tools/bench_x25519.py         # X25519 basepoint multiply: 12,635 jiffies / 211 s C64 time, ~14 s wall under warp
+python3 tools/bench_x25519.py         # X25519 basepoint multiply: 12,637 jiffies / 211 s C64 time (VIC blanked)
+python3 tools/bench_x25519.py --no-blank  # same multiply unblanked: 13,494 jiffies — the badline A/B
 
 # Integration tests (require the bridge/TAP rig + dnsmasq; see scripts/setup-bridge-tap.sh below)
 python3 tools/test_dns.py             # 4 tests: DNS resolution via ip65 over TAP (label, known host, second host, unknown host)

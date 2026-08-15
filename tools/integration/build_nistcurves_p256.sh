@@ -60,13 +60,31 @@ LIB_SRC="$LIB_DIR/src"
 LIB_BUILD="$LIB_DIR/build"
 OUT_DIR="$PROJECT_ROOT/build/lib"
 if [ "$PROFILE" = "onchip-comb" ]; then
-    # Comb-accelerated turbo profile: stage from the FULL onchip archive
-    # (the only shipped archive whose ecdsa256.o is the comb variant and
-    # which carries points256_comb.o + data_p256_limlee.o), then drop
-    # everything non-P-256 in step 4b. Consumer boot obligation grows by
-    # ec_precompute_256 (REU bank 2 $0000-$3FFF anchors, SPEC §8.3/§8.5).
-    UPSTREAM_TARGET="lib-onchip"
-    UPSTREAM_ARCHIVE="$LIB_BUILD/lib/nistcurves-onchip.a"
+    # Comb-accelerated turbo profile.
+    #
+    # Through the v0.10.2 pin this staged from the FULL `lib-onchip`
+    # archive and deleted ~13 non-P-256 members by hand, because no
+    # narrowed comb archive existed. That was SPEC §6.1 non-conformant
+    # (an edited member set is outside every §5/§8.0 manifest claim the
+    # archive ships) and it is why src/contract_footprint_asserts.s had
+    # to exclude this profile from the §6.6 assert: the surviving
+    # manifest described the pre-surgery set, 27,000 B against a
+    # 16,384 B region.
+    #
+    # libs/nistcurves v0.11.0 added `lib-p256-comb-onchip` in response
+    # (c64-nist-curves#117), carrying its own §6.4 manifest triple under
+    # the LIB_P256_COMB_ONLY switch. Member set = the
+    # lib-p256-verify-onchip set with the comb-fast ecdsa256.o replacing
+    # ecdsa256_nocomb.o, plus points256_comb.o + data_p256_limlee.o.
+    # So the surgery in step 4b is retired and the archive we link is
+    # one upstream actually ships.
+    #
+    # Consumer boot obligation still grows by ec_precompute_256 (REU
+    # bank 2 $0000-$3FFF anchors, SPEC §8.3/§8.5): measured 45 s at
+    # 48 MHz on a U64E, i.e. ~36 min at 1 MHz. See c64-https#120 for
+    # loading the table from disk instead.
+    UPSTREAM_TARGET="lib-p256-comb-onchip"
+    UPSTREAM_ARCHIVE="$LIB_BUILD/lib/nistcurves-p256-comb-onchip.a"
     STAGING="$PROJECT_ROOT/build/lib/nistcurves_p256_onchip_comb_staging"
     ARCHIVE="$OUT_DIR/nistcurves-p256-onchip-comb.a"
     SIZES="$OUT_DIR/nistcurves-p256-onchip-comb.sizes.txt"
@@ -186,6 +204,10 @@ done
 case "$ZP_MEMBER" in
     zp_config.o)             ZP_VARIANT_DEFINE=() ;;
     zp_config_p256verify.o)  ZP_VARIANT_DEFINE=('-D' 'LIB_P256_VERIFY_ONLY') ;;
+    # v0.11.0's comb archives (c64-nist-curves#117). Gate name confirmed
+    # against libs/nistcurves/src/zp_config.s:162 and Makefile:302 rather
+    # than inferred from the member basename.
+    zp_config_p256comb.o)    ZP_VARIANT_DEFINE=('-D' 'LIB_P256_COMB_ONLY') ;;
     zp_config_p384verify.o)  ZP_VARIANT_DEFINE=('-D' 'LIB_P384_VERIFY_ONLY') ;;
     zp_config_p384curve.o)   ZP_VARIANT_DEFINE=('-D' 'LIB_P384_CURVE_ONLY') ;;
     zp_config_sha384.o)      ZP_VARIANT_DEFINE=('-D' 'LIB_SHA384_ONLY') ;;
@@ -272,16 +294,16 @@ check_zp_slot fp_mul_j 58      # $3a
 # sibling's, which is a different routine writing through a different
 # buffer set.
 rm -f "$STAGING/mul_8x8.o" "$STAGING/data_shared.o" "$STAGING/reu_mul_init.o"
-# 4b. onchip-comb: the full onchip archive carries both curves + SHA-384 +
-# reference-inverse extras; keep only the P-256 comb verify set.
-if [ "$PROFILE" = "onchip-comb" ]; then
-    rm -f "$STAGING"/fp384_onchip.o "$STAGING"/mod384.o "$STAGING"/curve384.o \
-          "$STAGING"/points384_core.o "$STAGING"/points384_comb.o \
-          "$STAGING"/data_p384.o "$STAGING"/data_p384_limlee.o \
-          "$STAGING"/ecdsa384.o "$STAGING"/ecdsa384_msg.o \
-          "$STAGING"/sha384*.o "$STAGING"/data_sha.o \
-          "$STAGING"/inv256.o "$STAGING"/data_p256_invref.o
-fi
+# 4b. RETIRED at the libs/nistcurves v0.11.0 pin. This used to delete ~13
+# non-P-256 members (fp384/mod384/curve384/points384_*/data_p384*/
+# ecdsa384*/sha384*/data_sha/inv256/data_p256_invref) from the full
+# `lib-onchip` archive, because no narrowed comb archive existed.
+# `lib-p256-comb-onchip` is now that archive, so there is nothing to
+# strip — see the UPSTREAM_TARGET block at the top of this file.
+#
+# Do not reinstate this without also restoring the §6.6 comb exclusion in
+# src/contract_footprint_asserts.s: the two moved together, and deleting
+# members silently invalidates the §6.4 manifest the assert reads.
 if [ "$PROFILE" = "onchip" ] || [ "$PROFILE" = "onchip-comb" ]; then
     # Rebuild (not drop): fp256_onchip.o imports og_common/og_src_ld which
     # only this TU provides. The SHARED_* defines strip everything that

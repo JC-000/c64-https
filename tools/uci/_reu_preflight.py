@@ -140,19 +140,42 @@ def detect_crypto_profile(labels_path: Path | str) -> tuple[str, str]:
         return ("reu", f"could not read {labels_path} — assuming REU profile")
 
     banks = labels.get(_BANKS_EQUATE)
-    if banks == 0:
-        return ("onchip", f"{_BANKS_EQUATE}=0")
 
+    # The manifest equate is AUTHORITATIVE whenever it is present, and it
+    # decides in BOTH directions. The on-chip symbols are a fallback for
+    # when it is absent, not co-equal votes.
+    #
+    # This ordering is load-bearing, and getting it wrong shipped a real
+    # hole. The comb profile (USE_NISTCURVES_ONCHIP_COMB) generates multiply
+    # rows on the CPU — so `gen_mul_row`, `fe_gen_mul_row` and
+    # `sqtab_reserved` are all present — while still claiming REU **bank 2**
+    # for the 16 KB Lim-Lee anchor table: it links with
+    # LIB_NISTCURVES_REU_BANKS_USED = $04, not 0. Under the previous
+    # symbol-union-first ordering those three symbols outvoted the equate,
+    # the comb build was classified "onchip", and the device REU check was
+    # skipped entirely — printing "no REU required" for an image that does
+    # not work without one. Measured on a real comb build, 2026-08-15.
+    #
+    # That is exactly the failure #97's preflight exists to prevent, and it
+    # matters more now that comb is a shipped product whose whole premise is
+    # REU-plus-turbo.
+    if banks is not None:
+        if banks == 0:
+            return ("onchip", f"{_BANKS_EQUATE}=0")
+        return ("reu", f"{_BANKS_EQUATE}=${banks:02X} — claims REU bank(s)")
+
+    # No manifest equate: fall back to the symbol union. Union rather than
+    # conjunction so renaming any single symbol upstream cannot silently
+    # reclassify an onchip build as REU-profile and block the configuration
+    # we recommend to REU-less users.
     found = [name for name in _ONCHIP_SYMBOLS if name in labels]
     if found:
-        return ("onchip", "+".join(found))
+        return ("onchip", "+".join(found) + f" (no {_BANKS_EQUATE})")
 
-    if banks is None:
-        # No manifest equate and no onchip symbol. Most likely a genuine
-        # REU-profile build; possibly a library layout we do not know.
-        # Fail closed — the check is skippable, 44 minutes of spin is not.
-        return ("reu", f"no {_BANKS_EQUATE} and no on-chip row generator")
-    return ("reu", f"{_BANKS_EQUATE}={banks}")
+    # No manifest equate and no onchip symbol. Most likely a genuine
+    # REU-profile build; possibly a library layout we do not know.
+    # Fail closed — the check is skippable, 44 minutes of spin is not.
+    return ("reu", f"no {_BANKS_EQUATE} and no on-chip row generator")
 
 
 def _extract_config_value(resp: Any, category: str, item: str) -> str | None:

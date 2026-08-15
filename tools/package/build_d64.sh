@@ -95,14 +95,13 @@ for line in "${PACKAGE_VARIANTS[@]}"; do
     make_disk "$DIST/c64-https-$key.d64" "$key" "01" "$DIST/$prg" "$name"
 done
 
-# --- One image per backend, carrying that backend's profiles ------------------
-for backend in $(package_backends); do
-    args=()
-    for line in "${PACKAGE_VARIANTS[@]}"; do
-        [ "$(variant_field "$line" 5)" = "$backend" ] || continue
-        args+=("$DIST/$(variant_field "$line" 2)" "$(variant_field "$line" 4)")
-    done
-    make_disk "$DIST/c64-https-$backend.d64" "c64-https $backend" "01" "${args[@]}"
-done
+# --- No per-backend combo images ------------------------------------------
+# Retired deliberately. Their premise was "a user only ever learns one
+# name", and that breaks the moment a backend carries three variants: the
+# UCI set is 3 x 248 = 744 blocks against a .d64's 664, so a combo image
+# could not hold the lineup even if we wanted one. Rather than ship a disk
+# that silently omits a variant, every image now carries exactly the one
+# product named on its label, so what a consumer downloads is what they
+# get. See PACKAGE_VARIANTS in _common.sh for the three products.
 
 echo "[package] disk images complete."

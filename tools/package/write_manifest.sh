@@ -71,23 +71,46 @@ echo "--------------------------------------------------------------------------
 echo " WHICH ONE DO I WANT?"
 echo "------------------------------------------------------------------------------"
 echo
-echo "Two questions decide it."
+echo "Three things decide it."
 echo
 echo "1. How is your C64 on the network?"
 echo "     Ultimate 64 / Ultimate 64 Elite / C64 Ultimate  ->  the 'uci' images"
 echo "     a stock C64 with an RR-Net / cs8900a cartridge  ->  the 'ip65' images"
 echo
-echo "2. Do you have a RAM Expansion Unit (REU), and how fast is the CPU?"
-echo "     'reu' images use the REU to accelerate the ECDSA verify. They need"
-echo "     one, and they are FASTER below about 18 MHz — which includes every"
-echo "     real stock C64 at 1 MHz."
-echo "     'onchip' images need NO REU at all and do the same work on the CPU."
-echo "     They are FASTER above about 18 MHz, so they are the right pick for"
-echo "     Ultimate turbo modes (32/48/64 MHz)."
-echo "   The ~18 MHz crossover is measured, not estimated: the REU's DMA rate is"
-echo "   anchored to the ~1 MHz bus, so the REU profile carries a wall-clock"
-echo "   floor no amount of turbo removes, while the on-chip profile scales with"
-echo "   the clock. On a U64E the sign flips between the 16 and 20 MHz settings."
+echo "2. Which of the three do I want?"
+echo "     Three products, one disk each. The disk carries exactly what its"
+echo "     label says — there are no combined images to pick through."
+echo
+echo "     ip65-onchip   a completely unmodified C64 + RR-Net cartridge."
+echo "                   No REU, no turbo, no options. If you are not sure"
+echo "                   what you have, this is the one that will run."
+echo "                   ~36 min per handshake at 1 MHz."
+echo
+echo "     uci-onchip    Ultimate 64 / C64 Ultimate at turbo, REU off."
+echo "                   Boots straight to the menu."
+echo
+echo "     uci-comb      Ultimate 64 / C64 Ultimate at turbo, REU ON."
+echo "                   The fastest image: ~1.7x quicker verify than"
+echo "                   uci-onchip. It builds a 16 KB table into REU"
+echo "                   bank 2 at every boot before the menu appears —"
+echo "                   ~34 s at 64 MHz, ~45 s at 48 MHz. That is the"
+echo "                   program working, not a hang."
+echo
+echo "   Why the split: below about 5 MHz the extra table work costs more"
+echo "   than it saves, and below ~18 MHz the plain REU multiply path wins"
+echo "   outright — so the comb image is a turbo product and the compat"
+echo "   image is a stock-clock one. Both crossovers are measured, not"
+echo "   estimated; see the wall-clock sections of CLAUDE.md."
+echo
+echo "3. The screen goes blank during the slow parts. That is deliberate."
+echo "     Every image blanks the VIC-II across the two X25519 scalar"
+echo "     multiplies and the ECDSA verify, which stops the video chip"
+echo "     stealing bus cycles and buys about 6.5%. Measured, not guessed:"
+echo "     6.35% in VICE at 1 MHz, 6.78% (on-chip) and 6.60% (REU) on a"
+echo "     U64E at 48 MHz."
+echo "     The screen comes back between handshake phases, so the progress"
+echo "     line keeps updating — if it is blank for minutes at a time, that"
+echo "     is the crypto running, not a hang."
 echo
 for line in "${PACKAGE_VARIANTS[@]}"; do
     key="$(variant_field "$line" 1)"
@@ -101,7 +124,7 @@ for line in "${PACKAGE_VARIANTS[@]}"; do
     fi
     echo "  $prg"
     echo "      $note"
-    echo "      disk: c64-https-$key.d64   (also on c64-https-$(variant_field "$line" 5).d64)"
+    echo "      disk: c64-https-$key.d64"
     echo
 done
 echo "------------------------------------------------------------------------------"
@@ -134,16 +157,16 @@ echo "--------------------------------------------------------------------------
 echo " DISK IMAGES (.d64)"
 echo "------------------------------------------------------------------------------"
 echo
-echo "  Each variant ships as its own single-PRG 1541 image, plus one image per"
-echo "  networking backend carrying both of that backend's profiles. Load with:"
+echo "  One product per disk, one PRG per disk. Load with:"
 echo
-echo "      LOAD\"*\",8,1        (single-variant disks — one file, first on disk)"
-echo "      LOAD\"UCI-REU\",8,1  (or whichever name the directory shows)"
+echo "      LOAD\"*\",8,1"
 echo "      RUN"
 echo
-echo "  There is deliberately no all-in-one image: the four PRGs total 868 blocks"
-echo "  and a .d64 has 664 free. Each backend's pair does fit (UCI 496, ip65 372),"
-echo "  so the per-backend disk is the largest bundle a real 1541 can hold."
+echo "  There are deliberately no combined images. A .d64 has 664 free blocks and"
+echo "  each UCI PRG is 248, so the three-product lineup (744 blocks) cannot fit on"
+echo "  one disk and a per-backend image would have had to silently omit a product."
+echo "  Shipping one variant per disk means the label is the whole contents: what"
+echo "  you downloaded is what boots."
 echo
 if [ -f "$D64_LIST" ]; then
     while IFS= read -r ln; do

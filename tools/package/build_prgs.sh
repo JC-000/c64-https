@@ -43,6 +43,18 @@ cd "$PROJECT_ROOT"
 
 mkdir -p "$DIST"
 
+# Clear stale PRGs from a previous, differently-shaped run — the same reason
+# build_d64.sh clears stale .d64s. Without this, RETIRING a variant leaves its
+# PRG behind and write_manifest.sh hashes every artifact present in dist/, so
+# the dropped variant reappears in the checksum list with no disk, no
+# description and no verification behind it. Observed for real when the
+# lineup went from four variants to three: c64-https-{ip65,uci}-reu.prg
+# survived into MANIFEST.txt as though they had shipped.
+#
+# Scoped to our own PRGs on purpose: dist/ also holds the generated listener,
+# and a blanket wipe would delete work this script cannot rebuild.
+rm -f "$DIST"/c64-https-*.prg
+
 GIT_HEAD="$(git rev-parse HEAD)"
 GIT_HEAD_SHORT="$(git rev-parse --short HEAD)"
 GIT_DIRTY=""
