@@ -338,6 +338,18 @@ build/%.o: src/%.s
 	@mkdir -p $(dir $@)
 	$(CA65) $(CA65FLAGS) -o $@ $<
 
+# src/net/ip65/ip65_blob.s pulls the prebuilt ip65 image in with a ca65
+# `.incbin`, which make's dependency graph cannot see. Without this edge
+# make is free to assemble ip65_blob.s before the $(IP65_BIN) rule has
+# run, and from a clean build/ it does exactly that — failing with
+# "Cannot open include file '../../../ip65-build/ip65-c64.bin'" even
+# though the very same `make` invocation builds the blob a few targets
+# later. That is the fresh-clone failure in issue #89. Stating the edge
+# explicitly forces the correct order; it changes no output bytes.
+# (Only meaningful under BACKEND=ip65 — the UCI build never assembles
+# this object, and never requests $(IP65_BIN).)
+build/net/ip65/ip65_blob.o: $(IP65_BIN)
+
 # Phase C.3: c64-nist-curves sibling archive (libs/nistcurves/ submodule).
 # Phase 1.5 split: produces TWO archives, one per overlay half. The
 # script writes both with a single invocation; the second target is a

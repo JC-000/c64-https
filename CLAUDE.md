@@ -20,37 +20,66 @@ backend needs none of this):
 
     git submodule update --init --recursive
     make ip65-libs        # once per clone — `make` will NOT do this for you
-    make                  # builds the ip65 blob on demand, then the PRG
+    make                  # builds the ip65 blob, then the PRG
+
+Verified from a genuinely fresh `git clone` on 2026-08-15: those three
+commands produce a 47,105 B `build/c64-https.prg` with no extra step.
 
 `ip65-build/ip65-c64.bin` is a **gitignored local build artifact**
 (`.gitignore` line `ip65-build/*.bin`; `git ls-files ip65-build/` returns
 only `ip65.cfg` and `ip65_stub.s`), *not* a committed file.
 
-**A plain `make` does build it — the step you actually need is
-`make ip65-libs`.** `$(IP65_BIN)` is a real prerequisite of the PRG
-(`Makefile:263`, `PRG_DEPS := $(ALL_OBJS) $(IP65_BIN) ...`) with a real
-rule (`Makefile:468`), and make orders it ahead of the `.incbin` in
-`src/net/ip65/ip65_blob.s`. Measured 2026-08-15 by deleting the blob and
-running plain `make`: it was rebuilt byte-identically (6,951 B,
-`cf1a5ff7...`) and the link produced the usual 47,105 B PRG.
+**Plain `make` builds the blob, and since the `ip65_blob.o` dependency
+edge landed it does so in the right order.** The history is worth
+keeping, because both of the previous descriptions in this file were
+wrong and the second one was wrong in a way that would have re-broken
+fresh clones.
 
-What a fresh clone is missing is not the blob but the ip65 `.lib`
-archives, which the submodule ships sources for rather than binaries.
-The blob rule depends only on `ip65_stub.s` + `ip65.cfg`, so make runs
-it and it dies at the link. Measured the same day, submodules
-initialised but `make ip65-libs` never run:
+`$(IP65_BIN)` has always been a real prerequisite of the PRG
+(`Makefile:263`) with a real rule (`Makefile:477`). But
+`src/net/ip65/ip65_blob.s` pulls the image in with a ca65 `.incbin`,
+which make's dependency graph cannot see, so nothing ordered the blob
+rule *before* the object that consumes it. From a clean `build/` make
+assembled `ip65_blob.o` first and died:
 
-    cd ip65-build && ld65 -C ip65.cfg -o ip65-c64.bin ... ip65_stub.o \
-        ../ip65/ip65/ip65_tcp.lib ../ip65/drivers/ip65_c64.lib c64.lib
+    src/net/ip65/ip65_blob.s(22): Error: Cannot open include file
+    '../../../ip65-build/ip65-c64.bin': No such file or directory
+    make: *** [build/net/ip65/ip65_blob.o] Error 1
+
+That is issue #89's fresh-clone failure. It is now fixed at the source
+rather than documented around — `Makefile:341` states the missing edge:
+
+    build/net/ip65/ip65_blob.o: $(IP65_BIN)
+
+**Proven from a genuinely fresh clone**, 2026-08-15: `git clone` into a
+scratch dir, `git submodule update --init --recursive`, `make ip65-libs`,
+then plain `make` → exit 0, blob 6,951 B (`cf1a5ff7...`), PRG 47,105 B,
+no intermediate step. The same clone before the fix failed with the
+error above. The fix changes no output: the ip65 PRG hashes
+`d522e684…` with and without it.
+
+What plain `make` still cannot do for you is build the ip65 `.lib`
+archives — the submodule ships sources, not binaries. Skip
+`make ip65-libs` and the blob rule runs and dies at its link:
+
     ld65: Error: Input file '../ip65/ip65/ip65_tcp.lib' not found
     make: *** [ip65-build/ip65-c64.bin] Error 1
 
-So the recovery is `make ip65-libs` once, then plain `make`;
-`make ip65-blob` is a convenience for forcing a rebuild, not a required
-step. (An earlier revision of this section said `ip65-blob` was phony
-with "no rule connecting the two" and that a fresh clone fails at the
-`.incbin` with `Cannot open include file`. That mechanism is wrong, and
-it contradicted the `make ip65-blob` bullet below, which was right.)
+So: `make ip65-libs` once per clone, then plain `make`. `make ip65-blob`
+exists only to force a rebuild.
+
+**Trap — do not measure this in a nested git worktree.** ca65 does not
+resolve `.incbin` relative to the including source file, whatever the
+comment in `ip65_blob.s` says; it also tries the path relative to the
+*current directory*, and `../../../` from a repo root escapes three
+levels up. A worktree under `<repo>/.claude/worktrees/<name>/` is
+exactly three levels down, so with its own blob missing it silently
+assembles the **parent checkout's** `ip65-build/ip65-c64.bin` and the
+build appears to succeed. Reproduced deliberately in a scratch tree:
+`x/y/z/src/net/ip65/ip65_blob.s` with no `x/y/z/ip65-build/` assembles
+fine against a blob planted at the top. This is how an earlier revision
+of this section came to claim, with a measurement behind it, that a
+fresh clone needs no blob step. Verify blob behaviour in a real clone.
 
 `make clean` only removes `build/`, so once built the blob survives and is
 never rebuilt; that persistence, not a committed file, is why the rebuild
@@ -125,7 +154,8 @@ found`. The fix is `make ip65-libs`. (An earlier revision suggested
 `touch ip65-build/ip65-c64.bin` to restore a "committed blob is reused"
 path; there is no committed blob — `git ls-files ip65-build/` returns
 only `ip65.cfg` and `ip65_stub.s` — so on a real fresh clone there is
-nothing to touch.)
+nothing to touch. See the blob discussion above for the ordering fix
+that made the `.incbin` half of this go away.)
 
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg

@@ -54,7 +54,11 @@ python3 -m pip install -e ../c64-test-harness
 
 Skipping the first gives `ld65: Error: Input file
 '../ip65/ip65/ip65_tcp.lib' not found`, from the blob link step that plain
-`make` runs for you (reported as #89); skipping the second gives
+`make` runs for you. (Issue #89 originally reported a different symptom from
+the same missing step — `ip65_blob.s(22): Error: Cannot open include file` —
+because make could assemble that object before building the blob; a
+dependency edge in the Makefile now orders it correctly, so the ld65 message
+above is what you get today.) Skipping the second gives
 `ModuleNotFoundError: No module named 'c64_test_harness'` (#90). Use
 `python3 -m pip` so the package lands in the interpreter that runs the scripts —
 a venv mismatch reproduces #90 exactly after an install that appeared to succeed.
@@ -230,16 +234,26 @@ what makes the PRG deterministic.)
 
 ip65 is built from the submodule into a flat binary blob at $2000, using
 a custom ld65 linker config (`ip65-build/ip65.cfg`), and linked into the
-ca65 build via `.incbin`. **A plain `make` does produce that blob** —
-`$(IP65_BIN)` is a real prerequisite of the PRG with a real rule, ordered
-ahead of the `.incbin`. Measured 2026-08-15: deleting the blob and running
-plain `make` rebuilds it byte-identically and links the usual 47,105 B PRG.
+ca65 build via `.incbin`. **A plain `make` produces that blob for you** —
+`$(IP65_BIN)` is a real prerequisite of the PRG, and a dependency edge on
+`build/net/ip65/ip65_blob.o` forces it to be built before the object that
+`.incbin`s it. Verified from a genuinely fresh `git clone` on 2026-08-15:
+submodule init, `make ip65-libs`, then plain `make` yields the 47,105 B PRG
+with no intermediate step.
+
 What `make` cannot do for you is build the ip65 `.lib` archives the blob
 links against, so run `make ip65-libs` once per clone, as in "Before you
 build or test" above; `make ip65-blob` exists only to force a rebuild. The
 build is deterministic: 6,951 B, sha256 `cf1a5ff7809af4e4655e385b378b936054f41046ff2b7604828af3240c2d90dd`.
 `make clean` does not remove it, which is why the step is normally
 invisible. The UCI backend does not use the blob at all.
+
+One measurement trap, since it has already produced a wrong conclusion once:
+ca65 also resolves `.incbin` relative to the current directory, and
+`../../../` from a repo root escapes three levels up — which is exactly the
+depth of a git worktree under `.claude/worktrees/<name>/`. Such a worktree
+with no blob of its own silently assembles the parent checkout's blob and
+appears to build fine. Check blob behaviour in a real clone, not a worktree.
 
 ## Project Status
 
