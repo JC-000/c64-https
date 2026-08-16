@@ -200,8 +200,15 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ;   is spelled `-D nistcurves_zp_ptr2=$3d` from this pin; the wrapper's
 ;   od65 post-check was retargeted to the canonical name so it cannot go
 ;   vacuous. See that script's ZP_OVERRIDES block.
-.import LIB_ABI_VERSION
-.assert LIB_ABI_VERSION = 2, lderror, "libs/nistcurves: exported-surface generation changed (LIB_ABI_VERSION != 2) — re-check the integration, then bump the expected value in src/lib_contract_asserts.s"
+; PREFIXED FORM, from the v0.11.2 pin. The wrapper builds the archive with
+; `-D LIB_NO_BARE_EXPORTS=1` (SPEC §6.5) — which is what lets src/data.s
+; keep its own adopter-private mul_dma_* buffers without colliding — so the
+; bare `LIB_ABI_VERSION` is no longer exported and importing it fails as an
+; unresolved external. This is exactly the migration the note above
+; anticipated; it arrived via the bare-export gate rather than via a second
+; contract library entering the link.
+.import LIB_NISTCURVES_ABI_VERSION
+.assert LIB_NISTCURVES_ABI_VERSION = 2, lderror, "libs/nistcurves: exported-surface generation changed (LIB_NISTCURVES_ABI_VERSION != 2) — re-check the integration, then bump the expected value in src/lib_contract_asserts.s"
 
 
 ; =====================================================================
@@ -220,55 +227,70 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 
 
 ; =====================================================================
-; §8.0 — shared-primitive ownership tripwire
+; §8.0 — shared-primitive ownership, DECLARED rather than surgical
 ; =====================================================================
-; See the header note: the contract's disjointness assert is not
-; writable here yet. What IS checkable is that upstream's ownership
-; claim has not moved out from under the archive surgery in
-; tools/integration/build_nistcurves_p256.sh.
+; This section used to say the contract's disjointness assert was "not
+; writable here yet". It is writable now, and both halves are below.
 ;
-; THE MASK IS PROFILE-DEPENDENT. This is the same exported symbol in
-; both builds, but the REU and FP_ONCHIP_MUL archives ship different
-; `lib_manifest*` objects, so its VALUE differs by profile and one
-; expected constant cannot describe both. Measured with od65 on the
-; staged archives:
+; THE OLD SHAPE. c64-https has always been the §8.0 APP_OWNED case — it
+; provides all three shared primitives itself (sqtab_init + mul_8x8 +
+; ct_mul_8x8 in src/crypto/poly1305.s, mul_tables_init in
+; src/crypto/shared/mul_tables.s, reu_mul_init in src/boot.s, mul_dma_lo/hi
+; in src/data.s) — but resolved the resulting double-ownership by DELETING
+; archive members. The shipped manifest therefore described upstream's
+; archive rather than the one we linked: the mask claimed the library owned
+; all three while the linked archive owned none. Asserting disjointness
+; against that number would have encoded the mismatch, not caught it.
 ;
-;   profile                    v0.6.0   v0.9.1
-;   default (REU)              $0007    $0007
-;   FP_ONCHIP_MUL              $0007    $0005    <- split
-;   FP_ONCHIP_MUL + comb       $0007    $0005    <- split
+; THE NEW SHAPE (libs/nistcurves v0.11.2 + SPEC §6.2). The wrapper requests
+; the deferral through CONTRACT_DEFINES — four SHARED_* switches plus
+; LIB_NO_BARE_EXPORTS=1 — instead of ar65 surgery. Per §8.0's
+; conditional-mask rule the manifest then ATTESTS the deferral:
 ;
-; $0007 -> $0005 is the §8.2 `reu_mul` bit dropping out, upstream at
-; **v0.8.0** (c64-nist-curves #78). It is correct behaviour, not drift:
-; the onchip profile has no REU multiply path, so owning nothing there
-; is the truthful claim, and the CHANGELOG records that a profile switch
-; drops the bit from `SHARED_PRIMITIVES` and `SHARED_CONSUMES` alike.
-; An earlier revision of this file pinned $0007 for both profiles —
-; correct when measured at v0.6.0, and the reason every onchip build
-; failed to link at the v0.9.1 pin.
+;   archive                    PRIMITIVES   CONSUMES
+;   lib-p256-verify (REU)         $0000        $0007
+;   lib-p256-verify-onchip        $0000        $0005
+;   lib-p256-comb-onchip          $0000        $0005
 ;
-; THE ARCHIVE SURGERY IS UNAFFECTED. Checked rather than assumed, since
-; the wrong remedy here is expensive: the §8 primitive bodies each
-; archive actually exports are the SAME SET at v0.6.0 and v0.9.1 —
-; REU ships only `reu_mul_init`/`reu_mul_tables_init` (never pulled;
-; src/boot.s:31 exports its own, so ld65 has no undefined symbol to
-; resolve from the member), onchip ships `sqtab_lo`/`sqtab_hi` (absolute
-; equates baked to LIB_SHARED_SQTAB_BASE=$BC00, not bodies) plus
-; `reu_fetch_mul_row`, `og_common`, `og_src_ld`. Neither ships
-; `sqtab_init`, `ct_mul_8x8`, `mul_8x8`, `poly_prod_*` or `smc_*`.
-; So `build_nistcurves_p256.sh`'s member drops need no re-derivation
-; for this change, and none was made.
+; **Only PRIMITIVES is profile-independent.** CONSUMES is NOT: under
+; FP_ONCHIP_MUL the manifest zeroes the reu_mul bit in BOTH masks, because
+; that build genuinely does not read the primitive — upstream hard-asserts
+; it (`src/lib_manifest.s`, "FP_ONCHIP_MUL manifest must not claim SPEC 8.2
+; reu_mul consumption"). That is §8.0's three-state table working: a
+; deferral switch drops a bit from ownership only, while a profile gate
+; drops it from ownership AND consumption.
+;
+; Measured with od65 on the staged archives at the v0.11.2 pin. All three
+; asserts below pass in every profile regardless, since $0005 & ~$0007 = 0.
+; Do not "correct" $0005 to $0007 on an onchip archive — it is right.
 .import LIB_NISTCURVES_SHARED_PRIMITIVES
+.import LIB_NISTCURVES_SHARED_CONSUMES
 
-.ifdef USE_NISTCURVES_ONCHIP
-  ; FP_ONCHIP_MUL, and the comb variant which sets the same -D.
-  NISTCURVES_EXPECTED_PRIMITIVES = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_CT_MUL_8X8
-  .assert LIB_NISTCURVES_SHARED_PRIMITIVES = NISTCURVES_EXPECTED_PRIMITIVES, lderror, "libs/nistcurves FP_ONCHIP_MUL archive: SHARED_PRIMITIVES is not $0005 (sqtab|ct_mul_8x8). This mask is PROFILE-DEPENDENT - the onchip archive drops the reu_mul bit that the REU archive keeps, so read the onchip lib_manifest, not the REU one. If upstream moved it again, update the USE_NISTCURVES_ONCHIP arm in src/lib_contract_asserts.s; only re-derive the wrapper's member drops if the archive's exported primitive BODIES changed too."
-.else
-  ; Default REU profile: all three.
-  NISTCURVES_EXPECTED_PRIMITIVES = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SHARED_PRIMITIVES_CT_MUL_8X8
-  .assert LIB_NISTCURVES_SHARED_PRIMITIVES = NISTCURVES_EXPECTED_PRIMITIVES, lderror, "libs/nistcurves REU archive: SHARED_PRIMITIVES is not $0007 (sqtab|reu_mul|ct_mul_8x8). This mask is PROFILE-DEPENDENT - the onchip archive legitimately reports $0005, so check which profile this build selected. If upstream moved the REU value, update the .else arm in src/lib_contract_asserts.s; only re-derive the wrapper's member drops if the archive's exported primitive BODIES changed too."
-.endif
+; --- The library must own nothing, in every profile ---
+; If this fires, the wrapper's CONTRACT_DEFINES did not reach the manifest
+; TU. Do NOT restore the member drops to work around it: that puts the
+; mismatch back and silently invalidates the two asserts below.
+.assert LIB_NISTCURVES_SHARED_PRIMITIVES = 0, lderror, "libs/nistcurves: SHARED_PRIMITIVES is not $0000. c64-https requests full 8.0 deferral via CONTRACT_DEFINES, so the archive must own no shared primitive. Most likely the defines did not reach lib_manifest*.o. Do not restore the ar65 member drops to work around this."
+
+; --- §8.0 disjointness: no primitive owned twice ---
+.assert (APP_OWNED & LIB_NISTCURVES_SHARED_PRIMITIVES) = 0, lderror, "c64-https and libs/nistcurves both claim ownership of a shared primitive (SPEC 8.0 disjointness). c64-https provides sqtab_init/mul_8x8/ct_mul_8x8 in poly1305.s and reu_mul_init in boot.s; the library must defer all of them."
+
+; --- §8.0 coverage: everything the library READS, somebody PROVIDES ---
+; CONSUMES & ~(APP_OWNED | LIB_OWNED) = 0.
+;
+; HONEST SCOPE: this assert CANNOT FIRE TODAY, and must not be read as
+; guarding the poly_prod rendezvous. APP_OWNED is $0007, which covers every
+; §8.0 bit allocated so far, and CONSUMES is drawn from those same three
+; bits — so the expression is identically zero. It is kept because it is
+; the clause's canonical form and it arms itself the day a fourth primitive
+; is allocated ($0008) and nistcurves consumes it.
+;
+; The failure it sounds like it catches is covered elsewhere: defines
+; missing from the manifest TU trip the PRIMITIVES = 0 assert above;
+; defines missing from the code TUs trip a duplicate-external link error
+; against our own exports. And the poly_prod rendezvous is caught by
+; neither — only by the comb/onchip ECDSA KAT.
+.assert (LIB_NISTCURVES_SHARED_CONSUMES & ~(APP_OWNED | LIB_NISTCURVES_SHARED_PRIMITIVES)) = 0, lderror, "libs/nistcurves consumes a shared primitive that neither it nor c64-https provides (SPEC 8.0 coverage)."
 
 
 ; =====================================================================

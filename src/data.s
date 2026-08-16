@@ -130,24 +130,30 @@ mul_dma_hi:     .res 256        ; DMA target: hi bytes of a*b for current a
 ; These remain in-tree under both modes: sqtab_init is still served by
 ; src/crypto/poly1305.s (the sibling's mul_8x8.s is intentionally
 ; excluded from build/lib/x25519.a — see tools/integration/build_x25519.sh).
-.ifndef USE_NISTCURVES_ONCHIP
+; c64-https OWNS the quarter-square tables in every profile, because it
+; owns the §8.0 SQTAB primitive: src/crypto/poly1305.s provides
+; `sqtab_init`, and the table a primitive fills belongs to whoever fills it.
+;
+; This was profile-split before. Under USE_NISTCURVES_ONCHIP the in-tree
+; labels yielded to the sibling, which exported sqtab_lo/hi as absolute
+; equates baked to LIB_SHARED_SQTAB_BASE, and this file kept a same-size
+; `sqtab_reserved` placeholder purely to hold the address still. That
+; existed because the sibling's export was unconditional; from the v0.11.2
+; pin the wrapper builds it with `-D LIB_NO_BARE_EXPORTS=1` (SPEC §6.5), so
+; the bare names are suppressed and the split collapses in the direction
+; §8.0 always implied.
+;
+; THE ADDRESS IS STILL LOAD-BEARING. The sibling reads the table through
+; its OWN equates derived from LIB_SHARED_SQTAB_BASE=0xBC00, and derives
+; sqtab_hi as base+$0200 (libs/nistcurves/src/mul_8x8.s:47, with its own
+; `.assert sqtab_hi = sqtab_lo + $0200`). These labels must therefore land
+; at $BC00/$BE00 or every multiply reads the wrong memory — silently, with
+; no link error. The Makefile's post-link check asserts sqtab_lo's address.
 .align 256
 .export sqtab_lo
 .export sqtab_hi
 sqtab_lo:       .res 512
 sqtab_hi:       .res 512
-.else
-; Under USE_NISTCURVES_ONCHIP the sibling's rebuilt mul_8x8_onchip.o
-; exports sqtab_lo/hi as ABSOLUTE EQUATES at LIB_SHARED_SQTAB_BASE=$BC00
-; (its .export is unconditional, so the in-tree labels must yield).
-; Keep a same-size aligned placeholder so the TABLES_BSS layout — and
-; therefore the $BC00 address the equate is baked to — stays put. The
-; placeholder is exported solely so the Makefile's post-link check can
-; assert it still sits at $BC00; sqtab_init fills it via the equates.
-.align 256
-.export sqtab_reserved
-sqtab_reserved: .res 1024
-.endif
 
 .segment "BSS"
 

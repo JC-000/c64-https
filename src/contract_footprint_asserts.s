@@ -99,11 +99,10 @@
 ;   - the switch was PRG-NEUTRAL — the comb image is byte-identical
 ;     (`63c7ce868cdd…`) built either way, so the archive change altered the
 ;     manifest and nothing else;
-;   - the wrapper still drops three members for other reasons
-;     (`mul_8x8.o`, `data_shared.o`, `reu_mul_init.o` — the §8.0 APP_OWNED
-;     collision set, c64-https#119). That surgery does not affect the
-;     numbers this assert reads, because those are per-variant §6.4 values,
-;     but it is why the §8.0 disjointness asserts are still not writable.
+;   - the wrapper drops NO members at all from the v0.11.2 pin
+;     (c64-https#119 closed): the §8.0 deferral is requested through
+;     CONTRACT_DEFINES, so the manifest attests it and the §8.0
+;     disjointness/coverage asserts in src/lib_contract_asserts.s are live.
 
 
 .import LIB_NISTCURVES_RESIDENT_BYTES

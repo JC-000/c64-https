@@ -162,7 +162,7 @@ Variables:
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65).
                           Changing it requires `make clean` — see above.
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
-                          `libs/x25519@v0.11.1` sibling. **UCI links;
+                          `libs/x25519@v0.11.2` sibling. **UCI links;
                           ip65 overflows CRYPTO_OVERLAY** — see
                           "Known issues". Off by default either way.
   - `EMBED_P256_OVERLAY=1` — stage the P-256 verify image into the
@@ -218,7 +218,7 @@ buffers in the crypto BSS — see per-module headers for details):
 
   X25519 / field arithmetic
     Default: in-tree `src/crypto/{x25519,fe25519}.s`.
-    Opt-in: sibling `libs/x25519@v0.11.1` via `make USE_X25519_SIBLING=1`
+    Opt-in: sibling `libs/x25519@v0.11.2` via `make USE_X25519_SIBLING=1`
     — links under UCI from the v0.10.1/v0.11.0 wave pins, still
     overflows under ip65, and ships in nothing; see Known issues.
     The v0.6.0 pin is c64-lib-contract-aligned (SPEC §8.1) and adds the
@@ -235,7 +235,7 @@ buffers in the crypto BSS — see per-module headers for details):
   SHA-256                   (in-tree; no sibling)
     sha256_init, sha256_update, sha256_final
 
-  ECDSA P-256                (`libs/nistcurves@v0.11.0` sibling,
+  ECDSA P-256                (`libs/nistcurves@v0.11.2` sibling,
                               c64-lib-contract SPEC §1-§8.1 aligned)
     ecdsa_verify_256      — TLS dispatcher in src/crypto/ecdsa_verify.s
                             packs the BE struct + calls the sibling entry
@@ -901,7 +901,7 @@ Five latent bugs and three new ones were cleared to get here:
     `tools/test_x25519.py` RFC 7748 vector 2 — whose u ends `0x93` —
     passes 73/73 on the in-tree build.)
 
-    The pin is now **v0.11.1**. The v0.6.0 -> v0.10.0 migrations the
+    The pin is now **v0.11.2**. The v0.6.0 -> v0.10.0 migrations the
     wrapper had to absorb (the §4 `LIB_X25519_CODE` /
     `LIB_X25519_INIT_CODE` segment renames, the `x25_x1` buffer added
     by v0.7.0's #64 fix) are done and documented in
@@ -980,6 +980,42 @@ Five latent bugs and three new ones were cleared to get here:
     Both P-384 wrappers now **discover** those member names instead, so
     the chain again stops exactly at the SHA-384 `OVERLAY_REGION`
     overflow above — verified, same 1536 B, at the v0.9.1 pin.
+  - **§6.1 IS SATISFIED: no archive member is edited.** From the
+    `libs/nistcurves` **v0.11.2** pin the wrapper requests the §8.0
+    APP_OWNED shape through `CONTRACT_DEFINES` (SPEC §6.2) instead of
+    deleting members: four `SHARED_*` switches, `LIB_NO_BARE_EXPORTS=1`
+    and `LIB_SHARED_SQTAB_BASE=0xBC00`. The manifest then *attests* the
+    deferral — `SHARED_PRIMITIVES=$0000`, `SHARED_CONSUMES=$0007` — so
+    the §8.0 disjointness and coverage asserts are live in
+    `src/lib_contract_asserts.s`, profile-independently, where they were
+    previously recorded as "not writable today".
+
+    Three ownership questions moved to c64-https as a result, all in the
+    direction §8.0 always implied:
+      - `poly_prod_lo/hi` — we provide the §8.3 `ct_mul_8x8` body, so we
+        own its product scratch. `poly1305.s` exports them in every
+        profile now (it used to import under onchip).
+      - `sqtab_lo/hi` — we provide `sqtab_init`, so we own the table.
+        `data.s` defines them in every profile; the `sqtab_reserved`
+        placeholder is gone. The sibling still reads through its own
+        equates derived from `LIB_SHARED_SQTAB_BASE`, deriving
+        `sqtab_hi = base+$0200`, so the labels MUST land at
+        `$BC00`/`$BE00` — the Makefile's post-link check asserts it.
+      - the ABI import is the prefixed `LIB_NISTCURVES_ABI_VERSION`; the
+        bare name is suppressed by the export gate.
+
+    **Two upstream fixes made this possible, and the second is the one
+    that cost a day.** v0.11.1 made `SHARED_CT_MUL_8X8` assemble against
+    the on-chip TU (c64-nist-curves#123, filed from here) — before that
+    the wrapper needed a glue TU that `.include`d pristine library
+    source. v0.11.2 added the **knob-staleness guard**: a changed
+    `CONTRACT_DEFINES` used to reuse stale objects and exit 0 with a
+    *different archive than requested*. An attempt at this change before
+    that guard produced a comb image that would not boot, and the cause
+    looked like our ownership changes; it was mixed objects. If a
+    `libs/nistcurves` build ever behaves inexplicably after a define
+    change, check the pin is >= v0.11.2 before debugging anything else.
+
   - **Sibling-archive member names are DISCOVERED, never hardcoded —
     and this is load-bearing.** Upstream v0.9.0 gave each of its nine
     archives its own per-variant `zp_config_*.o` /
