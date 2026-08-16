@@ -165,8 +165,45 @@ ZP_OVERRIDES=(
 # CA65FLAGS hook), so we cannot pass -D overrides via `make CA65=...` here.
 # We build upstream with its defaults, then rebuild the TUs that need
 # consumer overrides (zp_config.o always; mul_8x8_onchip.o under onchip).
-echo "[p256/$PROFILE] building libs/nistcurves $UPSTREAM_TARGET (upstream defaults)..."
-make -s -C "$LIB_DIR" "$UPSTREAM_TARGET" >/dev/null
+# SPEC §6.2: request the §8.0 APP_OWNED shape and §6.5 bare-name
+# suppression through CONTRACT_DEFINES, rather than building upstream's
+# defaults and then deleting the members that collide. §6.1 bans that
+# surgery, and the reason is concrete: the manifest then describes an
+# archive we did not link, which is what forced the §6.6 comb exemption.
+#
+#   SHARED_SQTAB_INIT / SHARED_CT_MUL_8X8   bodies come from
+#                                           src/crypto/poly1305.s
+#   SHARED_REU_MUL_INIT / _FETCH            reu_mul_init from src/boot.s;
+#                                           §8.2 requires both or neither
+#   LIB_NO_BARE_EXPORTS=1                   suppress the bare mul_dma_lo/hi,
+#                                           mul_cached_a, mul_src2_buf that
+#                                           src/data.s defines. §8.2 rules
+#                                           those ADOPTER-PRIVATE and rules
+#                                           OUT deferring them ("would point
+#                                           a library's own field arithmetic
+#                                           at another library's memory") —
+#                                           the §6.5 rename track plus this
+#                                           gate is the sanctioned remedy.
+#   LIB_SHARED_SQTAB_BASE=0xBC00            the sibling reads the table
+#                                           through its own baked equates;
+#                                           src/data.s owns the storage and
+#                                           must land there. 0x-hex, never
+#                                           `$BC00`: SPEC §2 records that an
+#                                           unquoted `$BC00` through
+#                                           make+shell expands to `$B`+"C00"
+#                                           and silently yields a WRONG
+#                                           address with no diagnostic.
+#
+# Requires libs/nistcurves >= v0.11.2:
+#   v0.11.1 made SHARED_CT_MUL_8X8 assemble against the on-chip TU
+#           (c64-nist-curves#123) — before that this needed a glue TU.
+#   v0.11.2 added the knob-staleness guard: a changed CONTRACT_DEFINES used
+#           to reuse stale objects and exit 0 with a DIFFERENT archive than
+#           requested. That silent no-op is why an earlier attempt at this
+#           change produced a comb image that would not boot.
+CONTRACT_DEFINES="-D SHARED_SQTAB_INIT -D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH -D SHARED_CT_MUL_8X8 -D LIB_NO_BARE_EXPORTS=1 -D LIB_SHARED_SQTAB_BASE=0xBC00"
+echo "[p256/$PROFILE] building libs/nistcurves $UPSTREAM_TARGET (APP_OWNED + gated bare exports)..."
+make -s -C "$LIB_DIR" "$UPSTREAM_TARGET" CONTRACT_DEFINES="$CONTRACT_DEFINES" >/dev/null
 
 if [ ! -f "$UPSTREAM_ARCHIVE" ]; then
     echo "ERROR: upstream archive missing: $UPSTREAM_ARCHIVE" >&2
@@ -293,7 +330,9 @@ check_zp_slot fp_mul_j 58      # $3a
 # would have bound to the library's table builder rather than the
 # sibling's, which is a different routine writing through a different
 # buffer set.
-rm -f "$STAGING/mul_8x8.o" "$STAGING/data_shared.o" "$STAGING/reu_mul_init.o"
+# No member drops. The CONTRACT_DEFINES above make them collision-free:
+# reu_mul_init.o exports nothing, mul_8x8.o exports only the §8.3 surface
+# it defers on, data_shared.o exports only nistcurves_-prefixed names.
 # 4b. RETIRED at the libs/nistcurves v0.11.0 pin. This used to delete ~13
 # non-P-256 members (fp384/mod384/curve384/points384_*/data_p384*/
 # ecdsa384*/sha384*/data_sha/inv256/data_p256_invref) from the full
@@ -304,60 +343,18 @@ rm -f "$STAGING/mul_8x8.o" "$STAGING/data_shared.o" "$STAGING/reu_mul_init.o"
 # Do not reinstate this without also restoring the §6.6 comb exclusion in
 # src/contract_footprint_asserts.s: the two moved together, and deleting
 # members silently invalidates the §6.4 manifest the assert reads.
-if [ "$PROFILE" = "onchip" ] || [ "$PROFILE" = "onchip-comb" ]; then
-    # Rebuild (not drop): fp256_onchip.o imports og_common/og_src_ld which
-    # only this TU provides. The SHARED_* defines strip everything that
-    # would collide with the in-tree providers (see header comment #3).
-    #
-    # Upstream gap (candidate c64-nist-curves issue): the og_common block
-    # references ct_mul_8x8 / smc_* as same-TU symbols, so
-    # SHARED_CT_MUL_8X8 alone leaves them undefined — the guard combo was
-    # never exercised upstream. Bridge it with a generated glue TU that
-    # declares the .imports and then .includes the PRISTINE library source
-    # (composition, not a source patch — libs/ stays untouched).
-    #
-    # THE IMPORT LIST SHRANK AT v0.10.1, AND SHRINKING IT WAS MANDATORY.
-    # Upstream moved three of the five symbols this glue used to supply
-    # into its own source, so re-declaring them is now a hard assemble
-    # error rather than a harmless duplicate:
-    #
-    #   poly_prod_lo / poly_prod_hi  defined unconditionally at
-    #       mul_8x8.s:223-225, deliberately OUTSIDE the SHARED_CT_MUL_8X8
-    #       gate (contract v0.9.1 adopter-private-buffer rule: fp_sqr's
-    #       diagonal path writes them with no ct_mul_8x8 involved).
-    #       Importing them here now yields
-    #       `mul_8x8.s(223): Error: Symbol 'poly_prod_lo' is already an
-    #       import`. The consumer side moved to match: under
-    #       USE_NISTCURVES_ONCHIP, src/crypto/poly1305.s IMPORTS this
-    #       object's pair instead of defining its own, so og_common's
-    #       `jsr ct_mul_8x8` and its poly_prod read-back address the same
-    #       two bytes. See the ownership comment in poly1305.s — getting
-    #       this wrong is silent wrong crypto, not a link error.
-    #   mul_cached_a                 upstream imports the §6.5 canonical
-    #       `nistcurves_mul_cached_a` itself (mul_8x8.s:30); the bare name
-    #       is aliased for it in src/crypto/shared/mul_tables.s.
-    #
-    # ct_mul_8x8 and the two SMC bake sites are still ours to supply:
-    # upstream declares no import for them under SHARED_CT_MUL_8X8.
-    cat > "$STAGING/mul_8x8_onchip_glue.s" <<'EOF'
-; generated by build_nistcurves_p256.sh (onchip profile) — do not edit
-.import ct_mul_8x8
-.import smc_sum_a_imm, smc_diff_a_imm
-.include "mul_8x8.s"
-EOF
-    "$CA65" \
-        --cpu 6502 \
-        -g \
-        -I "$LIB_SRC" \
-        -D FP_ONCHIP_MUL=1 \
-        -D SHARED_CT_MUL_8X8=1 \
-        -D SHARED_SQTAB_INIT=1 \
-        -D 'LIB_SHARED_SQTAB_BASE=$BC00' \
-        -o "$STAGING/mul_8x8_onchip.o" \
-        "$STAGING/mul_8x8_onchip_glue.s"
-else
-    rm -f "$STAGING/mul_8x8_onchip.o"
-fi
+# --- The mul_8x8_onchip glue TU is RETIRED (libs/nistcurves v0.11.1) ---
+# The onchip profile used to need a generated glue TU here: a file that
+# declared `.import ct_mul_8x8` plus the two smc_* operand sites and then
+# `.include`d the pristine library source, because og_common referenced all
+# three as same-TU symbols while SHARED_CT_MUL_8X8 gated out their
+# definitions without adding imports. That was a library edit in all but
+# name — filed and fixed as c64-nist-curves#123.
+#
+# From v0.11.1 the shipped mul_8x8_onchip.o already imports the full §8.3
+# provider surface: ct_mul_8x8, smc_sum_a_imm, smc_diff_a_imm AND
+# poly_prod_lo/hi (verified with od65 --dump-imports). src/crypto/poly1305.s
+# exports all five. Nothing to bridge.
 
 # --- 5. Re-archive into c64-https's expected location ---
 # Member list is taken from the upstream archive dynamically (v0.5.0

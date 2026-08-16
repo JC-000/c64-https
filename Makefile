@@ -345,10 +345,13 @@ $(PRG): $(PRG_DEPS)
 ifeq ($(USE_NISTCURVES_ONCHIP),1)
 	# Onchip-profile invariant: the sibling's sqtab_lo/hi equates are
 	# BAKED to $$BC00/$$BE00 (LIB_SHARED_SQTAB_BASE in the wrapper).
-	# data.s's sqtab_reserved placeholder must still land exactly there —
-	# any TABLES_BSS layout drift silently corrupts every multiply.
-	@grep -q '^al C:BC00 \.sqtab_reserved' $(LABELS) || \
-		{ echo 'ERROR: sqtab_reserved is not at $$BC00 — TABLES_BSS layout drifted; realign LIB_SHARED_SQTAB_BASE in tools/integration/build_nistcurves_p256.sh'; exit 1; }
+	# src/data.s owns sqtab_lo/hi, but the sibling reads the table through
+	# its OWN equates derived from that base, so the two must agree on the
+	# address. Drift is neither a link nor a boot failure — just every
+	# multiply reading the wrong memory.
+	@grep -q '^al C:BC00 \.sqtab_lo' $(LABELS) || \
+		{ echo 'ERROR: sqtab_lo is not at $$BC00 — TABLES_BSS layout drifted; realign LIB_SHARED_SQTAB_BASE in tools/integration/build_nistcurves_p256.sh'; \
+		  grep ' \.sqtab_lo$$' $(LABELS); exit 1; }
 endif
 ifeq ($(USE_X25519_SIBLING),1)
 	# Same invariant, other sibling: build_x25519.sh bakes sqtab_lo/hi

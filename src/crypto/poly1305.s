@@ -15,45 +15,34 @@
 .import poly_h, poly_r, poly_s, poly_product, poly1305_tag
 .import aead_scratch
 
-; --- poly_prod_lo / poly_prod_hi ownership (c64-lib-contract v0.9.1
-;     "adopter-private buffer" rule) ---
+; --- poly_prod_lo / poly_prod_hi: c64-https OWNS them, every profile ---
 ;
-; These two bytes are the a*b -> 16-bit output of the §8.3 `ct_mul_8x8`
-; body below, and ordinary scratch for anything else that wants a 16-bit
-; product slot. Exactly ONE module in the link may define them, and every
-; writer and reader must agree on which — they are a rendezvous, not
-; private state, so a second copy is not a duplicate-symbol error but a
-; silent wrong answer.
+; Two bytes, and getting the direction wrong is silent wrong crypto with no
+; link error: they are the a*b -> 16-bit output of the §8.3 `ct_mul_8x8`
+; body below, written by that body and read back by the library's
+; `og_common` row generator. Exactly ONE module may define them. If both
+; sides defined a pair the link SUCCEEDS with two disjoint pairs and every
+; on-chip-generated multiply row reads two bytes nothing ever wrote.
 ;
-; Under USE_NISTCURVES_ONCHIP the owner is the sibling's
-; `mul_8x8_onchip.o`, and it must be: from libs/nistcurves v0.10.0 that
-; object defines poly_prod_lo/hi OUTSIDE the SHARED_CT_MUL_8X8 gate,
-; because its own `fp_sqr` diagonal-squaring path writes them
-; independently of ct_mul_8x8 (upstream's comment at
-; libs/nistcurves/src/mul_8x8.s:207-222). Its `og_common` row generator
-; then does `jsr ct_mul_8x8` — resolving to the body below — and reads
-; the result back out of poly_prod_lo/hi. If this file kept its own pair,
-; og_common would read two zero bytes on every product and every
-; on-chip-generated multiply row would be wrong, with no link diagnostic
-; anywhere. So we import instead: one pair of bytes, in
-; LIB_NISTCURVES_MUL_CODE, written and read by both sides.
+; SPEC §8.3: whoever provides the ct_mul_8x8 body owns the product scratch.
+; c64-https provides that body, so it owns the pair — in every profile,
+; from the libs/nistcurves v0.11.2 pin.
 ;
-; Under every other profile the sibling's mul_8x8 object is dropped from
-; the archive entirely, nothing else defines them, and this file owns
-; them as before.
-.ifdef USE_NISTCURVES_ONCHIP
-.import poly_prod_lo
-.import poly_prod_hi
-.endif
+; This was profile-split before, and both arms were workarounds. Under the
+; REU profile the sibling's mul_8x8 object was DROPPED from the archive, so
+; this file owned the pair by default. Under onchip the sibling exported
+; them unconditionally (v0.10.0 moved them outside the SHARED_CT_MUL_8X8
+; gate) and this file had to yield and import. v0.11.1 puts them inside the
+; gate as IMPORTS on the library side (c64-nist-curves#123), so a deferring
+; consumer provides them everywhere and the split disappears.
+
 
 ; --- Exports ---
 .export poly1305_init
 .export poly1305_clamp
 .export sqtab_init
-.ifndef USE_NISTCURVES_ONCHIP
 .export poly_prod_lo
 .export poly_prod_hi
-.endif
 .export mul_8x8
 .export poly1305_multiply
 .export poly1305_reduce
@@ -66,10 +55,8 @@
 ; =============================================================================
 .segment "CRYPTO_BSS"
 
-.ifndef USE_NISTCURVES_ONCHIP
 poly_prod_lo:   .res 1
 poly_prod_hi:   .res 1
-.endif
 
 mul_a:          .res 1
 mul_b:          .res 1
