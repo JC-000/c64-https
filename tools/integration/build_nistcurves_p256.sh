@@ -85,19 +85,16 @@ if [ "$PROFILE" = "onchip-comb" ]; then
     # loading the table from disk instead.
     UPSTREAM_TARGET="lib-p256-comb-onchip"
     UPSTREAM_ARCHIVE="$LIB_BUILD/lib/nistcurves-p256-comb-onchip.a"
-    STAGING="$PROJECT_ROOT/build/lib/nistcurves_p256_onchip_comb_staging"
     ARCHIVE="$OUT_DIR/nistcurves-p256-onchip-comb.a"
     SIZES="$OUT_DIR/nistcurves-p256-onchip-comb.sizes.txt"
 elif [ "$PROFILE" = "onchip" ]; then
     UPSTREAM_TARGET="lib-p256-verify-onchip"
     UPSTREAM_ARCHIVE="$LIB_BUILD/lib/nistcurves-p256-verify-onchip.a"
-    STAGING="$PROJECT_ROOT/build/lib/nistcurves_p256_onchip_staging"
     ARCHIVE="$OUT_DIR/nistcurves-p256-onchip.a"
     SIZES="$OUT_DIR/nistcurves-p256-onchip.sizes.txt"
 else
     UPSTREAM_TARGET="lib-p256-verify"
     UPSTREAM_ARCHIVE="$LIB_BUILD/lib/nistcurves-p256-verify.a"
-    STAGING="$PROJECT_ROOT/build/lib/nistcurves_p256_staging"
     ARCHIVE="$OUT_DIR/nistcurves-p256.a"
     SIZES="$OUT_DIR/nistcurves-p256.sizes.txt"
 fi
@@ -202,181 +199,94 @@ ZP_OVERRIDES=(
 #           requested. That silent no-op is why an earlier attempt at this
 #           change produced a comb image that would not boot.
 CONTRACT_DEFINES="-D SHARED_SQTAB_INIT -D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH -D SHARED_CT_MUL_8X8 -D LIB_NO_BARE_EXPORTS=1 -D LIB_SHARED_SQTAB_BASE=0xBC00"
+# ZP-slot overrides go in the SEPARATE variable, not the one above: SPEC §6.2
+# splits them because a globally-delivered slot define collides with every
+# `.importzp` site. c64-https needs three (upstream defaults collide with our
+# canonical map): nistcurves_zp_ptr2 $fd -> $3D (upstream's default hits our
+# zp_temp/zp_count during cert parsing), fp_mul_i/j $2c/$2d -> $39/$3A
+# (upstream's defaults sit inside our fe25519 claim $2c-$37).
+#
+# 0x-hex, never `$3d`: SPEC §2 records that an unquoted `$3d` through
+# make+shell expands to `$3`+"d" and silently assembles the slot at address
+# $00, with no diagnostic at any stage. The od65 post-check below is what
+# actually proves the values landed.
+CONTRACT_ZP_DEFINES="-D nistcurves_zp_ptr2=0x3d -D fp_mul_i=0x39 -D fp_mul_j=0x3a"
 echo "[p256/$PROFILE] building libs/nistcurves $UPSTREAM_TARGET (APP_OWNED + gated bare exports)..."
-make -s -C "$LIB_DIR" "$UPSTREAM_TARGET" CONTRACT_DEFINES="$CONTRACT_DEFINES" >/dev/null
+make -s -C "$LIB_DIR" "$UPSTREAM_TARGET" CONTRACT_DEFINES="$CONTRACT_DEFINES" CONTRACT_ZP_DEFINES="$CONTRACT_ZP_DEFINES" >/dev/null
 
 if [ ! -f "$UPSTREAM_ARCHIVE" ]; then
     echo "ERROR: upstream archive missing: $UPSTREAM_ARCHIVE" >&2
     exit 1
 fi
 
-# --- 2. Stage upstream object files ---
-rm -rf "$STAGING"
-mkdir -p "$STAGING" "$OUT_DIR"
-cp "$UPSTREAM_ARCHIVE" "$STAGING/upstream.a"
-(cd "$STAGING" && "$AR65" x upstream.a $( "$AR65" t upstream.a ))
+# --- 2. Verify the ZP overrides landed, then use the archive as built ---
+# NOTHING IS STAGED, REBUILT OR RE-ARCHIVED ANY MORE. The archive we link is
+# byte-for-byte the one upstream's make produced, which is what makes SPEC
+# §6.1's "no ar65 member surgery, no copying intermediates around" true by
+# construction rather than by inspection.
+#
+# This replaces a rebuild-one-member-and-re-archive dance. That dance had a
+# §6.2 defect that outlived the member drops: it passed only the ZP
+# overrides to the rebuilt object and NOT the CONTRACT_DEFINES string, so
+# `zp_config.s`'s `.ifndef LIB_NO_BARE_EXPORTS` gate did not apply to the
+# one member we rebuilt — the archive shipped a single object re-exporting
+# the bare `zp_*` names every other member had been built to suppress.
+# One artifact, two configurations. Dormant while only one contract library
+# links, live the moment a second one does: that is exactly the #83 ZP
+# collision family the suppression gate exists to prevent.
+#
+# CONTRACT_ZP_DEFINES is the sanctioned route (upstream since nist#104) and
+# is scoped correctly by construction: slot defines reach every TU that
+# DEFINES a slot and never one that `.importzp`s it, which is the
+# model-independent rule SPEC §6.2 states after measured failures in both
+# directions.
+#
+# The post-check below is kept and is the load-bearing part. A wrong ZP slot
+# is not a link error — `nistcurves_zp_ptr2` colliding with c64-https's
+# zp_temp/zp_count corrupts cert parsing at runtime, and fp_mul_i/j landing
+# inside the fe25519 claim ($2c-$37) corrupts multiplies. Verify from the
+# emitted object, never from the fact that a -D was passed.
+mkdir -p "$OUT_DIR"
 
-# --- 3. Rebuild the archive's zp_config member with c64-https overrides ---
-# The member NAME is discovered, never hardcoded. Upstream v0.9.0 (issue #90)
-# gave each of the nine archives its own per-variant ZP object, so
-# `nistcurves-p256-verify.a` ships `zp_config_p256verify.o` and only the FULL
-# archive still ships a plain `zp_config.o`. Step 5 re-archives strictly by
-# `ar65 t upstream.a`, so writing to a hardcoded `zp_config.o` here would have
-# been SILENTLY DROPPED from the output and the upstream-default object
-# archived in its place — reinstating exactly the ZP collisions these
-# overrides exist to prevent (zp_ptr2 $fd vs c64-https zp_temp/zp_count during
-# cert parsing; fp_mul_i/j $2c/$2d inside the fe25519 claim $2c-$37). That is
-# memory corruption at runtime, not a link error, so it must fail loudly here.
-ZP_MEMBER=""
-for m in $( "$AR65" t "$STAGING/upstream.a" ); do
-    case "$m" in zp_config*.o)
-        [ -z "$ZP_MEMBER" ] || { echo "ERROR: upstream archive has more than one zp_config member ($ZP_MEMBER, $m) — teach this script which one to override" >&2; exit 1; }
-        ZP_MEMBER="$m" ;;
-    esac
-done
-[ -n "$ZP_MEMBER" ] || { echo "ERROR: no zp_config*.o member in $UPSTREAM_ARCHIVE — upstream layout changed; the c64-https ZP overrides would be silently lost" >&2; exit 1; }
+ZP_MEMBER="$(basename "$(ls "$LIB_BUILD"/zp_config_*.o 2>/dev/null | head -1)")"
+[ -n "$ZP_MEMBER" ] || { echo "ERROR: no zp_config_*.o in $LIB_BUILD" >&2; exit 1; }
 
-# The variant gate decides which slots the object .exportzp's (zp_config.s
-# lines ~132-141), so it must match what upstream built the member with.
-case "$ZP_MEMBER" in
-    zp_config.o)             ZP_VARIANT_DEFINE=() ;;
-    zp_config_p256verify.o)  ZP_VARIANT_DEFINE=('-D' 'LIB_P256_VERIFY_ONLY') ;;
-    # v0.11.0's comb archives (c64-nist-curves#117). Gate name confirmed
-    # against libs/nistcurves/src/zp_config.s:162 and Makefile:302 rather
-    # than inferred from the member basename.
-    zp_config_p256comb.o)    ZP_VARIANT_DEFINE=('-D' 'LIB_P256_COMB_ONLY') ;;
-    zp_config_p384verify.o)  ZP_VARIANT_DEFINE=('-D' 'LIB_P384_VERIFY_ONLY') ;;
-    zp_config_p384curve.o)   ZP_VARIANT_DEFINE=('-D' 'LIB_P384_CURVE_ONLY') ;;
-    zp_config_sha384.o)      ZP_VARIANT_DEFINE=('-D' 'LIB_SHA384_ONLY') ;;
-    *) echo "ERROR: unrecognised zp_config member '$ZP_MEMBER' — add its upstream -D gate to this case block" >&2; exit 1 ;;
-esac
-
-echo "[p256/$PROFILE] rebuilding $ZP_MEMBER with c64-https ZP overrides..."
-"$CA65" \
-    --cpu 6502 \
-    -g \
-    -I "$LIB_SRC" \
-    "${ZP_VARIANT_DEFINE[@]+"${ZP_VARIANT_DEFINE[@]}"}" \
-    "${ZP_OVERRIDES[@]}" \
-    -o "$STAGING/$ZP_MEMBER" \
-    "$LIB_SRC/zp_config.s"
-
-# 3b. Prove the overrides actually landed in the object that gets archived.
-# A ZP collision here is silent at link time and only shows up as corrupted
-# cert parsing at runtime, so assert the values rather than trusting the -D.
 check_zp_slot() {
     local name="$1" want="$2" got
-    got=$("${OD65:-od65}" --dump-exports "$STAGING/$ZP_MEMBER" \
-          | awk -v n="\"$name\"" '$1=="Name:" && $2==n {f=1; next} f && $1=="Value:" {gsub(/[()]/,"",$3); print $3; exit}')
+    got=$("${OD65:-od65}" --dump-exports "$LIB_BUILD/$ZP_MEMBER" \
+          | awk -v n="\"$name\"" '$1=="Name:" && $2==n {f=1; next} f && $1=="Value:" {print $2; exit}')
     if [ "$got" != "$want" ]; then
-        echo "ERROR: $ZP_MEMBER exports $name = ${got:-<absent>}, expected $want (c64-https ZP override did not take)" >&2
+        echo "ERROR: $ZP_MEMBER exports $name = ${got:-<absent>}, expected $want (CONTRACT_ZP_DEFINES did not take)" >&2
         exit 1
     fi
 }
-# Same as check_zp_slot, but tolerates the symbol being absent. Only correct
-# for a slot whose ABSENCE is legitimate — see the alias check below.
-check_zp_slot_if_present() {
-    local name="$1" want="$2" got
-    got=$("${OD65:-od65}" --dump-exports "$STAGING/$ZP_MEMBER" \
-          | awk -v n="\"$name\"" '$1=="Name:" && $2==n {f=1; next} f && $1=="Value:" {gsub(/[()]/,"",$3); print $3; exit}')
-    [ -z "$got" ] && return 0
-    if [ "$got" != "$want" ]; then
-        echo "ERROR: $ZP_MEMBER exports $name = $got, expected $want (c64-https ZP override did not take)" >&2
-        exit 1
-    fi
-}
+# Canonical spellings only: the bare aliases vanish under LIB_NO_BARE_EXPORTS,
+# and a guard that can go vacuous under a build-tightening flag is worse than
+# no guard.
+check_zp_slot nistcurves_zp_ptr2 0x0000003D
+check_zp_slot fp_mul_i           0x00000039
+check_zp_slot fp_mul_j           0x0000003A
 
-# The CANONICAL spelling is checked unconditionally — it is the name the
-# library's own code reads, so its absence or disagreement is always a defect.
-check_zp_slot "$ZP_PTR2_SLOT" 61   # $3d — canonical spelling for this pin
-
-# The deprecated bare alias is checked only WHEN PRESENT, and only when it is
-# a distinct symbol. On a §2-migrated pin this proves the alias tracks the
-# override rather than splitting one slot across two addresses (the silent
-# outcome contract §6.5 forbids) — but the alias legitimately disappears under
-# `-D LIB_NO_BARE_EXPORTS=1` (§1), and a hard check would then fail the build
-# over a symbol the contract expects to be gone. Checking the bare name
-# *instead* of the canonical one would be the worse error in the other
-# direction: it is the spelling that goes away, so the guard would stop
-# guarding exactly when a consumer tightens the build.
-if [ "$ZP_PTR2_SLOT" != "zp_ptr2" ]; then
-    check_zp_slot_if_present zp_ptr2 61    # $3d — deprecated alias, if still emitted
+# The suppression gate must have reached this TU too — that is the whole
+# point of routing the overrides through CONTRACT_ZP_DEFINES.
+if "${OD65:-od65}" --dump-exports "$LIB_BUILD/$ZP_MEMBER" | grep -q '"zp_ptr2"'; then
+    echo "ERROR: $ZP_MEMBER re-exports the bare 'zp_ptr2' — LIB_NO_BARE_EXPORTS did not reach it." >&2
+    echo "       One archive must carry one configuration (SPEC 6.2)." >&2
+    exit 1
 fi
+echo "[p256/$PROFILE] ZP overrides verified in $ZP_MEMBER; bare zp_* suppressed"
 
-check_zp_slot fp_mul_i 57      # $39
-check_zp_slot fp_mul_j 58      # $3a
+cp "$UPSTREAM_ARCHIVE" "$ARCHIVE"
 
-# --- 4. Drop conflicting members / rebuild the onchip mul object ---
-# `reu_mul_init.o` is the SPEC §8.2 `reu_mul` provider. c64-https is the
-# §8.0 APP_OWNED case for that primitive — src/boot.s::reu_mul_init builds
-# the 128 KB REU multiply table itself — so the library's provider is
-# surplus in every configuration. Dropping it is the archive-surgery
-# spelling of `-D SHARED_REU_MUL_INIT` (the wrapper cannot pass that
-# define: upstream's Makefile builds every module with one recipe, which
-# is why step 3 rebuilds rather than reconfigures).
-#
-# It is a NO-OP for the shipped builds and load-bearing for one that is
-# not shipped yet. Default build: boot.o defines `reu_mul_init` and
-# `reu_fetch_mul_row` itself, so ld65 has no undefined symbol this member
-# could satisfy and never pulls it — the four REU-profile PRGs are
-# byte-identical with and without the drop (measured). Onchip archives
-# never contained it. But under `USE_X25519_SIBLING=1`, boot.o *imports*
-# `reu_mul_init` (the sibling owns the table), ld65 pulls this member to
-# satisfy it because nistcurves-p256.a precedes x25519.a on the link line,
-# and then the sibling's own provider arrives via `reu_clear_wide` —
-# `ld65: Error: Duplicate external identifier: 'reu_mul_tables_init'`,
-# the failure README.md and CLAUDE.md both recorded as unconditional.
-# Note the near miss: had ld65 resolved instead of erroring, `reu_mul_init`
-# would have bound to the library's table builder rather than the
-# sibling's, which is a different routine writing through a different
-# buffer set.
-# No member drops. The CONTRACT_DEFINES above make them collision-free:
-# reu_mul_init.o exports nothing, mul_8x8.o exports only the §8.3 surface
-# it defers on, data_shared.o exports only nistcurves_-prefixed names.
-# 4b. RETIRED at the libs/nistcurves v0.11.0 pin. This used to delete ~13
-# non-P-256 members (fp384/mod384/curve384/points384_*/data_p384*/
-# ecdsa384*/sha384*/data_sha/inv256/data_p256_invref) from the full
-# `lib-onchip` archive, because no narrowed comb archive existed.
-# `lib-p256-comb-onchip` is now that archive, so there is nothing to
-# strip — see the UPSTREAM_TARGET block at the top of this file.
-#
-# Do not reinstate this without also restoring the §6.6 comb exclusion in
-# src/contract_footprint_asserts.s: the two moved together, and deleting
-# members silently invalidates the §6.4 manifest the assert reads.
-# --- The mul_8x8_onchip glue TU is RETIRED (libs/nistcurves v0.11.1) ---
-# The onchip profile used to need a generated glue TU here: a file that
-# declared `.import ct_mul_8x8` plus the two smc_* operand sites and then
-# `.include`d the pristine library source, because og_common referenced all
-# three as same-TU symbols while SHARED_CT_MUL_8X8 gated out their
-# definitions without adding imports. That was a library edit in all but
-# name — filed and fixed as c64-nist-curves#123.
-#
-# From v0.11.1 the shipped mul_8x8_onchip.o already imports the full §8.3
-# provider surface: ct_mul_8x8, smc_sum_a_imm, smc_diff_a_imm AND
-# poly_prod_lo/hi (verified with od65 --dump-imports). src/crypto/poly1305.s
-# exports all five. Nothing to bridge.
 
-# --- 5. Re-archive into c64-https's expected location ---
-# Member list is taken from the upstream archive dynamically (v0.5.0
-# renamed/added members vs v0.3.0: ecdsa256_nocomb.o, precalc_manifest.o,
-# lib_manifest_onchip.o, ...) minus the dropped members above, so this
-# script no longer needs touching when upstream reshuffles objects.
-MEMBERS=()
-for m in $( "$AR65" t "$STAGING/upstream.a" ); do
-    [ -f "$STAGING/$m" ] || continue        # dropped members
-    MEMBERS+=("$STAGING/$m")
-done
-rm -f "$ARCHIVE"
-"$AR65" a "$ARCHIVE" "${MEMBERS[@]}"
+# (steps 4 and 5 retired: no member drops, no glue TU, no re-archive)
 
-# --- 6. Per-source byte counts (for the supervisor's PR description) ---
+# --- 3. Per-source byte counts (for the PR description) ---
 {
     echo "# $(basename "$ARCHIVE") per-source byte counts (ca65 .o file sizes)"
-    for m in $( "$AR65" t "$STAGING/upstream.a" ); do
-        if [ -f "$STAGING/$m" ]; then
-            bytes=$(wc -c < "$STAGING/$m")
-            printf '%-24s %d bytes (.o)\n' "${m%.o}" "$bytes"
-        fi
+    for m in $( "$AR65" t "$ARCHIVE" ); do
+        f="$LIB_BUILD/$m"
+        [ -f "$f" ] && printf '%-24s %d bytes (.o)\n' "${m%.o}" "$(wc -c < "$f")"
     done
 } > "$SIZES"
 

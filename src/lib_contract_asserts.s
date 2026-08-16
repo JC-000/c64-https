@@ -247,12 +247,22 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; LIB_NO_BARE_EXPORTS=1 — instead of ar65 surgery. Per §8.0's
 ; conditional-mask rule the manifest then ATTESTS the deferral:
 ;
-;   LIB_NISTCURVES_SHARED_PRIMITIVES  $0000   library owns nothing
-;   LIB_NISTCURVES_SHARED_CONSUMES    $0007   it still READS all three
+;   archive                    PRIMITIVES   CONSUMES
+;   lib-p256-verify (REU)         $0000        $0007
+;   lib-p256-verify-onchip        $0000        $0005
+;   lib-p256-comb-onchip          $0000        $0005
 ;
-; PROFILE-INDEPENDENT, unlike the old tripwire. The REU-vs-onchip split
-; ($0007 vs $0005) was a property of which bodies each archive shipped;
-; under full deferral neither ships any.
+; **Only PRIMITIVES is profile-independent.** CONSUMES is NOT: under
+; FP_ONCHIP_MUL the manifest zeroes the reu_mul bit in BOTH masks, because
+; that build genuinely does not read the primitive — upstream hard-asserts
+; it (`src/lib_manifest.s`, "FP_ONCHIP_MUL manifest must not claim SPEC 8.2
+; reu_mul consumption"). That is §8.0's three-state table working: a
+; deferral switch drops a bit from ownership only, while a profile gate
+; drops it from ownership AND consumption.
+;
+; Measured with od65 on the staged archives at the v0.11.2 pin. All three
+; asserts below pass in every profile regardless, since $0005 & ~$0007 = 0.
+; Do not "correct" $0005 to $0007 on an onchip archive — it is right.
 .import LIB_NISTCURVES_SHARED_PRIMITIVES
 .import LIB_NISTCURVES_SHARED_CONSUMES
 
@@ -266,10 +276,20 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 .assert (APP_OWNED & LIB_NISTCURVES_SHARED_PRIMITIVES) = 0, lderror, "c64-https and libs/nistcurves both claim ownership of a shared primitive (SPEC 8.0 disjointness). c64-https provides sqtab_init/mul_8x8/ct_mul_8x8 in poly1305.s and reu_mul_init in boot.s; the library must defer all of them."
 
 ; --- §8.0 coverage: everything the library READS, somebody PROVIDES ---
-; CONSUMES & ~(APP_OWNED | LIB_OWNED) = 0. This half catches a deferral
-; requested but not honoured: a primitive the library still reads while
-; neither side provides it links clean and fails at runtime as wrong
-; arithmetic — the same silent class as the poly_prod rendezvous.
+; CONSUMES & ~(APP_OWNED | LIB_OWNED) = 0.
+;
+; HONEST SCOPE: this assert CANNOT FIRE TODAY, and must not be read as
+; guarding the poly_prod rendezvous. APP_OWNED is $0007, which covers every
+; §8.0 bit allocated so far, and CONSUMES is drawn from those same three
+; bits — so the expression is identically zero. It is kept because it is
+; the clause's canonical form and it arms itself the day a fourth primitive
+; is allocated ($0008) and nistcurves consumes it.
+;
+; The failure it sounds like it catches is covered elsewhere: defines
+; missing from the manifest TU trip the PRIMITIVES = 0 assert above;
+; defines missing from the code TUs trip a duplicate-external link error
+; against our own exports. And the poly_prod rendezvous is caught by
+; neither — only by the comb/onchip ECDSA KAT.
 .assert (LIB_NISTCURVES_SHARED_CONSUMES & ~(APP_OWNED | LIB_NISTCURVES_SHARED_PRIMITIVES)) = 0, lderror, "libs/nistcurves consumes a shared primitive that neither it nor c64-https provides (SPEC 8.0 coverage)."
 
 
