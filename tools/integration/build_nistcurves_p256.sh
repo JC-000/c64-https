@@ -248,8 +248,25 @@ fi
 # emitted object, never from the fact that a -D was passed.
 mkdir -p "$OUT_DIR"
 
-ZP_MEMBER="$(basename "$(ls "$LIB_BUILD"/zp_config_*.o 2>/dev/null | head -1)")"
-[ -n "$ZP_MEMBER" ] || { echo "ERROR: no zp_config_*.o in $LIB_BUILD" >&2; exit 1; }
+# Name the member from the ARCHIVE BEING LINKED, never by globbing the build
+# directory. All three profiles are built from the same libs/nistcurves tree,
+# so several variants' ZP objects coexist there — after a comb build followed
+# by a REU build, `ls zp_config_*.o | head -1` yields zp_config_p256comb.o
+# while the REU archive ships zp_config_p256verify.o (reproduced). The check
+# would then verify an object this archive does not contain.
+#
+# Today that would still pass, because v0.11.2's staleness stamp guarantees
+# every object in the directory carries the same knob string — but a guard
+# that reads a different artifact than the one shipped is the wrong shape
+# regardless, and a variant-gated slot could someday differ between variants'
+# ZP TUs. Listing an archive is not extracting it, so §6.1 stays clean.
+ZP_MEMBER="$( "$AR65" t "$UPSTREAM_ARCHIVE" | grep '^zp_config' )"
+case "$(printf '%s\n' "$ZP_MEMBER" | grep -c .)" in
+    1) ;;
+    0) echo "ERROR: no zp_config member in $(basename "$UPSTREAM_ARCHIVE")" >&2; exit 1 ;;
+    *) echo "ERROR: multiple zp_config members in $(basename "$UPSTREAM_ARCHIVE"): $ZP_MEMBER" >&2; exit 1 ;;
+esac
+[ -f "$LIB_BUILD/$ZP_MEMBER" ] || { echo "ERROR: $ZP_MEMBER named by the archive but absent from $LIB_BUILD" >&2; exit 1; }
 
 check_zp_slot() {
     local name="$1" want="$2" got
