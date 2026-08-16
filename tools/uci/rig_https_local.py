@@ -634,6 +634,68 @@ def _decode_screen_ram(data: bytes) -> str:
     return '\n'.join(lines)
 
 
+# --- Phase timing (W0 sprint spike, opt-in via PHASE_TIMING=1) ---------------
+# The handshake prints a progress marker per phase (src/boot.s:1153-1161,
+# printed from src/tls13.s), so timestamping markers yields a per-phase
+# wall-clock breakdown without touching any 6502 code.
+#
+# The obvious approach — tests/rig_vice_https_macos.py's "latest progress
+# needle anywhere on screen" — does NOT work on this rig, measured
+# 2026-08-15: it produced 3 transitions across a 42 s handshake. Two reasons,
+# both specific to running the full flight rather than VICE's slower pace:
+#   1. the screen SCROLLS, so needle position stops tracking print order;
+#   2. markers REPEAT — ENC1/RX/GOT2/GOT/DEC/PROC cycle once per encrypted
+#      record — so "which needle is furthest right" oscillates.
+# Taking the last non-empty line instead is exactly "what was printed most
+# recently", which is immune to both.
+#
+# Note tls_state ($A84A) is NOT a usable alternative here: it sits in
+# SHADOW_BSS under the BASIC ROM, and a DMA read of $A000-$BFFF returns ROM
+# bytes unless $01 banks it out. Screen RAM at $0400 is always RAM.
+def _current_phase(screen: str) -> str:
+    for line in reversed(screen.split("\n")):
+        s = line.strip()
+        if s:
+            return s
+    return "(blank)"
+
+
+def _format_phase_log(phase_log: "list[tuple[str, float]]") -> str:
+    """Render the phase log as a timeline plus a per-marker cost rollup.
+
+    Markers repeat (one ENC1/RX/GOT2/GOT/DEC/PROC cycle per encrypted
+    record), so the rollup — total wall-clock attributed to each marker and
+    how many times it was entered — is usually the more readable half.
+    """
+    if not phase_log:
+        return "(no phase transitions observed)"
+
+    out = ["--- timeline ---",
+           f"{'marker':24s} {'t (s)':>9s} {'delta (s)':>11s}", "-" * 47]
+    prev = 0.0
+    totals: "dict[str, list]" = {}
+    for i, (name, t) in enumerate(phase_log):
+        d = t - prev
+        out.append(f"{name:24s} {t:9.1f} {d:11.1f}")
+        # Attribute this interval to the marker that was showing DURING it,
+        # i.e. the previous entry — not to the one that just appeared.
+        if i > 0:
+            owner = phase_log[i - 1][0]
+            e = totals.setdefault(owner, [0.0, 0])
+            e[0] += d
+            e[1] += 1
+        prev = t
+
+    out += ["", "--- cost by marker (descending) ---",
+            f"{'marker':24s} {'total (s)':>11s} {'entered':>9s}", "-" * 47]
+    for name, (secs, n) in sorted(totals.items(), key=lambda kv: -kv[1][0]):
+        out.append(f"{name:24s} {secs:11.1f} {n:9d}")
+    out.append("")
+    out.append(f"last marker reached: {phase_log[-1][0]} at "
+               f"{phase_log[-1][1]:.1f}s")
+    return "\n".join(out)
+
+
 def _dump_diag(transport: Ultimate64Transport,
                labels: dict[str, int]) -> None:
     def r8(name: str) -> int:
@@ -1564,8 +1626,12 @@ def main() -> int:
         deadline = time.time() + SENTINEL_POLL_TIMEOUT
         last_progress = -1
         start = time.time()
+        phase_timing = os.environ.get("PHASE_TIMING", "0") == "1"
+        phase_poll = float(os.environ.get("PHASE_POLL", "0.5"))
+        phase_log: "list[tuple[str, float]]" = []
+        cur_phase = None
         while time.time() < deadline:
-            time.sleep(0.5)
+            time.sleep(phase_poll if phase_timing else 0.5)
             blob = transport.read_memory(SENTINEL_ADDR, 2)
             sentinel = blob[0]
             progress = blob[1]
@@ -1573,9 +1639,29 @@ def main() -> int:
                 elapsed = time.time() - start
                 print(f"  [{elapsed:6.1f}s] progress=0x{progress:02X}")
                 last_progress = progress
+            if phase_timing:
+                scr = _decode_screen_ram(
+                    bytes(transport.read_memory(0x0400, 1000)))
+                phase = _current_phase(scr)
+                if cur_phase is None:
+                    cur_phase = phase
+                elif phase != cur_phase:
+                    cur_phase = phase
+                    phase_log.append((phase, time.time() - start))
+                    print(f"  phase +{phase_log[-1][1]:7.1f}s  {phase}")
             if sentinel == SENTINEL_VALUE:
                 print("  sentinel set — routine complete")
                 break
+        if phase_timing:
+            table = _format_phase_log(phase_log)
+            print("\n=== Phase timing (W0) ===")
+            print(table)
+            try:
+                (run_dir / "phase_timing.txt").write_text(
+                    f"target={host_str.decode(errors='replace')} "
+                    f"turbo={TURBO_MHZ}MHz poll={phase_poll}s\n\n{table}\n")
+            except Exception as exc:      # diagnostics must never fail the run
+                print(f"  (could not write phase_timing.txt: {exc})")
         else:
             print(f"TIMEOUT: sentinel not set after "
                   f"{SENTINEL_POLL_TIMEOUT:.0f}s "
