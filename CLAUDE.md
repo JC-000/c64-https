@@ -1050,36 +1050,45 @@ Five latent bugs and three new ones were cleared to get here:
     `-D LIB_NO_BARE_EXPORTS=1` and a guard that can go vacuous under a
     build-tightening flag is worse than no guard.
   - **`poly_prod_lo` / `poly_prod_hi` are a RENDEZVOUS, not private
-    scratch — and under `USE_NISTCURVES_ONCHIP` the sibling owns
-    them.** Two bytes, and getting them wrong is silent wrong crypto
-    with no link error anywhere. The onchip row generator
-    `og_common` (in the sibling's `mul_8x8_onchip.o`) does
-    `jsr ct_mul_8x8` — which under `SHARED_CT_MUL_8X8` resolves to
-    c64-https's body in `src/crypto/poly1305.s` — and then reads the
-    product back out of `poly_prod_lo/hi`. Writer and reader must
-    address the *same* two bytes.
+    scratch — and c64-https owns them, in every profile.** Two bytes,
+    and getting the direction wrong is silent wrong crypto with no link
+    error anywhere. The onchip row generator `og_common` (in the
+    sibling's `mul_8x8_onchip.o`) does `jsr ct_mul_8x8` — which under
+    `SHARED_CT_MUL_8X8` resolves to c64-https's body in
+    `src/crypto/poly1305.s` — and reads the product back out of
+    `poly_prod_lo/hi`. Writer and reader must address the *same* two
+    bytes.
 
-    Through the v0.9.1 pin upstream gated those bytes with the
-    `ct_mul_8x8` body, so the sibling had none and the wrapper's glue
-    TU `.import`ed c64-https's pair. libs/nistcurves v0.10.0 moved
-    them **outside** the gate (contract v0.9.1 adopter-private-buffer
-    rule: `fp_sqr`'s diagonal path writes them with no `ct_mul_8x8`
-    involved), which surfaced as
-    `mul_8x8.s(223): Error: Symbol 'poly_prod_lo' is already an
-    import`. The fix inverts ownership under this profile only: the
-    glue TU drops the import, and `poly1305.s` imports the sibling's
-    pair instead of defining its own. Had the glue simply dropped the
-    import without the consumer-side change, the link would have
-    SUCCEEDED with two disjoint pairs, `og_common` would have read
-    two zero bytes for every product, and every on-chip-generated
-    multiply row would have been wrong.
+    SPEC §8.3 settles the direction: whoever provides the `ct_mul_8x8`
+    body owns its product scratch. We provide it, so `poly1305.s`
+    exports the pair unconditionally.
+
+    **The ownership flipped twice before landing there**, which is worth
+    keeping because both intermediate states looked reasonable. Through
+    the v0.9.1 pin upstream gated the bytes with the `ct_mul_8x8` body,
+    so the sibling had none and our glue TU imported ours. v0.10.0 moved
+    them *outside* the gate (`fp_sqr`'s diagonal path writes them with no
+    `ct_mul_8x8` involved), surfacing as `mul_8x8.s(223): Error: Symbol
+    'poly_prod_lo' is already an import`, and the fix at the time
+    inverted ownership under onchip only — `poly1305.s` imported the
+    sibling's pair. v0.11.1 then put them inside the gate as **imports on
+    the library side** (c64-nist-curves#123), which is the shape §8.3
+    describes, so the profile split disappeared and we own them again.
+
+    The failure mode is the same at every step and is why this entry
+    exists: if both sides define a pair, the link **SUCCEEDS** with two
+    disjoint pairs, `og_common` reads two bytes nothing ever wrote, and
+    every on-chip-generated multiply row is wrong.
 
     Guarded behaviourally, not structurally: `tools/test_ecdsa_kat_oracle.py`
-    on an onchip build is the test that would catch it (6/6 including
-    3 negative CAVP vectors; a zeroed row set fails the 3 positive
-    ones). Run it against **an onchip PRG specifically** after any
-    change in this area — the REU-profile build does not link
-    `mul_8x8_onchip.o` at all and will pass regardless.
+    on an onchip or comb build is the test that catches it (6/6 including
+    3 negative CAVP vectors; a zeroed row set fails the 3 positive ones).
+    Run it against **an onchip or comb PRG specifically** after any change
+    in this area — the REU-profile build exercises a different multiply
+    path and will pass regardless. Note also that neither §8.0 assert
+    covers this: the coverage assert cannot fire while `APP_OWNED` spans
+    every allocated bit.
+
   - **The v0.7.0/v0.8.0 UCI `CRYPTO_HOT` overflow is RESOLVED at
     v0.9.1 — and no cfg change was needed.** Recorded here because the
     obvious remedy was nearly taken and would have been the wrong
@@ -1967,7 +1976,7 @@ claims REU bank 2 for the 16 KB Lim-Lee table,
 **45 s at 48 MHz / ~34 s at 64 MHz / ~36 min at 1 MHz** (measured, see
 below); and it only wins above ~5 MHz, so it is strictly a turbo
 product. Its archive comes from upstream's `lib-p256-comb-onchip`
-(v0.11.0), not from member surgery.
+(v0.11.2), not from member surgery.
 
 Disk images: **one product per disk, three disks**, `LOAD"*",8,1`.
 Per-backend combo images were retired with the lineup change — three
