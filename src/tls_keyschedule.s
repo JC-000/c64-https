@@ -725,7 +725,12 @@ tls_compute_finished:
 ; =============================================================================
 .segment "CRYPTO_CODE"
 tls_verify_finished:
+.ifndef TLS_STREAM_DEFRAME
+        ; Non-streaming build: every message starts at tls_rec_buf.
+        ; Under TLS_STREAM_DEFRAME the deframer sets tls_hs_ptr before
+        ; dispatch (in-place offset or carry buffer) — do not reset it.
         jsr tls_hs_ptr_reset
+.endif
         ; Set hkdf_prk = server handshake traffic secret
         ldx #31
 @vf_c1:

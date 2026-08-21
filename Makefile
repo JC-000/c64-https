@@ -88,6 +88,23 @@ endif
 ifeq ($(VIC_BLANK),0)
 CA65FLAGS += -D NO_VIC_BLANK=1
 endif
+# W1 streaming handshake-message deframer (src/tls_deframe.s + the
+# TLS_STREAM_DEFRAME paths in src/tls13.s / tls_cert.s /
+# tls_keyschedule.s). Lets the client process a real server's encrypted
+# flight where handshake messages do not align with TLS records (one
+# message spanning several records; several messages sharing one
+# record). Default ON under UCI, OFF under ip65: the ip65 image has
+# neither the code headroom nor any BSS slack for the deframer state +
+# carry buffer (~330 B). Override with TLS_STREAM_DEFRAME=0|1 —
+# forcing it on under ip65 is expected to overflow the link.
+ifeq ($(BACKEND),uci)
+TLS_STREAM_DEFRAME ?= 1
+else
+TLS_STREAM_DEFRAME ?= 0
+endif
+ifeq ($(TLS_STREAM_DEFRAME),1)
+CA65FLAGS += -D TLS_STREAM_DEFRAME=1
+endif
 # Lazy (=) so the USE_NISTCURVES_ONCHIP_COMB block below can retarget
 # CFG to the cfg variant after this line.
 LD65FLAGS = -C $(CFG) -Ln build/labels.txt -m build/c64-https.map --dbgfile build/c64-https.dbg

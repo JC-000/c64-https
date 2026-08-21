@@ -95,7 +95,12 @@ tls_hs_ptr_reset:
 ;         C=1 error (bad format, unsupported key type)
 ; =============================================================================
 tls_handle_certificate:
+.ifndef TLS_STREAM_DEFRAME
+        ; Non-streaming build: every message starts at tls_rec_buf.
+        ; Under TLS_STREAM_DEFRAME the deframer sets tls_hs_ptr before
+        ; dispatch (in-place offset or carry buffer) — do not reset it.
         jsr tls_hs_ptr_reset
+.endif
         ldy #0
 
         ; --- Verify handshake type = 11 (Certificate) ---
@@ -560,7 +565,12 @@ x509_extract_pubkey:
 ; Output: C=0 signature valid, C=1 invalid
 ; =============================================================================
 tls_handle_cert_verify:
+.ifndef TLS_STREAM_DEFRAME
+        ; Non-streaming build: every message starts at tls_rec_buf.
+        ; Under TLS_STREAM_DEFRAME the deframer sets tls_hs_ptr before
+        ; dispatch (in-place offset or carry buffer) — do not reset it.
         jsr tls_hs_ptr_reset
+.endif
         ; stage marker: entered handler
         lda #$20
         sta tls_recv_sub_progress
