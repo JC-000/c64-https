@@ -647,6 +647,43 @@ The scripts:
 
 ### End-to-end HTTPS status
 
+**REAL-SERVER MILESTONE (2026-08-21, U64E @ 48 MHz, comb):** the first
+HTTPS GETs from the C64 to real public internet servers.
+
+  target            CFIN     http_status   note
+  github.com        32.5 s   **200**       full PASS, homepage HTML prefix
+  browserleaks.com  33.4 s   **200**       TLS + status PASS; rig sentinel
+                                           timed out on body drain (below)
+
+The W1 streaming deframer handled the real 9-11-record flights
+(Certificate ~2.7 KB over ~6 records; CV+Finished sharing the tail), the
+W2 streaming consumer staged the leaf, and the sibling library verified
+real CA-issued chains. Local padded-chain bench: 11-record flight costs
+only ~0.7 s over the single-cert control (31.5 vs 30.8 s CFIN).
+
+Two findings from the live runs:
+  - **512-content records** (what MFL-honoring servers actually send) hit
+    a latent page-dispatch bug in the record layer's inner-type read —
+    fixed in `src/tls_record.s` (page-2 arm), mutation-proven by
+    `tools/test_tls_deframer.py::mfl512_full_records`. Every local
+    fixture had been one byte short of the trigger.
+  - **W4 gap (open):** a large NON-chunked body cannot terminate by
+    Content-Length once `body_append` truncates at 512 B
+    (`http_resp_len` freezes, the equality never fires), leaving only
+    the connection-close fallback — browserleaks holds the connection
+    and the rig sentinel timed out at 300 s with status/body already
+    correct. Fix direction: count consumed-not-stored body bytes
+    (needs >16-bit for real pages) or cap the post-truncation drain.
+
+**U64E "writemem exhaustion wedge"** (user-named): fw 3.14d misses
+garbage collection on a temp location filled by REST `writemem`; a long
+hardware session (~15 PRG loads that day) fills it CUMULATIVELY and then
+REST *and* the UCI bridge wedge together — ping alive, REST refuses
+instantly, C64 parks mid-transfer. Power cycle fixes. Budget PRG loads
+per session and power-cycle proactively; `readmem` is not implicated.
+
+
+
 The TLS 1.3 handshake now completes end-to-end against the local test
 listener (ECDSA-P256 cert, `tools/https_e2e/certs/`) on **both** backends:
 UCI/U64E at 48 MHz turbo and stock 1 MHz, and ip65/VICE at stock 1 MHz
