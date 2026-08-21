@@ -41,6 +41,30 @@ Modes
     records what the client actually did, in ``client_accepted_finished``: a
     client that goes on to send its own Finished did not check ours.
 
+Record framing (``record_frame`` / ``RECORD_FRAME`` env)
+-------------------------------------------------------
+Orthogonal to *mode*. Controls how the encrypted **handshake content stream**
+(EncryptedExtensions || Certificate || CertificateVerify || Finished) is cut
+into TLS records — the exact axis the streaming deframer (sprint W1/W2) has to
+handle. The message bytes, transcript, keys and signatures are identical across
+all framings; only the record boundaries move:
+
+``"onepermsg"`` (default)
+    One handshake message per record — the historical behavior, kept
+    byte-for-byte so the existing ``rig_https_bad_finished.py`` is unaffected.
+
+``"mfl512"``
+    The whole handshake stream re-chunked into <=512-byte record fragments,
+    the way a real server honoring ``max_fragment_length`` fragments it. Messages
+    span records; a record carries multiple/partial messages. This is the
+    real-world github.com / browserleaks.com pattern.
+
+``"pathological"``
+    Adversarial fragmentation: tiny records, splits *inside* the 4-byte message
+    header, and message boundaries mid-record. Maximum stress for the deframer;
+    still perfectly valid TLS (Python's own ``ssl`` client reassembles it, which
+    ``--selftest`` proves).
+
 Self-validation
 ---------------
 ``python3 tools/https_e2e/evil_listener.py --selftest`` runs both modes against
@@ -185,6 +209,36 @@ def _plaintext_record(content_type: int, payload: bytes) -> bytes:
     return bytes([content_type, 0x03, 0x03]) + struct.pack(">H", len(payload)) + payload
 
 
+VALID_RECORD_FRAMES = ("onepermsg", "mfl512", "pathological")
+
+
+def frame_handshake_stream(stream: bytes, mode: str) -> list[bytes]:
+    """Cut the handshake content *stream* into record-payload fragments.
+
+    Returns a list of byte-slices whose concatenation is exactly *stream*; each
+    slice becomes one TLS record. ``"onepermsg"`` is handled by the caller (it
+    frames per message, not per stream) and is rejected here.
+    """
+    if mode == "mfl512":
+        return [stream[i:i + 512] for i in range(0, len(stream), 512)] or [b""]
+    if mode == "pathological":
+        # A fixed, deterministic pattern of awkward sizes. Small leading pieces
+        # guarantee a split inside the first message's 4-byte header; the mix of
+        # sizes scatters message boundaries across records. Deterministic so a
+        # failure reproduces.
+        pattern = [1, 2, 3, 1, 250, 7, 511, 13, 400, 1]
+        out = []
+        pos = 0
+        i = 0
+        while pos < len(stream):
+            size = pattern[i % len(pattern)]
+            out.append(stream[pos:pos + size])
+            pos += size
+            i += 1
+        return out or [b""]
+    raise ValueError(f"frame_handshake_stream does not handle mode {mode!r}")
+
+
 class RecordReader:
     """Reassembles TLS records from a stream socket."""
 
@@ -290,11 +344,18 @@ class EvilTls13Server:
 
     def __init__(self, cert_path: str, key_path: str, *,
                  mode: str = "good",
-                 body: str = DEFAULT_BODY):
+                 body: str = DEFAULT_BODY,
+                 record_frame: str = "onepermsg"):
         if mode not in ("good", "bad_finished"):
             raise ValueError(f"unknown mode {mode!r}")
+        if record_frame not in VALID_RECORD_FRAMES:
+            raise ValueError(
+                f"unknown record_frame {record_frame!r}; "
+                f"expected one of {VALID_RECORD_FRAMES}"
+            )
         self.mode = mode
         self.body = body
+        self.record_frame = record_frame
 
         with open(cert_path, "rb") as f:
             pem = f.read()
@@ -308,6 +369,7 @@ class EvilTls13Server:
 
         self.result: dict = {
             "mode": mode,
+            "record_frame": record_frame,
             "listening": False,
             "client_hello_seen": False,
             "server_flight_sent": False,
@@ -400,27 +462,45 @@ class EvilTls13Server:
         s_keys = TrafficKeys(s_hs)
         c_keys = TrafficKeys(c_hs)
 
-        def send_hs(msg: bytes) -> None:
-            # One handshake message per record: the C64 client's
-            # tls_recv_encrypted dispatches on tls_rec_buf[0] and handles
-            # exactly one message per decrypted record.
-            sock.sendall(s_keys.encrypt(msg + bytes([CT_HANDSHAKE])))
+        # The handshake content stream, accumulated in message order. Under
+        # "onepermsg" each message is sent as its own record as it is produced
+        # (the historical path, byte-for-byte). Under any other framing the
+        # whole stream is buffered here and re-cut into records after the
+        # Finished — the message bytes, transcript and signatures are identical
+        # either way; only record boundaries move.
+        hs_stream = bytearray()
+
+        def emit(msg: bytes) -> None:
+            if self.record_frame == "onepermsg":
+                # One handshake message per record: the pre-deframer C64 client
+                # dispatches on tls_rec_buf[0] and handles exactly one message
+                # per decrypted record.
+                sock.sendall(s_keys.encrypt(msg + bytes([CT_HANDSHAKE])))
+            else:
+                hs_stream.extend(msg)
 
         ee = _handshake(HS_ENCRYPTED_EXTENSIONS, b"\x00\x00")
-        send_hs(ee)
+        emit(ee)
         transcript += ee
 
         cert = self._certificate()
-        send_hs(cert)
+        emit(cert)
         transcript += cert
 
         cv = self._certificate_verify(_sha256(transcript))
-        send_hs(cv)
+        emit(cv)
         transcript += cv
 
         fin, corrupted = self._finished(s_hs, _sha256(transcript))
-        send_hs(fin)
+        emit(fin)
         self.result["finished_corrupted"] = corrupted
+
+        if self.record_frame != "onepermsg":
+            fragments = frame_handshake_stream(bytes(hs_stream), self.record_frame)
+            for frag in fragments:
+                sock.sendall(s_keys.encrypt(frag + bytes([CT_HANDSHAKE])))
+            self.result["record_count"] = len(fragments)
+
         self.result["server_flight_sent"] = True
 
         # Fold the Finished we actually SENT. A client that accepts the
@@ -526,8 +606,16 @@ class EvilTls13Server:
 
 def serve_one_connection(srv: socket.socket, cert_path: str, key_path: str, *,
                          mode: str, body: str, timeout: float,
-                         result: dict) -> None:
-    """Accept exactly one connection and run the flight. Fills *result*."""
+                         result: dict, record_frame: str | None = None) -> None:
+    """Accept exactly one connection and run the flight. Fills *result*.
+
+    *record_frame* selects handshake record framing (see module docstring). When
+    ``None`` it falls back to the ``RECORD_FRAME`` environment variable, then to
+    ``"onepermsg"`` — so an out-of-band rig can pick the framing without the
+    caller threading a new argument.
+    """
+    if record_frame is None:
+        record_frame = os.environ.get("RECORD_FRAME", "onepermsg")
     conn = None
     try:
         srv.settimeout(timeout)
@@ -535,7 +623,8 @@ def serve_one_connection(srv: socket.socket, cert_path: str, key_path: str, *,
         result["listening"] = True
         conn, addr = srv.accept()
         result["client_addr"] = addr
-        server = EvilTls13Server(cert_path, key_path, mode=mode, body=body)
+        server = EvilTls13Server(cert_path, key_path, mode=mode, body=body,
+                                 record_frame=record_frame)
         result.update(server.result)
         result["client_addr"] = addr
         result["listening"] = True
@@ -569,8 +658,20 @@ def _selftest() -> int:
     cert_path, key_path = _ensure_certs_p256()
     failures = 0
 
-    for mode, expect in (("good", "handshake completes"),
-                         ("bad_finished", "client rejects")):
+    # Every (mode, record_frame) combination must behave correctly against
+    # Python's own OpenSSL client. The re-framings are only useful as a C64
+    # deframer test if OpenSSL — which reassembles records faithfully — accepts
+    # them in `good` and still rejects the corrupted Finished; that proves the
+    # bytes on the wire are valid TLS and the framing, not a protocol error, is
+    # what the C64 must cope with.
+    cases = [
+        (mode, frame, expect)
+        for frame in VALID_RECORD_FRAMES
+        for mode, expect in (("good", "handshake completes"),
+                             ("bad_finished", "client rejects"))
+    ]
+
+    for mode, record_frame, expect in cases:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("127.0.0.1", 0))
@@ -581,7 +682,7 @@ def _selftest() -> int:
             target=serve_one_connection,
             args=(srv, cert_path, key_path),
             kwargs=dict(mode=mode, body=DEFAULT_BODY, timeout=20.0,
-                        result=result),
+                        result=result, record_frame=record_frame),
             daemon=True,
         )
         t.start()
@@ -613,10 +714,12 @@ def _selftest() -> int:
         t.join(timeout=25.0)
 
         verdict = "PASS" if ok else "FAIL"
-        print(f"  {verdict}: mode={mode:<13} expect {expect}")
+        print(f"  {verdict}: frame={record_frame:<12} mode={mode:<13} "
+              f"expect {expect}")
+        print(f"        records    : {result.get('record_count', '1/msg')}")
         print(f"        client saw : {detail}")
-        print(f"        server saw : {result}")
         if not ok:
+            print(f"        server saw : {result}")
             failures += 1
 
     print()
