@@ -59,9 +59,10 @@ ORACLES (implementation-independent)
   * the running transcript (read via ``tls_transcript_hash``) ==
     SHA-256(concatenated handshake messages).  Proves every message's bytes
     were folded regardless of record framing.
-  * for the oversized-leaf case, a sentinel at ``cert_buf + 1536`` survives and
-    no valid pubkey is extracted — proves the size guard fired instead of
-    overflowing.
+  * for the oversized-leaf case, a sentinel fill of the whole ``cert_buf``
+    survives and no valid pubkey is extracted — proves the size guard fired
+    before any copy.  (Not one byte past the end: ``cert_buf + 1536`` is
+    $A600 = ``tls_rec_buf[0]``, which the record layer writes on any build.)
 
 Both crypto-verified messages (CertificateVerify, Finished) are intentionally
 absent from this suite: their transcript discipline needs a self-consistent
@@ -398,8 +399,13 @@ def run_scenario(transport, labels, sc):
     write_bytes(transport, labels["ecdsa_pubkey_x"], bytes([POISON]) * 32)
     write_bytes(transport, labels["ecdsa_pubkey_y"], bytes([POISON]) * 32)
     write_bytes(transport, labels["tls_transcript"], bytes([POISON]) * 32)
-    # Overflow sentinel just past cert_buf's capacity.
-    write_bytes(transport, labels["cert_buf"] + CERT_BUF_MAX, bytes([SENTINEL]))
+    # Overflow sentinel: fill ALL of cert_buf. cert_buf+1536 cannot host a
+    # sentinel — it is $A600 = tls_rec_buf[0] under both cfgs, which the
+    # record layer writes on every build (found the hard way: the check
+    # failed against a correct deframer). The W2 guard rejects an oversized
+    # leaf BEFORE any copy, so the whole buffer staying intact is the
+    # stronger, collision-free oracle (it also catches a partial copy).
+    write_bytes(transport, labels["cert_buf"], bytes([SENTINEL]) * CERT_BUF_MAX)
 
     # Fresh running transcript so the fold accumulates exactly this flight.
     jsr(transport, labels["tls_transcript_init"], timeout=60.0)
@@ -431,12 +437,13 @@ def run_scenario(transport, labels, sc):
             )
 
     if sc.expect_overflow_safe:
-        sentinel = read_bytes(transport, labels["cert_buf"] + CERT_BUF_MAX, 1)[0]
-        if sentinel != SENTINEL:
+        got_buf = read_bytes(transport, labels["cert_buf"], CERT_BUF_MAX)
+        if got_buf != bytes([SENTINEL]) * CERT_BUF_MAX:
+            bad = next(i for i, b in enumerate(got_buf) if b != SENTINEL)
             problems.append(
-                f"BUFFER OVERFLOW: sentinel at cert_buf+{CERT_BUF_MAX} was "
-                f"clobbered (${sentinel:02X}, expected ${SENTINEL:02X}) — the "
-                f"oversized leaf was copied past cert_buf"
+                f"BUFFER WRITTEN ON OVERSIZED LEAF: cert_buf+{bad} was "
+                f"clobbered (${got_buf[bad]:02X}, expected ${SENTINEL:02X}) — "
+                f"the size guard must reject before any copy"
             )
         gx, gy = read_pubkey(transport, labels)
         if gx != bytes([POISON]) * 32 or gy != bytes([POISON]) * 32:
