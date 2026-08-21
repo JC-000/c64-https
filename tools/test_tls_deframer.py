@@ -59,9 +59,17 @@ ORACLES (implementation-independent)
   * the running transcript (read via ``tls_transcript_hash``) ==
     SHA-256(concatenated handshake messages).  Proves every message's bytes
     were folded regardless of record framing.
-  * for the oversized-leaf case, a sentinel at ``cert_buf + 1536`` survives and
-    no valid pubkey is extracted — proves the size guard fired instead of
-    overflowing.
+  * for the oversized-leaf case, ``cert_buf`` itself is pre-filled with a
+    sentinel pattern that must survive the flight untouched, and no valid
+    pubkey may be extracted.  The CertificateEntry's 24-bit length field
+    arrives before any cert_data byte, so a correct implementation can (and
+    must) reject an oversized leaf BEFORE copying anything — "reject on the
+    length field" is the only overflow oracle this memory map permits, because
+    the byte after ``cert_buf``'s cap is ``tls_rec_buf[0]`` ($A600 under both
+    cfgs), which the record layer legitimately writes on every flight.  (An
+    earlier revision put a sentinel at ``cert_buf+1536`` and was therefore
+    unpassable by ANY implementation — caught by the deframer lane's first run
+    against it.)
 
 Both crypto-verified messages (CertificateVerify, Finished) are intentionally
 absent from this suite: their transcript discipline needs a self-consistent
@@ -74,11 +82,19 @@ logic needs.
 Vectors are fully deterministic (fixed key/iv/seq, repo test cert), so a
 failure reproduces byte-for-byte.
 
+BACKEND: the deframer ships UCI-only (``TLS_STREAM_DEFRAME`` defaults ON for
+``BACKEND=uci``, OFF for ip65, which has no code/BSS headroom).  This suite
+therefore builds ``make BACKEND=uci`` by default; on an ip65 build the nine
+``[deframer]`` scenarios xfail BY DESIGN, not by defect.  The suite itself is
+backend-agnostic — every address comes from ``build/labels.txt``.
+
 Usage:
     python3 tools/test_tls_deframer.py [--verbose]
 
 Env:
-    C64_SKIP_BUILD=1   reuse the already-built PRG
+    C64_SKIP_BUILD=1             reuse the already-built PRG
+    DEFRAMER_BUILD_BACKEND=ip65  build the ip65 image instead (deframer
+                                 scenarios then xfail by design)
 
 Requires: Python 3.10+, c64_test_harness, VICE x64sc, cryptography
 """
@@ -233,15 +249,28 @@ def reset_recv_state(transport, labels) -> None:
     write_bytes(transport, labels["tls_state"], [TLS_STATE_CERTIFICATE])
 
 
-def drive_flight(transport, labels, record_bytes, n_records):
+def ring_is_empty(transport, labels) -> bool:
+    head = read_bytes(transport, labels["tcp_recv_head"], 2)
+    tail = read_bytes(transport, labels["tcp_recv_tail"], 2)
+    return head == tail
+
+
+def drive_flight(transport, labels, record_bytes, n_records, n_msgs):
     """Prime the ring and pump tls_recv_encrypted until the flight drains.
 
     Returns the list of carry flags observed (diagnostic only; the oracle is
-    end-state, so a build whose call granularity differs is still judged fairly).
+    end-state, so a build whose call granularity differs is still judged
+    fairly — one call may consume one message or the whole flight).
+
+    Early exit: once the ring is empty and *n_msgs* calls have succeeded,
+    nothing more can arrive (net_poll is an RTS), so stop rather than let a
+    surplus call spin tls_recv_encrypted's 65,536-poll timeout loop. A C=1
+    return also ends the flight (error, or drained + timed out).
     """
     reset_recv_state(transport, labels)
     prime_ring(transport, labels, record_bytes)
     carries = []
+    successes = 0
     # An upper bound on calls under any sane design: never more than one call
     # per record, plus slack for a drain call. Capped so a wedged build cannot
     # spin the suite forever.
@@ -255,6 +284,12 @@ def drive_flight(transport, labels, record_bytes, n_records):
                     carry = regs[k] & 0x01
                     break
         carries.append(carry)
+        if carry == 0:
+            successes += 1
+        if carry == 1:
+            break
+        if successes >= n_msgs and ring_is_empty(transport, labels):
+            break
     return carries
 
 
@@ -276,13 +311,14 @@ def read_transcript(transport, labels):
 
 class Scenario:
     def __init__(self, name, kind, chunks, expect_pubkey, expect_transcript,
-                 expect_overflow_safe=False):
+                 expect_overflow_safe=False, n_msgs=1):
         self.name = name
         self.kind = kind                        # "plumbing" or "deframer"
         self.chunks = chunks
         self.expect_pubkey = expect_pubkey      # (x, y) or None
         self.expect_transcript = expect_transcript  # bytes or None
         self.expect_overflow_safe = expect_overflow_safe
+        self.n_msgs = n_msgs                    # handshake messages in flight
 
 
 def build_scenarios(cert_der, pubkey_xy):
@@ -300,6 +336,7 @@ def build_scenarios(cert_der, pubkey_xy):
         [ee, cert],
         (px, py),
         hashlib.sha256(stream).digest(),
+        n_msgs=2,
     ))
 
     # A lone Certificate in a single record — the simplest reassembly-free
@@ -319,6 +356,7 @@ def build_scenarios(cert_der, pubkey_xy):
         [ee + cert],
         (px, py),
         hashlib.sha256(ee + cert).digest(),
+        n_msgs=2,
     ))
 
     # --- deframer (b): one message split across records ---
@@ -359,6 +397,7 @@ def build_scenarios(cert_der, pubkey_xy):
         [ee + cert[:half], cert[half:]],
         (px, py),
         hashlib.sha256(ee + cert).digest(),
+        n_msgs=2,
     ))
 
     # certificate spanning many small records (the real ~6-record pattern).
@@ -398,8 +437,14 @@ def run_scenario(transport, labels, sc):
     write_bytes(transport, labels["ecdsa_pubkey_x"], bytes([POISON]) * 32)
     write_bytes(transport, labels["ecdsa_pubkey_y"], bytes([POISON]) * 32)
     write_bytes(transport, labels["tls_transcript"], bytes([POISON]) * 32)
-    # Overflow sentinel just past cert_buf's capacity.
-    write_bytes(transport, labels["cert_buf"] + CERT_BUF_MAX, bytes([SENTINEL]))
+    if sc.expect_overflow_safe:
+        # Fill cert_buf ITSELF with the sentinel. The CertificateEntry length
+        # field precedes the cert bytes, so a correct implementation rejects an
+        # oversized leaf before copying anything — cert_buf must come back
+        # untouched. A sentinel *past* cert_buf would be useless here: the next
+        # byte is tls_rec_buf[0], which the record layer legitimately writes.
+        write_bytes(transport, labels["cert_buf"],
+                    bytes([SENTINEL]) * CERT_BUF_MAX)
 
     # Fresh running transcript so the fold accumulates exactly this flight.
     jsr(transport, labels["tls_transcript_init"], timeout=60.0)
@@ -407,7 +452,8 @@ def run_scenario(transport, labels, sc):
     write_bytes(transport, labels["tls_hs_read_iv"], HS_READ_IV)
 
     record_bytes, n_records = records_from_chunks(sc.chunks)
-    carries = drive_flight(transport, labels, record_bytes, n_records)
+    carries = drive_flight(transport, labels, record_bytes, n_records,
+                           sc.n_msgs)
 
     problems = []
 
@@ -431,12 +477,14 @@ def run_scenario(transport, labels, sc):
             )
 
     if sc.expect_overflow_safe:
-        sentinel = read_bytes(transport, labels["cert_buf"] + CERT_BUF_MAX, 1)[0]
-        if sentinel != SENTINEL:
+        buf = read_bytes(transport, labels["cert_buf"], CERT_BUF_MAX)
+        if buf != bytes([SENTINEL]) * CERT_BUF_MAX:
+            first = next(i for i, b in enumerate(buf) if b != SENTINEL)
             problems.append(
-                f"BUFFER OVERFLOW: sentinel at cert_buf+{CERT_BUF_MAX} was "
-                f"clobbered (${sentinel:02X}, expected ${SENTINEL:02X}) — the "
-                f"oversized leaf was copied past cert_buf"
+                f"cert_buf written during an oversized-leaf flight (first "
+                f"clobber at cert_buf+{first}, ${buf[first]:02X}) — the size "
+                f"guard must fire on the CertificateEntry length field, "
+                f"BEFORE any cert_data byte is copied"
             )
         gx, gy = read_pubkey(transport, labels)
         if gx != bytes([POISON]) * 32 or gy != bytes([POISON]) * 32:
@@ -517,9 +565,15 @@ def main() -> int:
     if os.environ.get("C64_SKIP_BUILD"):
         print("\n=== Building (skipped: C64_SKIP_BUILD set) ===")
     else:
-        print("\n=== Building ===")
+        # UCI by default: the deframer is TLS_STREAM_DEFRAME, ON only under
+        # BACKEND=uci (ip65 has no headroom — its deframer scenarios xfail by
+        # design). make clean first: make tracks timestamps, not the command
+        # line, so a backend switch without clean produces a mixed link.
+        backend = os.environ.get("DEFRAMER_BUILD_BACKEND", "uci")
+        print(f"\n=== Building (BACKEND={backend}) ===")
         subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
-        result = subprocess.run(["make"], capture_output=True, text=True,
+        result = subprocess.run(["make", f"BACKEND={backend}"],
+                                capture_output=True, text=True,
                                 cwd=PROJECT_ROOT)
         if result.returncode != 0:
             print(f"Build failed:\n{result.stderr}")
