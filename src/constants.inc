@@ -106,6 +106,18 @@ x25_prev_bit    = $38           ; 1 byte — previous k_t for swap
 x25_byte_idx    = $39           ; 1 byte — byte index in scalar
 x25_bit_mask    = $3a           ; 1 byte — current bit mask
 
+; --- TLS handshake-message base pointer (W1 streaming deframer) ---
+; Points at the current handshake message; the message handlers in
+; tls_cert.s / tls_keyschedule.s read the message through this pointer
+; instead of hardcoding tls_rec_buf, so the streaming deframer can
+; dispatch a message at any offset (tls_rec_buf + N, or a carry buffer).
+; $3E-$3F is inside ZP_CRYPTO ($22-$3F) but past the ECDSA bignum claim
+; ($22-$3C) and nistcurves_zp_ptr2 ($3D); ECDSA never touches $3E-$3F,
+; so the pointer survives across ecdsa_verify inside
+; tls_handle_cert_verify.  Do NOT relocate to $36-$37: that pair looks
+; free but sits inside fe25519's declared $2C-$37 claim.
+tls_hs_ptr      = $3e           ; 2 bytes ($3E-$3F)
+
 ; --- General pointers (shared, save/restore around ip65) ---
 zp_ptr          = $fb           ; 2 bytes ($FB-$FC)
 zp_temp         = $fd           ; 1 byte
