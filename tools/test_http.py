@@ -165,6 +165,239 @@ def _reset_parser(transport, labels):
     write_bytes(transport, line_idx, [0])
     write_bytes(transport, hdr_match, [0])
     write_bytes(transport, resp_len, [0, 0])
+    # Ring input mode by default (span tests flip to 1 per span).
+    write_bytes(transport, labels.address("http_in_mode"), [0])
+
+
+# --- span-mode input (the TLS path's input mode) -------------------------
+# The TLS path hands each decrypted record to http_recv_response as a
+# linear span (http_in_mode=1).  These helpers drive the parser exactly
+# that way, one call per "record", which is what lets the tests cover
+# headers/chunks spanning many TLS records.
+
+SPAN_SCRATCH = 0xC800   # inside TCP_BUF, above the test scratch at $C000-$C3xx
+CARRY_STUB = 0xC300     # carry-latching JSR stub
+CARRY_LATCH = 0xC2F0
+
+
+def _feed_span(transport, labels, data, timeout=30.0):
+    """Feed one span to http_recv_response.
+
+    Returns the carry flag after the call: 1 = parser needs more data,
+    0 = response complete.
+    """
+    assert len(data) <= 0x700, "span too large for scratch area"
+    write_bytes(transport, SPAN_SCRATCH, data)
+    write_bytes(transport, labels.address("http_in_mode"), [1])
+    write_bytes(transport, labels.address("http_in_ptr"),
+                [SPAN_SCRATCH & 0xFF, SPAN_SCRATCH >> 8])
+    write_bytes(transport, labels.address("http_in_len"),
+                [len(data) & 0xFF, len(data) >> 8])
+    recv = labels.address("http_recv_response")
+    stub = bytes([
+        0x20, recv & 0xFF, recv >> 8,        # JSR http_recv_response
+        0xA9, 0x00,                          # LDA #0
+        0x69, 0x00,                          # ADC #0  (A = carry)
+        0x8D, CARRY_LATCH & 0xFF, CARRY_LATCH >> 8,  # STA latch
+        0x60,                                # RTS
+    ])
+    write_bytes(transport, CARRY_LATCH, [0xEE])  # poison the latch
+    write_bytes(transport, CARRY_STUB, stub)
+    jsr(transport, CARRY_STUB, timeout=timeout)
+    return read_bytes(transport, CARRY_LATCH, 1)[0]
+
+
+def _run_span_response(transport, labels, spans):
+    """Reset the parser and feed a list of spans.
+
+    Asserts carry=1 after every span except the last.  Returns the carry
+    after the final span (0 expected for a cleanly terminated response).
+    """
+    _reset_parser(transport, labels)
+    carry = None
+    for i, span in enumerate(spans):
+        carry = _feed_span(transport, labels, span)
+        if i < len(spans) - 1 and carry != 1:
+            return ("early", i, carry)
+    return carry
+
+
+def _check_response(transport, labels, want_status, want_body, prefix=None):
+    """Common assertions: status, resp_len, body bytes.
+
+    If prefix is not None, expect resp_len == len(prefix) and the buffer
+    to hold prefix (the truncate-at-capacity case); otherwise expect the
+    full want_body.
+    """
+    passed = 0
+    failed = 0
+    expect = prefix if prefix is not None else want_body
+
+    status_bytes = read_bytes(transport, labels.address("http_status"), 2)
+    status = status_bytes[0] | (status_bytes[1] << 8)
+    if status == want_status:
+        print(f"  PASS: http_status = {status}")
+        passed += 1
+    else:
+        print(f"  FAIL: http_status = {status}, expected {want_status}")
+        failed += 1
+
+    resp_len_bytes = read_bytes(transport, labels.address("http_resp_len"), 2)
+    resp_len = resp_len_bytes[0] | (resp_len_bytes[1] << 8)
+    if resp_len == len(expect):
+        print(f"  PASS: http_resp_len = {resp_len}")
+        passed += 1
+    else:
+        print(f"  FAIL: http_resp_len = {resp_len}, expected {len(expect)}")
+        failed += 1
+
+    body = read_bytes(transport, labels.address("http_resp_buf"),
+                      min(resp_len, 512))
+    if body == expect[:512]:
+        print(f"  PASS: body matches ({len(expect[:512])} bytes)")
+        passed += 1
+    else:
+        mism = [(i, body[i], expect[i])
+                for i in range(min(len(body), len(expect)))
+                if body[i] != expect[i]]
+        print(f"  FAIL: body mismatch — {len(mism)} byte(s) differ, "
+              f"len got {len(body)} vs {len(expect[:512])}")
+        for idx, got, exp in mism[:5]:
+            print(f"    offset {idx}: got ${got:02X}, expected ${exp:02X}")
+        failed += 1
+    return passed, failed
+
+
+def _chunked(body, sizes, ext=b""):
+    """Encode body as chunked with the given chunk sizes."""
+    out = b""
+    pos = 0
+    for n in sizes:
+        out += format(n, "x").encode() + ext + b"\r\n" + body[pos:pos+n] + b"\r\n"
+        pos += n
+    assert pos == len(body)
+    out += b"0\r\n\r\n"
+    return out
+
+
+def test_chunked_basic(transport, labels):
+    """Chunked response, everything in one span, lowercase hex sizes."""
+    body = b"Hello!!!"
+    resp = (b"HTTP/1.1 200 OK\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"5\r\nHello\r\n3\r\n!!!\r\n0\r\n\r\n")
+    carry = _run_span_response(transport, labels, [resp])
+    if carry != 0:
+        print(f"  FAIL: parser did not complete (carry={carry})")
+        return 0, 1
+    print("  PASS: parser completed on terminal chunk")
+    p, f = _check_response(transport, labels, 200, body)
+    chunked = read_bytes(transport, labels.address("http_chunked"), 1)[0]
+    if chunked == 1:
+        print("  PASS: http_chunked flag set")
+        p += 1
+    else:
+        print(f"  FAIL: http_chunked = {chunked}, expected 1")
+        f += 1
+    return p + 1, f
+
+
+def test_chunked_multi_record(transport, labels):
+    """Chunks + headers split across spans: header name split mid-word,
+    chunk data split mid-chunk, uppercase hex size, chunk extension,
+    terminal-chunk CRLF split between spans."""
+    body = b"0123456789" + bytes(range(0x41, 0x51))   # 10 + 16 = 26 bytes
+    wire = (b"HTTP/1.1 200 OK\r\n"
+            b"Transfer-Enco")
+    wire2 = (b"ding: chunked\r\n"
+             b"X-Other: yes\r\n"
+             b"\r\n"
+             b"A\r\n" + body[:4])
+    wire3 = body[4:10] + b"\r\n" + b"10;ext=1\r\n" + body[10:18]
+    wire4 = body[18:26] + b"\r\n" + b"0\r\n"
+    wire5 = b"\r\n"
+    carry = _run_span_response(transport, labels,
+                               [wire, wire2, wire3, wire4, wire5])
+    if carry != 0:
+        print(f"  FAIL: parser did not complete cleanly (result={carry})")
+        return 0, 1
+    print("  PASS: 5-span chunked response completed on terminal chunk")
+    p, f = _check_response(transport, labels, 200, body)
+    return p + 1, f
+
+
+def test_chunked_truncation(transport, labels):
+    """Chunked body larger than the 512 B http_resp_buf: the parser must
+    fill the buffer, keep consuming/discarding, and still terminate
+    cleanly on the terminal chunk with http_resp_len = 512."""
+    body = bytes((i * 7 + 3) & 0xFF for i in range(700))
+    wire = (b"HTTP/1.1 200 OK\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n" + _chunked(body, [100] * 7))
+    # split into ~400-byte spans (multi-record chunks)
+    spans = [wire[i:i+400] for i in range(0, len(wire), 400)]
+    carry = _run_span_response(transport, labels, spans)
+    if carry != 0:
+        print(f"  FAIL: parser did not complete cleanly (result={carry})")
+        return 0, 1
+    print(f"  PASS: {len(spans)}-span oversized chunked response completed")
+    p, f = _check_response(transport, labels, 200, body, prefix=body[:512])
+    return p + 1, f
+
+
+def _big_headers(count=24):
+    """A >1.5 KB header block: filler headers, several lines longer than
+    the 32-byte line buffer, Content-Length-lookalike prefixes, mixed
+    case."""
+    hdrs = b"HTTP/1.1 200 OK\r\n"
+    hdrs += b"Server: test-rig/1.0\r\n"
+    # a CSP-style monster line (~200 bytes)
+    hdrs += (b"Content-Security-Policy: default-src 'none'; "
+             + b"script-src " + b"https://example.invalid " * 6
+             + b"; style-src 'unsafe-inline'\r\n")
+    # a header whose 31-byte truncated prefix must NOT match Content-Length
+    hdrs += b"Content-Length-Hint: not-a-real-header-9999\r\n"
+    for i in range(count):
+        hdrs += (f"X-Filler-Header-{i:02d}: ".encode()
+                 + b"v" * 40 + b"\r\n")
+    return hdrs
+
+
+def test_large_headers_content_length(transport, labels):
+    """Header block far larger than http_resp_buf, split across many
+    spans, with Content-Length buried mid-block."""
+    body = b"Hello"
+    hdrs = _big_headers()
+    hdrs += b"Content-Length: 5\r\n"
+    hdrs += _big_headers(8)[len(b"HTTP/1.1 200 OK\r\n"):]  # more filler after
+    wire = hdrs + b"\r\n" + body
+    assert len(hdrs) > 1500, f"header block only {len(hdrs)} bytes"
+    spans = [wire[i:i+200] for i in range(0, len(wire), 200)]
+    carry = _run_span_response(transport, labels, spans)
+    if carry != 0:
+        print(f"  FAIL: parser did not complete cleanly (result={carry})")
+        return 0, 1
+    print(f"  PASS: {len(spans)}-span large-header response completed "
+          f"({len(hdrs)} header bytes)")
+    p, f = _check_response(transport, labels, 200, body)
+    return p + 1, f
+
+
+def test_chunked_large_headers(transport, labels):
+    """Chunked + large headers combined — the realistic github.com shape."""
+    body = b"<html>chunked page</html>"
+    hdrs = _big_headers(16)
+    hdrs += b"Transfer-Encoding: chunked\r\n"
+    wire = hdrs + b"\r\n" + _chunked(body, [16, 9])
+    spans = [wire[i:i+250] for i in range(0, len(wire), 250)]
+    carry = _run_span_response(transport, labels, spans)
+    if carry != 0:
+        print(f"  FAIL: parser did not complete cleanly (result={carry})")
+        return 0, 1
+    print(f"  PASS: {len(spans)}-span chunked+large-header response completed")
+    p, f = _check_response(transport, labels, 200, body)
+    return p + 1, f
 
 
 def _run_parser_loop(transport, labels, timeout=30.0):
@@ -405,6 +638,31 @@ def run_tests(transport, labels, verbose=False):
 
     print("\n--- http_recv_response Large Body ---")
     p, f = test_recv_response_with_body(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- Chunked: basic (single span) ---")
+    p, f = test_chunked_basic(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- Chunked: multi-record spans ---")
+    p, f = test_chunked_multi_record(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- Chunked: >512 B truncation ---")
+    p, f = test_chunked_truncation(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- Large headers + Content-Length ---")
+    p, f = test_large_headers_content_length(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- Chunked + large headers ---")
+    p, f = test_chunked_large_headers(transport, labels)
     total_passed += p
     total_failed += f
 

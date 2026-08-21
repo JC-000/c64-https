@@ -789,7 +789,23 @@ Five latent bugs and three new ones were cleared to get here:
     the colon. Once `http_resp_len` equals `http_content_length`,
     state_body returns C=0 and `http_get` exits cleanly. When the
     header is absent the parser falls back to the previous
-    keep-polling behaviour (preserves chunked/streaming paths).
+    keep-polling behaviour (preserves streaming paths).
+    W4 added `Transfer-Encoding: chunked` support on top: a matching
+    header (same case-insensitive single-SP matcher shape) sets
+    `http_chunked`, and the body state routes through
+    `http_state_body_chunked` (src/http.s), which strips chunk framing
+    — hex size lines incl. extensions, per-chunk CRLF, terminal
+    `0\r\n\r\n` with optional trailers — copying only payload into
+    `http_resp_buf` (truncate-at-capacity at 512 B: the buffer holds
+    the prefix, the rest is consumed and discarded so the terminal
+    chunk still terminates cleanly with C=0). Chunks >64 KB would wrap
+    the 16-bit `http_chunk_rem` and desync to the poll-timeout
+    fallback; real servers chunk at 8-32 KB. The body-state handler
+    moved out of `CODE` into the new `HTTP_AUX_CODE` segment (UCI:
+    LOADER; ip65: CRYPTO_OVERLAY — ip65's LOADER had 8 B free), which
+    is also where the header-state reset (`http_hdr_init`) and the
+    `Transfer-Encoding` matcher live. Covered by the chunked /
+    large-header span-mode vectors in `tools/test_http.py`.
   - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
   - Boot banner line 03 still says "rr-net" under ip65 build even
     though Phase 2 made it backend-aware — this is correct/expected
