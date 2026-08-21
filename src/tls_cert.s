@@ -83,6 +83,37 @@ tls_hs_ptr_reset:
         sta tls_hs_ptr+1
         rts
 
+.ifdef TLS_STREAM_DEFRAME
+; =============================================================================
+; tls_cert_stream_finish - finalize the W2 streaming Certificate path
+;
+; The deframer (tls_deframe.s) has copied the complete leaf certificate
+; into cert_buf. Run the same public-key extraction the in-place
+; tls_handle_certificate path uses, against the staged copy.
+;
+; Input:  A/X = leaf certificate length (lo/hi); leaf DER in cert_buf
+; Output: C=0 pubkey extracted to ecdsa_pubkey_x/y (+ curve id set),
+;         C=1 extraction failed (no EC pubkey / unsupported curve)
+;         cert_buf_len = leaf length
+; =============================================================================
+        .import cert_buf
+        .import cert_buf_len
+
+        .export tls_cert_stream_finish
+
+        .segment "TLS_DEFRAME_CODE"
+tls_cert_stream_finish:
+        sta cert_data_len_lo
+        sta cert_buf_len
+        stx cert_data_len_hi
+        stx cert_buf_len+1
+        lda #<cert_buf
+        sta cert_data_ptr
+        lda #>cert_buf
+        sta cert_data_ptr+1
+        jmp x509_extract_pubkey         ; carry propagates as our result
+.endif
+
         .segment "TLS_CODE"
 
 ; =============================================================================

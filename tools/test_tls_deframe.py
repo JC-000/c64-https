@@ -38,12 +38,18 @@ Requires: Python 3.10+, c64_test_harness, VICE x64sc
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import hmac
 import os
 import struct
 import subprocess
 import sys
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 from c64_test_harness import (
     Labels,
@@ -68,6 +74,8 @@ REQUIRED_LABELS = [
     "tls_rec_buf", "tls_rec_len",
     "tls_transcript_init", "tls_transcript_hash", "tls_transcript",
     "tls_s_hs_secret",
+    "cert_buf", "cert_buf_len",
+    "ecdsa_pubkey_x", "ecdsa_pubkey_y", "ecdsa_curve_id",
 ]
 
 # Handshake message types
@@ -114,6 +122,40 @@ def finished_verify_data(traffic_secret: bytes, transcript: bytes) -> bytes:
 
 def hs_msg(msg_type: int, body: bytes) -> bytes:
     return bytes([msg_type]) + len(body).to_bytes(3, "big") + body
+
+
+def cert_msg(entries, ctx: bytes = b"") -> bytes:
+    """RFC 8446 §4.4.2 Certificate message. entries = [(der, ext_bytes)]."""
+    lst = b""
+    for der, ext in entries:
+        lst += len(der).to_bytes(3, "big") + der
+        lst += len(ext).to_bytes(2, "big") + ext
+    body = bytes([len(ctx)]) + ctx + len(lst).to_bytes(3, "big") + lst
+    return hs_msg(HS_CERT, body)
+
+
+def chunks(data: bytes, n: int):
+    return [data[i:i + n] for i in range(0, len(data), n)]
+
+
+def generate_p256_cert():
+    """Self-signed ECDSA P-256 cert (same recipe as test_x509.py)."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com"),
+    ])
+    cert = (x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime.now(datetime.UTC))
+            .not_valid_after(datetime.datetime.now(datetime.UTC)
+                             + datetime.timedelta(days=365))
+            .sign(key, hashes.SHA256()))
+    der = cert.public_bytes(serialization.Encoding.DER)
+    nums = key.public_key().public_numbers()
+    return der, nums.x.to_bytes(32, "big"), nums.y.to_bytes(32, "big")
 
 
 SECRET = hashlib.sha256(b"c64-https lane A deframe secret").digest()
@@ -298,6 +340,113 @@ def run_cases(transport, labels):
     ev = rig.drive([big[:100], big[100:]])
     check("oversize spanning non-Certificate rejected",
           ev == [("err", ERR_TOO_BIG)], f"events={ev}")
+
+    # =======================================================================
+    # W2: streaming Certificate consumer
+    # =======================================================================
+    leaf_der, pub_x, pub_y = generate_p256_cert()
+
+    def check_pubkey(name):
+        got_x = read_bytes(transport, labels["ecdsa_pubkey_x"], 32)
+        got_y = read_bytes(transport, labels["ecdsa_pubkey_y"], 32)
+        curve = read_bytes(transport, labels["ecdsa_curve_id"], 1)[0]
+        check(name + " (pubkey X)", got_x == pub_x,
+              f"got {got_x.hex()[:16]}.. want {pub_x.hex()[:16]}..")
+        check(name + " (pubkey Y)", got_y == pub_y, "")
+        check(name + " (curve id P-256)", curve == 0, f"curve={curve}")
+
+    def clear_pubkey():
+        write_bytes(transport, labels["ecdsa_pubkey_x"], b"\xa5" * 32)
+        write_bytes(transport, labels["ecdsa_pubkey_y"], b"\xa5" * 32)
+        write_bytes(transport, labels["ecdsa_curve_id"], b"\xff")
+
+    # --- 10. Certificate wholly in one record: in-place path unchanged ---
+    cm = cert_msg([(leaf_der, b"")])
+    if len(cm) <= 548:
+        rig.reset()
+        clear_pubkey()
+        ev = rig.drive([cm])
+        check("in-place Certificate", ev == ["msg"], f"events={ev}")
+        check("in-place Certificate pointer = tls_rec_buf",
+              rig.hs_ptr() == labels["tls_rec_buf"],
+              f"ptr=${rig.hs_ptr():04X}")
+        check_pubkey("in-place Certificate")
+        check_transcript("in-place Certificate", cm)
+    else:
+        check("in-place Certificate", False,
+              f"generated cert msg too large for one record ({len(cm)} B)")
+
+    # --- 11. Certificate chain spanning records (streamed leaf) ---
+    # Leaf with real extensions bytes, plus a second (discarded) chain
+    # entry — split into 529-byte-ish record chunks like a real MFL=512
+    # server, but at a deliberately awkward 150 B to hit more edges.
+    chain = cert_msg([(leaf_der, b"\x00\x0b\x00\x01\x04"),
+                      (b"\xaa" * 600, b"\x01\x02\x03")])
+    rig.reset()
+    clear_pubkey()
+    write_bytes(transport, labels["cert_buf"], b"\x5a" * 16)  # stale marker
+    ev = rig.drive(chunks(chain, 150))
+    check("streamed Certificate chain", ev == ["msg"], f"events={ev}")
+    check_pubkey("streamed Certificate chain")
+    got_leaf = read_bytes(transport, labels["cert_buf"], len(leaf_der))
+    check("streamed Certificate leaf staged in cert_buf",
+          got_leaf == leaf_der, "cert_buf contents differ")
+    got_len = read_bytes(transport, labels["cert_buf_len"], 2)
+    check("cert_buf_len set to leaf length",
+          struct.unpack("<H", got_len)[0] == len(leaf_der),
+          f"len={struct.unpack('<H', got_len)[0]} want {len(leaf_der)}")
+    check_transcript("streamed Certificate chain", chain)
+
+    # --- 12. streamed Certificate followed by more messages ---
+    # Real tail pattern: ...Certificate spans records, and the record
+    # carrying its end also carries the next message (here an EE stand-in).
+    combo = chain + m1
+    rig.reset()
+    clear_pubkey()
+    ev = rig.drive(chunks(combo, 200))
+    check("streamed Certificate + trailing message",
+          ev == ["msg", "msg"], f"events={ev}")
+    check_pubkey("streamed Certificate + trailing message")
+    check_transcript("streamed Certificate + trailing message", chain, m1)
+
+    # --- 13. leaf larger than cert_buf: explicit error, before any copy ---
+    # The cap check fires when the entry length completes, i.e. BEFORE a
+    # single cert_data byte is copied — cert_buf must remain untouched.
+    # (A sentinel at cert_buf+1536 cannot test this: that address is
+    # tls_rec_buf[0] under both cfgs, which the record layer writes
+    # legitimately. Watching cert_buf itself is collision-free.)
+    big_cert = cert_msg([(b"\xbb" * 1600, b"")])   # wikipedia-sized leaf
+    rig.reset()
+    write_bytes(transport, labels["cert_buf"], b"\x5a" * 64)
+    ev = rig.drive(chunks(big_cert, 300))
+    check("oversize leaf rejected (certificate too large)",
+          ev == [("err", ERR_CERT_TOO_BIG)], f"events={ev}")
+    check("oversize leaf: cert_buf untouched (guard before copy)",
+          read_bytes(transport, labels["cert_buf"], 64) == b"\x5a" * 64, "")
+
+    # --- 13b. leaf of exactly 1536 B is still accepted by the cap ---
+    # (no EC key inside, so it must fail LATER with CERT_FMT — proving
+    # the boundary itself is not rejected)
+    edge_cert = cert_msg([(b"\xcc" * 1536, b"")])
+    rig.reset()
+    ev = rig.drive(chunks(edge_cert, 300))
+    check("1536 B leaf passes the cap (fails later on extraction)",
+          ev == [("err", ERR_CERT_FMT)], f"events={ev}")
+
+    # --- 14. non-zero certificate_request_context ---
+    bad_ctx = bytearray(cert_msg([(leaf_der, b"")]))
+    bad_ctx[4] = 0x05             # ctx length byte inside the body
+    rig.reset()
+    ev = rig.drive(chunks(bytes(bad_ctx), 150))
+    check("non-zero request context rejected (streamed)",
+          ev == [("err", ERR_CERT_FMT)], f"events={ev}")
+
+    # --- 15. leaf with no EC public key ---
+    junk_cert = cert_msg([(b"\xdd" * 200, b"")])
+    rig.reset()
+    ev = rig.drive(chunks(junk_cert, 80))
+    check("junk leaf rejected (no usable key)",
+          ev == [("err", ERR_CERT_FMT)], f"events={ev}")
 
     return passed, failed
 

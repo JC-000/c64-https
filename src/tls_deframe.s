@@ -91,6 +91,8 @@
 .import tls_handle_certificate
 .import tls_handle_cert_verify
 .import tls_verify_finished
+.import tls_cert_stream_finish
+.import cert_buf
 .import tls_recv_sub_progress
 
 ; Carry buffer: 4-byte handshake header + body. EncryptedExtensions,
@@ -103,12 +105,28 @@ DF_CARRY_MAX_BODY = DF_CARRY_SIZE - 4
 DF_ERR_HDR_LEN    = $01         ; 24-bit length high byte non-zero
 DF_ERR_TOO_BIG    = $02         ; spanning non-Certificate message > carry cap
 DF_ERR_DISPATCH   = $03         ; message handler returned C=1
-DF_ERR_TYPE       = $04         ; unknown handshake message type
+DF_ERR_TYPE      = $04          ; unknown handshake message type
+DF_ERR_CERT_FMT   = $05         ; streamed Certificate malformed / no usable key
+DF_ERR_CERT_TOO_BIG = $06       ; leaf certificate exceeds cert_buf (1536 B)
 
 ; df_mode values
 DF_MODE_HDR       = 0           ; collecting the 4-byte message header
 DF_MODE_CARRY     = 1           ; assembling body into df_carry_buf
 DF_MODE_STREAM    = 2           ; streaming Certificate body (W2)
+
+; Streaming-Certificate sub-states (df_cs_state)
+CS_CTX        = 0               ; certificate_request_context length (1 B, must be 0)
+CS_LIST_LEN   = 1               ; certificate_list length (3 B)
+CS_ENTRY_LEN  = 2               ; CertificateEntry cert_data length (3 B)
+CS_ENTRY_DATA = 3               ; cert_data bytes (leaf -> cert_buf, rest discarded)
+CS_EXT_LEN    = 4               ; per-entry extensions length (2 B)
+CS_EXT_DATA   = 5               ; extension bytes (discarded)
+
+; Leaf staging capacity — keep in step with cert_buf in src/der_decode.s
+; (CERT_BUF_BSS, 1536 B). The cap check runs BEFORE any copy, so an
+; oversize leaf is a clean DF_ERR_CERT_TOO_BIG, never a write past
+; cert_buf+1536.
+DF_CERT_BUF_SIZE  = 1536
 
 .segment "TLS_DEFRAME_CODE"
 
@@ -331,6 +349,10 @@ df_carry_body:
         lda #>df_carry_buf
         adc df_carry_off+1
         sta zp_tmp2
+        lda df_chunk
+        sta df_copy_len
+        lda df_chunk+1
+        sta df_copy_len+1
         jsr df_copy_chunk
 
         ; df_carry_off += chunk
@@ -410,12 +432,286 @@ df_need_data:
         rts
 
 ; =============================================================================
-; W2 streaming Certificate consumer — placeholder in W1: a Certificate
-; that spans records is rejected until the streaming consumer lands.
+; W2 streaming Certificate consumer
+;
+; Parses the Certificate message incrementally as its bytes arrive:
+; certificate_request_context, certificate_list length, then per entry
+; the cert_data length + data + extensions. Only the FIRST entry (the
+; leaf) is copied — into cert_buf — and the moment it is complete the
+; public key is extracted via tls_cert_stream_finish (same extraction
+; as the in-place path). Every later entry is counted and discarded
+; without buffering. Message bytes are folded into the running
+; transcript in bulk at the top of each pump (fold-as-you-go — the
+; bytes are not retained, so there is nothing to fold later).
+;
+; Reached only for a Certificate that is NOT wholly inside one record;
+; the wholly-in-record case dispatches in place through
+; tls_handle_certificate exactly as before.
 ; =============================================================================
 df_stream_begin:
+        lda #$33
+        sta tls_recv_sub_progress
+        lda #DF_MODE_STREAM
+        sta df_mode
+        lda #CS_CTX
+        sta df_cs_state
+        lda #0
+        sta df_cs_idx
+        sta df_cs_entry
+        sta df_cs_off
+        sta df_cs_off+1
+        ; fall through into the body consumer
+
 df_stream_body:
-        lda #DF_ERR_TOO_BIG
+        ; anything to consume this pump?
+        lda df_avail
+        ora df_avail+1
+        bne :+
+        jmp df_need_data
+:
+        ; df_take = min(df_avail, df_msg_rem); fold it all into the
+        ; running transcript up front — the parse loop below consumes
+        ; exactly df_take bytes before returning.
+        jsr df_chunk_min
+        lda df_chunk
+        sta df_take
+        lda df_chunk+1
+        sta df_take+1
+        jsr df_rec_cursor
+        lda df_take
+        sta zp_count
+        lda df_take+1
+        sta zp_count+1
+        jsr tls_transcript_update
+
+@parse:
+        lda df_take
+        ora df_take+1
+        bne @have_bytes
+        ; out of bytes this pump — message complete?
+        lda df_msg_rem
+        ora df_msg_rem+1
+        bne @more_later
+        jmp @msg_end
+@more_later:
+        jmp df_need_data
+
+@have_bytes:
+        lda df_cs_state
+        cmp #CS_ENTRY_DATA
+        bne :+
+        jmp @entry_data
+:       cmp #CS_EXT_DATA
+        bne :+
+        jmp @ext_data
+:       cmp #CS_CTX
+        beq @ctx
+        cmp #CS_LIST_LEN
+        beq @list_len
+        cmp #CS_ENTRY_LEN
+        beq @entry_len
+        ; CS_EXT_LEN
+        jmp @ext_len
+
+@ctx:
+        ; certificate_request_context length — must be 0 for a server
+        ; Certificate (RFC 8446 §4.4.2)
+        jsr df_cs_take_byte
+        beq :+
+        jmp @cert_fmt_err
+:       lda #CS_LIST_LEN
+        sta df_cs_state
+        lda #0
+        sta df_cs_idx
+        jmp @parse
+
+@list_len:
+        ; certificate_list length, 3 bytes. High byte must be 0 (the
+        ; 16-bit message length already caps everything below 64 KB);
+        ; the low 16 bits are not tracked — df_msg_rem bounds the walk.
+        jsr df_cs_take_byte
+        ldx df_cs_idx
+        bne :+
+        cmp #0
+        beq :+
+        jmp @cert_fmt_err
+:       inc df_cs_idx
+        lda df_cs_idx
+        cmp #3
+        bne @parse
+        lda #CS_ENTRY_LEN
+        sta df_cs_state
+        lda #0
+        sta df_cs_idx
+        jmp @parse
+
+@entry_len:
+        ; CertificateEntry cert_data length, 3 bytes big-endian
+        jsr df_cs_take_byte
+        ldx df_cs_idx
+        bne @el_not_first
+        cmp #0
+        beq @el_next
+        jmp @cert_fmt_err       ; entry >= 64 KB
+@el_not_first:
+        cpx #1
+        bne :+
+        sta df_cs_tmp+1         ; length high byte
+        jmp @el_next
+:       sta df_cs_tmp           ; length low byte
+@el_next:
+        inc df_cs_idx
+        lda df_cs_idx
+        cmp #3
+        beq :+
+        jmp @parse
+:       ; length complete
+        lda df_cs_tmp
+        sta df_cs_need
+        lda df_cs_tmp+1
+        sta df_cs_need+1
+        lda #0
+        sta df_cs_idx
+        lda df_cs_entry
+        bne @el_done            ; not the leaf — just skip its bytes
+        ; leaf: must fit cert_buf. Checked BEFORE any copy.
+        lda df_cs_need+1
+        cmp #>DF_CERT_BUF_SIZE
+        bcc @el_leaf_fits
+        bne @el_leaf_too_big
+        lda df_cs_need
+        beq @el_leaf_fits       ; exactly 1536 ($0600) still fits
+@el_leaf_too_big:
+        lda #DF_ERR_CERT_TOO_BIG
+        jmp df_fail
+@el_leaf_fits:
+        lda #0
+        sta df_cs_off
+        sta df_cs_off+1
+@el_done:
+        lda #CS_ENTRY_DATA
+        sta df_cs_state
+        jmp @parse
+
+@entry_data:
+        ; cert_data bytes: copy to cert_buf for the leaf, discard others
+        lda df_cs_need
+        ora df_cs_need+1
+        beq @entry_data_done
+        jsr df_cs_min_take_need ; df_n = min(df_take, df_cs_need)
+        lda df_cs_entry
+        bne @ed_skip_copy
+        ; leaf: copy df_n bytes (record cursor) -> cert_buf + df_cs_off
+        jsr df_rec_cursor
+        clc
+        lda #<cert_buf
+        adc df_cs_off
+        sta zp_tmp1
+        lda #>cert_buf
+        adc df_cs_off+1
+        sta zp_tmp2
+        lda df_n
+        sta df_copy_len
+        lda df_n+1
+        sta df_copy_len+1
+        jsr df_copy_chunk
+        clc
+        lda df_cs_off
+        adc df_n
+        sta df_cs_off
+        lda df_cs_off+1
+        adc df_n+1
+        sta df_cs_off+1
+@ed_skip_copy:
+        jsr df_cs_advance_n     ; consumes df_n, also df_cs_need -= df_n
+        lda df_cs_need
+        ora df_cs_need+1
+        beq @entry_data_done
+        jmp @parse              ; df_take exhausted — loop top handles it
+@entry_data_done:
+        lda df_cs_entry
+        bne @edd_not_leaf
+        ; Leaf complete — extract the public key NOW (remaining chain
+        ; entries only get skipped; nothing else reads cert_buf).
+        lda df_cs_tmp           ; leaf length (df_cs_tmp survives
+        ldx df_cs_tmp+1         ;  CS_ENTRY_DATA untouched)
+        jsr tls_cert_stream_finish
+        bcc @edd_not_leaf
+        jmp @cert_fmt_err       ; no usable EC public key in the leaf
+@edd_not_leaf:
+        lda #CS_EXT_LEN
+        sta df_cs_state
+        lda #0
+        sta df_cs_idx
+        jmp @parse
+
+@ext_len:
+        ; per-entry extensions length, 2 bytes big-endian
+        jsr df_cs_take_byte
+        ldx df_cs_idx
+        bne :+
+        sta df_cs_tmp+1
+        jmp @xl_next
+:       sta df_cs_tmp
+@xl_next:
+        inc df_cs_idx
+        lda df_cs_idx
+        cmp #2
+        beq :+
+        jmp @parse
+:       lda df_cs_tmp
+        sta df_cs_need
+        lda df_cs_tmp+1
+        sta df_cs_need+1
+        lda #0
+        sta df_cs_idx
+        lda df_cs_need
+        ora df_cs_need+1
+        beq @entry_done         ; no extensions
+        lda #CS_EXT_DATA
+        sta df_cs_state
+        jmp @parse
+
+@ext_data:
+        jsr df_cs_min_take_need
+        jsr df_cs_advance_n
+        lda df_cs_need
+        ora df_cs_need+1
+        beq @entry_done
+        jmp @parse
+@entry_done:
+        inc df_cs_entry
+        lda #CS_ENTRY_LEN
+        sta df_cs_state
+        lda #0
+        sta df_cs_idx
+        jmp @parse
+
+@msg_end:
+        ; The declared message length ran out. It must have done so
+        ; cleanly between entries, with at least one entry consumed
+        ; (the leaf, whose extraction already succeeded above).
+        lda df_cs_state
+        cmp #CS_ENTRY_LEN
+        bne @cert_fmt_err
+        lda df_cs_idx
+        bne @cert_fmt_err
+        lda df_cs_entry
+        beq @cert_fmt_err
+        lda #$34
+        sta tls_recv_sub_progress
+        ; message done — reset per-message state, report success.
+        ; (No df_dispatch here: the streamed Certificate was consumed
+        ; incrementally; there is nothing left to hand to a handler.)
+        lda #0
+        sta df_mode
+        sta df_hdr_have
+        sta df_hdr_split
+        clc
+        rts
+
+@cert_fmt_err:
+        lda #DF_ERR_CERT_FMT
         jmp df_fail
 
 ; =============================================================================
@@ -481,10 +777,10 @@ df_consume_chunk:
         sta df_msg_rem+1
         rts
 
-; Copy df_chunk bytes from (zp_ptr) to (zp_tmp1). Clobbers A,X,Y and
+; Copy df_copy_len bytes from (zp_ptr) to (zp_tmp1). Clobbers A,X,Y and
 ; advances both pointers' high bytes across pages.
 df_copy_chunk:
-        ldx df_chunk+1
+        ldx df_copy_len+1
         beq @tail
 @page:  ldy #0
 :       lda (zp_ptr),y
@@ -495,15 +791,93 @@ df_copy_chunk:
         inc zp_tmp2
         dex
         bne @page
-@tail:  lda df_chunk
+@tail:  lda df_copy_len
         beq @done
         ldy #0
 :       lda (zp_ptr),y
         sta (zp_tmp1),y
         iny
-        cpy df_chunk
+        cpy df_copy_len
         bne :-
 @done:  rts
+
+; --- streaming-Certificate helpers ------------------------------------------
+
+; Take one message byte from the record cursor. Returns it in A (flags
+; reflect A). Advances df_rec_off; decrements df_take and df_msg_rem.
+df_cs_take_byte:
+        jsr df_rec_cursor
+        ldy #0
+        lda (zp_ptr),y
+        pha
+        inc df_rec_off
+        bne :+
+        inc df_rec_off+1
+:       lda df_take
+        bne :+
+        dec df_take+1
+:       dec df_take
+        lda df_msg_rem
+        bne :+
+        dec df_msg_rem+1
+:       dec df_msg_rem
+        pla
+        rts
+
+; df_n = min(df_take, df_cs_need). Clobbers A.
+df_cs_min_take_need:
+        lda df_take+1
+        cmp df_cs_need+1
+        bcc @use_take
+        bne @use_need
+        lda df_take
+        cmp df_cs_need
+        bcc @use_take
+@use_need:
+        lda df_cs_need
+        sta df_n
+        lda df_cs_need+1
+        sta df_n+1
+        rts
+@use_take:
+        lda df_take
+        sta df_n
+        lda df_take+1
+        sta df_n+1
+        rts
+
+; Consume df_n message bytes in bulk:
+; df_rec_off += n; df_take -= n; df_msg_rem -= n; df_cs_need -= n.
+df_cs_advance_n:
+        clc
+        lda df_rec_off
+        adc df_n
+        sta df_rec_off
+        lda df_rec_off+1
+        adc df_n+1
+        sta df_rec_off+1
+        sec
+        lda df_take
+        sbc df_n
+        sta df_take
+        lda df_take+1
+        sbc df_n+1
+        sta df_take+1
+        sec
+        lda df_msg_rem
+        sbc df_n
+        sta df_msg_rem
+        lda df_msg_rem+1
+        sbc df_n+1
+        sta df_msg_rem+1
+        sec
+        lda df_cs_need
+        sbc df_n
+        sta df_cs_need
+        lda df_cs_need+1
+        sbc df_n+1
+        sta df_cs_need+1
+        rts
 
 ; =============================================================================
 ; Deframer state — NET_BSS_TAIL region (UCI: ~378 B free under comb)
@@ -521,6 +895,18 @@ df_avail:       .res 2          ; unconsumed bytes in current record
 df_chunk:       .res 2          ; current chunk length
 df_carry_off:   .res 2          ; write offset into df_carry_buf
 df_last_err:    .res 1          ; DF_ERR_* of the last failure
+df_copy_len:    .res 2          ; df_copy_chunk length parameter
+
+; streaming-Certificate consumer state
+df_take:        .res 2          ; message bytes left to parse this pump
+df_n:           .res 2          ; current bulk sub-operation length
+df_cs_state:    .res 1          ; CS_*
+df_cs_idx:      .res 1          ; byte index within a multi-byte field
+df_cs_tmp:      .res 2          ; field accumulator (hi/lo)
+df_cs_need:     .res 2          ; bytes remaining of current data field
+df_cs_entry:    .res 1          ; CertificateEntry counter (0 = leaf)
+df_cs_off:      .res 2          ; leaf write offset into cert_buf
+
 df_carry_buf:   .res DF_CARRY_SIZE
 
 .endif  ; TLS_STREAM_DEFRAME
