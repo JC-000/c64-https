@@ -23,10 +23,14 @@ the package, and #96's implementation extends to it — same algorithm,
 different curve — so the in-tree tests now have no third-party dependency
 for certs either.
 
-Two profiles, matching the listener's ``cert_profile`` selector:
+Three profiles, matching the listener's ``cert_profile`` selector:
 
-    p256 (default) -> certs/server.pem      + certs/server.key
-    p384           -> certs/server-p384.pem + certs/server-p384.key
+    p256 (default) -> certs/server.pem       + certs/server.key
+    p384           -> certs/server-p384.pem  + certs/server-p384.key
+    p256-chain     -> certs/server-chain.pem + certs/server.key
+                      (the p256 leaf + 2 padded throwaway intermediates,
+                      ~3.2 KB total — the real-record-count bench; see
+                      chain_certs.py)
 
 Usable directly, too:
 
@@ -43,12 +47,14 @@ GEN_DIR = REPO_ROOT / "tools" / "package" / "listener"
 
 CN = "www.foo.bar"
 SANS = ["foo.bar", "www.foo.bar"]
-PROFILES = ("p256", "p384")
+PROFILES = ("p256", "p384", "p256-chain")
 
-# Filenames per profile — must stay in step with gen_certs.CURVE_PROFILES.
+# Filenames per profile — must stay in step with gen_certs.CURVE_PROFILES
+# (and, for the chain profile, chain_certs.CHAIN_PEM_NAME + the p256 key).
 _FILENAMES = {
     "p256": ("server.pem", "server.key"),
     "p384": ("server-p384.pem", "server-p384.key"),
+    "p256-chain": ("server-chain.pem", "server.key"),
 }
 
 
@@ -75,6 +81,16 @@ def ensure_certs(profile: str = "p256",
     dependency rather than a bug.
     """
     cert_path, key_path = cert_paths(profile, certs_dir)
+
+    if profile == "p256-chain":
+        # Delegates to chain_certs, which ensures the p256 leaf pair first
+        # and handles its own staleness (the chain must be rebuilt whenever
+        # the leaf regenerates, not only when the chain file is absent).
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        from chain_certs import ensure_chain_certs  # noqa: PLC0415
+        return ensure_chain_certs(certs_dir, force=force, quiet=quiet)
 
     if cert_path.is_file() and key_path.is_file() and not force:
         return cert_path, key_path
