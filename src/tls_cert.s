@@ -18,15 +18,20 @@
 ;                    out of tls_rec_buf to avoid the 8-bit copy loop that
 ;                    truncated records >=256 B like the 352 B Certificate.)
 ;   constants.inc:  TLS_HS_CERTIFICATE, TLS_HS_CERT_VERIFY,
-;                   zp_ptr, zp_count, zp_tmp1, zp_tmp2
+;                   zp_ptr, zp_count, zp_tmp1, zp_tmp2, tls_hs_ptr
 ;
-; ZP usage: zp_ptr ($FB-$FC), zp_count ($FE), zp_tmp1 ($02), zp_tmp2 ($03)
+; ZP usage: zp_ptr ($FB-$FC), zp_count ($FE), zp_tmp1 ($02), zp_tmp2 ($03),
+;           tls_hs_ptr ($3E-$3F) — base pointer to the current handshake
+;           message.  Both handlers reset it to tls_rec_buf at entry via
+;           tls_hs_ptr_reset (W1: the streaming deframer will set it to
+;           an arbitrary base instead and the resets become conditional).
 
         .include "constants.inc"
 
         .export tls_handle_certificate
         .export x509_extract_pubkey
         .export tls_handle_cert_verify
+        .export tls_hs_ptr_reset
         .export cv_sig_scheme           ; Phase 4b: exported for negotiation tests
 
         .import tls_rec_buf
@@ -59,21 +64,42 @@
         ; failure happened.
         .import tls_recv_sub_progress
 
+; =============================================================================
+; tls_hs_ptr_reset - point tls_hs_ptr at tls_rec_buf
+;
+; The pre-deframer contract: every handshake message starts at
+; tls_rec_buf[0].  Handlers call this at entry so that direct callers
+; (tools/test_tls_p384_negotiation.py, tools/test_finished_verify.py —
+; both drive handlers over DMA with no dispatcher in the loop) keep
+; working unchanged.  Lives in CRYPTO_CODE, not TLS_CODE: the NET_CODE
+; region that hosts TLS_CODE under UCI has ~8 bytes of slack.
+; Clobbers: A
+; =============================================================================
+        .segment "CRYPTO_CODE"
+tls_hs_ptr_reset:
+        lda #<tls_rec_buf
+        sta tls_hs_ptr
+        lda #>tls_rec_buf
+        sta tls_hs_ptr+1
+        rts
+
         .segment "TLS_CODE"
 
 ; =============================================================================
 ; tls_handle_certificate - Process TLS 1.3 Certificate message
 ;
-; Input: tls_rec_buf contains the Certificate handshake message
+; Input: (tls_hs_ptr) points at the Certificate handshake message
+;        (reset to tls_rec_buf at entry — see tls_hs_ptr_reset)
 ;        tls_rec_len = message length
 ; Output: C=0 success (leaf cert pubkey extracted to ecdsa_pubkey_x/y)
 ;         C=1 error (bad format, unsupported key type)
 ; =============================================================================
 tls_handle_certificate:
+        jsr tls_hs_ptr_reset
         ldy #0
 
         ; --- Verify handshake type = 11 (Certificate) ---
-        lda tls_rec_buf
+        lda (tls_hs_ptr),y
         cmp #TLS_HS_CERTIFICATE
         beq @cert_type_ok
         jmp @cert_error
@@ -87,42 +113,42 @@ tls_handle_certificate:
 
         ; --- certificate_request_context length [4] ---
         ; For server Certificate, this is always 0
-        lda tls_rec_buf,y
+        lda (tls_hs_ptr),y
         bne @cert_error             ; non-zero context length = unexpected
         iny                         ; Y=5
 
         ; --- certificate_list length [5-7] (24-bit, skip high byte) ---
         ; High byte must be 0 (certs < 64K)
-        lda tls_rec_buf,y
+        lda (tls_hs_ptr),y
         bne @cert_error             ; cert list > 65535 bytes
         iny                         ; Y=6
-        lda tls_rec_buf,y            ; cert_list_len high byte (of 16-bit)
+        lda (tls_hs_ptr),y           ; cert_list_len high byte (of 16-bit)
         sta cert_list_len_hi
         iny                         ; Y=7
-        lda tls_rec_buf,y            ; cert_list_len low byte
+        lda (tls_hs_ptr),y           ; cert_list_len low byte
         sta cert_list_len_lo
         iny                         ; Y=8
 
         ; --- First CertificateEntry ---
         ; cert_data length [8-10] (24-bit)
-        lda tls_rec_buf,y            ; high byte (must be 0)
+        lda (tls_hs_ptr),y           ; high byte (must be 0)
         bne @cert_error
         iny                         ; Y=9
-        lda tls_rec_buf,y
+        lda (tls_hs_ptr),y
         sta cert_data_len_hi
         iny                         ; Y=10
-        lda tls_rec_buf,y
+        lda (tls_hs_ptr),y
         sta cert_data_len_lo
         iny                         ; Y=11
 
-        ; cert_data starts at tls_rec_buf + Y
+        ; cert_data starts at (tls_hs_ptr) + Y
         ; Store pointer to cert data
         tya
         clc
-        adc #<tls_rec_buf
+        adc tls_hs_ptr
         sta cert_data_ptr
         lda #0
-        adc #>tls_rec_buf
+        adc tls_hs_ptr+1
         sta cert_data_ptr+1
 
         ; Save cert_data start offset for extension skipping later
@@ -156,10 +182,10 @@ tls_handle_certificate:
         ; Read extensions length (2 bytes) at cert_parse_pos
         ; For simplicity, assume offset < 256 for now (typical small certs)
         ldy zp_tmp1
-        lda tls_rec_buf,y
+        lda (tls_hs_ptr),y
         sta cert_ext_len_hi
         iny
-        lda tls_rec_buf,y
+        lda (tls_hs_ptr),y
         sta cert_ext_len_lo
         iny
 
@@ -527,18 +553,21 @@ x509_extract_pubkey:
 ; =============================================================================
 ; tls_handle_cert_verify - Process TLS 1.3 CertificateVerify message
 ;
-; Input: tls_rec_buf contains the CertificateVerify handshake message
+; Input: (tls_hs_ptr) points at the CertificateVerify handshake message
+;        (reset to tls_rec_buf at entry — see tls_hs_ptr_reset)
 ;        tls_transcript (32 bytes) = current transcript hash
 ;        Server's public key already in ecdsa_pubkey_x/y
 ; Output: C=0 signature valid, C=1 invalid
 ; =============================================================================
 tls_handle_cert_verify:
+        jsr tls_hs_ptr_reset
         ; stage marker: entered handler
         lda #$20
         sta tls_recv_sub_progress
 
         ; --- Verify handshake type = 15 (CertificateVerify) ---
-        lda tls_rec_buf
+        ldy #0
+        lda (tls_hs_ptr),y
         cmp #TLS_HS_CERT_VERIFY
         beq @cv_type_ok
         jmp @cv_error
@@ -552,12 +581,14 @@ tls_handle_cert_verify:
         ; P-384 — actual P-384 verify dispatch is filled in by Phase 4a
         ; through the existing ecdsa_verify entry (curve_id-switched).
         ; cv_sig_scheme := high byte - $04, so 0 = P-256, 1 = P-384.
-        lda tls_rec_buf+5
+        ldy #5
+        lda (tls_hs_ptr),y
         cmp #$03
         beq :+
         jmp @cv_error               ; low byte must be 03 for both
 :
-        lda tls_rec_buf+4
+        dey                         ; Y=4
+        lda (tls_hs_ptr),y
         sec
         sbc #$04
         cmp #2
@@ -585,18 +616,23 @@ tls_handle_cert_verify:
 @cv_p256_path:
 
         ; --- Read signature length [6-7] (big-endian) ---
-        lda tls_rec_buf+6            ; high byte (expect 0)
+        ldy #6
+        lda (tls_hs_ptr),y           ; high byte (expect 0)
         beq :+
         jmp @cv_error               ; signature > 255 bytes
 :
-        lda tls_rec_buf+7            ; low byte
+        iny                         ; Y=7
+        lda (tls_hs_ptr),y           ; low byte
         sta cv_sig_len
 
         ; --- Parse DER signature into ecdsa_sig_r/s ---
-        ; Signature data starts at tls_rec_buf+8
-        lda #<(tls_rec_buf+8)
+        ; Signature data starts at (tls_hs_ptr)+8
+        lda tls_hs_ptr
+        clc
+        adc #8
         sta zp_ptr
-        lda #>(tls_rec_buf+8)
+        lda tls_hs_ptr+1
+        adc #0
         sta zp_ptr+1
         lda cv_sig_len
         sta zp_count

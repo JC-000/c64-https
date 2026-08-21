@@ -55,7 +55,7 @@
 .import tls_app_write_iv
 .import tls_app_read_key
 .import tls_app_read_iv
-.import tls_rec_buf
+.import tls_hs_ptr_reset
 .import input_buffer
 
 ; HMAC BSS state (data.asm)
@@ -709,13 +709,23 @@ tls_compute_finished:
 ;
 ; Input: tls_s_hs_secret = server handshake traffic secret
 ;        tls_transcript = transcript hash up to (but not including) Finished
-;        tls_rec_buf+4 = received verify_data (32 bytes, after 4-byte HS header)
+;        (tls_hs_ptr)+4 = received verify_data (32 bytes, after 4-byte HS
+;        header).  The pointer is reset to tls_rec_buf at entry (see
+;        tls_hs_ptr_reset) so direct callers — tools/test_finished_verify.py
+;        drives this routine over DMA with no dispatcher in the loop —
+;        keep the historical tls_rec_buf+4 contract unchanged.
 ; Output: C=0 if match (server Finished is valid)
 ;         C=1 if mismatch (verification failed)
 ;
 ; Computes expected verify_data and compares with received (constant-time).
+;
+; Placed in CRYPTO_CODE rather than TLS_CODE: the NET_CODE region that
+; hosts TLS_CODE under UCI is within a few bytes of full, and this
+; routine has no locality tie to the rest of the key schedule.
 ; =============================================================================
+.segment "CRYPTO_CODE"
 tls_verify_finished:
+        jsr tls_hs_ptr_reset
         ; Set hkdf_prk = server handshake traffic secret
         ldx #31
 @vf_c1:
@@ -727,16 +737,18 @@ tls_verify_finished:
         ; Compute expected Finished
         jsr tls_compute_finished
 
-        ; Constant-time comparison of tls_verify_data vs tls_rec_buf+4
+        ; Constant-time comparison of tls_verify_data vs (tls_hs_ptr)+4
         ; Accumulate differences in A (OR of all XOR bytes)
         lda #0
         sta zp_tmp1                     ; clear accumulator
         tax                             ; X = index
+        ldy #4                          ; received verify_data offset
 @vf_cmp:
-        lda tls_verify_data,x
-        eor tls_rec_buf+4,x
+        lda (tls_hs_ptr),y
+        eor tls_verify_data,x
         ora zp_tmp1                     ; accumulate differences
         sta zp_tmp1
+        iny
         inx
         cpx #32
         bne @vf_cmp
