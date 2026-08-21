@@ -1630,6 +1630,7 @@ def main() -> int:
         phase_poll = float(os.environ.get("PHASE_POLL", "0.5"))
         phase_log: "list[tuple[str, float]]" = []
         cur_phase = None
+        sentinel_seen = False
         while time.time() < deadline:
             time.sleep(phase_poll if phase_timing else 0.5)
             blob = transport.read_memory(SENTINEL_ADDR, 2)
@@ -1651,7 +1652,14 @@ def main() -> int:
                     print(f"  phase +{phase_log[-1][1]:7.1f}s  {phase}")
             if sentinel == SENTINEL_VALUE:
                 print("  sentinel set — routine complete")
+                sentinel_seen = True
                 break
+        # NOTE: this used to be the `else:` of the while-loop (while/else —
+        # runs only when the loop exhausts without break). The W0 phase-timing
+        # commit inserted the `if phase_timing:` block between the loop and
+        # its `else`, silently rebinding the `else` to the `if`: a successful
+        # default-mode run then reported TIMEOUT, and a PHASE_TIMING=1 run
+        # never took the TIMEOUT path at all. Track the break explicitly.
         if phase_timing:
             table = _format_phase_log(phase_log)
             print("\n=== Phase timing (W0) ===")
@@ -1662,7 +1670,7 @@ def main() -> int:
                     f"turbo={TURBO_MHZ}MHz poll={phase_poll}s\n\n{table}\n")
             except Exception as exc:      # diagnostics must never fail the run
                 print(f"  (could not write phase_timing.txt: {exc})")
-        else:
+        if not sentinel_seen:
             print(f"TIMEOUT: sentinel not set after "
                   f"{SENTINEL_POLL_TIMEOUT:.0f}s "
                   f"(progress=0x{last_progress:02X})", file=sys.stderr)
