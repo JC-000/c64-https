@@ -95,6 +95,7 @@ from c64_test_harness.labels import Labels
 
 from _memory_policy import build_policy_and_arbiter_with_overlay_carveout
 from _reu_preflight import ReuPreflightError, preflight_reu
+from _temp_gc import gc_temp
 
 # Pure helpers shared with the local rig (all side-effect free; importing
 # the module only evaluates env defaults, it drives no hardware).
@@ -410,6 +411,12 @@ def main() -> int:
         print("Enabling UCI...")
         enable_uci(client)
         uci_enabled = True
+
+        # Userspace /Temp GC (fw <= 3.14d leaks one attachment per REST
+        # body; ~15 runs wedge REST + the UCI bridge together). Mirrors
+        # the GideonZ/1541ultimate#686 cleanup until a released firmware
+        # carries it. Best-effort; C64_SKIP_TEMP_GC=1 bypasses.
+        gc_temp(HOST)
 
         # Wedged-runner pre-detect (see rig_https_local for the rationale).
         try:
