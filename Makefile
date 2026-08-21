@@ -79,6 +79,13 @@ endif
 ifdef HTTPS_PORT
 CA65FLAGS += -D HTTPS_PORT=$(HTTPS_PORT)
 endif
+# Optional HTTPS target-host override (src/boot.s defaults to www.foo.bar).
+# `make HTTPS_HOST=github.com` retargets the GET + SNI + DNS lookup.
+# ca65's -D accepts numeric values only, so the hostname travels via a
+# generated include (build/https_host.inc, reached through `-I build`).
+# The generator rule is content-compared: changing HTTPS_HOST= rebuilds
+# boot.o with no `make clean`, and an unchanged value touches nothing.
+HTTPS_HOST ?= www.foo.bar
 # VIC-II blanking around the CPU-bound crypto primitives (src/vic.s).
 # ON by default and that is what ships; `make VIC_BLANK=0` degrades
 # vic_blank/vic_unblank to bare RTS so the badline tax can be measured
@@ -399,6 +406,29 @@ build/%.o: src/%.s
 # (Only meaningful under BACKEND=ip65 — the UCI build never assembles
 # this object, and never requests $(IP65_BIN).)
 build/net/ip65/ip65_blob.o: $(IP65_BIN)
+
+# src/boot.s pulls the HTTPS target hostname from this generated include
+# (see the HTTPS_HOST block near the top). FORCE makes the rule run on
+# every make so a changed HTTPS_HOST= is noticed; the content compare
+# leaves the file's mtime alone when the value is unchanged, so boot.o
+# is NOT rebuilt in that case. On a change it also deletes boot.o
+# outright: this Make (3.81 on macOS) compares mtimes at 1-second
+# resolution, so two `make HTTPS_HOST=...` runs inside the same second
+# would otherwise leave the previous host's boot.o counting as up to
+# date — measured, not hypothetical. The LINK step keeps the repo-wide
+# same-second caveat (see "make clean when you change flags" in
+# CLAUDE.md): scripted back-to-back host switches inside one second can
+# skip the relink, so check the PRG hash when a build matters. Deleting
+# $(PRG) here does NOT fix that — make's cached stat of the goal leaves
+# it "up to date" and the file simply vanishes (measured too).
+build/https_host.inc: FORCE
+	@mkdir -p build
+	@printf '.define HTTPS_HOST_STR "%s"\n' '$(HTTPS_HOST)' > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@ && rm -f build/boot.o; fi
+
+FORCE:
+
+build/boot.o: build/https_host.inc
 
 # Phase C.3: c64-nist-curves sibling archive (libs/nistcurves/ submodule).
 # Phase 1.5 split: produces TWO archives, one per overlay half. The

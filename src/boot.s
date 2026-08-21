@@ -11,6 +11,12 @@
         HTTPS_PORT = 443
         .endif
 
+        ; HTTPS target host. `make HTTPS_HOST=github.com` writes the
+        ; string into build/https_host.inc (ca65 -D is numeric-only, so
+        ; a string override must travel via a generated include). The
+        ; default is www.foo.bar and the default build byte-identical.
+        .include "https_host.inc"
+
         ; ---- exports: entry + print helpers ----
         .export start
         .export main_loop
@@ -93,8 +99,8 @@
         ; ---- exports: hostnames / path data ----
         .export http_host_zimmers
         .export http_host_zimmers_len
-        .export http_host_foo
-        .export http_host_foo_len
+        .export http_host_target
+        .export http_host_target_len
         .export http_path_root
 
         ; ---- exports: local BSS ----
@@ -519,11 +525,11 @@ do_https_get:
         jsr print_string
 
         ; --- set HTTP host/path/port ---
-        lda #<http_host_foo
+        lda #<http_host_target
         sta http_host_ptr
-        lda #>http_host_foo
+        lda #>http_host_target
         sta http_host_ptr+1
-        lda #http_host_foo_len
+        lda #http_host_target_len
         sta http_host_len
 
         lda #<http_path_root
@@ -541,7 +547,7 @@ do_https_get:
         ; --- copy hostname into tls_hostname for SNI ---
         ldx #0
 @copy_host:
-        lda http_host_foo,x
+        lda http_host_target,x
         beq @copy_done
         sta tls_hostname,x
         inx
@@ -553,8 +559,8 @@ do_https_get:
         stx tls_hostname_len
 
         ; --- DNS resolve ---
-        lda #<http_host_foo
-        ldx #>http_host_foo
+        lda #<http_host_target
+        ldx #>http_host_target
         jsr net_dns_resolve
         bcc @dns_ok
 
@@ -1194,10 +1200,13 @@ http_host_zimmers:
         .byte 0
 http_host_zimmers_len = 15
 
-http_host_foo:
-        .byte "www.foo.bar"
+http_host_target:
+        .byte HTTPS_HOST_STR
         .byte 0
-http_host_foo_len = 11
+http_host_target_len = * - http_host_target - 1
+        ; the SNI copy loop below guards at 63 chars; refuse at build
+        ; time rather than truncating at runtime
+        .assert http_host_target_len <= 63, error, "HTTPS_HOST exceeds the 63-char SNI guard"
 
 http_path_root:
         .byte "/"
