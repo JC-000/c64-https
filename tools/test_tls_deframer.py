@@ -409,6 +409,31 @@ def build_scenarios(cert_der, pubkey_xy):
         hashlib.sha256(cert).digest(),
     ))
 
+    # --- deframer: MFL-512 real-server record shape ---
+    # Records carrying EXACTLY 512 content bytes (inner plaintext 513: the
+    # inner content-type byte sits at index 512, i.e. page 2 of tls_rec_buf).
+    # This is what a max_fragment_length-honoring server (github.com) sends,
+    # and it is one byte past every local fixture: the record layer's
+    # inner-type extraction had a two-page dispatch that misread index 512
+    # as tls_rec_buf[256], aborting the handshake with a bogus content type.
+    # Found live against github.com 2026-08-21; keep this vector so the
+    # class stays covered.
+    # The vector must be adversarial BY CONSTRUCTION: the buggy dispatch read
+    # tls_rec_buf[256] as the inner type, so a record whose content byte 256
+    # happens to be $16 passes by luck (the first draft of this vector did).
+    # A 512-byte EE message padded with zeros pins content[256] to $00.
+    ee_big = hs_message(TLS_HS_ENCRYPTED_EXT, b"\x01\xfa" + b"\x00" * 506)
+    assert len(ee_big) == 512
+    assert ee_big[256] != TLS_CT_HANDSHAKE
+    scenarios.append(Scenario(
+        "deframer/mfl512_full_records",
+        "deframer",
+        chunk_bytes(ee_big + cert, [512]),
+        (px, py),
+        hashlib.sha256(ee_big + cert).digest(),
+        n_msgs=2,
+    ))
+
     # --- deframer (d): oversized leaf must error, not overflow ---
     # A single-entry Certificate whose cert_data exceeds cert_buf (1536 B).
     big_leaf = b"\x30\x82" + (CERT_BUF_MAX + 200).to_bytes(2, "big") + \
