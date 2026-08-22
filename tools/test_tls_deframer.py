@@ -23,8 +23,10 @@ the handshake content stream.  TLS records fragment that stream *arbitrarily*:
       inside the 4-byte message header,
   (c) the Certificate message (~2.7 KB, multi-cert chain) spans ~6 records;
       only the first (leaf) cert must be captured, the rest counted+discarded,
-  (d) a leaf certificate larger than ``cert_buf`` (1536 B) must produce a clean
-      "certificate too large" error, never a buffer overflow.
+  (d) a leaf certificate larger than ``cert_buf`` (2048 B UCI / 1536 B ip65,
+      read from labels.txt ``cert_buf_size``) must produce a clean
+      "certificate too large" error, never a buffer overflow — while a
+      Wikipedia-sized ~1636 B leaf must be ACCEPTED on the UCI build.
 
 The current code (``tls13.s`` ~555-660) assumes exactly one message per record.
 Every scenario below that is marked ``[deframer]`` therefore FAILS on the
@@ -134,8 +136,13 @@ TLS_HS_ENCRYPTED_EXT = 8
 TLS_HS_CERTIFICATE = 11
 TLS_STATE_CERTIFICATE = 4          # >= ENCRYPTED_EXT(3): decrypt with hs read keys
 
-# cert_buf capacity from the sprint plan / src/der_decode.s:588.
-CERT_BUF_MAX = 1536
+# cert_buf capacity — resolved in main() from build/labels.txt
+# (`cert_buf_size`, an absolute export in src/exports.s: 2048 under UCI,
+# 1536 under ip65 — src/net/<backend>/net_tuning.inc). Never hardcode
+# either number here: the Wikipedia growth made the size
+# backend-conditional, and the oversize/boundary vectors below scale
+# with it.
+CERT_BUF_MAX = None
 
 # Fixed handshake read key/iv/seq so every record is reproducible.
 HS_READ_KEY = bytes((i * 7 + 3) & 0xFF for i in range(32))
@@ -155,6 +162,7 @@ REQUIRED_LABELS = [
     "tls_transcript", "tls_transcript_init", "tls_transcript_hash",
     "ecdsa_pubkey_x", "ecdsa_pubkey_y",
     "cert_buf",
+    "cert_buf_size",
     "sqtab_init",
 ]
 
@@ -247,6 +255,16 @@ def reset_recv_state(transport, labels) -> None:
     write_bytes(transport, labels["tls_recv_count"], [0, 0])
     write_bytes(transport, labels["tls_read_seq"], b"\x00" * 8)
     write_bytes(transport, labels["tls_state"], [TLS_STATE_CERTIFICATE])
+    # Fresh-connection deframer reset, exactly as tls_connect does after
+    # ServerHello (src/tls13.s @ `jsr tls_deframe_init`). Each scenario
+    # is a fresh simulated connection; without this, a scenario that
+    # aborts MID-STREAM (the oversized-leaf reject) leaks DF_MODE_STREAM
+    # state into the next scenario's flight — invisible while the
+    # error vector ran last, real once anything follows it. Conditional
+    # because pre-deframer / ip65 builds export no such symbol (their
+    # deframer scenarios xfail by design).
+    if labels.address("tls_deframe_init") is not None:
+        jsr(transport, labels["tls_deframe_init"], timeout=30.0)
 
 
 def ring_is_empty(transport, labels) -> bool:
@@ -321,7 +339,7 @@ class Scenario:
         self.n_msgs = n_msgs                    # handshake messages in flight
 
 
-def build_scenarios(cert_der, pubkey_xy):
+def build_scenarios(cert_der, pubkey_xy, wiki_leaf=None):
     ee = encrypted_extensions()
     cert = certificate_message(cert_der)
     px, py = pubkey_xy
@@ -435,18 +453,46 @@ def build_scenarios(cert_der, pubkey_xy):
     ))
 
     # --- deframer (d): oversized leaf must error, not overflow ---
-    # A single-entry Certificate whose cert_data exceeds cert_buf (1536 B).
+    # A single-entry Certificate whose cert_data exceeds cert_buf
+    # (CERT_BUF_MAX, read from labels.txt — 2048 UCI / 1536 ip65).
     big_leaf = b"\x30\x82" + (CERT_BUF_MAX + 200).to_bytes(2, "big") + \
         bytes((i * 3) & 0xFF for i in range(CERT_BUF_MAX + 160))
     big_cert = certificate_message(big_leaf)
     scenarios.append(Scenario(
         "deframer/oversized_leaf_errors",
         "deframer",
-        chunk_bytes(big_cert, [480, 480, 480, 480]),
+        chunk_bytes(big_cert, [480, 480, 480, 480, 480]),
         None,                                   # must NOT extract a pubkey
         None,                                   # transcript not asserted
         expect_overflow_safe=True,
     ))
+
+    # --- wiki gate: a ~1636 B leaf (en.wikipedia.org's leaf size) ---
+    # The whole point of the 2048 B UCI cert_buf: a leaf bigger than the
+    # historical 1536 B cap but under 2048 must be ACCEPTED and fully
+    # parsed (real minted P-256 cert, pubkey extraction is the oracle).
+    # On a 1536 B build (ip65 cap) the same leaf must instead be the
+    # clean TOO_BIG reject, cert_buf untouched.
+    if wiki_leaf is not None:
+        wleaf_der, (wx, wy) = wiki_leaf
+        wcert = certificate_message(wleaf_der)
+        if len(wleaf_der) <= CERT_BUF_MAX:
+            scenarios.append(Scenario(
+                "deframer/wikipedia_sized_leaf_accepted",
+                "deframer",
+                chunk_bytes(wcert, [480, 480, 480]),
+                (wx, wy),
+                hashlib.sha256(wcert).digest(),
+            ))
+        else:
+            scenarios.append(Scenario(
+                "deframer/wikipedia_sized_leaf_errors",
+                "deframer",
+                chunk_bytes(wcert, [480, 480, 480]),
+                None,
+                None,
+                expect_overflow_safe=True,
+            ))
 
     return scenarios
 
@@ -526,7 +572,7 @@ def run_scenario(transport, labels, sc):
     return (not problems), detail
 
 
-def run_tests(transport, labels, cert_der, pubkey_xy):
+def run_tests(transport, labels, cert_der, pubkey_xy, wiki_leaf=None):
     print("\n  Initializing sqtab (Poly1305 multiply table)...")
     jsr(transport, labels["sqtab_init"], timeout=60.0)
 
@@ -534,7 +580,7 @@ def run_tests(transport, labels, cert_der, pubkey_xy):
     write_bytes(transport, labels["net_poll"], [RTS])
     print("  net_poll patched to RTS (ring-driven, no live NIC)")
 
-    scenarios = build_scenarios(cert_der, pubkey_xy)
+    scenarios = build_scenarios(cert_der, pubkey_xy, wiki_leaf)
 
     plumb_pass = plumb_fail = defr_pass = defr_fail = 0
     for sc in scenarios:
@@ -573,6 +619,36 @@ def load_cert_fixture():
     cert = load_pem_x509_certificate(pem)
     der = cert.public_bytes(serialization.Encoding.DER)
     nums = cert.public_key().public_numbers()
+    return der, (nums.x.to_bytes(32, "big"), nums.y.to_bytes(32, "big"))
+
+
+def build_wiki_leaf(target: int = 1636):
+    """Mint a real, parseable ~1636 B P-256 leaf (en.wikipedia.org's size).
+
+    Uses the padded-cert generator from tools/https_e2e/chain_certs.py
+    (standard v3 shape: SPKI before the padding extension, so the C64's
+    skip-and-seek parser extracts the key the same way it does for the
+    repo cert). The key is minted fresh per run, so the expected pubkey
+    comes from the cert itself rather than a fixed vector; everything
+    else about the scenario stays deterministic. Sizing converges in a
+    couple of passes (the ECDSA signature length wobbles by ±2 B, which
+    is irrelevant to the gate — anything in (1536, 2048] exercises it).
+    """
+    from cryptography.x509 import load_der_x509_certificate
+
+    sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools", "https_e2e"))
+    from chain_certs import build_padded_intermediate  # noqa: PLC0415
+
+    pad = 1200
+    der = build_padded_intermediate("C64 Wiki-Sized Leaf", pad)
+    for _ in range(4):
+        if len(der) == target:
+            break
+        pad += target - len(der)
+        der = build_padded_intermediate("C64 Wiki-Sized Leaf", pad)
+    if not (1536 < len(der) <= 2048):
+        raise RuntimeError(f"wiki leaf sizing failed: {len(der)} B")
+    nums = load_der_x509_certificate(der).public_key().public_numbers()
     return der, (nums.x.to_bytes(32, "big"), nums.y.to_bytes(32, "big"))
 
 
@@ -615,9 +691,16 @@ def main() -> int:
         print(f"FATAL: required label(s) not found: {', '.join(missing)}")
         return 1
 
+    global CERT_BUF_MAX
+    CERT_BUF_MAX = labels.address("cert_buf_size")
+    print(f"  cert_buf capacity: {CERT_BUF_MAX} B (labels.txt cert_buf_size)")
+
     cert_der, pubkey_xy = load_cert_fixture()
     print(f"  Test cert: {len(cert_der)} B DER, "
           f"pubkey x={pubkey_xy[0][:6].hex()}...")
+    wiki_leaf = build_wiki_leaf()
+    print(f"  Wiki-sized leaf: {len(wiki_leaf[0])} B DER "
+          f"({'fits' if len(wiki_leaf[0]) <= CERT_BUF_MAX else 'over cap'})")
 
     config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True,
                                  sound=False)
@@ -636,7 +719,8 @@ def main() -> int:
 
         print("\n=== Deframer scenarios ===")
         try:
-            pp, pf, dp, df = run_tests(transport, labels, cert_der, pubkey_xy)
+            pp, pf, dp, df = run_tests(transport, labels, cert_der,
+                                       pubkey_xy, wiki_leaf)
         finally:
             mgr.release(inst)
 

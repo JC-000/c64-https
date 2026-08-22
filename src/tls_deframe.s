@@ -68,6 +68,7 @@
 ; ip65 has neither the code nor the BSS headroom — see the Makefile).
 
 .include "constants.inc"
+.include "net_tuning.inc"       ; CERT_BUF_SIZE (2048 UCI / 1536 ip65)
 
 .ifdef TLS_STREAM_DEFRAME
 
@@ -107,7 +108,7 @@ DF_ERR_TOO_BIG    = $02         ; spanning non-Certificate message > carry cap
 DF_ERR_DISPATCH   = $03         ; message handler returned C=1
 DF_ERR_TYPE      = $04          ; unknown handshake message type
 DF_ERR_CERT_FMT   = $05         ; streamed Certificate malformed / no usable key
-DF_ERR_CERT_TOO_BIG = $06       ; leaf certificate exceeds cert_buf (1536 B)
+DF_ERR_CERT_TOO_BIG = $06       ; leaf certificate exceeds cert_buf (CERT_BUF_SIZE)
 
 ; df_mode values
 DF_MODE_HDR       = 0           ; collecting the 4-byte message header
@@ -122,11 +123,16 @@ CS_ENTRY_DATA = 3               ; cert_data bytes (leaf -> cert_buf, rest discar
 CS_EXT_LEN    = 4               ; per-entry extensions length (2 B)
 CS_EXT_DATA   = 5               ; extension bytes (discarded)
 
-; Leaf staging capacity — keep in step with cert_buf in src/der_decode.s
-; (CERT_BUF_BSS, 1536 B). The cap check runs BEFORE any copy, so an
+; Leaf staging capacity — cert_buf in src/der_decode.s (CERT_BUF_BSS),
+; sized per-backend by net_tuning.inc (2048 UCI / 1536 ip65), so the
+; two can never drift. The cap check runs BEFORE any copy, so an
 ; oversize leaf is a clean DF_ERR_CERT_TOO_BIG, never a write past
-; cert_buf+1536.
-DF_CERT_BUF_SIZE  = 1536
+; cert_buf+CERT_BUF_SIZE.
+DF_CERT_BUF_SIZE  = CERT_BUF_SIZE
+; The @el_leaf_fits comparison below tests only the high byte plus a
+; low-byte-of-need == 0 check, which is exact ONLY while the cap's own
+; low byte is zero. Keep it a whole number of pages or rewrite the check.
+.assert (DF_CERT_BUF_SIZE .MOD 256) = 0, error, "DF_CERT_BUF_SIZE must be page-aligned (leaf cap check assumes low byte 0)"
 
 .segment "TLS_DEFRAME_CODE"
 
@@ -580,7 +586,7 @@ df_stream_body:
         bcc @el_leaf_fits
         bne @el_leaf_too_big
         lda df_cs_need
-        beq @el_leaf_fits       ; exactly 1536 ($0600) still fits
+        beq @el_leaf_fits       ; exactly DF_CERT_BUF_SIZE still fits
 @el_leaf_too_big:
         lda #DF_ERR_CERT_TOO_BIG
         jmp df_fail
