@@ -18,6 +18,12 @@
         .export print_null_terminated
         .export print_resp_body
 
+        ; ---- Lane G viewer hook (UCI only; see do_https_get) ----
+.ifdef BACKEND_UCI
+        .import viewer_enter
+        .import http_body_sink
+.endif
+
         ; ---- exports: REU multiply table routines ----
         ; Phase C.5: under USE_X25519_SIBLING=1 the sibling's
         ; libs/x25519/src/x25519_init.s owns reu_mul_init +
@@ -633,6 +639,16 @@ do_https_get:
         ; body whenever it arrived as a second TLS record.
         jsr http_recv_body
 
+.ifdef BACKEND_UCI
+        ; Lane G stretch-goal hook: when the body sink routed the
+        ; response into the REU (http_body_sink != 0), drop into the
+        ; scrollable viewer instead of printing the bounce buffer.
+        lda http_body_sink
+        beq @print_body
+        jsr viewer_enter
+        jmp @close
+@print_body:
+.endif
         ; display response body
         jsr print_resp_body
 
