@@ -358,11 +358,21 @@ http_resp_len:          .res 2
 .export http_line_idx
 .export http_line_buf
 .export http_content_length
+.export http_cl_valid
+.export http_body_total
 http_parse_state:       .res 1
 http_hdr_match:         .res 1
 http_line_idx:          .res 1
 http_line_buf:          .res 32
-http_content_length:    .res 2          ; 16-bit; $FFFF when header absent
+; W4 body-termination fix: Content-Length is 24-bit (real bodies exceed
+; 64 KB) and its "absent" state is a separate valid-flag byte instead of
+; the historical $FFFF magic (a 24-bit magic could collide with a real
+; length).  http_body_total counts body bytes CONSUMED — not stored — so
+; the Content-Length termination fires even after the 512 B stored copy
+; truncates (the browserleaks.com hang; see src/http.s @state_body).
+http_content_length:    .res 3          ; 24-bit LE; meaningful iff http_cl_valid=1
+http_cl_valid:          .res 1          ; 1 = Content-Length header seen
+http_body_total:        .res 3          ; 24-bit LE count of body bytes consumed
 
 ; -----------------------------------------------------------------------------
 ; Application data pointers (for tls_send)

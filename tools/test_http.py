@@ -357,6 +357,180 @@ def test_recv_response_with_body(transport, labels):
     return passed, failed
 
 
+def _load_span(transport, labels, data, addr=0xC400):
+    """Feed canned data to the parser as a linear span (http_in_mode=1).
+
+    This is the TLS-path input mode (issue #72): the parser reads from
+    http_in_ptr/http_in_len instead of the TCP ring, which also lifts the
+    ring helper's 256-byte limit — needed for the >512 B body vectors.
+    """
+    write_bytes(transport, addr, data)
+    write_bytes(transport, labels.address("http_in_mode"), [1])
+    write_bytes(transport, labels.address("http_in_ptr"),
+                [addr & 0xFF, (addr >> 8) & 0xFF])
+    write_bytes(transport, labels.address("http_in_len"),
+                [len(data) & 0xFF, (len(data) >> 8) & 0xFF])
+
+
+def _read_u16(transport, labels, name):
+    b = read_bytes(transport, labels.address(name), 2)
+    return b[0] | (b[1] << 8)
+
+
+def _read_u24(transport, labels, name):
+    b = read_bytes(transport, labels.address(name), 3)
+    return b[0] | (b[1] << 8) | (b[2] << 16)
+
+
+def test_body_larger_than_buffer(transport, labels):
+    """W4 regression (browserleaks.com): identity body > 512 B with
+    Content-Length must terminate by CONSUMED count, not stored count.
+
+    Before the fix, http_resp_len froze at the 512 B cap, the
+    Content-Length match could never fire, and only connection-close /
+    poll-timeout ended the read."""
+    passed = 0
+    failed = 0
+
+    body = bytes((i * 7 + (i >> 8)) & 0xFF for i in range(700))
+    response = b"HTTP/1.1 200 OK\r\nContent-Length: 700\r\n\r\n" + body
+
+    _load_span(transport, labels, response)
+    _reset_parser(transport, labels)
+
+    complete = _run_parser_loop(transport, labels, timeout=60.0)
+    if not complete:
+        print("  FAIL: parser did not complete (Content-Length termination "
+              "did not fire on truncated body — the W4 regression)")
+        return 0, 1
+    print("  PASS: parser terminated on consumed-count match")
+    passed += 1
+
+    total = _read_u24(transport, labels, "http_body_total")
+    if total == 700:
+        print(f"  PASS: http_body_total = {total}")
+        passed += 1
+    else:
+        print(f"  FAIL: http_body_total = {total}, expected 700")
+        failed += 1
+
+    resp_len = _read_u16(transport, labels, "http_resp_len")
+    if resp_len == 512:
+        print(f"  PASS: http_resp_len = {resp_len} (min(512, total))")
+        passed += 1
+    else:
+        print(f"  FAIL: http_resp_len = {resp_len}, expected 512")
+        failed += 1
+
+    stored = read_bytes(transport, labels.address("http_resp_buf"), 512)
+    if stored == body[:512]:
+        print("  PASS: http_resp_buf holds the first 512 body bytes")
+        passed += 1
+    else:
+        print("  FAIL: http_resp_buf does not match first 512 body bytes")
+        failed += 1
+
+    in_len = _read_u16(transport, labels, "http_in_len")
+    if in_len == 0:
+        print("  PASS: span fully consumed (bytes past the cap were drained)")
+        passed += 1
+    else:
+        print(f"  FAIL: http_in_len = {in_len}, expected 0 "
+              "(bytes past the 512 cap were not consumed)")
+        failed += 1
+
+    return passed, failed
+
+
+def test_content_length_24bit(transport, labels):
+    """Content-Length parses to 24 bits (real bodies exceed 64 KB) with
+    the valid-flag replacing the old $FFFF magic sentinel."""
+    passed = 0
+    failed = 0
+
+    # Headers + a token 5 bytes of a (claimed) 100000-byte body.  A single
+    # dispatch consumes the span and returns not-done; we then inspect the
+    # parsed header state.
+    response = b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\nABCDE"
+    _load_span(transport, labels, response)
+    _reset_parser(transport, labels)
+
+    jsr(transport, labels.address("http_recv_response"))
+
+    cl_valid = read_bytes(transport, labels.address("http_cl_valid"), 1)[0]
+    if cl_valid == 1:
+        print("  PASS: http_cl_valid = 1")
+        passed += 1
+    else:
+        print(f"  FAIL: http_cl_valid = {cl_valid}, expected 1")
+        failed += 1
+
+    cl = _read_u24(transport, labels, "http_content_length")
+    if cl == 100000:
+        print(f"  PASS: http_content_length = {cl} (24-bit)")
+        passed += 1
+    else:
+        print(f"  FAIL: http_content_length = {cl}, expected 100000")
+        failed += 1
+
+    total = _read_u24(transport, labels, "http_body_total")
+    state = read_bytes(transport, labels.address("http_parse_state"), 1)[0]
+    if total == 5 and state == 2:
+        print(f"  PASS: body_total = {total}, still in body state "
+              "(not terminated early)")
+        passed += 1
+    else:
+        print(f"  FAIL: body_total = {total} (exp 5), parse_state = {state} "
+              "(exp 2)")
+        failed += 1
+
+    return passed, failed
+
+
+def test_body_no_content_length(transport, labels):
+    """Content-Length absent: legacy behaviour preserved — bytes store into
+    http_resp_buf, no premature termination, body_total still counts."""
+    passed = 0
+    failed = 0
+
+    body = b"NO-CL BODY BYTES HERE"          # 21 bytes
+    response = b"HTTP/1.1 200 OK\r\nX-Info: none\r\n\r\n" + body
+    _load_span(transport, labels, response)
+    _reset_parser(transport, labels)
+
+    # Single dispatch: consumes the whole span, returns not-done (C=1)
+    # because with no Content-Length the parser keeps polling.
+    jsr(transport, labels.address("http_recv_response"))
+
+    resp_len = _read_u16(transport, labels, "http_resp_len")
+    if resp_len == len(body):
+        print(f"  PASS: http_resp_len = {resp_len}")
+        passed += 1
+    else:
+        print(f"  FAIL: http_resp_len = {resp_len}, expected {len(body)}")
+        failed += 1
+
+    stored = read_bytes(transport, labels.address("http_resp_buf"), len(body))
+    if stored == body:
+        print("  PASS: body stored intact")
+        passed += 1
+    else:
+        print(f"  FAIL: body mismatch: {stored!r}")
+        failed += 1
+
+    total = _read_u24(transport, labels, "http_body_total")
+    if total == len(body):
+        print(f"  PASS: http_body_total = {total}")
+        passed += 1
+    else:
+        print(f"  FAIL: http_body_total = {total}, expected {len(body)}")
+        failed += 1
+
+    # Restore ring input mode for any later ring-driven vectors.
+    write_bytes(transport, labels.address("http_in_mode"), [0])
+    return passed, failed
+
+
 def run_tests(transport, labels, verbose=False):
     total_passed = 0
     total_failed = 0
@@ -405,6 +579,21 @@ def run_tests(transport, labels, verbose=False):
 
     print("\n--- http_recv_response Large Body ---")
     p, f = test_recv_response_with_body(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- W4: body > 512 with Content-Length (browserleaks regression) ---")
+    p, f = test_body_larger_than_buffer(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- W4: 24-bit Content-Length ---")
+    p, f = test_content_length_24bit(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- W4: Content-Length absent (legacy path) ---")
+    p, f = test_body_no_content_length(transport, labels)
     total_passed += p
     total_failed += f
 

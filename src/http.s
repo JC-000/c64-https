@@ -22,6 +22,11 @@
         .export http_crlf
         .export http_bg_idx
         .export http_bg_src
+        ; W4 body-termination fix (see @state_body / HTTP_AUX_CODE):
+        .export http_body_append
+        .export http_in_mode
+        .export http_in_ptr
+        .export http_in_len
 
         ; ---- imports: data.asm BSS (HTTP I/O + parser state) ----
         .import http_host_ptr
@@ -39,6 +44,8 @@
         .import http_line_idx
         .import http_line_buf
         .import http_content_length
+        .import http_cl_valid
+        .import http_body_total
 
         ; ---- imports: data.asm BSS (TLS app data) ----
         ; (tcp_recv_head/tail imports dropped in the issue #72 redesign —
@@ -523,11 +530,11 @@ http_recv_response:
         lda #0
         sta http_hdr_match
         sta http_line_idx
-        ; Reset Content-Length sentinel to $FFFF ("unknown") — will be
-        ; overwritten by check_content_length if the header is seen.
-        lda #$ff
-        sta http_content_length
-        sta http_content_length+1
+        ; Content-Length is "absent until seen": http_cl_valid = 0.  The
+        ; historical $FFFF magic sentinel went away with the 24-bit
+        ; Content-Length extension — a separate valid-flag byte cannot
+        ; collide with any real length value.
+        sta http_cl_valid
         jmp @state_headers
 
 ; ----- state 1: read header lines into http_line_buf until an empty line -----
@@ -567,9 +574,7 @@ http_recv_response:
         ; fits entirely in one record no further record ever arrives.
         lda #2
         sta http_parse_state
-        lda #0
-        sta http_resp_len
-        sta http_resp_len+1
+        jsr http_body_begin     ; zero resp_len + consumed counter
         jmp @state_body
 
 ; ----- state 2: read body bytes -----
@@ -587,43 +592,25 @@ http_recv_response:
 ; first post-handshake TLS record the parser sees contains only the
 ; status line + headers and the body lands in the next record.
 @state_body:
-        ; Content-Length termination: http_content_length defaults to $FFFF
-        ; ("unknown"), overwritten by check_content_length if the header
-        ; was seen.  $FFFF will never match because the buffer-full check
-        ; below bails at 512 bytes.  For a real Content-Length value we
-        ; finish the instant resp_len matches — handles Content-Length: 0
-        ; on entry and the post-append case below.
-        lda http_resp_len
-        cmp http_content_length
-        bne @body_read
-        lda http_resp_len+1
-        cmp http_content_length+1
-        beq @done
-@body_read:
+        ; W4 termination fix: terminate on body bytes CONSUMED, not
+        ; stored.  The old check compared http_resp_len against
+        ; Content-Length, but resp_len freezes at the 512 B buffer cap,
+        ; so for any body > 512 B the Content-Length match could never
+        ; fire and only the connection-close / poll-timeout fallback
+        ; ended the read — against a server that holds the connection
+        ; open (observed live: browserleaks.com), http_get never
+        ; returned.  http_body_total (24-bit, HTTP_AUX_CODE routines)
+        ; now counts every consumed byte; bytes past the 512 B cap are
+        ; consumed and discarded instead of ending the parse.
+        jsr http_body_done_check
+        bcc @body_done          ; C=0 -> body complete
         jsr http_in_byte
         bcs @not_done           ; no byte right now -> poll more
-        ; store byte using zp_ptr = http_resp_buf + http_resp_len
-        pha                     ; save received byte
-        clc
-        lda #<http_resp_buf
-        adc http_resp_len
-        sta zp_ptr
-        lda #>http_resp_buf
-        adc http_resp_len+1
-        sta zp_ptr+1
-        pla                     ; restore byte
-        ldy #0
-        sta (zp_ptr),y
-        ; increment 16-bit length
-        inc http_resp_len
-        bne @body_check_full
-        inc http_resp_len+1
-@body_check_full:
-        ; check if buffer full (512 bytes = $0200)
-        lda http_resp_len+1
-        cmp #$02
-        bcs @done               ; high byte >= 2 means >= 512
-        jmp @state_body         ; keep reading (also re-checks Content-Length)
+        jsr http_body_append    ; count + store/sink the byte
+        jmp @state_body         ; keep reading (re-checks termination)
+
+@body_done:
+        jmp @done
 
 @not_done:
         sec
@@ -636,19 +623,25 @@ http_recv_response:
 ; check_content_length - inspect http_line_buf[0..http_line_idx) for the
 ;   header  "Content-Length: <digits>"  (case-insensitive on the name, a
 ;   single SP after the colon).  On match, the decimal value is stored in
-;   http_content_length (16-bit) — which the caller pre-loaded with the
-;   $FFFF "unknown" sentinel.  No-op otherwise.
-;   Clobbers: A, X, Y
+;   http_content_length (24-bit little-endian — real-server bodies exceed
+;   64 KB) and http_cl_valid is set to 1.  No-op otherwise (http_cl_valid
+;   stays 0 from the status-line reset).
+;   Clobbers: A, X, Y, zp_ptr, zp_temp
 ;
-; Lives in the LOADER_OVERFLOW segment (reachable via JSR from CODE in
-; LOADER) because the LOADER region is packed; see c64-https-ip65.cfg.
+; Lives in the HTTP_AUX_CODE segment (reachable via JSR from CODE in
+; LOADER): the W4 24-bit extension no longer fits the packed
+; LOADER_OVERFLOW/NET_CODE tail on either backend, so the whole W4 HTTP
+; body machinery rides a dedicated segment — LOADER slack under UCI,
+; CRYPTO_OVERLAY under ip65 (see the cfgs).
 ; =============================================================================
-        .segment "LOADER_OVERFLOW"
+        .segment "HTTP_AUX_CODE"
 check_content_length:
         ; Need at least len("content-length: ") = 16 bytes in the line.
         lda http_line_idx
         cmp #16
-        bcc @ccl_rts            ; line too short -> no-op
+        bcs :+                  ; line too short -> no-op
+        rts
+:
         ; Case-insensitive compare against lowercase pattern.  Each line
         ; byte is OR'd with $20, which folds A..Z to a..z and leaves ':'
         ; and ' ' unchanged.
@@ -657,37 +650,52 @@ check_content_length:
         lda http_line_buf,x
         ora #$20
         cmp cl_pattern,x
-        bne @ccl_rts
-        dex
+        beq :+
+        rts                     ; name mismatch -> no-op
+:       dex
         bpl @ccl_cmp
-        ; Matched.  Zero the accumulator and parse digits starting at idx 16.
+        ; Matched.  Zero the accumulator, mark the header seen, and parse
+        ; digits starting at idx 16.
         lda #0
         sta http_content_length
         sta http_content_length+1
+        sta http_content_length+2
+        lda #1
+        sta http_cl_valid
         ldx #16
 @ccl_digit_loop:
+        ; (branch-inverted exits: the 24-bit loop body outgrew the
+        ;  127-byte relative-branch reach to @ccl_rts)
         cpx http_line_idx
-        bcs @ccl_rts
-        lda http_line_buf,x
+        bcc :+
+        jmp @ccl_rts
+:       lda http_line_buf,x
         cmp #$30                ; '0'
-        bcc @ccl_rts
-        cmp #$3a                ; '9'+1
-        bcs @ccl_rts
-        sec
+        bcs :+
+        jmp @ccl_rts
+:       cmp #$3a                ; '9'+1
+        bcc :+
+        jmp @ccl_rts
+:       sec
         sbc #$30                ; A = digit 0..9
         pha
         ; old *= 10  =  old*8 + old*2 (need THREE ASLs to reach *8; tmp
-        ; holds *2 after the first shift).
+        ; holds *2 after the first shift).  24-bit: tmp = zp_ptr(2)+zp_temp.
         asl http_content_length
         rol http_content_length+1
+        rol http_content_length+2
         lda http_content_length
-        sta zp_ptr              ; tmp_lo = old*2
+        sta zp_ptr              ; tmp = old*2
         lda http_content_length+1
-        sta zp_ptr+1            ; tmp_hi = old*2
+        sta zp_ptr+1
+        lda http_content_length+2
+        sta zp_temp
         asl http_content_length
         rol http_content_length+1
+        rol http_content_length+2
         asl http_content_length
         rol http_content_length+1
+        rol http_content_length+2
         clc
         lda http_content_length
         adc zp_ptr
@@ -695,12 +703,17 @@ check_content_length:
         lda http_content_length+1
         adc zp_ptr+1
         sta http_content_length+1
+        lda http_content_length+2
+        adc zp_temp
+        sta http_content_length+2
         pla
         clc
         adc http_content_length
         sta http_content_length
         bcc @ccl_nc
         inc http_content_length+1
+        bne @ccl_nc
+        inc http_content_length+2
 @ccl_nc:
         inx
         jmp @ccl_digit_loop
@@ -713,6 +726,101 @@ check_content_length:
 ; separate whitespace-skip loop.
 cl_pattern:
         .byte "content-length: "
+
+; =============================================================================
+; http_body_begin - reset per-response body state at the headers->body
+;   transition (state 1 -> 2).  Living here (not in the recv-loop inits)
+;   guarantees the reset runs on every parse walk regardless of entry
+;   path (http_recv_body, http_get_plain, or a test driving
+;   http_recv_response directly).
+;   Clobbers: A
+; =============================================================================
+http_body_begin:
+        lda #0
+        sta http_resp_len
+        sta http_resp_len+1
+        sta http_body_total
+        sta http_body_total+1
+        sta http_body_total+2
+        rts
+
+; =============================================================================
+; http_body_done_check - is the body complete?
+;   C=0 -> complete; C=1 -> keep reading.
+;
+;   Content-Length seen (http_cl_valid=1): complete exactly when the
+;     24-bit consumed count http_body_total equals http_content_length.
+;     Works whether or not the stored copy was truncated at 512 B —
+;     that is the W4 fix.
+;   Content-Length absent: legacy behaviour — the 512 B buffer cap ends
+;     the read (chunked/streaming fallback preserved).
+;   Clobbers: A
+; =============================================================================
+http_body_done_check:
+        lda http_cl_valid
+        beq @no_cl
+        lda http_body_total
+        cmp http_content_length
+        bne @more
+        lda http_body_total+1
+        cmp http_content_length+1
+        bne @more
+        lda http_body_total+2
+        cmp http_content_length+2
+        bne @more
+        clc
+        rts
+@no_cl:
+        lda http_resp_len+1
+        cmp #$02
+        bcs @full               ; high byte >= 2 means >= 512
+@more:
+        sec
+        rts
+@full:
+        clc
+        rts
+
+; =============================================================================
+; http_body_append - consume one body byte (in A).
+;
+;   Always increments the 24-bit http_body_total (bytes CONSUMED).
+;   Stores into http_resp_buf while resp_len < 512; bytes past the cap
+;   are counted and discarded.
+;   Clobbers: A, Y, zp_ptr.  Preserves X.
+; =============================================================================
+http_body_append:
+        pha
+        ; http_body_total++ (24-bit)
+        inc http_body_total
+        bne @stored_count
+        inc http_body_total+1
+        bne @stored_count
+        inc http_body_total+2
+@stored_count:
+        ; room in http_resp_buf?  (resp_len < 512)
+        lda http_resp_len+1
+        cmp #$02
+        bcs @discard            ; buffer-mode overflow: count only
+        ; store byte at http_resp_buf + resp_len
+        clc
+        lda #<http_resp_buf
+        adc http_resp_len
+        sta zp_ptr
+        lda #>http_resp_buf
+        adc http_resp_len+1
+        sta zp_ptr+1
+        pla
+        ldy #0
+        sta (zp_ptr),y
+        inc http_resp_len
+        bne @rts
+        inc http_resp_len+1
+@rts:
+        rts
+@discard:
+        pla                     ; byte counted, not stored
+        rts
 
 ; =============================================================================
 ; http_get_plain - perform a plain HTTP (no TLS) GET request
