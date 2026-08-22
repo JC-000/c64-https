@@ -79,6 +79,49 @@ endif
 ifdef HTTPS_PORT
 CA65FLAGS += -D HTTPS_PORT=$(HTTPS_PORT)
 endif
+# W4 REU body sink: HTTPS_BODY_TO_REU=1 makes boot.s's do_https_get set
+# http_body_sink=1, streaming the HTTP response body into the REU at
+# HTTP_REU_BODY_BASE (default $10:0000 = bank 16 — needs a 16 MB REU;
+# see src/constants.inc).  UCI-only: the sink code is compiled out of
+# ip65 builds, so the flag is only honored under BACKEND=uci.
+ifeq ($(BACKEND),uci)
+ifdef HTTPS_BODY_TO_REU
+CA65FLAGS += -D HTTPS_BODY_TO_REU=1
+endif
+endif
+# Optional HTTPS target-host override (src/boot.s defaults to www.foo.bar).
+# `make HTTPS_HOST=github.com` retargets the GET + SNI + DNS lookup.
+# ca65's -D accepts numeric values only, so the hostname travels via a
+# generated include (build/https_host.inc, reached through `-I build`).
+# The generator rule is content-compared: changing HTTPS_HOST= rebuilds
+# boot.o with no `make clean`, and an unchanged value touches nothing.
+HTTPS_HOST ?= www.foo.bar
+# Companion request-path override (default "/"), same mechanism/caveats.
+# e.g. make HTTPS_PATH='/w/index.php?title=Commodore_64&action=raw'
+HTTPS_PATH ?= /
+# Debug knob: present a DIFFERENT SNI than the connect host (default:
+# SNI = host, unchanged). Lets the C64 dial a local TCP relay while the
+# ClientHello names the real origin — e.g. tcpdump forensics via
+#   make HTTPS_HOST=10.43.23.99 HTTPS_PORT=8443 HTTPS_SNI=en.wikipedia.org
+# UCI-only, off unless set; empty means no override.
+HTTPS_SNI ?=
+ifneq ($(strip $(HTTPS_SNI)),)
+CA65FLAGS += -D HTTPS_SNI_OVERRIDE=1
+endif
+# Optional REU document-base override, shared by the http.s body sink
+# and the Lane G viewer (both read the HTTP_REU_BODY_BASE equate /
+# runtime var; defaults to $10:0000 = 1048576). VICE tests use a
+# 512 KB REU, so they build with a base inside it:
+# `make BACKEND=uci HTTP_REU_BODY_BASE=196608` ($03:0000; decimal —
+# ca65 -D does not take 0x, and $ needs shell quoting).
+ifdef HTTP_REU_BODY_BASE
+CA65FLAGS += -D HTTP_REU_BODY_BASE=$(HTTP_REU_BODY_BASE)
+endif
+# Viewer test helpers (viewer_test_blit RAM->REU blit + viewer_scroll_up).
+# Test-image only; never set for a shipping build.
+ifdef VIEWER_TEST_HELPERS
+CA65FLAGS += -D VIEWER_TEST_HELPERS=1
+endif
 # VIC-II blanking around the CPU-bound crypto primitives (src/vic.s).
 # ON by default and that is what ships; `make VIC_BLANK=0` degrades
 # vic_blank/vic_unblank to bare RTS so the badline tax can be measured
@@ -87,6 +130,23 @@ endif
 # blanking" section of CLAUDE.md for the numbers it produced.
 ifeq ($(VIC_BLANK),0)
 CA65FLAGS += -D NO_VIC_BLANK=1
+endif
+# W1 streaming handshake-message deframer (src/tls_deframe.s + the
+# TLS_STREAM_DEFRAME paths in src/tls13.s / tls_cert.s /
+# tls_keyschedule.s). Lets the client process a real server's encrypted
+# flight where handshake messages do not align with TLS records (one
+# message spanning several records; several messages sharing one
+# record). Default ON under UCI, OFF under ip65: the ip65 image has
+# neither the code headroom nor any BSS slack for the deframer state +
+# carry buffer (~330 B). Override with TLS_STREAM_DEFRAME=0|1 —
+# forcing it on under ip65 is expected to overflow the link.
+ifeq ($(BACKEND),uci)
+TLS_STREAM_DEFRAME ?= 1
+else
+TLS_STREAM_DEFRAME ?= 0
+endif
+ifeq ($(TLS_STREAM_DEFRAME),1)
+CA65FLAGS += -D TLS_STREAM_DEFRAME=1
 endif
 # Lazy (=) so the USE_NISTCURVES_ONCHIP_COMB block below can retarget
 # CFG to the cfg variant after this line.
@@ -399,6 +459,29 @@ build/%.o: src/%.s
 # (Only meaningful under BACKEND=ip65 — the UCI build never assembles
 # this object, and never requests $(IP65_BIN).)
 build/net/ip65/ip65_blob.o: $(IP65_BIN)
+
+# src/boot.s pulls the HTTPS target hostname from this generated include
+# (see the HTTPS_HOST block near the top). FORCE makes the rule run on
+# every make so a changed HTTPS_HOST= is noticed; the content compare
+# leaves the file's mtime alone when the value is unchanged, so boot.o
+# is NOT rebuilt in that case. On a change it also deletes boot.o
+# outright: this Make (3.81 on macOS) compares mtimes at 1-second
+# resolution, so two `make HTTPS_HOST=...` runs inside the same second
+# would otherwise leave the previous host's boot.o counting as up to
+# date — measured, not hypothetical. The LINK step keeps the repo-wide
+# same-second caveat (see "make clean when you change flags" in
+# CLAUDE.md): scripted back-to-back host switches inside one second can
+# skip the relink, so check the PRG hash when a build matters. Deleting
+# $(PRG) here does NOT fix that — make's cached stat of the goal leaves
+# it "up to date" and the file simply vanishes (measured too).
+build/https_host.inc: FORCE
+	@mkdir -p build
+	@printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n.define HTTPS_SNI_STR "%s"\n' '$(HTTPS_HOST)' '$(HTTPS_PATH)' '$(HTTPS_SNI)' > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@ && rm -f build/boot.o; fi
+
+FORCE:
+
+build/boot.o: build/https_host.inc
 
 # Phase C.3: c64-nist-curves sibling archive (libs/nistcurves/ submodule).
 # Phase 1.5 split: produces TWO archives, one per overlay half. The

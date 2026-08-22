@@ -92,6 +92,13 @@
 .import tls_handle_certificate
 .import tls_handle_cert_verify
 
+.ifdef TLS_STREAM_DEFRAME
+; --- W1 streaming handshake-message deframer (tls_deframe.s) ---
+.import tls_deframe_init
+.import tls_deframe_new_record
+.import tls_deframe_pump
+.endif
+
 ; --- Networking (net.s) ---
 .import net_poll
 
@@ -185,6 +192,13 @@ tls_connect:
         lda #<keys_ok_msg
         ldy #>keys_ok_msg
         jsr print_string
+
+.ifdef TLS_STREAM_DEFRAME
+        ; Reset the streaming deframer. The ServerHello record has been
+        ; fully consumed; the encrypted handshake messages begin with
+        ; the next record fetched by tls_recv_encrypted.
+        jsr tls_deframe_init
+.endif
 
         ; --- receive EncryptedExtensions (encrypted) ---
         lda #TLS_STATE_ENCRYPTED_EXT
@@ -519,6 +533,72 @@ tls_recv_server_hello:
 ; tls_derive_traffic_keys   - in tls_keyschedule.s
 ; tls_verify_finished       - in tls_keyschedule.s
 
+.ifdef TLS_STREAM_DEFRAME
+; =============================================================================
+; tls_recv_encrypted — streaming variant (W1 deframer, tls_deframe.s).
+;
+; Handshake messages no longer line up with records in either direction
+; (a real server's Certificate spans ~6 records; CertificateVerify and
+; Finished share the tail record), so instead of dispatching "the one
+; message in this record" we pump the deframer: it consumes the current
+; record's unconsumed bytes first and asks for another record only when
+; it runs dry. Returns once ONE handshake message has been dispatched
+; successfully, so tls_connect's state machine and progress markers are
+; unchanged. Transcript discipline (snapshot before dispatch, fold per
+; MESSAGE — see the pre-deframer comment in the .else branch below, and
+; the fold-as-you-go note in tls_deframe.s) lives inside the deframer.
+;
+; Output: C=0 one message dispatched, C=1 timeout/error
+; =============================================================================
+tls_recv_encrypted:
+        lda #<enc1_msg
+        ldy #>enc1_msg
+        jsr print_string
+        lda #0
+        sta enc_timeout
+        sta enc_timeout+1
+        lda #<rx_msg
+        ldy #>rx_msg
+        jsr print_string
+@df_pump:
+        jsr tls_deframe_pump
+        bcc @df_msg_done
+        cmp #0
+        beq @enc_wait           ; A=0: record exhausted — fetch the next
+        jmp @enc_error          ; A!=0: deframe/handler error
+@enc_wait:
+        jsr net_poll
+        jsr tls_record_recv_and_decrypt
+        bcc @enc_got_record
+        inc enc_timeout
+        bne @enc_wait
+        inc enc_timeout+1
+        bne @enc_wait
+        ; timeout
+        sec
+        rts
+@enc_got_record:
+        lda #<got2_msg
+        ldy #>got2_msg
+        jsr print_string
+        ; verify inner content type is handshake
+        lda tls_rec_type
+        cmp #TLS_CT_HANDSHAKE
+        bne @enc_error
+        jsr tls_deframe_new_record
+        jmp @df_pump
+@df_msg_done:
+        lda #<proc_msg
+        ldy #>proc_msg
+        jsr print_string
+        clc
+        rts
+@enc_error:
+        sec
+        rts
+
+.else   ; !TLS_STREAM_DEFRAME — one message per record (ip65 path)
+
 ; =============================================================================
 ; tls_recv_encrypted - receive encrypted handshake msg, decrypt, dispatch
 ; Output: C=0 success, C=1 timeout/error
@@ -650,6 +730,8 @@ tls_recv_encrypted:
 @enc_error:
         sec
         rts
+
+.endif  ; TLS_STREAM_DEFRAME
 
 ; =============================================================================
 ; tls_send_finished - compute client Finished, encrypt, send

@@ -19,3 +19,12 @@
 ; do not shrink it without re-running tests/test_vice_https_macos.py.
 NET_SH_DRAIN_OUTER = 8
 NET_SH_DRAIN_INNER = 250
+
+; CERT_BUF_SIZE: capacity of cert_buf (src/der_decode.s, CERT_BUF_BSS).
+;
+; 1536 under ip65 — cert_buf is pinned at $A000 and time-shared with
+; LIB_NISTCURVES_P256_BSS via the #68 SCRATCH_UNION, whose $600 cap is
+; a link-time assert (src/net/ip65/exports.s + the cfg). Growing this
+; would break the union; the UCI backend carries the 2048 B variant
+; (Wikipedia's 1636 B leaf) in CRYPTO_OVERLAY instead.
+CERT_BUF_SIZE = 1536

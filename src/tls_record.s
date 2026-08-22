@@ -459,11 +459,20 @@ tls_record_decrypt:
         tay                     ; Y = (ciphertext_len - 1) low byte
         lda tls_enc_aead_len+1
         sbc #0
-        beq @inner_lo_page      ; if high byte = 0, in first page
-        ; High page: read from tls_rec_buf+256,y
-        lda tls_rec_buf+256,y
+        beq @inner_page0        ; index $0000-$00FF
+        cmp #2
+        beq @inner_page2        ; index $0200-$02FF: 512-content records —
+                                ; the max_fragment_length=512 real-server
+                                ; shape (content 512 + type = index 512).
+                                ; The old two-page dispatch read
+                                ; tls_rec_buf+256 here and got a mid-DER
+                                ; byte; found live against github.com.
+        lda tls_rec_buf+256,y   ; index $0100-$01FF
         jmp @got_inner_type
-@inner_lo_page:
+@inner_page2:
+        lda tls_rec_buf+512,y
+        jmp @got_inner_type
+@inner_page0:
         lda tls_rec_buf,y
 @got_inner_type:
         sta tls_rec_type

@@ -138,6 +138,52 @@ net_poll:
         beq @do_poll
         rts
 @do_poll:
+        ; --- Clamp the SOCKET_READ request to ring free space -----------
+        ; THE WIKIPEDIA-STALL BUG (found 2026-08-22 by ring forensics):
+        ; requesting a fixed 512 while the ring has less free space makes
+        ; the fill loop below hit "ring full" mid-response, and the
+        ; response drain then DISCARDS the remainder — bytes the firmware
+        ; considers delivered. The TLS stream acquires a permanent hole
+        ; exactly one ring-capacity past the wrap origin and the client
+        ; parks forever (en.wikipedia.org's 4.7 KB flight; the local
+        ; 4.68 KB control missed the razor-edge by phasing). Request
+        ; min(free-1, UCI_READ_CHUNK_MAX) instead, and skip the read
+        ; entirely when nothing fits — unread bytes stay in the firmware
+        ; for a later poll, which is exactly what TCP is for.
+        ; free-1 = (head - tail - 1) & TCP_RECV_MASK  (head==tail: empty)
+        lda tcp_recv_head+0
+        sec
+        sbc tcp_recv_tail+0
+        sta uci_req_len+0
+        lda tcp_recv_head+1
+        sbc tcp_recv_tail+1
+        and #>TCP_RECV_MASK
+        sta uci_req_len+1
+        lda uci_req_len+0
+        sec
+        sbc #$01
+        sta uci_req_len+0
+        lda uci_req_len+1
+        sbc #$00
+        and #>TCP_RECV_MASK
+        sta uci_req_len+1
+        ora uci_req_len+0
+        bne :+
+        rts                     ; ring effectively full — poll again later
+:
+        ; clamp to UCI_READ_CHUNK_MAX (512 = $0200)
+        lda uci_req_len+1
+        cmp #>UCI_READ_CHUNK_MAX
+        bcc @len_clamped        ; high < 2  -> under 512, keep
+        bne @len_use_max        ; high > 2  -> over, clamp
+        lda uci_req_len+0
+        beq @len_clamped        ; exactly 512, keep
+@len_use_max:
+        lda #<UCI_READ_CHUNK_MAX
+        sta uci_req_len+0
+        lda #>UCI_READ_CHUNK_MAX
+        sta uci_req_len+1
+@len_clamped:
         jsr uci_wait_not_busy
         bcc :+
         ; FPGA wedged before we could push SOCKET_READ — net_last_error is
@@ -157,10 +203,11 @@ net_poll:
         lda uci_socket_id
         jsr uci_put_byte
 
-        ; maxlen — fixed UCI_READ_CHUNK_MAX (512), LE.
-        lda #<UCI_READ_CHUNK_MAX
+        ; maxlen — min(ring free - 1, UCI_READ_CHUNK_MAX), LE (computed
+        ; at @do_poll; see the wikipedia-stall note there).
+        lda uci_req_len+0
         jsr uci_put_byte
-        lda #>UCI_READ_CHUNK_MAX
+        lda uci_req_len+1
         jsr uci_put_byte
 
         jsr uci_push_wait
@@ -1053,5 +1100,6 @@ uci_chunk_len:        .res 2          ; 16-bit bytes remaining in current chunk
 uci_write_resp:       .res 2          ; written_lo/hi from SOCKET_WRITE
 uci_read_hdr:         .res 2          ; actual_len_lo/hi from SOCKET_READ
 uci_poll_rem:         .res 2          ; net_poll per-cycle remaining
+uci_req_len:          .res 2          ; net_poll: clamped SOCKET_READ maxlen
 uci_next_lo:          .res 1          ; scratch: (tail+1) & mask, low
 uci_next_hi:          .res 1          ; scratch: (tail+1) & mask, high

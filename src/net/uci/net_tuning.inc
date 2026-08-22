@@ -23,10 +23,32 @@
 ; cost ~80 s and regressed the shipped handshake from 51.0 s to 125.4 s
 ; (issue #73).
 ;
-; 16 polls (~0.6 s at 48 MHz) is a deliberate small hedge rather than 0:
-; it still pulls anything already queued into the ring before the long
-; stalls, at negligible cost, without relying on firmware autonomy being
-; absolute. Keep it non-zero — the drain loop's `dex`/`bne` shape turns
-; an INNER of 0 into 256 iterations.
-NET_SH_DRAIN_OUTER = 1
+; REVISED 2026-08-21 (the wikipedia stall): firmware ACK autonomy has a
+; LIMIT — its socket buffer holds ~4.3 KB, and bytes beyond that are
+; silently dropped, not flow-controlled. en.wikipedia.org's 4,659 B
+; flight is the first target to exceed it: with only 16 drain polls the
+; C64 entered the ~8 s X25519 stall pulling nothing, the firmware
+; buffer overflowed, and the stream had a permanent hole at record 9
+; (tls_read_seq=8, mid-header, ~4.3 KB consumed — measured, U64E
+; 48 MHz). github's 3.2 KB flight squeaked under, which is why every
+; earlier live run passed. The drain therefore DOES have something to
+; buy on UCI for large flights: moving ~4 KB firmware->ring before the
+; crypto stall frees the firmware buffer for the flight tail. 128
+; polls ≈ 5.2 s at the ~40 ms clock-invariant poll cost — client
+; silence grows to ~30 s against 45 s (browserleaks) / 90 s (github) /
+; 120 s (wikipedia) tolerances. Keep INNER non-zero — the drain loop's
+; `dex`/`bne` shape turns an INNER of 0 into 256 iterations.
+NET_SH_DRAIN_OUTER = 8
 NET_SH_DRAIN_INNER = 16
+
+; CERT_BUF_SIZE: capacity of cert_buf (src/der_decode.s, CERT_BUF_BSS).
+;
+; 2048 under UCI so en.wikipedia.org's 1636 B leaf certificate fits —
+; the last blocker for Wikipedia as a real-server HTTPS target. The
+; segment rides CRYPTO_OVERLAY under both UCI cfgs (it no longer fits
+; CRYPTO_COLD_SHADOW at this size); ip65 keeps 1536, pinned at $A000
+; and unioned with LIB_NISTCURVES_P256_BSS (see cfg/c64-https-ip65.cfg
+; SCRATCH_UNION — its $600 cap is a link-time assert and MUST NOT
+; grow). The deframer's leaf cap check requires the low byte to be
+; zero (asserted in src/tls_deframe.s).
+CERT_BUF_SIZE = 2048

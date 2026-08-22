@@ -106,6 +106,18 @@ x25_prev_bit    = $38           ; 1 byte — previous k_t for swap
 x25_byte_idx    = $39           ; 1 byte — byte index in scalar
 x25_bit_mask    = $3a           ; 1 byte — current bit mask
 
+; --- TLS handshake-message base pointer (W1 streaming deframer) ---
+; Points at the current handshake message; the message handlers in
+; tls_cert.s / tls_keyschedule.s read the message through this pointer
+; instead of hardcoding tls_rec_buf, so the streaming deframer can
+; dispatch a message at any offset (tls_rec_buf + N, or a carry buffer).
+; $3E-$3F is inside ZP_CRYPTO ($22-$3F) but past the ECDSA bignum claim
+; ($22-$3C) and nistcurves_zp_ptr2 ($3D); ECDSA never touches $3E-$3F,
+; so the pointer survives across ecdsa_verify inside
+; tls_handle_cert_verify.  Do NOT relocate to $36-$37: that pair looks
+; free but sits inside fe25519's declared $2C-$37 claim.
+tls_hs_ptr      = $3e           ; 2 bytes ($3E-$3F)
+
 ; --- General pointers (shared, save/restore around ip65) ---
 zp_ptr          = $fb           ; 2 bytes ($FB-$FC)
 zp_temp         = $fd           ; 1 byte
@@ -129,6 +141,20 @@ reu_reu_bank    = $df06         ; REU bank
 reu_len_lo      = $df07         ; transfer length low
 reu_len_hi      = $df08         ; transfer length high
 reu_addr_ctrl   = $df0a         ; address control
+
+; --- W4 REU body sink ---
+; Default REU destination for a streamed HTTP response body: bank 16
+; ($10:0000) — clear of the mul-table banks 0-1, the comb profile's
+; Lim-Lee bank 2, and the reserved P-384 overlay banks 6-7.  The
+; shipped default therefore needs a 16 MB REU (the stretch-goal
+; config).  Build-time override: `make HTTP_REU_BODY_BASE=196608`
+; (decimal; ca65 -D takes no 0x and $ needs shell quoting) puts it at
+; bank 3 for a 512 KB VICE REU.  The runtime copy lives in src/http.s
+; (`http_reu_body_base`, 3 bytes LE in RODATA — RAM at runtime), so
+; tests and rigs can also retarget it by DMA without a rebuild.
+.ifndef HTTP_REU_BODY_BASE
+HTTP_REU_BODY_BASE = $100000
+.endif
 
 ; --- SID voice 3 setup for noise (entropy collection) ---
 sid_base        = $d400
