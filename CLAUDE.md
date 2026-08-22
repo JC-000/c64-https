@@ -191,6 +191,18 @@ Variables:
                           ~7 MHz; boot costs ~50 s at 64 MHz (test
                           scripts: set C64_INIT_WAIT). Uses
                           cfg/c64-https-$(BACKEND)-onchip.cfg.
+  - `HTTPS_HOST=<host>` — build-time HTTPS target (default `www.foo.bar`;
+                          feeds the GET, SNI and DNS lookup). Travels via
+                          a generated `build/https_host.inc` because
+                          ca65's `-D` is numeric-only; the generator is
+                          content-compared and deletes `boot.o` on a
+                          change, so no `make clean` is needed for THIS
+                          flag (the link step keeps the repo-wide
+                          same-second caveat). Hosts >63 chars are a
+                          build error (SNI copy guard).
+  - `TLS_STREAM_DEFRAME` — streaming handshake deframer gate; default ON
+                          under `BACKEND=uci`, OFF (compiled out) under
+                          ip65. See the real-server milestone entry.
   - `CA65`, `LD65`      — toolchain overrides
   - `VICE`              — override the `make run` emulator
 
@@ -606,6 +618,15 @@ The scripts:
                             stock `ssl`. `FINISHED_MODE=good` is the control
                             and must be run first. See "Negative-path
                             coverage — the server Finished" under Smoke tests.
+  - `rig_https_live.py` — HTTPS e2e against a REAL public server
+                            (`HTTPS_TARGET=github.com`, DMA-fed to the
+                            PRG so any build works). Pass criteria are
+                            C64-side only (sentinel + `http_status=200`).
+                            Runs the `/Temp` GC (`_temp_gc.py`) after
+                            enable_uci — see the writemem-wedge note in
+                            "End-to-end HTTPS status". Comb
+                            `C64_INIT_WAIT=75` is auto-detected from
+                            labels.txt. Keep `DEBUG_CAPTURE=0` here.
   - `rig_https_local.py` — HTTPS e2e scaffolding against a local TLS 1.3
                             listener (ECDSA-P256 cert from
                             `tools/https_e2e/certs/`). DMAs a 6502 stub
