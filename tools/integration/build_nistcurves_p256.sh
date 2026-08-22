@@ -102,6 +102,107 @@ fi
 CA65="${CA65:-ca65}"
 AR65="${AR65:-ar65}"
 
+# --- 0. Preflight: the submodule checkout must be new enough ---
+# Issue #124. A stale libs/nistcurves working checkout under a current
+# wrapper produces an error that names the wrong cause entirely:
+#
+#   ERROR: zp_config.o exports nistcurves_zp_ptr2 = <absent>,
+#          expected 0x0000003D (CONTRACT_ZP_DEFINES did not take)
+#
+# — which reads as "the knob is broken" when the truth is "your submodule is
+# four releases behind the gitlink". The reporter never touched that knob.
+# Reproduced by moving ONLY the submodule checkout under a fresh clone of
+# master: v0.6.0 and v0.8.0 give that line character for character (their
+# lib-p256-verify archive still carries a bare `zp_config.o`; the per-variant
+# name arrived in v0.9.0), v0.9.1 gives the same text with the per-variant
+# member name, v0.10.1 and later pass.
+#
+# Two properties make this worth a preflight rather than a better message
+# further down:
+#
+#   - `tools/check_upstream_pins.py` cannot catch it. It reads the gitlink
+#     with `git ls-tree` on purpose, so it works on a submodule that was
+#     never `--init`'d — which means it reports the PINNED version and would
+#     have said "v0.11.2, no drift" while the working tree sat at v0.6.0.
+#     Its --worktree mode, added alongside this, is the standalone check.
+#   - The failure is several minutes into a build, after upstream's make has
+#     assembled the whole archive.
+#
+# The gate is a source probe, not a tag comparison: tags are the wrong
+# oracle here (c64-x25519 ships lightweight ones that `git describe`
+# without `--tags` cannot see, and this org rebuilt the c64-nist-curves
+# history in 2026-05, moving tag commits). What the wrapper actually
+# requires is behavioural — the two knobs it passes must be honoured:
+#
+#   CONTRACT_ZP_DEFINES     upstream v0.10.0; without it the ZP overrides
+#                           are discarded and the post-check reports
+#                           <absent> (the #124 signature)
+#   nistcurves_zp_ptr2      the §6.5 canonical spelling of the slot, also
+#                           v0.10.0 — a pin that predates it would need the
+#                           bare `zp_ptr2`, and this wrapper only passes the
+#                           canonical name
+#
+# Probing for those two says exactly what the next 200 lines depend on, and
+# keeps saying it correctly if upstream renames a tag under us. It is
+# deliberately NOT the full requirement — CLAUDE.md records >= v0.11.2 for
+# reasons this cannot see (v0.11.1's on-chip SHARED_CT_MUL_8X8 fix, v0.11.2's
+# knob-staleness guard, both of which fail later and elsewhere). This gate
+# exists to convert one specific illegible failure into a remedy, not to
+# certify the pin.
+lib_preflight_fail() {
+    local what="$1"
+    local head;  head="$(git -C "$LIB_DIR" rev-parse HEAD 2>/dev/null || true)"
+    local found; found="$(git -C "$LIB_DIR" describe --tags --always 2>/dev/null || echo '<unknown>')"
+    local pin;   pin="$(git -C "$PROJECT_ROOT" ls-tree HEAD libs/nistcurves 2>/dev/null | awk '{print $3}')"
+    local diagnosis
+    if [ -z "$head" ]; then
+        diagnosis="The submodule is not checked out at all."
+    elif [ "$head" != "$pin" ]; then
+        diagnosis="The submodule working tree is NOT the commit this repo pins."
+    else
+        # Same sha as the gitlink, yet the probes failed: the checkout has been
+        # edited in place, or the gitlink itself is stale. Say so rather than
+        # sending someone at a `git submodule update` that will report nothing.
+        diagnosis="The working tree IS at the pinned commit, so this is not the usual
+staleness — the checkout has local modifications, or this branch's gitlink is
+itself too old."
+    fi
+    cat >&2 <<EOF
+ERROR: libs/nistcurves checkout is unusable for this build (c64-https#124).
+
+  $what
+
+  submodule checkout : $found
+  this repo pins     : ${pin:0:12}${pin:+ (v0.11.2)}
+
+$diagnosis Fix it with:
+
+    git submodule update --init --recursive
+
+If that reports nothing and the build still fails, force it:
+
+    git submodule update --force --init --recursive
+
+Note that tools/check_upstream_pins.py will NOT show this by default -- it
+reads the pinned gitlink, not your working checkout. Use its --worktree mode.
+EOF
+    exit 1
+}
+
+[ -f "$LIB_SRC/zp_config.s" ] || lib_preflight_fail \
+    "libs/nistcurves/src/zp_config.s is missing — the submodule is not checked out,\n  or that file was removed from it."
+
+grep -qE '^[[:space:]]*\.ifndef[[:space:]]+nistcurves_zp_ptr2[[:space:]]*$' "$LIB_SRC/zp_config.s" \
+    || lib_preflight_fail \
+    "src/zp_config.s has no '.ifndef nistcurves_zp_ptr2' — the SPEC 6.5 canonical
+  ZP spelling this wrapper passes arrived in libs/nistcurves v0.10.0."
+
+grep -q 'CONTRACT_ZP_DEFINES' "$LIB_DIR/Makefile" \
+    || lib_preflight_fail \
+    "libs/nistcurves/Makefile does not honour CONTRACT_ZP_DEFINES — the SPEC 6.2
+  route for consumer ZP-slot overrides arrived in libs/nistcurves v0.10.0.
+  Without it the -D flags below are silently discarded."
+
 # --- ZP-slot overrides (c64-https canonical map) ---
 # nistcurves_zp_ptr2 = $3D : library default $fd collides with c64-https
 #                 zp_temp/zp_count used by der_decode.s during cert parsing.
@@ -110,9 +211,9 @@ AR65="${AR65:-ar65}"
 #                 unused inside ZP_CRYPTO.
 # Other slots match upstream defaults — see libs/nistcurves/src/zp_config.s.
 #
-# THE POINTER SLOT IS SPELLED `nistcurves_zp_ptr2` FROM v0.10.0. The
-# spelling is PROBED, never hardcoded, because both spellings are wrong at
-# some pin this script has to build.
+# THE POINTER SLOT IS SPELLED `nistcurves_zp_ptr2` FROM v0.10.0, and this
+# wrapper passes ONLY that spelling — the preflight above is what makes that
+# safe, by refusing a pin where the bare `zp_ptr2` would have been required.
 #
 # c64-lib-contract SPEC §2 gained a ZP prefix registry at v0.9.0: a bare
 # `zp_ptr2` is unregistered (three adopters had independently converged on
@@ -136,26 +237,16 @@ AR65="${AR65:-ar65}"
 #                                 symbol; real slot     names to $3D
 #                                 stays at $fd
 #
-# Neither spelling is safe across both, so probe the library source and
-# follow it. Note the v0.9.1 + canonical cell is a *wrong value*, not a
-# silent one: the `check_zp_slot` guards below read the emitted object with
-# od65, so that combination stops the build (as `$fd` != `$3d`, or as
-# `<absent>` if the guard is aimed at the canonical name). The probe's value
-# is being loud AND correct at both pins, rather than merely loud at one.
+# Neither spelling is safe across both, which is why a pre-v0.10.0 checkout
+# is rejected outright above rather than accommodated. An earlier revision
+# of this file probed the source and built a `ZP_OVERRIDES` array from the
+# result; that array became dead code when f090469 retired the
+# rebuild-a-member path in favour of CONTRACT_ZP_DEFINES, and it has been
+# removed. The probe itself survives, promoted to the preflight gate.
 #
 # fp_mul_i / fp_mul_j need no probe: `fp_` is a registered §2 prefix for
 # c64-nist-curves, so those names are canonical already and keep their
 # `.ifndef` guards across the migration (verified on v0.10.1).
-if grep -qE '^[[:space:]]*\.ifndef[[:space:]]+nistcurves_zp_ptr2[[:space:]]*$' "$LIB_SRC/zp_config.s"; then
-    ZP_PTR2_SLOT='nistcurves_zp_ptr2'
-else
-    ZP_PTR2_SLOT='zp_ptr2'
-fi
-ZP_OVERRIDES=(
-    '-D' "$ZP_PTR2_SLOT=\$3d"
-    '-D' 'fp_mul_i=$39'
-    '-D' 'fp_mul_j=$3a'
-)
 
 # --- 1. Build upstream's verify archive ---
 # Upstream's Makefile builds every module with the same recipe (no per-file
