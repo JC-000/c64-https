@@ -452,6 +452,41 @@ def build_scenarios(cert_der, pubkey_xy, wiki_leaf=None):
         n_msgs=2,
     ))
 
+    # --- deframer: wikipedia-SHAPED flight (2026-08-22 stall forensics) ---
+    # Real en.wikipedia.org shape: EE in a small record, then a multi-cert
+    # Certificate whose FIRST entry is the 1636 B leaf (> the historical
+    # 1536 B cap — the reason for the 2048 UCI cert_buf), spanning many
+    # 512-content records. This pins the CONSUMER side: deframer + record
+    # layer + multi-cert framing keep the big leaf and discard the rest.
+    #
+    # NOTE — SCOPE: this harness primes the whole flight into the ring up
+    # front with net_poll stubbed to RTS, so it CANNOT reproduce the
+    # actual hardware stall, which is in the ADAPTER fill loop
+    # (src/net/uci/net.s net_poll requesting >ring-free and the response
+    # drain discarding the overflow — fixed there by clamping the
+    # SOCKET_READ maxlen to ring free space). That fix is validated on
+    # hardware / a poll-driven rig, NOT here. Kept under the 4 KB ring
+    # (leaf 1636 + one 656 intermediate) so prime_ring can hold it.
+    if wiki_leaf is not None and len(wiki_leaf[0]) <= CERT_BUF_MAX:
+        shaped_leaf, shaped_xy = wiki_leaf
+    else:
+        shaped_leaf, shaped_xy = cert_der, (px, py)
+    shaped_inter = bytes([0x30, 0x82]) + (656 - 4).to_bytes(2, "big") + \
+        bytes((i * 7 + 656) & 0xFF for i in range(656 - 4))
+    entries = b""
+    for c in (shaped_leaf, shaped_inter):
+        entries += len(c).to_bytes(3, "big") + c + b"\x00\x00"
+    body = b"\x00" + len(entries).to_bytes(3, "big") + entries
+    shaped_cert = hs_message(TLS_HS_CERTIFICATE, body)
+    scenarios.append(Scenario(
+        "deframer/wikipedia_shaped_flight",
+        "deframer",
+        [ee] + chunk_bytes(shaped_cert, [512] * 6),
+        shaped_xy,
+        hashlib.sha256(ee + shaped_cert).digest(),
+        n_msgs=2,
+    ))
+
     # --- deframer (d): oversized leaf must error, not overflow ---
     # A single-entry Certificate whose cert_data exceeds cert_buf
     # (CERT_BUF_MAX, read from labels.txt — 2048 UCI / 1536 ip65).
