@@ -312,6 +312,24 @@ hostname:
      The same-second caveat still stands for `BACKEND=` and every other flag,
      which have no equivalent hook. `make clean` remains the remedy there.
 
+**Both verified on hardware, 2026-08-22, U64E 601A96 @ 48 MHz comb, at
+master `305051c`.** The banner reads, from real screen RAM:
+
+    HTTPS GET EN.WIKIPEDIA.ORG...
+
+and the same session fetched the article end-to-end twice: `http_status=200`,
+`http_body_total=125,235 B` into REU `$10:0000`, first 512 body bytes
+byte-identical to a live host-side reference fetch, viewer live on the real
+screen showing the wikitext.
+
+**Neither existing rig could have caught the banner bug, and that is the
+lesson worth keeping.** `rig_https_wiki.py` and `rig_https_local.py` both
+drive `http_get` through a DMA'd trampoline, so neither one ever executes
+`do_https_get` — where the banner lives. The wikipedia rig PASSes with a
+banner saying anything at all. `tools/uci/rig_https_banner.py` exists to walk
+the MENU ('I', then 'G') and read `$0400`, which is the only path that
+exercises that code.
+
 Related: `$(PRG)`'s recipe now `rm -f $@` before linking, because **ld65
 writes nothing when a memory area overflows** — so a failed link used to leave
 the previous image on disk, and every rig loads `build/c64-https.prg` by path
@@ -735,6 +753,25 @@ The scripts:
   - `rig_http_local.py`  — HTTP GET against a local test server
   - `rig_http_live.py`   — HTTP GET against a real internet host (requires
                             internet access from the U64E)
+  - `rig_https_banner.py`  — walks the MENU ('I' then 'G') and reads screen
+                            RAM at $0400 to prove the HTTPS banner names the
+                            build's real `HTTPS_HOST` (issue #128). The only
+                            rig that executes `do_https_get`: every other
+                            HTTPS rig enters through a DMA'd `http_get`
+                            trampoline and skips the menu entirely. Lets the
+                            fetch finish and sends 'Q' to leave the viewer,
+                            because `do_https_get` only reaches `tls_close` /
+                            `net_tcp_close` after the viewer returns — and
+                            resetting with a live firmware socket poisons the
+                            UCI lease path (power cycle only).
+                            **Two traps it was written around:**
+                            `decode_screen()` returns LOWERCASE rows (only
+                            `screen_text()` uppercases), so comparing a raw
+                            row against `"HTTPS GET"` never matches and reads
+                            as "no banner" against a perfectly good screen;
+                            and at 48 MHz the handshake prints ~24 progress
+                            markers that scroll a 25-row screen, so the read
+                            must start immediately with no sleep.
   - `rig_https_bad_finished.py` — the client must ABORT on a forged server
                             Finished. Uses the hand-rolled
                             `tools/https_e2e/evil_listener.py` rather than
