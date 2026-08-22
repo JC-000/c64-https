@@ -671,40 +671,77 @@ The scripts:
 
 ### End-to-end HTTPS status
 
-**REAL-SERVER MILESTONE (2026-08-21, U64E @ 48 MHz, comb):** the first
-HTTPS GETs from the C64 to real public internet servers.
+**REAL-SERVER MILESTONE (2026-08-21/22, U64E @ 48 MHz, comb):** HTTPS GETs
+from the C64 to real public internet servers, and the stretch goal — the
+Commodore 64's own Wikipedia article, over TLS, into the REU, scrollable
+on screen.
 
-  target            CFIN     http_status   note
-  github.com        32.5 s   **200**       full PASS, homepage HTML prefix
-  browserleaks.com  33.4 s   **200**       TLS + status PASS; rig sentinel
-                                           timed out on body drain (below)
+  target            result
+  github.com        **HTTP 200**, homepage HTML (CFIN 32.5 s)
+  browserleaks.com  **HTTP 200** (CFIN 33.4 s)
+  lwn.net           **HTTP 200** (CFIN 38.5 s)
+  en.wikipedia.org  **HTTP 200**, 125,235 B article -> REU $10:0000,
+                    body byte-verified vs a host reference fetch,
+                    on-screen scroll viewer entered (~76 s to full body)
 
-The W1 streaming deframer handled the real 9-11-record flights
-(Certificate ~2.7 KB over ~6 records; CV+Finished sharing the tail), the
-W2 streaming consumer staged the leaf, and the sibling library verified
-real CA-issued chains. Local padded-chain bench: 11-record flight costs
-only ~0.7 s over the single-cert control (31.5 vs 30.8 s CFIN).
+The W1 streaming deframer (`src/tls_deframe.s`) handles the real 11-14
+record flights (Certificate spanning ~6 records; CV+Finished sharing the
+tail); the W2 streaming consumer stages the leaf into a UCI-only 2048 B
+`cert_buf` (`CERT_BUF_SIZE`, so wikipedia's 1636 B leaf fits); the
+sibling library verifies real CA-issued chains. Target is a build knob:
+`make HTTPS_HOST=<host> HTTPS_PATH=<path>` (+ `HTTPS_BODY_TO_REU=1` and
+the `src/viewer.s` viewer for the wikipedia flow). Rigs:
+`tools/uci/rig_https_live.py`, `rig_https_wiki.py`.
 
-Two findings from the live runs:
-  - **512-content records** (what MFL-honoring servers actually send) hit
-    a latent page-dispatch bug in the record layer's inner-type read —
-    fixed in `src/tls_record.s` (page-2 arm), mutation-proven by
+Three bugs the local-listener path never exposed, all fixed:
+  - **512-content records** (what MFL-honoring servers send) hit a latent
+    page-dispatch bug in the record layer's inner-type read — fixed in
+    `src/tls_record.s` (page-2 arm), mutation-proven by
     `tools/test_tls_deframer.py::mfl512_full_records`. Every local
-    fixture had been one byte short of the trigger.
-  - **W4 gap (open):** a large NON-chunked body cannot terminate by
-    Content-Length once `body_append` truncates at 512 B
-    (`http_resp_len` freezes, the equality never fires), leaving only
-    the connection-close fallback — browserleaks holds the connection
-    and the rig sentinel timed out at 300 s with status/body already
-    correct. Fix direction: count consumed-not-stored body bytes
-    (needs >16-bit for real pages) or cap the post-truncation drain.
+    fixture was one byte short of the trigger.
+  - **Large-body termination**: identity/chunked bodies past the 512 B
+    `http_resp_buf` cap now terminate on a 24-bit CONSUMED-byte count
+    (`http_body_total`), not on the frozen stored length (Lane E W4
+    rework in `src/http.s`; wikipedia serves the article chunked with no
+    Content-Length, so this is the primary path).
+  - **THE wikipedia stall (`net_poll` ring-drop, commit d9cd021)**: the
+    UCI adapter requested a fixed 512 B per `SOCKET_READ` while its ring
+    fill loop silently dropped any byte past the ring's CURRENT free
+    space — and the response drain discarded them, bytes the firmware
+    counts as delivered. Once the 4 KB ring wrapped (any flight over ring
+    capacity: wikipedia's 4.7 KB cert flight is the first target to
+    cross it), the stream got a permanent hole one ring-capacity past
+    the wrap and the deframer parked forever at that record. github/
+    browserleaks/lwn (3.2-4.0 KB flights) squeaked under. Fixed by
+    clamping the request to `min(ring_free - 1, 512)` and skipping the
+    read when nothing fits (`src/net/uci/net.s`). **Not a firmware bug.**
+    Found by decrypting the stalled run's captured ring wrap-aware, after
+    a TCP-relay experiment excluded delivery/window causes (full flight
+    handed to firmware with zero backpressure, client stalled anyway —
+    see `HTTPS_SNI` override knob, added for exactly that experiment).
 
-**U64E "writemem exhaustion wedge"** (user-named): fw 3.14d misses
-garbage collection on a temp location filled by REST `writemem`; a long
-hardware session (~15 PRG loads that day) fills it CUMULATIVELY and then
-REST *and* the UCI bridge wedge together — ping alive, REST refuses
-instantly, C64 parks mid-transfer. Power cycle fixes. Budget PRG loads
-per session and power-cycle proactively; `readmem` is not implicated.
+**U64E lease-poisoning (open device gotcha, separate from the writemem
+wedge below).** Resetting the C64 while a firmware TCP socket is still
+live poisons the UCI lease path: `GET_IPADDR` then returns 0.0.0.0 on
+all interfaces with no error while REST/FTP/menu stay healthy, so the
+program loops forever at "REQUESTING DHCP". Survives C64 resets,
+`machine:reboot`, and UCI disable/enable — **only a wall power cycle
+clears it.** Any live rig that times out leaves the C64 parked in
+`http_get` with an open socket, so its cleanup reset triggers this; the
+completing runs above do not. Diagnostic trap: probe DHCP with a
+FAST-BOOT image (onchip), never the comb image, which does not reach
+DHCP inside `phase2_check`/`boot_check` windows at stock clock and reads
+as a false 0.0.0.0.
+
+**U64E "writemem exhaustion wedge"** (user-named, DIFFERENT failure): fw
+3.14d misses garbage collection on a temp location filled by REST
+`writemem`; a long hardware session (~15 PRG loads) fills it CUMULATIVELY
+and then REST *and* the UCI bridge wedge together — ping alive, REST
+refuses instantly, C64 parks mid-transfer. Power cycle fixes; upstream
+GideonZ/1541ultimate#686 (merged, unreleased). Mitigated by
+`tools/uci/_temp_gc.py` (FTP-deletes managed `temp<HEX>` files, keep
+youngest 2; wired into the live/wiki rigs). Budget PRG loads per session;
+`readmem` is not implicated.
 
 
 
