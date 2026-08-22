@@ -476,6 +476,40 @@ def ensure_reu_16mb(client: Ultimate64Client) -> None:
 # Main hardware run                                                           #
 # --------------------------------------------------------------------------- #
 
+def _close_orphan_socket(transport, client, labels) -> None:
+    """Best-effort SOCKET_CLOSE for a connection abandoned mid-run.
+
+    Abandoning an ACTIVE firmware TCP socket (rig timeout while the C64
+    is parked inside http_get's recv loop) is the leading suspect for
+    the U64E's recurring DHCP-0.0.0.0 poisoning (2026-08-21; survives
+    machine:reboot, cleared only by cold power). The stuck C64 cannot be
+    jsr'd into, so: save the live socket id, reset the C64 (the PRG
+    stays in RAM), let BASIC come up, restore the id, and SYS a 4-byte
+    trampoline in the cassette buffer straight at net_tcp_close so the
+    firmware sees a proper SOCKET_CLOSE. Never raises.
+    """
+    try:
+        sock = transport.read_memory(labels["uci_socket_id"], 1)[0]
+        if sock == 0:
+            return
+        close_addr = labels["net_tcp_close"]
+        print(f"  orphan-socket hygiene: closing firmware socket "
+              f"{sock} via net_tcp_close (${close_addr:04X})")
+        client.reset()
+        time.sleep(6.0)                      # BASIC READY (PRG stays in RAM)
+        transport.write_memory(labels["uci_socket_id"], bytes([sock]),
+                               override="restore socket id for orphan close")
+        tramp = bytes([0x20, close_addr & 0xFF, close_addr >> 8, 0x60])
+        transport.write_memory(0x0334, tramp,
+                               override="orphan-close trampoline (cassette buffer)")
+        send_text(transport, "sys820\r")
+        time.sleep(2.0)
+        print("  orphan-socket hygiene: SOCKET_CLOSE issued")
+    except Exception as exc:                 # noqa: BLE001 — best-effort
+        print(f"  orphan-socket hygiene failed (non-fatal): {exc}",
+              file=sys.stderr)
+
+
 def main() -> int:
     if not PRG_PATH.is_file() or not LABELS_PATH.is_file():
         print(f"ERROR: build artifacts missing under {PRG_PATH.parent}",
@@ -734,6 +768,7 @@ def main() -> int:
             print(f"\nFAIL: sentinel not set within {WIKI_TIMEOUT:.0f}s "
                   f"(progress=0x{last_progress:02X}, "
                   f"http_body_total={body_total:,})", file=sys.stderr)
+            _close_orphan_socket(transport, client, labels)
             outcome = "TIMEOUT"
             return 1
         if carry != 0:
