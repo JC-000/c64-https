@@ -90,6 +90,7 @@ def test_build_get_basic(transport, labels):
     version_addr = labels.address("http_version")
     host_hdr_addr = labels.address("http_host_hdr")
     conn_hdr_addr = labels.address("http_conn_hdr")
+    ua_hdr_addr = labels.address("http_ua_hdr")
     crlf_addr = labels.address("http_crlf")
 
     # Build expected output by reading the actual constant bytes from VICE
@@ -99,6 +100,7 @@ def test_build_get_basic(transport, labels):
     ver_bytes = read_bytes(transport, version_addr, 11)        # " HTTP/1.1\r\n"
     hosthdr_bytes = read_bytes(transport, host_hdr_addr, 6)    # "Host: "
     conn_bytes = read_bytes(transport, conn_hdr_addr, 19)      # "Connection: close\r\n"
+    ua_bytes = read_bytes(transport, ua_hdr_addr, 27)          # "User-Agent: ...\r\n"
     crlf_bytes = read_bytes(transport, crlf_addr, 2)           # \r\n
 
     # The hostname and path are written by us in raw bytes, so they stay as-is.
@@ -109,11 +111,21 @@ def test_build_get_basic(transport, labels):
         hosthdr_bytes +           # "Host: "         (6)
         hostname +                # "example.com"    (11)
         crlf_bytes +              # "\r\n"           (2)
+        ua_bytes +                # "User-Agent: c64-https/0.1\r\n" (27)
         conn_bytes +              # "Connection: close\r\n" (19)
         crlf_bytes                # "\r\n"           (2)
     )
 
-    expected_len = len(expected)  # should be 60
+    expected_len = len(expected)  # should be 87
+
+    # The UA header exists because Wikipedia 403s UA-less requests: assert
+    # the emitted line is exactly the honest short UA (raw ASCII).
+    if ua_bytes == b"User-Agent: c64-https/0.1\r\n":
+        print("  PASS: User-Agent header line emitted as expected")
+        passed += 1
+    else:
+        print(f"  FAIL: User-Agent line = {bytes(ua_bytes)!r}")
+        failed += 1
 
     # Check length
     if actual_len == expected_len:

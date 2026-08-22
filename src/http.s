@@ -19,6 +19,7 @@
         .export http_version
         .export http_host_hdr
         .export http_conn_hdr
+        .export http_ua_hdr
         .export http_crlf
         .export http_bg_idx
         .export http_bg_src
@@ -365,6 +366,21 @@ http_build_get:
         inx
         cpx #2
         bne @cv_crlf1
+
+        ; --- "User-Agent: c64-https/0.1\r\n" (27 bytes) ---
+        ; Wikipedia's robot policy 403s a UA-less request (measured live,
+        ; lane H recon 2026-08-21); a short honest UA gets a 200.
+        ldx #0
+@cv_ua:
+        lda http_ua_hdr,x
+        stx http_bg_src
+        ldx http_bg_idx
+        sta http_req_buf,x
+        inc http_bg_idx
+        ldx http_bg_src
+        inx
+        cpx #27
+        bne @cv_ua
 
         ; --- "Connection: close\r\n" (19 bytes) ---
         ldx #0
@@ -910,6 +926,8 @@ http_host_hdr:
         .byte "Host: "
 http_conn_hdr:
         .byte "Connection: close", $0d, $0a
+http_ua_hdr:
+        .byte "User-Agent: c64-https/0.1", $0d, $0a
 http_crlf:
         .byte $0d, $0a
 
