@@ -1223,6 +1223,24 @@ http_host_zimmers:
         .byte 0
 http_host_zimmers_len = 15
 
+; --- HTTPS_TARGET_RODATA: the build-knob strings, isolated ---
+; Issue #126. These three labels are the only rodata in the program whose
+; SIZE is a build knob, and they used to sit in RODATA, which every cfg
+; routes into the always-resident crypto region. That region runs 10-25 B
+; from full on four of the five shipped/default configurations, so a longer
+; `make HTTPS_HOST=... HTTPS_PATH=...` did not overflow the strings' own
+; budget — it pushed LIB_NISTCURVES_P256_RODATA off the end of CRYPTO_HOT
+; and failed the link in a segment that has nothing to do with the knob:
+;
+;   ld65: Warning: Segment 'LIB_NISTCURVES_P256_RODATA' overflows memory
+;         area 'CRYPTO_HOT' by 34 bytes
+;
+; Isolating them means the knob's cost lands in ONE segment, which each cfg
+; routes to a region that has room for the asserted maxima below (63 B host
+; + 100 B path + 63 B SNI). Growth in a build flag now hits the flag's own
+; region, not an unrelated library's rodata.
+        .segment "HTTPS_TARGET_RODATA"
+
 http_host_target:
         .byte HTTPS_HOST_STR
         .byte 0
@@ -1253,6 +1271,7 @@ https_sni_override:
         .byte 0
         .assert (* - https_sni_override - 1) <= 63, error, "HTTPS_SNI exceeds the 63-char SNI guard"
 .endif
+        ; --- end HTTPS_TARGET_RODATA ---
 
 ; =============================================================================
 ; Local BSS

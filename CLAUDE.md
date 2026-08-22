@@ -226,6 +226,44 @@ Variables:
                           ~7 MHz; boot costs ~50 s at 64 MHz (test
                           scripts: set C64_INIT_WAIT). Uses
                           cfg/c64-https-$(BACKEND)-onchip.cfg.
+  - **`HTTPS_HOST` / `HTTPS_PATH` / `HTTPS_SNI` grow their OWN segment now
+    (#126).** These strings are the only rodata whose size is a build knob,
+    and they used to ride `RODATA` into the always-resident crypto region —
+    which runs **10-25 B from full** on four of the five default/shipped
+    configurations. So a longer target did not overflow the strings' budget;
+    it pushed `LIB_NISTCURVES_P256_RODATA` off the end and failed the link in
+    a segment with nothing to do with the knob:
+
+        ld65: Warning: Segment 'LIB_NISTCURVES_P256_RODATA' overflows
+              memory area 'CRYPTO_HOT' by 34 bytes
+
+    Measured with the documented wikipedia command (`HTTPS_HOST=
+    en.wikipedia.org HTTPS_PATH=/w/index.php?...`, +46 B of string):
+    **uci-plain FAIL by 34 B, uci-onchip FAIL by 21 B, ip65-onchip FAIL by
+    36 B (CRYPTO_RESIDENT), ip65-plain OK, uci-comb OK.** Two of the three
+    *shipped* products were in that failing set, and the milestone was
+    reachable only on comb because comb's cfg already routes `RODATA` to
+    `CRYPTO_OVERLAY`.
+
+    They now live in `HTTPS_TARGET_RODATA`, routed per-cfg to a region with
+    room: `CRYPTO_OVERLAY` under both UCI cfgs (~2.5 KB free), `NET_CODE`
+    under ip65 (186 B tail). All five profiles build the wikipedia command,
+    and all three UCI profiles absorb the asserted maxima at once
+    (63 B host + 100 B path + 63 B SNI = 229 B).
+
+    **ip65's 186 B is a joint budget, and boot.s's three asserts are
+    independent maxima rather than a joint guarantee.** Host + path at
+    maximum is 165 B and fits; adding a 63-char `HTTPS_SNI` is 229 B and
+    overflows by 45 B on both ip65 profiles. That combination is not a real
+    ip65 configuration — `HTTPS_SNI` is a UCI-era relay/forensics knob — and
+    it now fails naming `HTTPS_TARGET_RODATA` and its own region rather than
+    a library that did not grow.
+
+    Do **not** read ld65's `NET_BSS $4000-$4F8B ... EMPTY, 3,980 B free` as
+    headroom: that span is the ip65 blob's own BSS, reserved inside the blob
+    image rather than by a ld65 segment. Empty to the linker, live at
+    runtime.
+
   - `HTTPS_HOST=<host>` — build-time HTTPS target (default `www.foo.bar`;
                           feeds the GET, SNI and DNS lookup). Travels via
                           a generated `build/https_host.inc` because
