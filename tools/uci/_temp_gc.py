@@ -30,7 +30,9 @@ import re
 import sys
 from ftplib import FTP, error_perm
 
-_MANAGED = re.compile(r"^temp\d+$")
+# The firmware's attachment counter is HEX: temp0009 is followed by
+# temp000A (observed live). A \d+ pattern silently skips lettered names.
+_MANAGED = re.compile(r"^temp[0-9a-fA-F]+$")
 
 
 def gc_temp(host: str, keep: int | None = None, timeout: float = 10.0) -> int:
@@ -53,7 +55,7 @@ def gc_temp(host: str, keep: int | None = None, timeout: float = 10.0) -> int:
             # files; the numeric sort below makes oldest-first explicit
             # (and survives a counter that skips).
             names = [n for n in ftp.nlst() if _MANAGED.match(n)]
-            names.sort(key=lambda n: int(n[4:]))
+            names.sort(key=lambda n: int(n[4:], 16))
             victims = names[: max(0, len(names) - keep)] if keep else names
             for name in victims:
                 try:
