@@ -268,11 +268,61 @@ Variables:
                           feeds the GET, SNI and DNS lookup). Travels via
                           a generated `build/https_host.inc` because
                           ca65's `-D` is numeric-only; the generator is
-                          content-compared and deletes `boot.o` on a
-                          change, so no `make clean` is needed for THIS
-                          flag (the link step keeps the repo-wide
-                          same-second caveat). Hosts >63 chars are a
-                          build error (SNI copy guard).
+                          content-compared **at Makefile parse time**, and
+                          on a change it deletes `boot.o` AND the PRG, so no
+                          `make clean` is needed for THIS flag — including
+                          back-to-back inside one second. The
+                          "link step keeps the repo-wide same-second caveat"
+                          that used to be recorded here was **issue #128**,
+                          not a fact of life; see the entry below. Hosts >63
+                          chars are a build error (SNI copy guard).
+**Two #128 hazards, both silent, both fixed — read this before touching the
+`HTTPS_HOST` plumbing.** The report was "the wikipedia build still connects to
+foo.bar", and it had two independent causes, neither of which is a bad
+hostname:
+
+  1. **The banner was a hardcoded literal.** `do_https_get` printed
+     `"HTTPS GET WWW.FOO.BAR..."` unconditionally while connecting to the real
+     target — `http_host_target` drives both the SNI copy and
+     `net_dns_resolve` a few lines below, and always did. The only thing an
+     operator can see said the knob had done nothing. It now prints the actual
+     host, assembled at runtime and fed through `ascii_chrout` (the host is
+     ASCII, and raw ASCII lowercase renders as PETSCII graphics — issue #28).
+
+  2. **`make HTTPS_HOST=<other>` could silently do nothing and exit 0.**
+     macOS ships GNU Make 3.81 (1-second mtime resolution), so a `boot.o`
+     rebuilt in the same second as the previous link is not "newer" than the
+     PRG and the link is skipped. Measured: `make` then `make
+     HTTPS_HOST=en.wikipedia.org` back-to-back printed nothing, exited 0, and
+     left a PRG carrying the OLD host.
+
+     **Two fixes were tried and measured before the third worked**, which is
+     why the mechanism looks the way it does:
+       - deleting `boot.o` only — skipped the link, stale PRG (the bug);
+       - deleting `boot.o` and the PRG *from inside the recipe* — **worse**:
+         make stats its targets before that recipe runs and caches the result,
+         so it used the cached "exists, same second" view, skipped the link
+         anyway, and left **no PRG at all**, still exit 0;
+       - compare-and-invalidate during **Makefile parse** (a `$(shell ...)`
+         guarded by `MAKECMDGOALS`), which runs before make builds its file
+         database. Absence is not a timestamp comparison — that is the whole
+         point. Verified 3/3 on the same-second switch, in both directions,
+         and a no-op `make` still relinks nothing.
+
+     The same-second caveat still stands for `BACKEND=` and every other flag,
+     which have no equivalent hook. `make clean` remains the remedy there.
+
+Related: `$(PRG)`'s recipe now `rm -f $@` before linking, because **ld65
+writes nothing when a memory area overflows** — so a failed link used to leave
+the previous image on disk, and every rig loads `build/c64-https.prg` by path
+(`tools/uci/rig_https_wiki.py:135`). `.DELETE_ON_ERROR` does NOT cover this
+and was tried first: it deletes a target only if the recipe *changed* it, and
+here the file is never touched. Absence is the honest state after a failure.
+
+Keep build prose OUT of recipe bodies: make echoes recipe comment lines into
+every build's stdout, and a comment containing the word "overflows" is exactly
+what scripts grep the build output for.
+
   - `TLS_STREAM_DEFRAME` — streaming handshake deframer gate; default ON
                           under `BACKEND=uci`, OFF (compiled out) under
                           ip65. See the real-server milestone entry.

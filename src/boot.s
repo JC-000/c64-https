@@ -529,8 +529,30 @@ do_https_get:
         rts
 
 @net_ok:
+        ; Issue #128: print the ACTUAL target, not a hardcoded literal.
+        ; This banner used to read "HTTPS GET WWW.FOO.BAR..." unconditionally,
+        ; so a `make HTTPS_HOST=en.wikipedia.org` build announced foo.bar on
+        ; screen while connecting to wikipedia perfectly well. The connection
+        ; was always right — http_host_target drives both the SNI copy and
+        ; net_dns_resolve, a few lines below — but the only thing the operator
+        ; can see said otherwise, which reads as "the build knob did nothing".
         lda #<https_get_msg
         ldy #>https_get_msg
+        jsr print_string
+        ; http_host_target is ASCII (it comes from the Makefile), so it goes
+        ; through ascii_chrout rather than CHROUT directly — raw ASCII
+        ; lowercase renders as PETSCII graphics in the default charset
+        ; (issue #28), which would turn "en.wikipedia.org" into line noise.
+        ldx #0
+@banner_host:
+        lda http_host_target,x
+        beq @banner_host_done
+        jsr ascii_chrout
+        inx
+        bne @banner_host
+@banner_host_done:
+        lda #<https_get_tail_msg
+        ldy #>https_get_tail_msg
         jsr print_string
 
         ; --- set HTTP host/path/port ---
@@ -1150,8 +1172,15 @@ http_get_msg:
         .byte "HTTP GET WWW.ZIMMERS.NET..."
         .byte $0d, 0
 
+; Issue #128: prefix + suffix around the real host, printed by do_https_get.
+; Deliberately NOT one literal — the host is a build knob, so the banner has
+; to be assembled at runtime from http_host_target.
 https_get_msg:
-        .byte "HTTPS GET WWW.FOO.BAR..."
+        .byte "HTTPS GET "
+        .byte 0
+
+https_get_tail_msg:
+        .byte "..."
         .byte $0d, 0
 
 dns_fail_msg:

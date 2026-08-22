@@ -15,6 +15,18 @@
 #   CA65, LD65        — ca65 / ld65 binaries (default: cc65 toolchain in PATH)
 #   VICE              — VICE binary for `make run` (default: x64sc)
 
+
+# General hygiene: drop any target whose recipe wrote it and then failed, so
+# a half-written generated file is never mistaken for a good one.
+#
+# NOTE this does NOT cover the case issue #128 turned up, and it was tried
+# there first. `.DELETE_ON_ERROR` deletes a target only if the recipe CHANGED
+# it, and ld65 on a memory-area overflow writes nothing at all — so the old
+# PRG's mtime is untouched and make correctly declines to delete it
+# (verified: file identical, same timestamp, after a deliberately overflowing
+# link). The link rule below therefore removes its own target up front.
+.DELETE_ON_ERROR:
+
 CA65      ?= ca65
 LD65      ?= ld65
 VICE      ?= x64sc
@@ -396,8 +408,21 @@ PRG_DEPS += build/lib/nistcurves-p256-verify.bin
 build/crypto/shared/p256_overlay_blobs.o: build/lib/nistcurves-p256-verify.bin
 endif
 
+# Issue #128: the recipe removes the old image BEFORE linking. ld65 writes
+# nothing when a memory area overflows, so without this a failed link silently
+# leaves the PREVIOUS build/c64-https.prg on disk — and every rig loads that
+# path by name (tools/uci/rig_https_wiki.py:135). The operator then runs a
+# stale image carrying the OLD HTTPS_HOST and reports "the build knob did
+# nothing" instead of "the build failed". Absence is the honest state after a
+# failure.
+#
+# Kept OUT of the recipe deliberately: make echoes recipe comment lines, so
+# prose sitting there lands in every build's stdout — and this prose contains
+# the word "overflows", which is exactly what scripts grep the build output
+# for. That cost me a full five-profile false FAIL while writing this.
 $(PRG): $(PRG_DEPS)
 	@mkdir -p build
+	@rm -f $@
 	$(LD65) $(LD65FLAGS) -o $@ $(ALL_OBJS) $(SIBLING_LIB_ARCHIVES)
 	# Rewrite ca65 label format `al XXXXXX .name` -> VICE format `al C:XXXX .name`
 	# so the c64-test-harness Labels.from_file() reader can parse it.
@@ -461,25 +486,48 @@ build/%.o: src/%.s
 build/net/ip65/ip65_blob.o: $(IP65_BIN)
 
 # src/boot.s pulls the HTTPS target hostname from this generated include
-# (see the HTTPS_HOST block near the top). FORCE makes the rule run on
-# every make so a changed HTTPS_HOST= is noticed; the content compare
-# leaves the file's mtime alone when the value is unchanged, so boot.o
-# is NOT rebuilt in that case. On a change it also deletes boot.o
-# outright: this Make (3.81 on macOS) compares mtimes at 1-second
-# resolution, so two `make HTTPS_HOST=...` runs inside the same second
-# would otherwise leave the previous host's boot.o counting as up to
-# date — measured, not hypothetical. The LINK step keeps the repo-wide
-# same-second caveat (see "make clean when you change flags" in
-# CLAUDE.md): scripted back-to-back host switches inside one second can
-# skip the relink, so check the PRG hash when a build matters. Deleting
-# $(PRG) here does NOT fix that — make's cached stat of the goal leaves
-# it "up to date" and the file simply vanishes (measured too).
-build/https_host.inc: FORCE
-	@mkdir -p build
-	@printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n.define HTTPS_SNI_STR "%s"\n' '$(HTTPS_HOST)' '$(HTTPS_PATH)' '$(HTTPS_SNI)' > $@.tmp
-	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@ && rm -f build/boot.o; fi
-
-FORCE:
+# (see the HTTPS_HOST block near the top). The content compare leaves the
+# file's mtime alone when the value is unchanged, so boot.o is NOT rebuilt
+# in that case.
+#
+# The "LINK step keeps the repo-wide same-second caveat ... check the PRG
+# hash when a build matters" note that used to stand here is RETIRED for
+# this flag: that caveat was the #128 bug, not a fact of life, and the
+# parse-time invalidation below closes it. The caveat still holds for
+# BACKEND= and the other flags, which have no equivalent hook — `make
+# clean` remains the remedy there (see CLAUDE.md).
+# Issue #128: the target strings are resolved at PARSE time, not in a recipe.
+#
+# This flag is documented as not needing `make clean`, so it has to be right
+# without one — and two earlier shapes of this rule were not:
+#
+#   1. Delete boot.o only. macOS ships GNU Make 3.81, which compares mtimes at
+#      1-second resolution, so a boot.o rebuilt in the same second as the
+#      previous link is NOT newer than the PRG and the link is skipped. `make`
+#      then `make HTTPS_HOST=<other>` back-to-back printed nothing, exited 0,
+#      and left a PRG still carrying the OLD host. That is precisely "the
+#      wikipedia build still connects to foo.bar".
+#
+#   2. Delete boot.o AND the PRG from inside the recipe. Worse: make stats its
+#      targets before this recipe runs and caches the result, so it used the
+#      cached "PRG exists, same second" view and skipped the link anyway —
+#      leaving NO PRG at all, still exit 0. Verified both times.
+#
+# Doing the compare-and-invalidate during Makefile expansion runs it before
+# make builds its file database, so the deletion is visible to the dependency
+# graph. Absence is not a timestamp comparison, which is the whole point:
+# nothing here can be defeated by two files sharing a second.
+ifneq ($(MAKECMDGOALS),clean)
+_ := $(shell mkdir -p build; \
+             printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n.define HTTPS_SNI_STR "%s"\n' \
+                    '$(HTTPS_HOST)' '$(HTTPS_PATH)' '$(HTTPS_SNI)' > build/https_host.inc.tmp; \
+             if cmp -s build/https_host.inc.tmp build/https_host.inc; then \
+                 rm -f build/https_host.inc.tmp; \
+             else \
+                 mv build/https_host.inc.tmp build/https_host.inc; \
+                 rm -f build/boot.o $(PRG); \
+             fi)
+endif
 
 build/boot.o: build/https_host.inc
 
