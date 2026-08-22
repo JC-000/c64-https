@@ -642,7 +642,12 @@ def main() -> int:
         # this trampoline JSRs http_get directly and never crosses it —
         # without this poke the body would not be sunk (lane E contract:
         # poking the exported flag by DMA before http_get is supported).
-        transport.write_memory(labels["http_body_sink"], b"\x01")
+        # http_body_sink lives in CRYPTO_COLD_SHADOW ($A000-$BFFF), which
+        # the MemoryPolicy reserves — this single-byte poke is the lane E
+        # supported contract, so bypass with a named override rather than
+        # widening the policy.
+        transport.write_memory(labels["http_body_sink"], b"\x01",
+                               override="arm http_body_sink (lane E DMA contract)")
         print("Armed http_body_sink=1 (trampoline bypasses do_https_get)")
 
         sys_line = f"sys{routine_addr}\r"
