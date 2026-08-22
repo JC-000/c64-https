@@ -6,7 +6,8 @@ this pinned to, and what has upstream shipped since?*
 
 Dependency-free (stdlib + ``git`` only), no network libraries, no API tokens,
 no GitHub CLI. Exactly one ``git ls-remote --tags`` and one ``git ls-tree`` per
-submodule. Safe to schedule.
+submodule. Safe to schedule. (That is the default mode; ``--worktree`` below
+makes no network calls at all.)
 
 Cost, measured rather than asserted (2026-08-13, 3 submodules, warm DNS):
 **2.1 s wall-clock, 0.15 s of it CPU** — i.e. network-bound, and it scales
@@ -20,6 +21,7 @@ one refactor away from a false one.
     tools/check_upstream_pins.py --json       # machine-readable
     tools/check_upstream_pins.py --strict     # exit 1 if any pin has drifted
     tools/check_upstream_pins.py --submodule libs/x25519
+    tools/check_upstream_pins.py --worktree   # offline: checkout vs. gitlink
 
 Why this exists rather than ``git submodule status``
 ----------------------------------------------------
@@ -37,6 +39,26 @@ treated identically.
 It also reads the pinned SHA out of the git tree (``git ls-tree HEAD <path>``)
 rather than the working copy, so it is correct for a submodule that has never
 been ``git submodule update --init``'d, and immune to a dirty local checkout.
+
+The blind spot that buys, and ``--worktree``
+--------------------------------------------
+Reading the gitlink means the default report describes *what this repo pins*,
+never *what is on disk*. Those diverge exactly when a submodule was not updated
+after a pull — and that divergence is what a build actually trips over.
+
+c64-https#124: a contributor's ``libs/nistcurves`` sat in the v0.5.0-v0.8.0
+range under a master-era tree, so ``make BACKEND=uci`` died several minutes in
+with ``zp_config.o exports nistcurves_zp_ptr2 = <absent>`` — an error naming a
+knob they never touched. This script, run at that moment, would have reported
+"v0.11.2, no drift" and been *correct about the pin* while the checkout that
+broke the build went unmentioned.
+
+``--worktree`` is the complementary check: for every submodule it compares the
+checked-out ``HEAD`` against the gitlink and reports MATCH / MISMATCH /
+NOT-CHECKED-OUT plus dirtiness. It is **offline** — no ``ls-remote``, so no
+network — and exits 1 on any mismatch without needing ``--strict``, because an
+out-of-sync checkout is a broken working tree rather than a policy call about
+how current a pin should be.
 """
 
 from __future__ import annotations
@@ -192,6 +214,96 @@ def inspect(mod: dict, ref: str) -> dict:
     return result
 
 
+def inspect_worktree(mod: dict, ref: str) -> dict:
+    """Compare a submodule's checked-out HEAD against the gitlink. Offline."""
+    result = {
+        "name": mod["name"],
+        "path": mod["path"],
+        "url": mod["url"],
+        "pinned_sha": None,
+        "checkout_sha": None,
+        "checkout_describe": None,
+        "dirty": False,
+        "state": "unknown",
+        "error": None,
+    }
+
+    result["pinned_sha"] = pinned_sha(mod["path"], ref)
+    if result["pinned_sha"] is None:
+        result["error"] = f"no gitlink for {mod['path']} at {ref}"
+        result["state"] = "no-gitlink"
+        return result
+
+    abs_path = os.path.join(REPO_ROOT, mod["path"])
+
+    # An un-`init`'d submodule leaves an EMPTY DIRECTORY behind, and `git -C`
+    # inside one does not fail — it walks up and answers from the superproject.
+    # Measured while writing this: a fresh clone with only libs/* initialised
+    # reported ip65's checkout as 9114ff7 (this repo's own HEAD, described as
+    # `v0.3.0-44-g9114ff7-dirty` against ip65's tags), i.e. a confident wrong
+    # answer for the precise case the mode exists to catch. So the directory
+    # must be confirmed to be its own worktree root before HEAD means anything.
+    try:
+        toplevel = _git("rev-parse", "--show-toplevel", cwd=abs_path)
+    except (subprocess.CalledProcessError, OSError):
+        result["state"] = "not-checked-out"
+        return result
+    if os.path.realpath(toplevel) != os.path.realpath(abs_path):
+        result["state"] = "not-checked-out"
+        return result
+
+    try:
+        result["checkout_sha"] = _git("rev-parse", "HEAD", cwd=abs_path)
+    except (subprocess.CalledProcessError, OSError):
+        result["state"] = "not-checked-out"
+        return result
+
+    # `--tags` is not optional here. Without it `git describe` sees annotated
+    # tags only, which is the exact defect the header documents: c64-x25519's
+    # lightweight v0.6.0 renders as `v0.5.0-5-g95fdd70`. This field is a human
+    # label only — every verdict below is decided on the SHA.
+    try:
+        result["checkout_describe"] = _git(
+            "describe", "--tags", "--always", "--dirty", cwd=abs_path
+        )
+    except (subprocess.CalledProcessError, OSError):
+        result["checkout_describe"] = result["checkout_sha"][:12]
+
+    try:
+        result["dirty"] = bool(_git("status", "--porcelain", cwd=abs_path))
+    except (subprocess.CalledProcessError, OSError):
+        result["dirty"] = False
+
+    result["state"] = (
+        "match" if result["checkout_sha"] == result["pinned_sha"] else "mismatch"
+    )
+    return result
+
+
+def render_worktree(rows: list[dict]) -> str:
+    lines = []
+    for row in rows:
+        lines.append(f"{row['path']}")
+        if row["error"]:
+            lines.append(f"    ERROR: {row['error']}")
+            continue
+        lines.append(f"    pinned   {row['pinned_sha'][:12]}")
+        if row["state"] == "not-checked-out":
+            lines.append("    checkout (absent)             <-- NOT CHECKED OUT")
+            continue
+        marker = {"match": "  (in sync)", "mismatch": "  <-- MISMATCH"}[row["state"]]
+        lines.append(
+            f"    checkout {row['checkout_sha'][:12]}  "
+            f"{row['checkout_describe']}{marker}"
+        )
+        if row["dirty"]:
+            lines.append("             (working tree dirty)")
+    if any(r["state"] in ("mismatch", "not-checked-out") for r in rows):
+        lines.append("")
+        lines.append("Fix with:  git submodule update --init --recursive")
+    return "\n".join(lines)
+
+
 def render(rows: list[dict]) -> str:
     lines = []
     for row in rows:
@@ -233,6 +345,14 @@ def main(argv: list[str]) -> int:
         metavar="PATH",
         help="restrict to this submodule path (repeatable)",
     )
+    ap.add_argument(
+        "--worktree",
+        action="store_true",
+        help=(
+            "offline: compare each submodule's checked-out HEAD against the "
+            "gitlink instead of querying upstream tags; exit 1 on any mismatch"
+        ),
+    )
     args = ap.parse_args(argv)
 
     mods = parse_gitmodules(os.path.join(REPO_ROOT, ".gitmodules"))
@@ -242,6 +362,17 @@ def main(argv: list[str]) -> int:
     if not mods:
         print("no submodules to check", file=sys.stderr)
         return 2
+
+    if args.worktree:
+        rows = [inspect_worktree(m, args.ref) for m in mods]
+        print(json.dumps(rows, indent=2) if args.json else render_worktree(rows))
+        if any(r["error"] for r in rows):
+            return 2
+        # No --strict gate: a checkout that is not the pinned commit is a broken
+        # working tree, not a judgement call about how current a pin should be.
+        if any(r["state"] in ("mismatch", "not-checked-out") for r in rows):
+            return 1
+        return 0
 
     rows = [inspect(m, args.ref) for m in mods]
 

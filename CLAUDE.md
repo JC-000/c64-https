@@ -157,6 +157,38 @@ only `ip65.cfg` and `ip65_stub.s` — so on a real fresh clone there is
 nothing to touch. See the blob discussion above for the ordering fix
 that made the `.incbin` half of this go away.)
 
+**Stale-submodule gotcha (#124) — now caught before the build, not during
+it.** A `libs/nistcurves` working checkout older than the gitlink used to
+fail several minutes in, inside `tools/integration/build_nistcurves_p256.sh`,
+with an error naming the wrong cause entirely:
+
+    ERROR: zp_config.o exports nistcurves_zp_ptr2 = <absent>,
+           expected 0x0000003D (CONTRACT_ZP_DEFINES did not take)
+
+— a knob the reporter never touched. The member name is the tell: bare
+`zp_config.o` in `nistcurves-p256-verify.a` exists only at upstream
+v0.5.0-v0.8.0 (the per-variant `zp_config_p256verify.o` arrived in v0.9.0),
+and none of those releases honours `CONTRACT_ZP_DEFINES` at all (v0.10.0), so
+the `-D` is silently discarded. Reproduced by moving ONLY the submodule
+checkout under a fresh clone of master: v0.6.0 and v0.8.0 give that line
+character for character, v0.9.1 gives the same text with the per-variant
+member name, v0.10.1 and later pass.
+
+The wrapper now preflights before invoking upstream's make and fails in
+~0.05 s naming `git submodule update --init --recursive`. The gate is a
+**source probe** (`.ifndef nistcurves_zp_ptr2` in `src/zp_config.s`,
+`CONTRACT_ZP_DEFINES` in the library Makefile), not a tag comparison — tags
+are the wrong oracle here, since this org rebuilt the c64-nist-curves history
+in 2026-05 and c64-x25519 ships lightweight tags. It deliberately does NOT
+certify the pin: >= v0.11.2 is still the requirement, for reasons the probe
+cannot see (v0.11.1's on-chip `SHARED_CT_MUL_8X8` fix, v0.11.2's
+knob-staleness guard), and those still fail later and elsewhere.
+
+Note that master itself was never broken: a fresh clone at `9114ff7` plus
+`git submodule update --init libs/nistcurves libs/x25519` links
+`build/c64-https.prg` under `BACKEND=uci`, and every commit that uses
+`CONTRACT_ZP_DEFINES` already pins v0.11.2.
+
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65).
@@ -2357,6 +2389,26 @@ schedulable.
     tools/check_upstream_pins.py --json              # machine-readable
     tools/check_upstream_pins.py --strict            # exit 1 on drift
     tools/check_upstream_pins.py --submodule libs/x25519
+    tools/check_upstream_pins.py --worktree          # checkout vs. gitlink
+
+**`--worktree` answers a different question, and the default mode cannot.**
+Everything above reports what the repo *pins*; `--worktree` reports what is
+*on disk*, comparing each submodule's checked-out HEAD against the gitlink
+(MATCH / MISMATCH / NOT-CHECKED-OUT, plus dirtiness). It is offline — no
+`ls-remote` — and exits 1 on any mismatch without `--strict`, since an
+out-of-sync checkout is a broken working tree rather than a policy call.
+
+Issue #124 is why it exists: a contributor's `libs/nistcurves` sat in the
+v0.5.0-v0.8.0 range under a master-era tree, and the default report would
+have said "v0.11.2, no drift" — correct about the pin, silent about the
+checkout that was actually breaking their build. One trap worth knowing if
+you write anything similar: an un-`init`'d submodule leaves an **empty
+directory**, and `git -C` inside one does not fail — it walks up and answers
+from the superproject. Before the guard landed, `--worktree` reported ip65's
+checkout as this repo's own HEAD (`v0.3.0-44-g9114ff7-dirty` against ip65's
+tags): a confident wrong answer for the exact case the mode exists to catch.
+The fix is to confirm `rev-parse --show-toplevel` equals the submodule path
+before HEAD means anything.
 
 **Do not read pins off `git submodule status`.** It renders versions
 via `git describe` *without* `--tags`, which considers annotated tags
