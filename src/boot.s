@@ -532,11 +532,11 @@ do_https_get:
         lda #http_host_target_len
         sta http_host_len
 
-        lda #<http_path_root
+        lda #<https_path_target
         sta http_path_ptr
-        lda #>http_path_root
+        lda #>https_path_target
         sta http_path_ptr+1
-        lda #1
+        lda #https_path_target_len
         sta http_path_len
 
         lda #<HTTPS_PORT
@@ -1211,6 +1211,14 @@ http_host_target_len = * - http_host_target - 1
 http_path_root:
         .byte "/"
         .byte 0
+
+; HTTPS request path, `make HTTPS_PATH=...` (see HTTPS_HOST above; same
+; generated-include mechanism). Default "/" keeps the build byte-identical.
+https_path_target:
+        .byte HTTPS_PATH_STR
+        .byte 0
+https_path_target_len = * - https_path_target - 1
+        .assert https_path_target_len <= 100, error, "HTTPS_PATH too long for the request builder"
 
 ; =============================================================================
 ; Local BSS

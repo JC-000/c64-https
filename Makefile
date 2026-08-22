@@ -86,6 +86,9 @@ endif
 # The generator rule is content-compared: changing HTTPS_HOST= rebuilds
 # boot.o with no `make clean`, and an unchanged value touches nothing.
 HTTPS_HOST ?= www.foo.bar
+# Companion request-path override (default "/"), same mechanism/caveats.
+# e.g. make HTTPS_PATH='/w/index.php?title=Commodore_64&action=raw'
+HTTPS_PATH ?= /
 # VIC-II blanking around the CPU-bound crypto primitives (src/vic.s).
 # ON by default and that is what ships; `make VIC_BLANK=0` degrades
 # vic_blank/vic_unblank to bare RTS so the badline tax can be measured
@@ -440,7 +443,7 @@ build/net/ip65/ip65_blob.o: $(IP65_BIN)
 # it "up to date" and the file simply vanishes (measured too).
 build/https_host.inc: FORCE
 	@mkdir -p build
-	@printf '.define HTTPS_HOST_STR "%s"\n' '$(HTTPS_HOST)' > $@.tmp
+	@printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n' '$(HTTPS_HOST)' '$(HTTPS_PATH)' > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@ && rm -f build/boot.o; fi
 
 FORCE:
