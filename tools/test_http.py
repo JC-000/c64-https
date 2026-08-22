@@ -543,6 +543,132 @@ def test_body_no_content_length(transport, labels):
     return passed, failed
 
 
+def _chunk(data, ext=b""):
+    """Encode one HTTP/1.1 chunk (RFC 7230 §4.1)."""
+    return (b"%x" % len(data)) + ext + b"\r\n" + data + b"\r\n"
+
+
+def test_chunked_body(transport, labels):
+    """Chunked transfer-decoding: Wikipedia serves the stretch-goal article
+    chunked with NO Content-Length, so the terminal 0-chunk is the
+    termination signal and http_body_total must count de-chunked payload
+    bytes only (never framing)."""
+    passed = 0
+    failed = 0
+
+    part1 = bytes((i * 3 + 1) & 0xFF for i in range(300))
+    part2 = bytes((i * 5 + 2) & 0xFF for i in range(300))
+    part3 = bytes((i * 11 + 3) & 0xFF for i in range(100))
+    body = part1 + part2 + part3                       # 700 B de-chunked
+
+    stream = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"\r\n"
+        + _chunk(part1)                                # "12c\r\n"...
+        + _chunk(part2, ext=b";name=val")              # chunk extension
+        + (b"%X" % len(part3)) + b"\r\n" + part3 + b"\r\n"  # UPPERCASE hex
+        + b"0\r\n"
+        + b"X-Trailer: yes\r\n"                        # trailer section
+        + b"\r\n"
+    )
+
+    _load_span(transport, labels, stream)
+    _reset_parser(transport, labels)
+
+    complete = _run_parser_loop(transport, labels, timeout=90.0)
+    if not complete:
+        print("  FAIL: parser did not complete on the terminal 0-chunk")
+        return 0, 1
+    print("  PASS: parser terminated on the 0-chunk (+ trailer)")
+    passed += 1
+
+    te = read_bytes(transport, labels.address("http_te_chunked"), 1)[0]
+    if te == 1:
+        print("  PASS: http_te_chunked = 1")
+        passed += 1
+    else:
+        print(f"  FAIL: http_te_chunked = {te}, expected 1")
+        failed += 1
+
+    total = _read_u24(transport, labels, "http_body_total")
+    if total == 700:
+        print(f"  PASS: http_body_total = {total} (payload only, no framing)")
+        passed += 1
+    else:
+        print(f"  FAIL: http_body_total = {total}, expected 700")
+        failed += 1
+
+    resp_len = _read_u16(transport, labels, "http_resp_len")
+    if resp_len == 512:
+        print(f"  PASS: http_resp_len = {resp_len}")
+        passed += 1
+    else:
+        print(f"  FAIL: http_resp_len = {resp_len}, expected 512")
+        failed += 1
+
+    stored = read_bytes(transport, labels.address("http_resp_buf"), 512)
+    if stored == body[:512]:
+        print("  PASS: http_resp_buf holds the first 512 de-chunked bytes")
+        passed += 1
+    else:
+        print("  FAIL: http_resp_buf does not match de-chunked body prefix")
+        failed += 1
+
+    in_len = _read_u16(transport, labels, "http_in_len")
+    if in_len == 0:
+        print("  PASS: span fully consumed")
+        passed += 1
+    else:
+        print(f"  FAIL: http_in_len = {in_len}, expected 0")
+        failed += 1
+
+    return passed, failed
+
+
+def test_chunked_small_body(transport, labels):
+    """Chunked body smaller than the buffer: stored intact, exact length."""
+    passed = 0
+    failed = 0
+
+    body = b"CHUNKED-SMALL-BODY-0123456789"                # 29 B
+    stream = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"transfer-encoding: CHUNKED\r\n"                  # case-folded match
+        b"\r\n"
+        + _chunk(body[:10]) + _chunk(body[10:]) + b"0\r\n\r\n"
+    )
+
+    _load_span(transport, labels, stream)
+    _reset_parser(transport, labels)
+
+    complete = _run_parser_loop(transport, labels, timeout=30.0)
+    if not complete:
+        print("  FAIL: parser did not complete")
+        return 0, 1
+
+    total = _read_u24(transport, labels, "http_body_total")
+    resp_len = _read_u16(transport, labels, "http_resp_len")
+    stored = read_bytes(transport, labels.address("http_resp_buf"), len(body))
+    if total == len(body) and resp_len == len(body):
+        print(f"  PASS: body_total = resp_len = {total}")
+        passed += 1
+    else:
+        print(f"  FAIL: body_total = {total}, resp_len = {resp_len}, "
+              f"expected {len(body)}")
+        failed += 1
+    if stored == body:
+        print("  PASS: de-chunked body stored intact")
+        passed += 1
+    else:
+        print(f"  FAIL: body mismatch: {stored!r}")
+        failed += 1
+
+    # Restore ring input mode for any later ring-driven vectors.
+    write_bytes(transport, labels.address("http_in_mode"), [0])
+    return passed, failed
+
+
 def run_tests(transport, labels, verbose=False):
     total_passed = 0
     total_failed = 0
@@ -606,6 +732,16 @@ def run_tests(transport, labels, verbose=False):
 
     print("\n--- W4: Content-Length absent (legacy path) ---")
     p, f = test_body_no_content_length(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- W4: chunked body > 512 (Wikipedia shape) ---")
+    p, f = test_chunked_body(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- W4: chunked small body ---")
+    p, f = test_chunked_small_body(transport, labels)
     total_passed += p
     total_failed += f
 
