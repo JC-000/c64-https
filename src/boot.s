@@ -126,6 +126,9 @@
         .import http_get_plain
         .import http_build_get
         .import http_recv_body
+.ifdef HTTPS_BODY_TO_REU
+        .import http_body_sink
+.endif
 
         ; ---- imports: HTTP I/O state (data.asm) ----
         .import http_host_ptr
@@ -631,6 +634,10 @@ do_https_get:
         ; the BODY in http_resp_buf / http_resp_len. Replaces the old
         ; first-record-only copy loop that showed headers and lost the
         ; body whenever it arrived as a second TLS record.
+.ifdef HTTPS_BODY_TO_REU
+        lda #1                  ; W4: stream the body into the REU at
+        sta http_body_sink      ;  http_reu_body_base (see src/http.s)
+.endif
         jsr http_recv_body
 
         ; display response body

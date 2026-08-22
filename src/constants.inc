@@ -130,6 +130,20 @@ reu_len_lo      = $df07         ; transfer length low
 reu_len_hi      = $df08         ; transfer length high
 reu_addr_ctrl   = $df0a         ; address control
 
+; --- W4 REU body sink ---
+; Default REU destination for a streamed HTTP response body: bank 16
+; ($10:0000) — clear of the mul-table banks 0-1, the comb profile's
+; Lim-Lee bank 2, and the reserved P-384 overlay banks 6-7.  The
+; shipped default therefore needs a 16 MB REU (the stretch-goal
+; config).  Build-time override: `make HTTP_REU_BODY_BASE=196608`
+; (decimal; ca65 -D takes no 0x and $ needs shell quoting) puts it at
+; bank 3 for a 512 KB VICE REU.  The runtime copy lives in src/http.s
+; (`http_reu_body_base`, 3 bytes LE in RODATA — RAM at runtime), so
+; tests and rigs can also retarget it by DMA without a rebuild.
+.ifndef HTTP_REU_BODY_BASE
+HTTP_REU_BODY_BASE = $100000
+.endif
+
 ; --- SID voice 3 setup for noise (entropy collection) ---
 sid_base        = $d400
 sid_v3_freq_lo  = $d40e

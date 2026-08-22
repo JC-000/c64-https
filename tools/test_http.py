@@ -17,6 +17,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
+from _vice_helpers import default_vice_config
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -669,6 +670,152 @@ def test_chunked_small_body(transport, labels):
     return passed, failed
 
 
+# --- W4 REU body sink helpers ---------------------------------------------
+# VICE runs with a 512 KB REU (-reusize 512), which cannot hold the
+# shipped default base of bank 16 ($10:0000, 16 MB REU).  The sink reads
+# its base from the runtime variable http_reu_body_base (3 bytes LE in
+# RODATA — RAM at runtime), so the test retargets it to bank 3
+# ($03:0000) by DMA, no rebuild needed.  Hardware rigs with a 16 MB REU
+# use the shipped default (or `make HTTP_REU_BODY_BASE=<decimal>`).
+SINK_TEST_BASE = (0x00, 0x00, 0x03)      # $03:0000 — inside a 512 KB REU
+
+REU_STATUS = 0xDF00
+
+
+def _reu_fetch_to_ram(transport, labels, length, c64_addr=0xC800,
+                      reu_base=SINK_TEST_BASE, stub_addr=0xC300):
+    """Drive a C64-side REU FETCH so the host can read REU contents back.
+
+    Writes a small 6502 stub that programs the $DF00 REC registers for a
+    REU->C64 transfer of `length` bytes from `reu_base` to `c64_addr`,
+    executes it via jsr(), and returns the fetched bytes.
+    """
+    lo, hi = length & 0xFF, (length >> 8) & 0xFF
+    stub = bytes([
+        0xA9, c64_addr & 0xFF,        0x8D, 0x02, 0xDF,   # c64 addr lo
+        0xA9, (c64_addr >> 8) & 0xFF, 0x8D, 0x03, 0xDF,   # c64 addr hi
+        0xA9, reu_base[0],            0x8D, 0x04, 0xDF,   # reu addr lo
+        0xA9, reu_base[1],            0x8D, 0x05, 0xDF,   # reu addr hi
+        0xA9, reu_base[2],            0x8D, 0x06, 0xDF,   # reu bank
+        0xA9, lo,                     0x8D, 0x07, 0xDF,   # len lo
+        0xA9, hi,                     0x8D, 0x08, 0xDF,   # len hi
+        0xA9, 0x00,                   0x8D, 0x0A, 0xDF,   # addr ctrl
+        0xA9, 0xB1,                   0x8D, 0x01, 0xDF,   # execute FETCH
+        0x60,                                             # rts
+    ])
+    write_bytes(transport, stub_addr, stub)
+    jsr(transport, stub_addr)
+    return read_bytes(transport, c64_addr, length)
+
+
+def test_reu_body_sink(transport, labels):
+    """W4 REU body sink: >512 B chunked body streamed to the REU through
+    the 512 B bounce buffer; verifies http_body_total, the first-512
+    http_resp_buf contract, and the REU contents read back by DMA."""
+    passed = 0
+    failed = 0
+
+    sink_blit = labels.address("http_sink_blit")
+    base_var = labels.address("http_reu_body_base")
+    sink_flag = labels.address("http_body_sink")
+    if sink_blit is None or base_var is None:
+        # The REU sink is BACKEND=uci-only (ip65 cannot fit it).  Do not
+        # let this read as coverage: say loudly what was not run.
+        print("  !! SINK VECTORS NOT RUN: this PRG has no REU sink "
+              "(BACKEND=uci-only).")
+        print("  !! To cover them: make clean && make BACKEND=uci && "
+              "C64_SKIP_BUILD=1 python3 tools/test_http.py")
+        if os.environ.get("C64_EXPECT_SINK"):
+            print("  FAIL: C64_EXPECT_SINK=1 but the sink is absent")
+            return 0, 1
+        return 0, 0
+
+    # Retarget the sink base into the 512 KB VICE REU (bank 3) and
+    # enable sink mode.
+    write_bytes(transport, base_var, list(SINK_TEST_BASE))
+    write_bytes(transport, sink_flag, [1])
+
+    # --- vector 1: chunked 700 B (the Wikipedia shape) ---
+    part1 = bytes((i * 13 + 5) & 0xFF for i in range(400))
+    part2 = bytes((i * 17 + 9) & 0xFF for i in range(300))
+    body = part1 + part2
+    stream = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"\r\n"
+        + _chunk(part1) + _chunk(part2) + b"0\r\n\r\n"
+    )
+    _load_span(transport, labels, stream)
+    _reset_parser(transport, labels)
+
+    complete = _run_parser_loop(transport, labels, timeout=90.0)
+    if not complete:
+        print("  FAIL: sink parse (chunked) did not complete")
+        write_bytes(transport, sink_flag, [0])
+        return passed, failed + 1
+    print("  PASS: chunked sink parse complete")
+    passed += 1
+
+    total = _read_u24(transport, labels, "http_body_total")
+    resp_len = _read_u16(transport, labels, "http_resp_len")
+    if total == 700 and resp_len == 512:
+        print(f"  PASS: body_total = {total}, resp_len = {resp_len}")
+        passed += 1
+    else:
+        print(f"  FAIL: body_total = {total} (exp 700), resp_len = "
+              f"{resp_len} (exp 512)")
+        failed += 1
+
+    stored = read_bytes(transport, labels.address("http_resp_buf"), 512)
+    if stored == body[:512]:
+        print("  PASS: http_resp_buf restored to the FIRST 512 body bytes")
+        passed += 1
+    else:
+        print("  FAIL: http_resp_buf does not hold the first 512 body bytes")
+        failed += 1
+
+    reu = _reu_fetch_to_ram(transport, labels, 700)
+    if bytes(reu) == body:
+        print("  PASS: REU holds all 700 de-chunked body bytes")
+        passed += 1
+    else:
+        diff = next((i for i in range(700) if reu[i] != body[i]), None)
+        print(f"  FAIL: REU contents mismatch (first diff at {diff})")
+        failed += 1
+
+    # --- vector 2: identity 600 B with Content-Length ---
+    body2 = bytes((i * 31 + 7) & 0xFF for i in range(600))
+    stream2 = (b"HTTP/1.1 200 OK\r\nContent-Length: 600\r\n\r\n" + body2)
+    _load_span(transport, labels, stream2)
+    _reset_parser(transport, labels)
+
+    complete = _run_parser_loop(transport, labels, timeout=90.0)
+    if not complete:
+        print("  FAIL: sink parse (identity/CL) did not complete")
+        write_bytes(transport, sink_flag, [0])
+        return passed, failed + 1
+
+    total = _read_u24(transport, labels, "http_body_total")
+    resp_len = _read_u16(transport, labels, "http_resp_len")
+    stored = read_bytes(transport, labels.address("http_resp_buf"), 512)
+    reu = _reu_fetch_to_ram(transport, labels, 600)
+    if (total == 600 and resp_len == 512 and stored == body2[:512]
+            and bytes(reu) == body2):
+        print("  PASS: identity/CL sink: body_total = 600, first-512 "
+              "restored, REU contents match")
+        passed += 1
+    else:
+        print(f"  FAIL: identity/CL sink: total={total}, resp_len={resp_len}, "
+              f"prefix_ok={stored == body2[:512]}, reu_ok={bytes(reu) == body2}")
+        failed += 1
+
+    # Cleanup: buffer mode, shipped default base (bank 16), ring input.
+    write_bytes(transport, sink_flag, [0])
+    write_bytes(transport, base_var, [0x00, 0x00, 0x10])
+    write_bytes(transport, labels.address("http_in_mode"), [0])
+    return passed, failed
+
+
 def run_tests(transport, labels, verbose=False):
     total_passed = 0
     total_failed = 0
@@ -688,12 +835,17 @@ def run_tests(transport, labels, verbose=False):
         print(f"  FATAL: VICE connection lost: {e}")
         return total_passed, total_failed + 1
 
-    # jsr() smoke test
+    # jsr() smoke test.  net_save_zp is ip65-only; http_body_finish
+    # exists under both backends and is a no-op while http_body_sink=0.
     print("\n--- jsr() Smoke Test ---")
     try:
-        save_zp = labels.address("net_save_zp")
-        jsr(transport, save_zp)
-        print("  PASS: jsr(net_save_zp) returned OK")
+        target = labels.address("net_save_zp")
+        name = "net_save_zp"
+        if target is None:
+            target = labels.address("http_body_finish")
+            name = "http_body_finish"
+        jsr(transport, target)
+        print(f"  PASS: jsr({name}) returned OK")
         total_passed += 1
     except Exception as e:
         print(f"  FAIL: jsr() crashed VICE: {e}")
@@ -745,6 +897,11 @@ def run_tests(transport, labels, verbose=False):
     total_passed += p
     total_failed += f
 
+    print("\n--- W4: REU body sink (BACKEND=uci builds only) ---")
+    p, f = test_reu_body_sink(transport, labels)
+    total_passed += p
+    total_failed += f
+
     return total_passed, total_failed
 
 
@@ -784,7 +941,11 @@ def main():
             print(f"  FATAL: required label '{name}' not found")
             sys.exit(1)
 
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
+    # default_vice_config pre-applies the mandatory -reu -reusize 512
+    # (see "VICE harness gotcha" in CLAUDE.md) — the REU body-sink
+    # vectors DMA through the emulated REU.
+    config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True,
+                                 sound=False)
     print("\n=== Starting VICE ===")
 
     with ViceInstanceManager(config=config) as mgr:

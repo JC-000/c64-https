@@ -374,6 +374,16 @@ http_content_length:    .res 3          ; 24-bit LE; meaningful iff http_cl_vali
 http_cl_valid:          .res 1          ; 1 = Content-Length header seen
 http_body_total:        .res 3          ; 24-bit LE count of body bytes consumed
 
+; W4 REU body sink (see src/http.s HTTP_SINK_CODE).  http_body_sink is
+; a MODE flag owned by the caller (boot.s under HTTPS_BODY_TO_REU=1, or
+; a test/rig via DMA): 0 = classic 512 B buffer capture (default),
+; 1 = stream the body to the REU at http_reu_body_base, bouncing
+; through http_resp_buf.  It is deliberately NOT reset by the parser.
+.export http_body_sink
+.export http_reu_cursor
+http_body_sink:         .res 1          ; 0 = buffer (default), 1 = REU sink
+http_reu_cursor:        .res 3          ; 24-bit LE REU write offset
+
 ; -----------------------------------------------------------------------------
 ; Application data pointers (for tls_send)
 ; -----------------------------------------------------------------------------

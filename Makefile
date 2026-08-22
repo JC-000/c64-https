@@ -79,6 +79,18 @@ endif
 ifdef HTTPS_PORT
 CA65FLAGS += -D HTTPS_PORT=$(HTTPS_PORT)
 endif
+# W4 REU body sink: HTTPS_BODY_TO_REU=1 makes boot.s's do_https_get set
+# http_body_sink=1, streaming the HTTP response body into the REU at
+# HTTP_REU_BODY_BASE (default $10:0000 = bank 16 — needs a 16 MB REU;
+# see src/constants.inc). HTTP_REU_BODY_BASE=<decimal> overrides the
+# base (ca65 -D takes no 0x and $ needs shell quoting): e.g.
+# `make HTTP_REU_BODY_BASE=196608` targets bank 3 for a 512 KB VICE REU.
+ifdef HTTPS_BODY_TO_REU
+CA65FLAGS += -D HTTPS_BODY_TO_REU=1
+endif
+ifdef HTTP_REU_BODY_BASE
+CA65FLAGS += -D HTTP_REU_BODY_BASE=$(HTTP_REU_BODY_BASE)
+endif
 # VIC-II blanking around the CPU-bound crypto primitives (src/vic.s).
 # ON by default and that is what ships; `make VIC_BLANK=0` degrades
 # vic_blank/vic_unblank to bare RTS so the badline tax can be measured

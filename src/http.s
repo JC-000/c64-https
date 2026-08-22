@@ -31,6 +31,14 @@
         ; W4 chunked transfer-decoding (see http_chunk_dispatch):
         .export http_te_chunked
         .export http_chunk_rem
+        ; W4 REU body sink (see HTTP_SINK_CODE; UCI-only — ip65 gets
+        ; inert stubs, the backend cannot fit the sink and the knob is
+        ; UCI-only anyway):
+        .export http_body_finish
+.ifdef BACKEND_UCI
+        .export http_reu_body_base
+        .export http_sink_blit
+.endif
 
         ; ---- imports: data.asm BSS (HTTP I/O + parser state) ----
         .import http_host_ptr
@@ -50,6 +58,11 @@
         .import http_content_length
         .import http_cl_valid
         .import http_body_total
+        .import http_body_sink
+        .import http_reu_cursor
+.ifndef USE_X25519_SIBLING
+        .import mul_dma_lo      ; REU-latch restore in http_body_finish
+.endif
 
         ; ---- imports: data.asm BSS (TLS app data) ----
         ; (tcp_recv_head/tail imports dropped in the issue #72 redesign —
@@ -240,6 +253,11 @@ http_recv_body:
         ; Timeout — accept whatever we have
 
 @recv_complete:
+        ; Sink finalize is idempotent (http_sink_flushed latch): on the
+        ; parse-complete path it already ran inside http_recv_response;
+        ; this call covers the poll-timeout fallback so a sink body cut
+        ; short still gets its final blit + first-512 restore.
+        jsr http_body_finish
         clc
         rts
 
@@ -625,7 +643,8 @@ http_recv_response:
         ; open (observed live: browserleaks.com), http_get never
         ; returned.  http_body_total (24-bit, HTTP_AUX_CODE routines)
         ; now counts every consumed byte; bytes past the 512 B cap are
-        ; consumed and discarded instead of ending the parse.
+        ; consumed and discarded (or streamed to the REU under
+        ; http_body_sink=1) instead of ending the parse.
         jsr http_body_done_check
         bcc @body_done          ; C=0 -> body complete
         jsr http_in_byte
@@ -634,7 +653,7 @@ http_recv_response:
         jmp @state_body         ; keep reading (re-checks termination)
 
 @body_done:
-        jmp @done
+        jmp sink_finish_done    ; sink finalize (no-op in buffer mode), C=0
 
 @not_done:
         sec
@@ -770,6 +789,10 @@ http_body_begin:
         sta http_chunk_rem
         sta http_chunk_rem+1
         sta http_chunk_skip
+        sta http_reu_cursor
+        sta http_reu_cursor+1
+        sta http_reu_cursor+2
+        sta http_sink_flushed
         lda http_te_chunked
         beq @identity
         lda #3                  ; chunked: start at the chunk-size line
@@ -831,7 +854,8 @@ te_pattern:
 ;     Works whether or not the stored copy was truncated at 512 B —
 ;     that is the W4 fix.
 ;   Content-Length absent: legacy behaviour — the 512 B buffer cap ends
-;     the read (chunked/streaming fallback preserved).
+;     the read (chunked/streaming fallback preserved).  In sink mode
+;     there is no cap: the caller's poll-timeout is the bound.
 ;   Clobbers: A
 ; =============================================================================
 http_body_done_check:
@@ -849,6 +873,10 @@ http_body_done_check:
         clc
         rts
 @no_cl:
+.ifdef BACKEND_UCI
+        lda http_body_sink
+        bne @more               ; sink mode: no 512 B cap
+.endif
         lda http_resp_len+1
         cmp #$02
         bcs @full               ; high byte >= 2 means >= 512
@@ -863,8 +891,11 @@ http_body_done_check:
 ; http_body_append - consume one body byte (in A).
 ;
 ;   Always increments the 24-bit http_body_total (bytes CONSUMED).
-;   Stores into http_resp_buf while resp_len < 512; bytes past the cap
-;   are counted and discarded.
+;   Buffer mode (http_body_sink=0): stores into http_resp_buf while
+;     resp_len < 512; bytes past the cap are counted and discarded.
+;   Sink mode (http_body_sink=1): http_resp_buf is a 512 B bounce
+;     buffer — on fill it is REU-DMA-blitted to http_reu_body_base +
+;     http_reu_cursor and reused (see HTTP_SINK_CODE).
 ;   Clobbers: A, Y, zp_ptr.  Preserves X.
 ; =============================================================================
 http_body_append:
@@ -892,8 +923,20 @@ http_body_append:
         ldy #0
         sta (zp_ptr),y
         inc http_resp_len
-        bne @rts
+        bne @check_sink
         inc http_resp_len+1
+@check_sink:
+.ifdef BACKEND_UCI
+        lda http_body_sink
+        beq @rts
+        lda http_resp_len+1     ; sink mode: bounce full at 512?
+        cmp #$02
+        bcc @rts
+        jsr http_sink_blit      ; blit the bounce, advance the cursor
+        lda #0                  ; reuse the bounce buffer
+        sta http_resp_len
+        sta http_resp_len+1
+.endif
 @rts:
         rts
 @discard:
@@ -1034,8 +1077,7 @@ http_chunk_dispatch:
         sta http_line_idx
         jmp @st_trailer
 @tr_done:
-        clc
-        rts
+        jmp sink_finish_done    ; sink finalize (no-op in buffer mode), C=0
 
 @not_done2:                     ; far exit for the late states
         sec
@@ -1070,6 +1112,172 @@ chunk_hex_digit:
 @nothex:
         sec
         rts
+
+; =============================================================================
+; W4 REU body sink (HTTP_SINK_CODE segment: NET_CODE tail under ip65,
+; CRYPTO_OVERLAY under UCI).
+;
+; With http_body_sink = 1, http_resp_buf acts as a 512 B bounce buffer:
+; http_body_append fills it, and each time it fills http_sink_blit
+; REU-DMA-STASHes the whole bounce to http_reu_body_base +
+; http_reu_cursor and resets it.  At completion http_body_finish blits
+; the final partial bounce, then re-FETCHes the FIRST min(512, total)
+; body bytes from the REU back into http_resp_buf — the host-side
+; verification contract: after a sunk body, http_resp_buf holds the
+; first 512 body bytes, http_resp_len = min(512, total), and
+; http_body_total the full de-chunked size.
+;
+; The default base is bank 16 ($10:0000 — 16 MB REU, the stretch-goal
+; config); see HTTP_REU_BODY_BASE in constants.inc for the override
+; story.  Register programming mirrors src/boot.s::reu_mul_init.
+;
+; UCI-ONLY: the sink is a turbo/UCI stretch feature (the build knob is
+; UCI-only) and ip65's memory map cannot fit it — every ip65 code pool
+; is within ~30 B of full after the W4 termination + chunked work.  The
+; ip65 arm below provides 3-byte inert stubs so the shared jmp/jsr
+; sites link; http_body_sink is then a dead flag on ip65 (nothing
+; tests it — the .ifdef BACKEND_UCI guards in http_body_append /
+; http_body_done_check compile the sink branches out).
+; =============================================================================
+        .segment "HTTP_SINK_CODE"
+.ifndef BACKEND_UCI
+sink_finish_done:               ; ip65: no sink — complete the parse
+http_body_finish:               ;  and finalize nothing
+        clc
+        rts
+.else
+
+; -----------------------------------------------------------------------------
+; sink_reu_setup - common $DF00 programming for blit + fetch-back:
+;   C64 addr = http_resp_buf, len = http_resp_len, both addrs increment.
+;   Clobbers: A.
+; -----------------------------------------------------------------------------
+sink_reu_setup:
+        lda #<http_resp_buf
+        sta reu_c64_lo
+        lda #>http_resp_buf
+        sta reu_c64_hi
+        lda http_resp_len
+        sta reu_len_lo
+        lda http_resp_len+1
+        sta reu_len_hi
+        lda #0
+        sta reu_addr_ctrl
+        rts
+
+; -----------------------------------------------------------------------------
+; http_sink_blit - STASH http_resp_len bytes of http_resp_buf to
+;   http_reu_body_base + http_reu_cursor; cursor += resp_len.
+;   No-op when resp_len = 0.  Clobbers: A.
+; -----------------------------------------------------------------------------
+http_sink_blit:
+        lda http_resp_len
+        ora http_resp_len+1
+        beq @rts
+        jsr sink_reu_setup
+        clc                     ; REU addr = 24-bit base + cursor
+        lda http_reu_body_base
+        adc http_reu_cursor
+        sta reu_reu_lo
+        lda http_reu_body_base+1
+        adc http_reu_cursor+1
+        sta reu_reu_hi
+        lda http_reu_body_base+2
+        adc http_reu_cursor+2
+        sta reu_reu_bank
+        lda #%10110000          ; execute + autoload + STASH (C64->REU)
+        sta reu_command
+        clc                     ; cursor += resp_len
+        lda http_reu_cursor
+        adc http_resp_len
+        sta http_reu_cursor
+        lda http_reu_cursor+1
+        adc http_resp_len+1
+        sta http_reu_cursor+1
+        bcc @rts
+        inc http_reu_cursor+2
+@rts:
+        rts
+
+; -----------------------------------------------------------------------------
+; sink_finish_done - shared completion tail for both body paths
+;   (identity @body_done, chunked @tr_done): finalize the sink and
+;   return C=0 (parse complete).
+; -----------------------------------------------------------------------------
+sink_finish_done:
+        jsr http_body_finish
+        clc
+        rts
+
+; -----------------------------------------------------------------------------
+; http_body_finish - finalize the REU sink at body completion (or the
+;   poll-timeout fallback).  Idempotent via the http_sink_flushed
+;   latch; a no-op in buffer mode.  Steps: final partial blit;
+;   http_resp_len = min(512, http_body_total); FETCH the first
+;   resp_len body bytes from the REU back into http_resp_buf; restore
+;   the reu_fetch_mul_row register latch this sink clobbered.
+;   Clobbers: A.
+; -----------------------------------------------------------------------------
+http_body_finish:
+        lda http_body_sink
+        beq @rts
+        lda http_sink_flushed
+        bne @rts
+        inc http_sink_flushed
+        jsr http_sink_blit      ; final partial bounce (may be 0 bytes)
+        ; http_resp_len = min(512, http_body_total)
+        lda http_body_total+2
+        bne @cap
+        lda http_body_total+1
+        cmp #$02
+        bcs @cap
+        lda http_body_total
+        sta http_resp_len
+        lda http_body_total+1
+        sta http_resp_len+1
+        jmp @fetch
+@cap:
+        lda #$00
+        sta http_resp_len
+        lda #$02
+        sta http_resp_len+1
+@fetch:
+        lda http_resp_len
+        ora http_resp_len+1
+        beq @restore
+        jsr sink_reu_setup
+        lda http_reu_body_base
+        sta reu_reu_lo
+        lda http_reu_body_base+1
+        sta reu_reu_hi
+        lda http_reu_body_base+2
+        sta reu_reu_bank
+        lda #%10110001          ; execute + autoload + FETCH (REU->C64)
+        sta reu_command
+@restore:
+.ifndef USE_NISTCURVES_ONCHIP
+.ifndef USE_X25519_SIBLING
+        ; Re-latch the reu_fetch_mul_row register state that
+        ; reu_mul_init pre-set at boot (this sink clobbered it).  A
+        ; REU-profile build doing a SECOND handshake in the same
+        ; session would otherwise DMA multiply rows to the wrong C64
+        ; address with no diagnostic.  Onchip/comb profiles never use
+        ; the latch (guard mirrors boot.s's reu_fetch_mul_row guard).
+        lda #<mul_dma_lo
+        sta reu_c64_lo
+        lda #>mul_dma_lo
+        sta reu_c64_hi
+        lda #0
+        sta reu_reu_lo
+        sta reu_len_lo
+        sta reu_addr_ctrl
+        lda #2
+        sta reu_len_hi          ; 512 B row fetches
+.endif
+.endif
+@rts:
+        rts
+.endif                          ; BACKEND_UCI (REU sink)
 
 ; =============================================================================
 ; http_get_plain - perform a plain HTTP (no TLS) GET request
@@ -1132,6 +1340,8 @@ http_get_plain:
         bne @plain_poll
         ; timeout: accept whatever we got so far
 @plain_done:
+        jsr http_body_finish    ; sink finalize (idempotent; no-op unless
+                                ;  http_body_sink=1 — see @recv_complete)
 
         ; --- 8. Close TCP ---
         jsr net_tcp_close
@@ -1164,6 +1374,17 @@ http_ua_hdr:
 http_crlf:
         .byte $0d, $0a
 
+.ifdef BACKEND_UCI
+; W4 REU body sink: runtime copy of the REU destination base (24-bit
+; LE).  Initialised from the HTTP_REU_BODY_BASE equate (constants.inc;
+; default bank 16 = $10:0000, -D-overridable at build).  Lives in
+; RODATA — which is RAM at runtime — so tests and rigs can retarget it
+; by DMA without a rebuild (e.g. VICE's 512 KB REU cannot hold bank 16;
+; the harness pokes bank 3 here).
+http_reu_body_base:
+        .byte <HTTP_REU_BODY_BASE, >HTTP_REU_BODY_BASE, ^HTTP_REU_BODY_BASE
+.endif
+
 
 ; =============================================================================
 ; Module-local scratch (build_get temporaries only; parser state is in
@@ -1182,3 +1403,5 @@ http_in_len:    .res 2          ; span bytes remaining (16-bit)
 http_te_chunked: .res 1         ; 1 = "Transfer-Encoding: chunked" seen
 http_chunk_rem: .res 2          ; 16-bit payload bytes left in this chunk
 http_chunk_skip: .res 1         ; 1 = skipping rest of the chunk-size line
+; REU sink finalize-once latch (see http_body_finish)
+http_sink_flushed: .res 1       ; 1 = finish already ran for this body
