@@ -35,6 +35,9 @@
         ; ---- imports: data.asm BSS (HTTP I/O + parser state) ----
         .import http_host_ptr
         .import http_host_len
+.ifdef HTTPS_SNI_OVERRIDE
+        .import https_sni_override
+.endif
         .import http_path_ptr
         .import http_path_len
         .import http_port
@@ -110,6 +113,22 @@ http_get:
 @tcp_ok:
 
         ; --- 4. Copy hostname to tls_hostname for SNI ---
+.ifdef HTTPS_SNI_OVERRIDE
+        ; Debug knob (make HTTPS_SNI=...): present a fixed SNI that
+        ; differs from the connect host, so the C64 can dial a local
+        ; TCP relay while the ClientHello names the real origin.
+        ldy #0
+@copy_sni:
+        lda https_sni_override,y
+        beq @copy_sni_done
+        sta tls_hostname,y
+        iny
+        bne @copy_sni           ; always branches (SNI < 256)
+@copy_sni_done:
+        lda #0
+        sta tls_hostname,y      ; null-terminate
+        sty tls_hostname_len
+.else
         lda http_host_ptr
         sta zp_ptr
         lda http_host_ptr+1
@@ -126,6 +145,7 @@ http_get:
         lda #0
         sta tls_hostname,y      ; null-terminate
         sty tls_hostname_len
+.endif
 
         ; --- 5. TLS handshake ---
         jsr tls_connect

@@ -99,6 +99,15 @@ HTTPS_HOST ?= www.foo.bar
 # Companion request-path override (default "/"), same mechanism/caveats.
 # e.g. make HTTPS_PATH='/w/index.php?title=Commodore_64&action=raw'
 HTTPS_PATH ?= /
+# Debug knob: present a DIFFERENT SNI than the connect host (default:
+# SNI = host, unchanged). Lets the C64 dial a local TCP relay while the
+# ClientHello names the real origin — e.g. tcpdump forensics via
+#   make HTTPS_HOST=10.43.23.99 HTTPS_PORT=8443 HTTPS_SNI=en.wikipedia.org
+# UCI-only, off unless set; empty means no override.
+HTTPS_SNI ?=
+ifneq ($(strip $(HTTPS_SNI)),)
+CA65FLAGS += -D HTTPS_SNI_OVERRIDE=1
+endif
 # Optional REU document-base override, shared by the http.s body sink
 # and the Lane G viewer (both read the HTTP_REU_BODY_BASE equate /
 # runtime var; defaults to $10:0000 = 1048576). VICE tests use a
@@ -467,7 +476,7 @@ build/net/ip65/ip65_blob.o: $(IP65_BIN)
 # it "up to date" and the file simply vanishes (measured too).
 build/https_host.inc: FORCE
 	@mkdir -p build
-	@printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n' '$(HTTPS_HOST)' '$(HTTPS_PATH)' > $@.tmp
+	@printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n.define HTTPS_SNI_STR "%s"\n' '$(HTTPS_HOST)' '$(HTTPS_PATH)' '$(HTTPS_SNI)' > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@ && rm -f build/boot.o; fi
 
 FORCE:

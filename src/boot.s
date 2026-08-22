@@ -1243,6 +1243,17 @@ https_path_target:
 https_path_target_len = * - https_path_target - 1
         .assert https_path_target_len <= 100, error, "HTTPS_PATH too long for the request builder"
 
+.ifdef HTTPS_SNI_OVERRIDE
+        ; `make HTTPS_SNI=<name>` — SNI presented instead of the connect
+        ; host (relay/forensics debug knob; see Makefile). Consumed by
+        ; http_get's SNI copy in src/http.s.
+        .export https_sni_override
+https_sni_override:
+        .byte HTTPS_SNI_STR
+        .byte 0
+        .assert (* - https_sni_override - 1) <= 63, error, "HTTPS_SNI exceeds the 63-char SNI guard"
+.endif
+
 ; =============================================================================
 ; Local BSS
 ; =============================================================================
