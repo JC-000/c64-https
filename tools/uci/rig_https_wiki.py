@@ -637,6 +637,14 @@ def main() -> int:
                                (path_bytes + b"\x00").ljust(128, b"\x00"))
         transport.write_memory(marker_base, bytes(16))
 
+        # Arm the REU body sink explicitly. The HTTPS_BODY_TO_REU build
+        # sets http_body_sink=1 in do_https_get (the menu 'G' path), but
+        # this trampoline JSRs http_get directly and never crosses it —
+        # without this poke the body would not be sunk (lane E contract:
+        # poking the exported flag by DMA before http_get is supported).
+        transport.write_memory(labels["http_body_sink"], b"\x01")
+        print("Armed http_body_sink=1 (trampoline bypasses do_https_get)")
+
         sys_line = f"sys{routine_addr}\r"
         print(f"Triggering: {sys_line.strip()}")
         send_text(transport, sys_line)
