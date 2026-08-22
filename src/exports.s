@@ -14,8 +14,16 @@
 ; Add symbols here as the harness needs them.
 
 .include "constants.inc"
+.include "net_tuning.inc"       ; CERT_BUF_SIZE (backend-conditional)
 
 .export tcp_recv_buf
+
+; cert_buf capacity as a linker-visible absolute symbol (2048 UCI /
+; 1536 ip65 — src/net/<backend>/net_tuning.inc). Tests and rigs MUST
+; read this from build/labels.txt instead of hardcoding either number:
+; tools/test_tls_deframer.py, tools/test_tls_deframe.py.
+cert_buf_size = CERT_BUF_SIZE
+.export cert_buf_size
 
 ; Promote the fe25519 ZP equates so tools/test_x25519.py can resolve
 ; them via labels.txt.

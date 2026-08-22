@@ -162,8 +162,11 @@ Variables:
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65).
                           Changing it requires `make clean` — see above.
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
-                          `libs/x25519@v0.11.2` sibling. **UCI links;
-                          ip65 overflows CRYPTO_OVERLAY** — see
+                          `libs/x25519@v0.11.2` sibling. **Currently
+                          links under NEITHER backend: ip65 overflows
+                          CRYPTO_OVERLAY (long-standing), and UCI
+                          overflows it by 1,280 B since the 2048 B
+                          cert_buf moved in (Wikipedia growth)** — see
                           "Known issues". Off by default either way.
   - `EMBED_P256_OVERLAY=1` — stage the P-256 verify image into the
                           CRYPTO_OVERLAY slot at PRG-load (UCI). Its
@@ -191,6 +194,18 @@ Variables:
                           ~7 MHz; boot costs ~50 s at 64 MHz (test
                           scripts: set C64_INIT_WAIT). Uses
                           cfg/c64-https-$(BACKEND)-onchip.cfg.
+  - `HTTPS_HOST=<host>` — build-time HTTPS target (default `www.foo.bar`;
+                          feeds the GET, SNI and DNS lookup). Travels via
+                          a generated `build/https_host.inc` because
+                          ca65's `-D` is numeric-only; the generator is
+                          content-compared and deletes `boot.o` on a
+                          change, so no `make clean` is needed for THIS
+                          flag (the link step keeps the repo-wide
+                          same-second caveat). Hosts >63 chars are a
+                          build error (SNI copy guard).
+  - `TLS_STREAM_DEFRAME` — streaming handshake deframer gate; default ON
+                          under `BACKEND=uci`, OFF (compiled out) under
+                          ip65. See the real-server milestone entry.
   - `CA65`, `LD65`      — toolchain overrides
   - `VICE`              — override the `make run` emulator
 
@@ -606,6 +621,15 @@ The scripts:
                             stock `ssl`. `FINISHED_MODE=good` is the control
                             and must be run first. See "Negative-path
                             coverage — the server Finished" under Smoke tests.
+  - `rig_https_live.py` — HTTPS e2e against a REAL public server
+                            (`HTTPS_TARGET=github.com`, DMA-fed to the
+                            PRG so any build works). Pass criteria are
+                            C64-side only (sentinel + `http_status=200`).
+                            Runs the `/Temp` GC (`_temp_gc.py`) after
+                            enable_uci — see the writemem-wedge note in
+                            "End-to-end HTTPS status". Comb
+                            `C64_INIT_WAIT=75` is auto-detected from
+                            labels.txt. Keep `DEBUG_CAPTURE=0` here.
   - `rig_https_local.py` — HTTPS e2e scaffolding against a local TLS 1.3
                             listener (ECDSA-P256 cert from
                             `tools/https_e2e/certs/`). DMAs a 6502 stub
@@ -646,6 +670,43 @@ The scripts:
                             current stall site).
 
 ### End-to-end HTTPS status
+
+**REAL-SERVER MILESTONE (2026-08-21, U64E @ 48 MHz, comb):** the first
+HTTPS GETs from the C64 to real public internet servers.
+
+  target            CFIN     http_status   note
+  github.com        32.5 s   **200**       full PASS, homepage HTML prefix
+  browserleaks.com  33.4 s   **200**       TLS + status PASS; rig sentinel
+                                           timed out on body drain (below)
+
+The W1 streaming deframer handled the real 9-11-record flights
+(Certificate ~2.7 KB over ~6 records; CV+Finished sharing the tail), the
+W2 streaming consumer staged the leaf, and the sibling library verified
+real CA-issued chains. Local padded-chain bench: 11-record flight costs
+only ~0.7 s over the single-cert control (31.5 vs 30.8 s CFIN).
+
+Two findings from the live runs:
+  - **512-content records** (what MFL-honoring servers actually send) hit
+    a latent page-dispatch bug in the record layer's inner-type read —
+    fixed in `src/tls_record.s` (page-2 arm), mutation-proven by
+    `tools/test_tls_deframer.py::mfl512_full_records`. Every local
+    fixture had been one byte short of the trigger.
+  - **W4 gap (open):** a large NON-chunked body cannot terminate by
+    Content-Length once `body_append` truncates at 512 B
+    (`http_resp_len` freezes, the equality never fires), leaving only
+    the connection-close fallback — browserleaks holds the connection
+    and the rig sentinel timed out at 300 s with status/body already
+    correct. Fix direction: count consumed-not-stored body bytes
+    (needs >16-bit for real pages) or cap the post-truncation drain.
+
+**U64E "writemem exhaustion wedge"** (user-named): fw 3.14d misses
+garbage collection on a temp location filled by REST `writemem`; a long
+hardware session (~15 PRG loads that day) fills it CUMULATIVELY and then
+REST *and* the UCI bridge wedge together — ping alive, REST refuses
+instantly, C64 parks mid-transfer. Power cycle fixes. Budget PRG loads
+per session and power-cycle proactively; `readmem` is not implicated.
+
+
 
 The TLS 1.3 handshake now completes end-to-end against the local test
 listener (ECDSA-P256 cert, `tools/https_e2e/certs/`) on **both** backends:
@@ -789,7 +850,23 @@ Five latent bugs and three new ones were cleared to get here:
     the colon. Once `http_resp_len` equals `http_content_length`,
     state_body returns C=0 and `http_get` exits cleanly. When the
     header is absent the parser falls back to the previous
-    keep-polling behaviour (preserves chunked/streaming paths).
+    keep-polling behaviour (preserves streaming paths).
+    W4 added `Transfer-Encoding: chunked` support on top: a matching
+    header (same case-insensitive single-SP matcher shape) sets
+    `http_chunked`, and the body state routes through
+    `http_state_body_chunked` (src/http.s), which strips chunk framing
+    — hex size lines incl. extensions, per-chunk CRLF, terminal
+    `0\r\n\r\n` with optional trailers — copying only payload into
+    `http_resp_buf` (truncate-at-capacity at 512 B: the buffer holds
+    the prefix, the rest is consumed and discarded so the terminal
+    chunk still terminates cleanly with C=0). Chunks >64 KB would wrap
+    the 16-bit `http_chunk_rem` and desync to the poll-timeout
+    fallback; real servers chunk at 8-32 KB. The body-state handler
+    moved out of `CODE` into the new `HTTP_AUX_CODE` segment (UCI:
+    LOADER; ip65: CRYPTO_OVERLAY — ip65's LOADER had 8 B free), which
+    is also where the header-state reset (`http_hdr_init`) and the
+    `Transfer-Encoding` matcher live. Covered by the chunked /
+    large-header span-mode vectors in `tools/test_http.py`.
   - `net_tcp_set_recv_cb` is an RTS stub (no callers in-tree).
   - Boot banner line 03 still says "rr-net" under ip65 build even
     though Phase 2 made it backend-aware — this is correct/expected
@@ -829,12 +906,20 @@ Five latent bugs and three new ones were cleared to get here:
     overflow and is fixed (see the CRYPTO_COLD_SHADOW entry under
     "Memory layout").
 
-    **`USE_X25519_SIBLING=1` LINKS UNDER UCI from the v0.10.1 /
-    v0.11.0 wave pins** (issue #112), and still does not under ip65.
-    Both backends previously died on the same symbol collision; that
-    half is closed, and what remains on ip65 is a fit problem:
+    **`USE_X25519_SIBLING=1` no longer links under EITHER backend.**
+    It linked under UCI from the v0.10.1 / v0.11.0 wave pins (issue
+    #112, symbol collision resolved) until the Wikipedia cert_buf
+    growth moved the resident 2,048 B `CERT_BUF_BSS` into
+    CRYPTO_OVERLAY; the sibling's page-aligned tables no longer fit
+    alongside it + TLS_DEFRAME_CODE (measured 2026-08-21, both
+    baselines confirmed against the pre-growth tree). This is an
+    accepted casualty: the flag ships in nothing, and the resident
+    deframer + Wikipedia-capable cert_buf are worth more than an
+    opt-in nobody ships. ip65 remains the older, structural overflow:
 
-      make BACKEND=uci USE_X25519_SIBLING=1     # 62,977 B PRG, links
+      make BACKEND=uci USE_X25519_SIBLING=1
+        Segment 'X25519_BSS' overflows memory area
+        'CRYPTO_OVERLAY' by 1280 bytes             # post-cert_buf-growth
       make USE_X25519_SIBLING=1                 # ip65
         Segment 'X25519_RODATA' overflows memory area
         'CRYPTO_OVERLAY' by 3584 bytes
@@ -1834,9 +1919,18 @@ UCI layout (W1 reference — `cfg/c64-https-uci.cfg`):
   $4000 (size 0) UCI_BSS_REGION   Zero-size alias post-W1 (UCI_BSS moved
                                   into NET_BSS_TAIL above, which is why
                                   NET_BSS_TAIL now runs through $41FF)
-  $4200-$5FFF  CRYPTO_OVERLAY     7.5 KB swappable overlay slot
+  $4200-$5FFF  CRYPTO_OVERLAY     7.5 KB slot. Resident in EVERY
+                                  default UCI build since the sprint:
+                                  TLS_DEFRAME_CODE (~1.4 KB) +
+                                  CERT_BUF_BSS (2,048 B — Wikipedia
+                                  growth); comb adds RODATA/
+                                  CRYPTO_RODATA/LIB rodata/LIMLEE_BSS
+                                  (used through ~$5BD2, ~1.1 KB tail
+                                  free). The overlay-embed flags
                                   (X25519 sibling / P-384 SHA-384 /
-                                  P-384 curve / W3 P-256 verify embed)
+                                  P-384 curve / W3 P-256 embed) contend
+                                  for what remains — see the
+                                  CRYPTO_OVERLAY bullet below.
   $6000-$9FFF  CRYPTO_HOT         16 KB file-backed; resident code +
                                   rodata + small BSS (UCI_BSS, most of
                                   libs/nistcurves P-256). No segment
@@ -1912,7 +2006,26 @@ Tight regions (post-W1):
   - **CRYPTO_OVERLAY** under UCI doubles as P-384 SHA-384/curve overlay
     paging slot, the W3 P-256 overlay embed slot, AND the
     USE_X25519_SIBLING=1 X25519 sibling rodata + BSS slot. Mutually
-    exclusive at link time across the three flags.
+    exclusive at link time across the three flags — and since the
+    real-server sprint the region also carries two RESIDENT tenants in
+    every default UCI build: `TLS_DEFRAME_CODE` (~1.4 KB, W1 deframer)
+    and `CERT_BUF_BSS` (2,048 B — `CERT_BUF_SIZE` in
+    `src/net/uci/net_tuning.inc`, grown from 1536 so
+    en.wikipedia.org's 1636 B leaf fits; under ip65 cert_buf stays
+    1536 B at $A000 in the SCRATCH_UNION, untouched). Measured
+    occupancy 2026-08-21: plain-uci and uci-onchip use $4200-$4F62
+    (4,253 B free); uci-comb through ~$5BD2 (~1.1 KB free, still
+    enough for the rigs' ~390 B of DMA scratch — verified via
+    `_memory_policy` arbiter + `rig_https_live.py --selfcheck`).
+    Consequences for the flags: `USE_X25519_SIBLING` now overflows
+    under UCI too (see Known issues); `EMBED_P256_OVERLAY` /
+    `USE_OVERLAY_P384_EMBED` were already broken before the growth
+    (the `build/labels.txt` ordering defect) and remain so. Moving
+    cert_buf out of CRYPTO_COLD_SHADOW also removed the packing that
+    used to land sqtab at $BC00, so both UCI cfgs now pin
+    `TABLES_BSS` with `start = $BA00` — the sibling reads the shared
+    sqtab through equates baked to LIB_SHARED_SQTAB_BASE=$BC00 and
+    the Makefile's post-link check still asserts it.
 
 There is a known TODO to restructure the MEMORY map so that all
 file-backed regions are physically contiguous in a single ROM-like
@@ -1940,7 +2053,9 @@ ld65 and ca65 edge cases; they are intentional and should stay:
     doing it inside the `.inc` header would duplicate on every include.
     Only **backend-agnostic** symbols live here: `tcp_recv_buf`,
     `fe_src1`, `fe_src2`, `fe_dst`, `cc20_data_ptr`, `cc20_remain`,
-    `zp_ptr`. The ip65-specific ones (`ip65_init`, `ip65_process`) moved
+    `zp_ptr`, and `cert_buf_size` (the CERT_BUF_SIZE equate as an
+    absolute export — 2048 UCI / 1536 ip65 — which tests/rigs MUST
+    read from labels.txt instead of hardcoding either number). The ip65-specific ones (`ip65_init`, `ip65_process`) moved
     to `src/net/ip65/exports.s`, which is linked only under
     `BACKEND=ip65` and also carries the `cert_buf = $A000`
     SCRATCH_UNION link-time assert.

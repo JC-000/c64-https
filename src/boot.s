@@ -11,12 +11,24 @@
         HTTPS_PORT = 443
         .endif
 
+        ; HTTPS target host. `make HTTPS_HOST=github.com` writes the
+        ; string into build/https_host.inc (ca65 -D is numeric-only, so
+        ; a string override must travel via a generated include). The
+        ; default is www.foo.bar and the default build byte-identical.
+        .include "https_host.inc"
+
         ; ---- exports: entry + print helpers ----
         .export start
         .export main_loop
         .export print_string
         .export print_null_terminated
         .export print_resp_body
+
+        ; ---- Lane G viewer hook (UCI only; see do_https_get) ----
+.ifdef BACKEND_UCI
+        .import viewer_enter
+        .import http_body_sink
+.endif
 
         ; ---- exports: REU multiply table routines ----
         ; Phase C.5: under USE_X25519_SIBLING=1 the sibling's
@@ -93,8 +105,8 @@
         ; ---- exports: hostnames / path data ----
         .export http_host_zimmers
         .export http_host_zimmers_len
-        .export http_host_foo
-        .export http_host_foo_len
+        .export http_host_target
+        .export http_host_target_len
         .export http_path_root
 
         ; ---- exports: local BSS ----
@@ -126,9 +138,9 @@
         .import http_get_plain
         .import http_build_get
         .import http_recv_body
-.ifdef HTTPS_BODY_TO_REU
-        .import http_body_sink
-.endif
+        ; (http_body_sink for the HTTPS_BODY_TO_REU flag-set below is
+        ;  imported by the Lane G viewer-hook block above — the knob is
+        ;  UCI-only, matching that block's BACKEND_UCI guard.)
 
         ; ---- imports: HTTP I/O state (data.asm) ----
         .import http_host_ptr
@@ -522,18 +534,18 @@ do_https_get:
         jsr print_string
 
         ; --- set HTTP host/path/port ---
-        lda #<http_host_foo
+        lda #<http_host_target
         sta http_host_ptr
-        lda #>http_host_foo
+        lda #>http_host_target
         sta http_host_ptr+1
-        lda #http_host_foo_len
+        lda #http_host_target_len
         sta http_host_len
 
-        lda #<http_path_root
+        lda #<https_path_target
         sta http_path_ptr
-        lda #>http_path_root
+        lda #>https_path_target
         sta http_path_ptr+1
-        lda #1
+        lda #https_path_target_len
         sta http_path_len
 
         lda #<HTTPS_PORT
@@ -544,7 +556,7 @@ do_https_get:
         ; --- copy hostname into tls_hostname for SNI ---
         ldx #0
 @copy_host:
-        lda http_host_foo,x
+        lda http_host_target,x
         beq @copy_done
         sta tls_hostname,x
         inx
@@ -556,8 +568,8 @@ do_https_get:
         stx tls_hostname_len
 
         ; --- DNS resolve ---
-        lda #<http_host_foo
-        ldx #>http_host_foo
+        lda #<http_host_target
+        ldx #>http_host_target
         jsr net_dns_resolve
         bcc @dns_ok
 
@@ -640,6 +652,16 @@ do_https_get:
 .endif
         jsr http_recv_body
 
+.ifdef BACKEND_UCI
+        ; Lane G stretch-goal hook: when the body sink routed the
+        ; response into the REU (http_body_sink != 0), drop into the
+        ; scrollable viewer instead of printing the bounce buffer.
+        lda http_body_sink
+        beq @print_body
+        jsr viewer_enter
+        jmp @close
+@print_body:
+.endif
         ; display response body
         jsr print_resp_body
 
@@ -1201,14 +1223,25 @@ http_host_zimmers:
         .byte 0
 http_host_zimmers_len = 15
 
-http_host_foo:
-        .byte "www.foo.bar"
+http_host_target:
+        .byte HTTPS_HOST_STR
         .byte 0
-http_host_foo_len = 11
+http_host_target_len = * - http_host_target - 1
+        ; the SNI copy loop below guards at 63 chars; refuse at build
+        ; time rather than truncating at runtime
+        .assert http_host_target_len <= 63, error, "HTTPS_HOST exceeds the 63-char SNI guard"
 
 http_path_root:
         .byte "/"
         .byte 0
+
+; HTTPS request path, `make HTTPS_PATH=...` (see HTTPS_HOST above; same
+; generated-include mechanism). Default "/" keeps the build byte-identical.
+https_path_target:
+        .byte HTTPS_PATH_STR
+        .byte 0
+https_path_target_len = * - https_path_target - 1
+        .assert https_path_target_len <= 100, error, "HTTPS_PATH too long for the request builder"
 
 ; =============================================================================
 ; Local BSS

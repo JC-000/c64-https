@@ -4,11 +4,14 @@ Runs a background HTTPS server on a specified host:port.  Every GET request
 returns a fixed 200 OK with a short body.  The server runs in a daemon
 thread so the test can drive VICE in the main thread.
 
-The TLS layer uses a self-signed ECDSA certificate.  Two cert profiles
+The TLS layer uses a self-signed ECDSA certificate.  Three cert profiles
 are available:
 
     "p256" (default) -- P-256 / ecdsa-with-SHA256
     "p384"           -- P-384 / ecdsa-with-SHA384
+    "p256-chain"     -- the p256 leaf + 2 padded throwaway intermediates
+                        (~3.2 KB chain, 11+ flight records at MFL 512) —
+                        the real-record-count bench; see chain_certs.py
 
 Both are generated lazily on first use (see ensure_certs.py) into the
 gitignored tools/https_e2e/certs/ directory, and reused thereafter.
@@ -49,7 +52,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 _CERT_PROFILE_ENV = "HTTPS_LISTENER_CERT_PROFILE"
 _DEFAULT_CERT_PROFILE = "p256"
-_CERT_PROFILES = ("p256", "p384")
+_CERT_PROFILES = ("p256", "p384", "p256-chain")
 
 DEFAULT_RESPONSE_BODY = "HELLO FROM HTTPS TEST SERVER"
 

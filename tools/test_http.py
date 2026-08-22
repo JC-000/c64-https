@@ -178,6 +178,512 @@ def _reset_parser(transport, labels):
     write_bytes(transport, line_idx, [0])
     write_bytes(transport, hdr_match, [0])
     write_bytes(transport, resp_len, [0, 0])
+    # Ring input mode by default (span tests flip to 1 per span).
+    write_bytes(transport, labels.address("http_in_mode"), [0])
+
+
+# --- span-mode input (the TLS path's input mode) -------------------------
+# The TLS path hands each decrypted record to http_recv_response as a
+# linear span (http_in_mode=1).  These helpers drive the parser exactly
+# that way, one call per "record", which is what lets the tests cover
+# headers/chunks spanning many TLS records.
+
+SPAN_SCRATCH = 0xC800   # inside TCP_BUF, above the test scratch at $C000-$C3xx
+CARRY_STUB = 0xC300     # carry-latching JSR stub
+CARRY_LATCH = 0xC2F0
+
+
+def _feed_span(transport, labels, data, timeout=30.0):
+    """Feed one span to http_recv_response.
+
+    Returns the carry flag after the call: 1 = parser needs more data,
+    0 = response complete.
+    """
+    assert len(data) <= 0x700, "span too large for scratch area"
+    write_bytes(transport, SPAN_SCRATCH, data)
+    write_bytes(transport, labels.address("http_in_mode"), [1])
+    write_bytes(transport, labels.address("http_in_ptr"),
+                [SPAN_SCRATCH & 0xFF, SPAN_SCRATCH >> 8])
+    write_bytes(transport, labels.address("http_in_len"),
+                [len(data) & 0xFF, len(data) >> 8])
+    recv = labels.address("http_recv_response")
+    stub = bytes([
+        0x20, recv & 0xFF, recv >> 8,        # JSR http_recv_response
+        0xA9, 0x00,                          # LDA #0
+        0x69, 0x00,                          # ADC #0  (A = carry)
+        0x8D, CARRY_LATCH & 0xFF, CARRY_LATCH >> 8,  # STA latch
+        0x60,                                # RTS
+    ])
+    write_bytes(transport, CARRY_LATCH, [0xEE])  # poison the latch
+    write_bytes(transport, CARRY_STUB, stub)
+    jsr(transport, CARRY_STUB, timeout=timeout)
+    return read_bytes(transport, CARRY_LATCH, 1)[0]
+
+
+def _run_span_response(transport, labels, spans):
+    """Reset the parser and feed a list of spans.
+
+    Asserts carry=1 after every span except the last.  Returns the carry
+    after the final span (0 expected for a cleanly terminated response).
+    """
+    _reset_parser(transport, labels)
+    carry = None
+    for i, span in enumerate(spans):
+        carry = _feed_span(transport, labels, span)
+        if i < len(spans) - 1 and carry != 1:
+            return ("early", i, carry)
+    return carry
+
+
+def _check_response(transport, labels, want_status, want_body, prefix=None):
+    """Common assertions: status, resp_len, body bytes.
+
+    If prefix is not None, expect resp_len == len(prefix) and the buffer
+    to hold prefix (the truncate-at-capacity case); otherwise expect the
+    full want_body.
+    """
+    passed = 0
+    failed = 0
+    expect = prefix if prefix is not None else want_body
+
+    status_bytes = read_bytes(transport, labels.address("http_status"), 2)
+    status = status_bytes[0] | (status_bytes[1] << 8)
+    if status == want_status:
+        print(f"  PASS: http_status = {status}")
+        passed += 1
+    else:
+        print(f"  FAIL: http_status = {status}, expected {want_status}")
+        failed += 1
+
+    resp_len_bytes = read_bytes(transport, labels.address("http_resp_len"), 2)
+    resp_len = resp_len_bytes[0] | (resp_len_bytes[1] << 8)
+    if resp_len == len(expect):
+        print(f"  PASS: http_resp_len = {resp_len}")
+        passed += 1
+    else:
+        print(f"  FAIL: http_resp_len = {resp_len}, expected {len(expect)}")
+        failed += 1
+
+    body = read_bytes(transport, labels.address("http_resp_buf"),
+                      min(resp_len, 512))
+    if body == expect[:512]:
+        print(f"  PASS: body matches ({len(expect[:512])} bytes)")
+        passed += 1
+    else:
+        mism = [(i, body[i], expect[i])
+                for i in range(min(len(body), len(expect)))
+                if body[i] != expect[i]]
+        print(f"  FAIL: body mismatch — {len(mism)} byte(s) differ, "
+              f"len got {len(body)} vs {len(expect[:512])}")
+        for idx, got, exp in mism[:5]:
+            print(f"    offset {idx}: got ${got:02X}, expected ${exp:02X}")
+        failed += 1
+    return passed, failed
+
+
+def _read_u16(transport, labels, name):
+    b = read_bytes(transport, labels.address(name), 2)
+    return b[0] | (b[1] << 8)
+
+
+def _read_u24(transport, labels, name):
+    b = read_bytes(transport, labels.address(name), 3)
+    return b[0] | (b[1] << 8) | (b[2] << 16)
+
+
+def _chunked(body, sizes, ext=b""):
+    """Encode body as chunked with the given chunk sizes."""
+    out = b""
+    pos = 0
+    for n in sizes:
+        out += format(n, "x").encode() + ext + b"\r\n" + body[pos:pos+n] + b"\r\n"
+        pos += n
+    assert pos == len(body)
+    out += b"0\r\n\r\n"
+    return out
+
+
+def test_chunked_basic(transport, labels):
+    """Chunked response, everything in one span, lowercase hex sizes."""
+    body = b"Hello!!!"
+    resp = (b"HTTP/1.1 200 OK\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"5\r\nHello\r\n3\r\n!!!\r\n0\r\n\r\n")
+    carry = _run_span_response(transport, labels, [resp])
+    if carry != 0:
+        print(f"  FAIL: parser did not complete (carry={carry})")
+        return 0, 1
+    print("  PASS: parser completed on terminal chunk")
+    p, f = _check_response(transport, labels, 200, body)
+    chunked = read_bytes(transport, labels.address("http_chunked"), 1)[0]
+    if chunked == 1:
+        print("  PASS: http_chunked flag set")
+        p += 1
+    else:
+        print(f"  FAIL: http_chunked = {chunked}, expected 1")
+        f += 1
+    return p + 1, f
+
+
+def test_chunked_multi_record(transport, labels):
+    """Chunks + headers split across spans: header name split mid-word,
+    chunk data split mid-chunk, uppercase hex size, chunk extension,
+    terminal-chunk CRLF split between spans."""
+    body = b"0123456789" + bytes(range(0x41, 0x51))   # 10 + 16 = 26 bytes
+    wire = (b"HTTP/1.1 200 OK\r\n"
+            b"Transfer-Enco")
+    wire2 = (b"ding: chunked\r\n"
+             b"X-Other: yes\r\n"
+             b"\r\n"
+             b"A\r\n" + body[:4])
+    wire3 = body[4:10] + b"\r\n" + b"10;ext=1\r\n" + body[10:18]
+    wire4 = body[18:26] + b"\r\n" + b"0\r\n"
+    wire5 = b"\r\n"
+    carry = _run_span_response(transport, labels,
+                               [wire, wire2, wire3, wire4, wire5])
+    if carry != 0:
+        print(f"  FAIL: parser did not complete cleanly (result={carry})")
+        return 0, 1
+    print("  PASS: 5-span chunked response completed on terminal chunk")
+    p, f = _check_response(transport, labels, 200, body)
+    return p + 1, f
+
+
+def test_chunked_truncation(transport, labels):
+    """Chunked body larger than the 512 B http_resp_buf: the parser must
+    fill the buffer, keep consuming/discarding, and still terminate
+    cleanly on the terminal chunk with http_resp_len = 512."""
+    body = bytes((i * 7 + 3) & 0xFF for i in range(700))
+    wire = (b"HTTP/1.1 200 OK\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n" + _chunked(body, [100] * 7))
+    # split into ~400-byte spans (multi-record chunks)
+    spans = [wire[i:i+400] for i in range(0, len(wire), 400)]
+    carry = _run_span_response(transport, labels, spans)
+    if carry != 0:
+        print(f"  FAIL: parser did not complete cleanly (result={carry})")
+        return 0, 1
+    print(f"  PASS: {len(spans)}-span oversized chunked response completed")
+    p, f = _check_response(transport, labels, 200, body, prefix=body[:512])
+    # W4: http_body_total counts every de-chunked payload byte CONSUMED,
+    # including the 188 past the 512 B stored cap — never framing.
+    total = _read_u24(transport, labels, "http_body_total")
+    if total == 700:
+        print(f"  PASS: http_body_total = {total} (payload only)")
+        p += 1
+    else:
+        print(f"  FAIL: http_body_total = {total}, expected 700")
+        f += 1
+    return p + 1, f
+
+
+def _big_headers(count=24):
+    """A >1.5 KB header block: filler headers, several lines longer than
+    the 32-byte line buffer, Content-Length-lookalike prefixes, mixed
+    case."""
+    hdrs = b"HTTP/1.1 200 OK\r\n"
+    hdrs += b"Server: test-rig/1.0\r\n"
+    # a CSP-style monster line (~200 bytes)
+    hdrs += (b"Content-Security-Policy: default-src 'none'; "
+             + b"script-src " + b"https://example.invalid " * 6
+             + b"; style-src 'unsafe-inline'\r\n")
+    # a header whose 31-byte truncated prefix must NOT match Content-Length
+    hdrs += b"Content-Length-Hint: not-a-real-header-9999\r\n"
+    for i in range(count):
+        hdrs += (f"X-Filler-Header-{i:02d}: ".encode()
+                 + b"v" * 40 + b"\r\n")
+    return hdrs
+
+
+def test_large_headers_content_length(transport, labels):
+    """Header block far larger than http_resp_buf, split across many
+    spans, with Content-Length buried mid-block."""
+    body = b"Hello"
+    hdrs = _big_headers()
+    hdrs += b"Content-Length: 5\r\n"
+    hdrs += _big_headers(8)[len(b"HTTP/1.1 200 OK\r\n"):]  # more filler after
+    wire = hdrs + b"\r\n" + body
+    assert len(hdrs) > 1500, f"header block only {len(hdrs)} bytes"
+    spans = [wire[i:i+200] for i in range(0, len(wire), 200)]
+    carry = _run_span_response(transport, labels, spans)
+    if carry != 0:
+        print(f"  FAIL: parser did not complete cleanly (result={carry})")
+        return 0, 1
+    print(f"  PASS: {len(spans)}-span large-header response completed "
+          f"({len(hdrs)} header bytes)")
+    p, f = _check_response(transport, labels, 200, body)
+    return p + 1, f
+
+
+def test_chunked_large_headers(transport, labels):
+    """Chunked + large headers combined — the realistic github.com shape."""
+    body = b"<html>chunked page</html>"
+    hdrs = _big_headers(16)
+    hdrs += b"Transfer-Encoding: chunked\r\n"
+    wire = hdrs + b"\r\n" + _chunked(body, [16, 9])
+    spans = [wire[i:i+250] for i in range(0, len(wire), 250)]
+    carry = _run_span_response(transport, labels, spans)
+    if carry != 0:
+        print(f"  FAIL: parser did not complete cleanly (result={carry})")
+        return 0, 1
+    print(f"  PASS: {len(spans)}-span chunked+large-header response completed")
+    p, f = _check_response(transport, labels, 200, body)
+    return p + 1, f
+
+
+# --- W4 lane-E vectors: consumed-count termination, 24-bit CL, REU sink ---
+
+def test_identity_oversize_cl(transport, labels):
+    """W4 regression (browserleaks.com): identity body > 512 B with
+    Content-Length must terminate by CONSUMED count, not stored count.
+
+    Before the fix, http_resp_len froze at the 512 B cap, the
+    Content-Length match could never fire, and only connection-close /
+    poll-timeout ended the read — a server that holds the connection
+    open left http_get never returning."""
+    body = bytes((i * 7 + (i >> 8)) & 0xFF for i in range(700))
+    wire = b"HTTP/1.1 200 OK\r\nContent-Length: 700\r\n\r\n" + body
+    spans = [wire[i:i+400] for i in range(0, len(wire), 400)]
+    carry = _run_span_response(transport, labels, spans)
+    if carry != 0:
+        print(f"  FAIL: parser did not complete (result={carry}) — the "
+              "consumed-count Content-Length termination did not fire")
+        return 0, 1
+    print(f"  PASS: {len(spans)}-span oversized identity/CL response "
+          "terminated on consumed-count match")
+    p, f = _check_response(transport, labels, 200, body, prefix=body[:512])
+
+    total = _read_u24(transport, labels, "http_body_total")
+    if total == 700:
+        print(f"  PASS: http_body_total = {total}")
+        p += 1
+    else:
+        print(f"  FAIL: http_body_total = {total}, expected 700")
+        f += 1
+
+    in_len = _read_u16(transport, labels, "http_in_len")
+    if in_len == 0:
+        print("  PASS: span fully consumed (bytes past the cap drained)")
+        p += 1
+    else:
+        print(f"  FAIL: http_in_len = {in_len}, expected 0")
+        f += 1
+    return p + 1, f
+
+
+def test_content_length_24bit(transport, labels):
+    """Content-Length parses to 24 bits (real bodies exceed 64 KB) with
+    the http_cl_valid flag replacing the old $FFFF magic sentinel."""
+    passed = 0
+    failed = 0
+
+    # Headers + a token 5 bytes of a (claimed) 100000-byte body.  One
+    # span; the parser must consume it and stay in the body state.
+    wire = b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\nABCDE"
+    _reset_parser(transport, labels)
+    carry = _feed_span(transport, labels, wire)
+    if carry != 1:
+        print(f"  FAIL: parser terminated early (carry={carry})")
+        return 0, 1
+    print("  PASS: parser still waiting for the rest of the 100000 B body")
+    passed += 1
+
+    cl_valid = read_bytes(transport, labels.address("http_cl_valid"), 1)[0]
+    cl = _read_u24(transport, labels, "http_content_length")
+    if cl_valid == 1 and cl == 100000:
+        print(f"  PASS: http_cl_valid = 1, http_content_length = {cl}")
+        passed += 1
+    else:
+        print(f"  FAIL: http_cl_valid = {cl_valid} (exp 1), "
+              f"http_content_length = {cl} (exp 100000)")
+        failed += 1
+
+    total = _read_u24(transport, labels, "http_body_total")
+    state = read_bytes(transport, labels.address("http_parse_state"), 1)[0]
+    if total == 5 and state == 2:
+        print(f"  PASS: body_total = {total}, still in body state")
+        passed += 1
+    else:
+        print(f"  FAIL: body_total = {total} (exp 5), parse_state = {state} "
+              "(exp 2)")
+        failed += 1
+    return passed, failed
+
+
+def test_body_no_content_length(transport, labels):
+    """Content-Length absent: legacy behaviour preserved — bytes store into
+    http_resp_buf, no premature termination, body_total still counts."""
+    passed = 0
+    failed = 0
+
+    body = b"NO-CL BODY BYTES HERE"          # 21 bytes
+    wire = b"HTTP/1.1 200 OK\r\nX-Info: none\r\n\r\n" + body
+    _reset_parser(transport, labels)
+    carry = _feed_span(transport, labels, wire)
+    if carry != 1:
+        print(f"  FAIL: parser terminated early (carry={carry})")
+        return 0, 1
+
+    resp_len = _read_u16(transport, labels, "http_resp_len")
+    stored = read_bytes(transport, labels.address("http_resp_buf"), len(body))
+    total = _read_u24(transport, labels, "http_body_total")
+    if resp_len == len(body) and stored == body:
+        print(f"  PASS: body stored intact, http_resp_len = {resp_len}")
+        passed += 1
+    else:
+        print(f"  FAIL: resp_len = {resp_len} (exp {len(body)}), "
+              f"stored = {stored!r}")
+        failed += 1
+    if total == len(body):
+        print(f"  PASS: http_body_total = {total}")
+        passed += 1
+    else:
+        print(f"  FAIL: http_body_total = {total}, expected {len(body)}")
+        failed += 1
+    return passed, failed
+
+
+# --- W4 REU body sink -----------------------------------------------------
+# VICE runs with a 512 KB REU (-reusize 512), which cannot hold the
+# shipped default base of bank 16 ($10:0000, 16 MB REU).  The sink reads
+# its base from the runtime variable http_reu_body_base (3 bytes LE,
+# file-backed RAM), so the test retargets it to bank 3 ($03:0000) by
+# DMA, no rebuild needed.  Hardware rigs with a 16 MB REU use the
+# shipped default (or `make HTTP_REU_BODY_BASE=<decimal>`).
+SINK_TEST_BASE = (0x00, 0x00, 0x03)      # $03:0000 — inside a 512 KB REU
+SINK_FETCH_STUB = 0xC380                 # after the carry stub at $C300
+SINK_FETCH_DEST = 0xC000                 # ring area; free between tests
+
+
+def _reu_fetch_to_ram(transport, labels, length, c64_addr=SINK_FETCH_DEST,
+                      reu_base=SINK_TEST_BASE, stub_addr=SINK_FETCH_STUB):
+    """Drive a C64-side REU FETCH so the host can read REU contents back.
+
+    Writes a small 6502 stub that programs the $DF00 REC registers for a
+    REU->C64 transfer of `length` bytes from `reu_base` to `c64_addr`,
+    executes it via jsr(), and returns the fetched bytes.
+    """
+    lo, hi = length & 0xFF, (length >> 8) & 0xFF
+    stub = bytes([
+        0xA9, c64_addr & 0xFF,        0x8D, 0x02, 0xDF,   # c64 addr lo
+        0xA9, (c64_addr >> 8) & 0xFF, 0x8D, 0x03, 0xDF,   # c64 addr hi
+        0xA9, reu_base[0],            0x8D, 0x04, 0xDF,   # reu addr lo
+        0xA9, reu_base[1],            0x8D, 0x05, 0xDF,   # reu addr hi
+        0xA9, reu_base[2],            0x8D, 0x06, 0xDF,   # reu bank
+        0xA9, lo,                     0x8D, 0x07, 0xDF,   # len lo
+        0xA9, hi,                     0x8D, 0x08, 0xDF,   # len hi
+        0xA9, 0x00,                   0x8D, 0x0A, 0xDF,   # addr ctrl
+        0xA9, 0xB1,                   0x8D, 0x01, 0xDF,   # execute FETCH
+        0x60,                                             # rts
+    ])
+    write_bytes(transport, stub_addr, stub)
+    jsr(transport, stub_addr)
+    return read_bytes(transport, c64_addr, length)
+
+
+def test_reu_body_sink(transport, labels):
+    """W4 REU body sink: >512 B bodies streamed to the REU through the
+    512 B bounce buffer; verifies http_body_total, the first-512
+    http_resp_buf restore contract, and the REU contents read back by
+    DMA.  Covers both the chunked (Wikipedia shape) and identity/CL
+    paths."""
+    passed = 0
+    failed = 0
+
+    sink_blit = labels.address("http_sink_blit")
+    base_var = labels.address("http_reu_body_base")
+    sink_flag = labels.address("http_body_sink")
+    if sink_blit is None or base_var is None:
+        # The REU sink is BACKEND=uci-only (ip65 cannot fit it).  Do not
+        # let this read as coverage: say loudly what was not run.
+        print("  !! SINK VECTORS NOT RUN: this PRG has no REU sink "
+              "(BACKEND=uci-only).")
+        print("  !! To cover them: make clean && make BACKEND=uci && "
+              "C64_SKIP_BUILD=1 python3 tools/test_http.py")
+        if os.environ.get("C64_EXPECT_SINK"):
+            print("  FAIL: C64_EXPECT_SINK=1 but the sink is absent")
+            return 0, 1
+        return 0, 0
+
+    # Retarget the sink base into the 512 KB VICE REU (bank 3) and
+    # enable sink mode.
+    write_bytes(transport, base_var, list(SINK_TEST_BASE))
+    write_bytes(transport, sink_flag, [1])
+
+    # --- vector 1: chunked 700 B (the Wikipedia shape) ---
+    part1 = bytes((i * 13 + 5) & 0xFF for i in range(400))
+    part2 = bytes((i * 17 + 9) & 0xFF for i in range(300))
+    body = part1 + part2
+    wire = (b"HTTP/1.1 200 OK\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n" + _chunked(body, [400, 300]))
+    carry = _run_span_response(transport, labels, [wire])
+    if carry != 0:
+        print(f"  FAIL: sink parse (chunked) did not complete "
+              f"(result={carry})")
+        write_bytes(transport, sink_flag, [0])
+        return passed, failed + 1
+    print("  PASS: chunked sink parse complete")
+    passed += 1
+
+    total = _read_u24(transport, labels, "http_body_total")
+    resp_len = _read_u16(transport, labels, "http_resp_len")
+    if total == 700 and resp_len == 512:
+        print(f"  PASS: body_total = {total}, resp_len = {resp_len}")
+        passed += 1
+    else:
+        print(f"  FAIL: body_total = {total} (exp 700), resp_len = "
+              f"{resp_len} (exp 512)")
+        failed += 1
+
+    stored = read_bytes(transport, labels.address("http_resp_buf"), 512)
+    if stored == body[:512]:
+        print("  PASS: http_resp_buf restored to the FIRST 512 body bytes")
+        passed += 1
+    else:
+        print("  FAIL: http_resp_buf does not hold the first 512 body bytes")
+        failed += 1
+
+    reu = _reu_fetch_to_ram(transport, labels, 700)
+    if bytes(reu) == body:
+        print("  PASS: REU holds all 700 de-chunked body bytes")
+        passed += 1
+    else:
+        diff = next((i for i in range(700) if reu[i] != body[i]), None)
+        print(f"  FAIL: REU contents mismatch (first diff at {diff})")
+        failed += 1
+
+    # --- vector 2: identity 600 B with Content-Length ---
+    body2 = bytes((i * 31 + 7) & 0xFF for i in range(600))
+    wire2 = b"HTTP/1.1 200 OK\r\nContent-Length: 600\r\n\r\n" + body2
+    carry = _run_span_response(transport, labels, [wire2])
+    if carry != 0:
+        print(f"  FAIL: sink parse (identity/CL) did not complete "
+              f"(result={carry})")
+        write_bytes(transport, sink_flag, [0])
+        return passed, failed + 1
+
+    total = _read_u24(transport, labels, "http_body_total")
+    resp_len = _read_u16(transport, labels, "http_resp_len")
+    stored = read_bytes(transport, labels.address("http_resp_buf"), 512)
+    reu = _reu_fetch_to_ram(transport, labels, 600)
+    if (total == 600 and resp_len == 512 and stored == body2[:512]
+            and bytes(reu) == body2):
+        print("  PASS: identity/CL sink: body_total = 600, first-512 "
+              "restored, REU contents match")
+        passed += 1
+    else:
+        print(f"  FAIL: identity/CL sink: total={total}, resp_len={resp_len}, "
+              f"prefix_ok={stored == body2[:512]}, "
+              f"reu_ok={bytes(reu) == body2}")
+        failed += 1
+
+    # Cleanup: buffer mode, shipped default base (bank 16), ring input.
+    write_bytes(transport, sink_flag, [0])
+    write_bytes(transport, base_var, [0x00, 0x00, 0x10])
+    write_bytes(transport, labels.address("http_in_mode"), [0])
+    return passed, failed
 
 
 def _run_parser_loop(transport, labels, timeout=30.0):
@@ -370,452 +876,6 @@ def test_recv_response_with_body(transport, labels):
     return passed, failed
 
 
-def _load_span(transport, labels, data, addr=0xC400):
-    """Feed canned data to the parser as a linear span (http_in_mode=1).
-
-    This is the TLS-path input mode (issue #72): the parser reads from
-    http_in_ptr/http_in_len instead of the TCP ring, which also lifts the
-    ring helper's 256-byte limit — needed for the >512 B body vectors.
-    """
-    write_bytes(transport, addr, data)
-    write_bytes(transport, labels.address("http_in_mode"), [1])
-    write_bytes(transport, labels.address("http_in_ptr"),
-                [addr & 0xFF, (addr >> 8) & 0xFF])
-    write_bytes(transport, labels.address("http_in_len"),
-                [len(data) & 0xFF, (len(data) >> 8) & 0xFF])
-
-
-def _read_u16(transport, labels, name):
-    b = read_bytes(transport, labels.address(name), 2)
-    return b[0] | (b[1] << 8)
-
-
-def _read_u24(transport, labels, name):
-    b = read_bytes(transport, labels.address(name), 3)
-    return b[0] | (b[1] << 8) | (b[2] << 16)
-
-
-def test_body_larger_than_buffer(transport, labels):
-    """W4 regression (browserleaks.com): identity body > 512 B with
-    Content-Length must terminate by CONSUMED count, not stored count.
-
-    Before the fix, http_resp_len froze at the 512 B cap, the
-    Content-Length match could never fire, and only connection-close /
-    poll-timeout ended the read."""
-    passed = 0
-    failed = 0
-
-    body = bytes((i * 7 + (i >> 8)) & 0xFF for i in range(700))
-    response = b"HTTP/1.1 200 OK\r\nContent-Length: 700\r\n\r\n" + body
-
-    _load_span(transport, labels, response)
-    _reset_parser(transport, labels)
-
-    complete = _run_parser_loop(transport, labels, timeout=60.0)
-    if not complete:
-        print("  FAIL: parser did not complete (Content-Length termination "
-              "did not fire on truncated body — the W4 regression)")
-        return 0, 1
-    print("  PASS: parser terminated on consumed-count match")
-    passed += 1
-
-    total = _read_u24(transport, labels, "http_body_total")
-    if total == 700:
-        print(f"  PASS: http_body_total = {total}")
-        passed += 1
-    else:
-        print(f"  FAIL: http_body_total = {total}, expected 700")
-        failed += 1
-
-    resp_len = _read_u16(transport, labels, "http_resp_len")
-    if resp_len == 512:
-        print(f"  PASS: http_resp_len = {resp_len} (min(512, total))")
-        passed += 1
-    else:
-        print(f"  FAIL: http_resp_len = {resp_len}, expected 512")
-        failed += 1
-
-    stored = read_bytes(transport, labels.address("http_resp_buf"), 512)
-    if stored == body[:512]:
-        print("  PASS: http_resp_buf holds the first 512 body bytes")
-        passed += 1
-    else:
-        print("  FAIL: http_resp_buf does not match first 512 body bytes")
-        failed += 1
-
-    in_len = _read_u16(transport, labels, "http_in_len")
-    if in_len == 0:
-        print("  PASS: span fully consumed (bytes past the cap were drained)")
-        passed += 1
-    else:
-        print(f"  FAIL: http_in_len = {in_len}, expected 0 "
-              "(bytes past the 512 cap were not consumed)")
-        failed += 1
-
-    return passed, failed
-
-
-def test_content_length_24bit(transport, labels):
-    """Content-Length parses to 24 bits (real bodies exceed 64 KB) with
-    the valid-flag replacing the old $FFFF magic sentinel."""
-    passed = 0
-    failed = 0
-
-    # Headers + a token 5 bytes of a (claimed) 100000-byte body.  A single
-    # dispatch consumes the span and returns not-done; we then inspect the
-    # parsed header state.
-    response = b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\nABCDE"
-    _load_span(transport, labels, response)
-    _reset_parser(transport, labels)
-
-    jsr(transport, labels.address("http_recv_response"))
-
-    cl_valid = read_bytes(transport, labels.address("http_cl_valid"), 1)[0]
-    if cl_valid == 1:
-        print("  PASS: http_cl_valid = 1")
-        passed += 1
-    else:
-        print(f"  FAIL: http_cl_valid = {cl_valid}, expected 1")
-        failed += 1
-
-    cl = _read_u24(transport, labels, "http_content_length")
-    if cl == 100000:
-        print(f"  PASS: http_content_length = {cl} (24-bit)")
-        passed += 1
-    else:
-        print(f"  FAIL: http_content_length = {cl}, expected 100000")
-        failed += 1
-
-    total = _read_u24(transport, labels, "http_body_total")
-    state = read_bytes(transport, labels.address("http_parse_state"), 1)[0]
-    if total == 5 and state == 2:
-        print(f"  PASS: body_total = {total}, still in body state "
-              "(not terminated early)")
-        passed += 1
-    else:
-        print(f"  FAIL: body_total = {total} (exp 5), parse_state = {state} "
-              "(exp 2)")
-        failed += 1
-
-    return passed, failed
-
-
-def test_body_no_content_length(transport, labels):
-    """Content-Length absent: legacy behaviour preserved — bytes store into
-    http_resp_buf, no premature termination, body_total still counts."""
-    passed = 0
-    failed = 0
-
-    body = b"NO-CL BODY BYTES HERE"          # 21 bytes
-    response = b"HTTP/1.1 200 OK\r\nX-Info: none\r\n\r\n" + body
-    _load_span(transport, labels, response)
-    _reset_parser(transport, labels)
-
-    # Single dispatch: consumes the whole span, returns not-done (C=1)
-    # because with no Content-Length the parser keeps polling.
-    jsr(transport, labels.address("http_recv_response"))
-
-    resp_len = _read_u16(transport, labels, "http_resp_len")
-    if resp_len == len(body):
-        print(f"  PASS: http_resp_len = {resp_len}")
-        passed += 1
-    else:
-        print(f"  FAIL: http_resp_len = {resp_len}, expected {len(body)}")
-        failed += 1
-
-    stored = read_bytes(transport, labels.address("http_resp_buf"), len(body))
-    if stored == body:
-        print("  PASS: body stored intact")
-        passed += 1
-    else:
-        print(f"  FAIL: body mismatch: {stored!r}")
-        failed += 1
-
-    total = _read_u24(transport, labels, "http_body_total")
-    if total == len(body):
-        print(f"  PASS: http_body_total = {total}")
-        passed += 1
-    else:
-        print(f"  FAIL: http_body_total = {total}, expected {len(body)}")
-        failed += 1
-
-    # Restore ring input mode for any later ring-driven vectors.
-    write_bytes(transport, labels.address("http_in_mode"), [0])
-    return passed, failed
-
-
-def _chunk(data, ext=b""):
-    """Encode one HTTP/1.1 chunk (RFC 7230 §4.1)."""
-    return (b"%x" % len(data)) + ext + b"\r\n" + data + b"\r\n"
-
-
-def test_chunked_body(transport, labels):
-    """Chunked transfer-decoding: Wikipedia serves the stretch-goal article
-    chunked with NO Content-Length, so the terminal 0-chunk is the
-    termination signal and http_body_total must count de-chunked payload
-    bytes only (never framing)."""
-    passed = 0
-    failed = 0
-
-    part1 = bytes((i * 3 + 1) & 0xFF for i in range(300))
-    part2 = bytes((i * 5 + 2) & 0xFF for i in range(300))
-    part3 = bytes((i * 11 + 3) & 0xFF for i in range(100))
-    body = part1 + part2 + part3                       # 700 B de-chunked
-
-    stream = (
-        b"HTTP/1.1 200 OK\r\n"
-        b"Transfer-Encoding: chunked\r\n"
-        b"\r\n"
-        + _chunk(part1)                                # "12c\r\n"...
-        + _chunk(part2, ext=b";name=val")              # chunk extension
-        + (b"%X" % len(part3)) + b"\r\n" + part3 + b"\r\n"  # UPPERCASE hex
-        + b"0\r\n"
-        + b"X-Trailer: yes\r\n"                        # trailer section
-        + b"\r\n"
-    )
-
-    _load_span(transport, labels, stream)
-    _reset_parser(transport, labels)
-
-    complete = _run_parser_loop(transport, labels, timeout=90.0)
-    if not complete:
-        print("  FAIL: parser did not complete on the terminal 0-chunk")
-        return 0, 1
-    print("  PASS: parser terminated on the 0-chunk (+ trailer)")
-    passed += 1
-
-    te = read_bytes(transport, labels.address("http_te_chunked"), 1)[0]
-    if te == 1:
-        print("  PASS: http_te_chunked = 1")
-        passed += 1
-    else:
-        print(f"  FAIL: http_te_chunked = {te}, expected 1")
-        failed += 1
-
-    total = _read_u24(transport, labels, "http_body_total")
-    if total == 700:
-        print(f"  PASS: http_body_total = {total} (payload only, no framing)")
-        passed += 1
-    else:
-        print(f"  FAIL: http_body_total = {total}, expected 700")
-        failed += 1
-
-    resp_len = _read_u16(transport, labels, "http_resp_len")
-    if resp_len == 512:
-        print(f"  PASS: http_resp_len = {resp_len}")
-        passed += 1
-    else:
-        print(f"  FAIL: http_resp_len = {resp_len}, expected 512")
-        failed += 1
-
-    stored = read_bytes(transport, labels.address("http_resp_buf"), 512)
-    if stored == body[:512]:
-        print("  PASS: http_resp_buf holds the first 512 de-chunked bytes")
-        passed += 1
-    else:
-        print("  FAIL: http_resp_buf does not match de-chunked body prefix")
-        failed += 1
-
-    in_len = _read_u16(transport, labels, "http_in_len")
-    if in_len == 0:
-        print("  PASS: span fully consumed")
-        passed += 1
-    else:
-        print(f"  FAIL: http_in_len = {in_len}, expected 0")
-        failed += 1
-
-    return passed, failed
-
-
-def test_chunked_small_body(transport, labels):
-    """Chunked body smaller than the buffer: stored intact, exact length."""
-    passed = 0
-    failed = 0
-
-    body = b"CHUNKED-SMALL-BODY-0123456789"                # 29 B
-    stream = (
-        b"HTTP/1.1 200 OK\r\n"
-        b"transfer-encoding: CHUNKED\r\n"                  # case-folded match
-        b"\r\n"
-        + _chunk(body[:10]) + _chunk(body[10:]) + b"0\r\n\r\n"
-    )
-
-    _load_span(transport, labels, stream)
-    _reset_parser(transport, labels)
-
-    complete = _run_parser_loop(transport, labels, timeout=30.0)
-    if not complete:
-        print("  FAIL: parser did not complete")
-        return 0, 1
-
-    total = _read_u24(transport, labels, "http_body_total")
-    resp_len = _read_u16(transport, labels, "http_resp_len")
-    stored = read_bytes(transport, labels.address("http_resp_buf"), len(body))
-    if total == len(body) and resp_len == len(body):
-        print(f"  PASS: body_total = resp_len = {total}")
-        passed += 1
-    else:
-        print(f"  FAIL: body_total = {total}, resp_len = {resp_len}, "
-              f"expected {len(body)}")
-        failed += 1
-    if stored == body:
-        print("  PASS: de-chunked body stored intact")
-        passed += 1
-    else:
-        print(f"  FAIL: body mismatch: {stored!r}")
-        failed += 1
-
-    # Restore ring input mode for any later ring-driven vectors.
-    write_bytes(transport, labels.address("http_in_mode"), [0])
-    return passed, failed
-
-
-# --- W4 REU body sink helpers ---------------------------------------------
-# VICE runs with a 512 KB REU (-reusize 512), which cannot hold the
-# shipped default base of bank 16 ($10:0000, 16 MB REU).  The sink reads
-# its base from the runtime variable http_reu_body_base (3 bytes LE in
-# RODATA — RAM at runtime), so the test retargets it to bank 3
-# ($03:0000) by DMA, no rebuild needed.  Hardware rigs with a 16 MB REU
-# use the shipped default (or `make HTTP_REU_BODY_BASE=<decimal>`).
-SINK_TEST_BASE = (0x00, 0x00, 0x03)      # $03:0000 — inside a 512 KB REU
-
-REU_STATUS = 0xDF00
-
-
-def _reu_fetch_to_ram(transport, labels, length, c64_addr=0xC800,
-                      reu_base=SINK_TEST_BASE, stub_addr=0xC300):
-    """Drive a C64-side REU FETCH so the host can read REU contents back.
-
-    Writes a small 6502 stub that programs the $DF00 REC registers for a
-    REU->C64 transfer of `length` bytes from `reu_base` to `c64_addr`,
-    executes it via jsr(), and returns the fetched bytes.
-    """
-    lo, hi = length & 0xFF, (length >> 8) & 0xFF
-    stub = bytes([
-        0xA9, c64_addr & 0xFF,        0x8D, 0x02, 0xDF,   # c64 addr lo
-        0xA9, (c64_addr >> 8) & 0xFF, 0x8D, 0x03, 0xDF,   # c64 addr hi
-        0xA9, reu_base[0],            0x8D, 0x04, 0xDF,   # reu addr lo
-        0xA9, reu_base[1],            0x8D, 0x05, 0xDF,   # reu addr hi
-        0xA9, reu_base[2],            0x8D, 0x06, 0xDF,   # reu bank
-        0xA9, lo,                     0x8D, 0x07, 0xDF,   # len lo
-        0xA9, hi,                     0x8D, 0x08, 0xDF,   # len hi
-        0xA9, 0x00,                   0x8D, 0x0A, 0xDF,   # addr ctrl
-        0xA9, 0xB1,                   0x8D, 0x01, 0xDF,   # execute FETCH
-        0x60,                                             # rts
-    ])
-    write_bytes(transport, stub_addr, stub)
-    jsr(transport, stub_addr)
-    return read_bytes(transport, c64_addr, length)
-
-
-def test_reu_body_sink(transport, labels):
-    """W4 REU body sink: >512 B chunked body streamed to the REU through
-    the 512 B bounce buffer; verifies http_body_total, the first-512
-    http_resp_buf contract, and the REU contents read back by DMA."""
-    passed = 0
-    failed = 0
-
-    sink_blit = labels.address("http_sink_blit")
-    base_var = labels.address("http_reu_body_base")
-    sink_flag = labels.address("http_body_sink")
-    if sink_blit is None or base_var is None:
-        # The REU sink is BACKEND=uci-only (ip65 cannot fit it).  Do not
-        # let this read as coverage: say loudly what was not run.
-        print("  !! SINK VECTORS NOT RUN: this PRG has no REU sink "
-              "(BACKEND=uci-only).")
-        print("  !! To cover them: make clean && make BACKEND=uci && "
-              "C64_SKIP_BUILD=1 python3 tools/test_http.py")
-        if os.environ.get("C64_EXPECT_SINK"):
-            print("  FAIL: C64_EXPECT_SINK=1 but the sink is absent")
-            return 0, 1
-        return 0, 0
-
-    # Retarget the sink base into the 512 KB VICE REU (bank 3) and
-    # enable sink mode.
-    write_bytes(transport, base_var, list(SINK_TEST_BASE))
-    write_bytes(transport, sink_flag, [1])
-
-    # --- vector 1: chunked 700 B (the Wikipedia shape) ---
-    part1 = bytes((i * 13 + 5) & 0xFF for i in range(400))
-    part2 = bytes((i * 17 + 9) & 0xFF for i in range(300))
-    body = part1 + part2
-    stream = (
-        b"HTTP/1.1 200 OK\r\n"
-        b"Transfer-Encoding: chunked\r\n"
-        b"\r\n"
-        + _chunk(part1) + _chunk(part2) + b"0\r\n\r\n"
-    )
-    _load_span(transport, labels, stream)
-    _reset_parser(transport, labels)
-
-    complete = _run_parser_loop(transport, labels, timeout=90.0)
-    if not complete:
-        print("  FAIL: sink parse (chunked) did not complete")
-        write_bytes(transport, sink_flag, [0])
-        return passed, failed + 1
-    print("  PASS: chunked sink parse complete")
-    passed += 1
-
-    total = _read_u24(transport, labels, "http_body_total")
-    resp_len = _read_u16(transport, labels, "http_resp_len")
-    if total == 700 and resp_len == 512:
-        print(f"  PASS: body_total = {total}, resp_len = {resp_len}")
-        passed += 1
-    else:
-        print(f"  FAIL: body_total = {total} (exp 700), resp_len = "
-              f"{resp_len} (exp 512)")
-        failed += 1
-
-    stored = read_bytes(transport, labels.address("http_resp_buf"), 512)
-    if stored == body[:512]:
-        print("  PASS: http_resp_buf restored to the FIRST 512 body bytes")
-        passed += 1
-    else:
-        print("  FAIL: http_resp_buf does not hold the first 512 body bytes")
-        failed += 1
-
-    reu = _reu_fetch_to_ram(transport, labels, 700)
-    if bytes(reu) == body:
-        print("  PASS: REU holds all 700 de-chunked body bytes")
-        passed += 1
-    else:
-        diff = next((i for i in range(700) if reu[i] != body[i]), None)
-        print(f"  FAIL: REU contents mismatch (first diff at {diff})")
-        failed += 1
-
-    # --- vector 2: identity 600 B with Content-Length ---
-    body2 = bytes((i * 31 + 7) & 0xFF for i in range(600))
-    stream2 = (b"HTTP/1.1 200 OK\r\nContent-Length: 600\r\n\r\n" + body2)
-    _load_span(transport, labels, stream2)
-    _reset_parser(transport, labels)
-
-    complete = _run_parser_loop(transport, labels, timeout=90.0)
-    if not complete:
-        print("  FAIL: sink parse (identity/CL) did not complete")
-        write_bytes(transport, sink_flag, [0])
-        return passed, failed + 1
-
-    total = _read_u24(transport, labels, "http_body_total")
-    resp_len = _read_u16(transport, labels, "http_resp_len")
-    stored = read_bytes(transport, labels.address("http_resp_buf"), 512)
-    reu = _reu_fetch_to_ram(transport, labels, 600)
-    if (total == 600 and resp_len == 512 and stored == body2[:512]
-            and bytes(reu) == body2):
-        print("  PASS: identity/CL sink: body_total = 600, first-512 "
-              "restored, REU contents match")
-        passed += 1
-    else:
-        print(f"  FAIL: identity/CL sink: total={total}, resp_len={resp_len}, "
-              f"prefix_ok={stored == body2[:512]}, reu_ok={bytes(reu) == body2}")
-        failed += 1
-
-    # Cleanup: buffer mode, shipped default base (bank 16), ring input.
-    write_bytes(transport, sink_flag, [0])
-    write_bytes(transport, base_var, [0x00, 0x00, 0x10])
-    write_bytes(transport, labels.address("http_in_mode"), [0])
-    return passed, failed
-
-
 def run_tests(transport, labels, verbose=False):
     total_passed = 0
     total_failed = 0
@@ -872,8 +932,34 @@ def run_tests(transport, labels, verbose=False):
     total_passed += p
     total_failed += f
 
-    print("\n--- W4: body > 512 with Content-Length (browserleaks regression) ---")
-    p, f = test_body_larger_than_buffer(transport, labels)
+    print("\n--- Chunked: basic (single span) ---")
+    p, f = test_chunked_basic(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- Chunked: multi-record spans ---")
+    p, f = test_chunked_multi_record(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- Chunked: >512 B truncation ---")
+    p, f = test_chunked_truncation(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- Large headers + Content-Length ---")
+    p, f = test_large_headers_content_length(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- Chunked + large headers ---")
+    p, f = test_chunked_large_headers(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- W4: identity body > 512 with Content-Length "
+          "(browserleaks regression) ---")
+    p, f = test_identity_oversize_cl(transport, labels)
     total_passed += p
     total_failed += f
 
@@ -884,16 +970,6 @@ def run_tests(transport, labels, verbose=False):
 
     print("\n--- W4: Content-Length absent (legacy path) ---")
     p, f = test_body_no_content_length(transport, labels)
-    total_passed += p
-    total_failed += f
-
-    print("\n--- W4: chunked body > 512 (Wikipedia shape) ---")
-    p, f = test_chunked_body(transport, labels)
-    total_passed += p
-    total_failed += f
-
-    print("\n--- W4: chunked small body ---")
-    p, f = test_chunked_small_body(transport, labels)
     total_passed += p
     total_failed += f
 

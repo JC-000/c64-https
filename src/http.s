@@ -23,14 +23,6 @@
         .export http_crlf
         .export http_bg_idx
         .export http_bg_src
-        ; W4 body-termination fix (see @state_body / HTTP_AUX_CODE):
-        .export http_body_append
-        .export http_in_mode
-        .export http_in_ptr
-        .export http_in_len
-        ; W4 chunked transfer-decoding (see http_chunk_dispatch):
-        .export http_te_chunked
-        .export http_chunk_rem
         ; W4 REU body sink (see HTTP_SINK_CODE; UCI-only — ip65 gets
         ; inert stubs, the backend cannot fit the sink and the knob is
         ; UCI-only anyway):
@@ -56,6 +48,7 @@
         .import http_line_idx
         .import http_line_buf
         .import http_content_length
+        ; W4 body-termination fix + REU sink state (src/data.s):
         .import http_cl_valid
         .import http_body_total
         .import http_body_sink
@@ -478,11 +471,7 @@ http_recv_response:
         beq @state_status
         cmp #1
         beq @jmp_headers
-        cmp #2
-        beq @jmp_body
-        jmp http_chunk_dispatch ; states 3..6: chunked transfer-decoding
-@jmp_body:
-        jmp @state_body
+        jmp http_state_body
 @jmp_headers:
         jmp @state_headers
 
@@ -571,13 +560,10 @@ http_recv_response:
         lda #0
         sta http_hdr_match
         sta http_line_idx
-        ; Content-Length is "absent until seen": http_cl_valid = 0.  The
-        ; historical $FFFF magic sentinel went away with the 24-bit
-        ; Content-Length extension — a separate valid-flag byte cannot
-        ; collide with any real length value.  Transfer-Encoding likewise
-        ; resets to "not chunked".
-        sta http_cl_valid
-        sta http_te_chunked
+        ; Reset the per-response header-derived state (Content-Length
+        ; sentinel to $FFFF "unknown", chunked flag + chunk parser state
+        ; to 0).  Lives in HTTP_AUX_CODE — LOADER is packed on ip65.
+        jsr http_hdr_init
         jmp @state_headers
 
 ; ----- state 1: read header lines into http_line_buf until an empty line -----
@@ -605,7 +591,8 @@ http_recv_response:
 @hl_eol:
         lda http_line_idx
         beq @hdr_end            ; empty line -> end of headers
-        jsr check_header_line   ; Content-Length + Transfer-Encoding
+        jsr check_content_length
+        jsr check_transfer_encoding
         lda #0
         sta http_line_idx
         jmp @state_headers
@@ -615,52 +602,391 @@ http_recv_response:
         ; fallthrough below — returning @not_done here would strand a
         ; short body until the next record, and for a response that
         ; fits entirely in one record no further record ever arrives.
-        jsr http_body_begin     ; zero counters + pick body state:
-                                ;   2 = identity, 3 = chunked
-        jmp http_recv_response  ; re-dispatch into the selected state
-
-; ----- state 2: read body bytes -----
-; RFC 7230 behaviour: we treat an empty ring as "body still arriving"
-; (return @not_done, letting the caller poll for more TLS records) instead
-; of declaring the response complete.  Only two events end body reads:
-;   1. buffer full (512 B safety cap — http_resp_buf is 512 B), or
-;   2. caller-side poll-timeout in http_get's @recv_loop (the caller gives
-;      up after ~65 k empty ticks with no data).
-; Previously this state treated "ring empty this instant" as "body done",
-; which clipped the response to zero bytes whenever the HTTP response
-; arrived in a second TLS record after the headers — a real situation
-; under UCI because the server emits NewSessionTicket handshake records
-; (app-key phase) ahead of the actual HTTP response record, so the very
-; first post-handshake TLS record the parser sees contains only the
-; status line + headers and the body lands in the next record.
-@state_body:
-        ; W4 termination fix: terminate on body bytes CONSUMED, not
-        ; stored.  The old check compared http_resp_len against
-        ; Content-Length, but resp_len freezes at the 512 B buffer cap,
-        ; so for any body > 512 B the Content-Length match could never
-        ; fire and only the connection-close / poll-timeout fallback
-        ; ended the read — against a server that holds the connection
-        ; open (observed live: browserleaks.com), http_get never
-        ; returned.  http_body_total (24-bit, HTTP_AUX_CODE routines)
-        ; now counts every consumed byte; bytes past the 512 B cap are
-        ; consumed and discarded (or streamed to the REU under
-        ; http_body_sink=1) instead of ending the parse.
-        jsr http_body_done_check
-        bcc @body_done          ; C=0 -> body complete
-        jsr http_in_byte
-        bcs @not_done           ; no byte right now -> poll more
-        jsr http_body_append    ; count + store/sink the byte
-        jmp @state_body         ; keep reading (re-checks termination)
-
-@body_done:
-        jmp sink_finish_done    ; sink finalize (no-op in buffer mode), C=0
+        lda #2
+        sta http_parse_state
+        jsr http_body_begin     ; zero resp_len + consumed count + sink state
+        jmp http_state_body
 
 @not_done:
         sec
         rts
-@done:
+
+; =============================================================================
+; W4: body state + chunked-transfer support.
+;
+; Everything below lives in HTTP_AUX_CODE, NOT in CODE: the ip65
+; LOADER region is packed (8 B free pre-W4), so the body-state handler
+; was moved out of CODE and the chunked machinery added alongside it.
+; The segment maps to LOADER under UCI (588 B free) and to the
+; resident CRYPTO_OVERLAY slot under ip65 (see the cfgs).
+; =============================================================================
+        .segment "HTTP_AUX_CODE"
+
+; -----------------------------------------------------------------------------
+; http_hdr_init - reset per-response header-derived parser state.
+; Called at the status-line -> headers transition.
+; -----------------------------------------------------------------------------
+http_hdr_init:
+        ; Content-Length is "absent until seen": http_cl_valid = 0.  The
+        ; historical $FFFF magic sentinel went away with the W4 24-bit
+        ; Content-Length extension — a separate valid-flag byte cannot
+        ; collide with any real length value.
+        lda #0
+        sta http_cl_valid
+        sta http_chunked
+        sta http_chunk_state
+        sta http_chunk_rem
+        sta http_chunk_rem+1
+        rts
+
+; -----------------------------------------------------------------------------
+; http_body_begin - reset per-response body state at the end-of-headers
+;   transition (headers -> state 2).  Living here (not in the recv-loop
+;   inits) guarantees the reset runs on every parse walk regardless of
+;   entry path (http_recv_body, http_get_plain, or a test driving
+;   http_recv_response directly).
+;   Clobbers: A
+;
+; HTTP_AUX_CODE2 (this routine + http_body_done_check + hex_digit):
+; jsr-only helpers split out of HTTP_AUX_CODE because ip65's
+; CRYPTO_OVERLAY cannot hold the whole W4 body machinery — this slice
+; rides CRYPTO_RESIDENT there (CRYPTO_OVERLAY under UCI, same slot as
+; the rest).
+; -----------------------------------------------------------------------------
+        .segment "HTTP_AUX_CODE2"
+http_body_begin:
+        lda #0
+        sta http_resp_len
+        sta http_resp_len+1
+        sta http_body_total
+        sta http_body_total+1
+        sta http_body_total+2
+        sta http_reu_cursor
+        sta http_reu_cursor+1
+        sta http_reu_cursor+2
+        sta http_sink_flushed
+        rts
+
+; -----------------------------------------------------------------------------
+; http_body_done_check - is the identity body complete?
+;   C=0 -> complete; C=1 -> keep reading.  (The chunked path terminates
+;   on the terminal chunk instead and never calls this.)
+;
+;   Content-Length seen (http_cl_valid=1): complete exactly when the
+;     24-bit consumed count http_body_total equals http_content_length.
+;     Works whether or not the stored copy was truncated at 512 B —
+;     that is the W4 fix.
+;   Content-Length absent: legacy behaviour — the 512 B buffer cap ends
+;     the read in buffer mode (streaming fallback preserved); in sink
+;     mode there is no cap and the caller's poll-timeout is the bound.
+;   Clobbers: A
+; -----------------------------------------------------------------------------
+http_body_done_check:
+        lda http_cl_valid
+        beq @no_cl
+        lda http_body_total
+        cmp http_content_length
+        bne @more
+        lda http_body_total+1
+        cmp http_content_length+1
+        bne @more
+        lda http_body_total+2
+        cmp http_content_length+2
+        bne @more
         clc
         rts
+@no_cl:
+.ifdef BACKEND_UCI
+        lda http_body_sink
+        bne @more               ; sink mode: no 512 B cap
+.endif
+        lda http_resp_len+1
+        cmp #$02
+        bcs @full               ; high byte >= 2 means >= 512
+@more:
+        sec
+        rts
+@full:
+        clc
+        rts
+        .segment "HTTP_AUX_CODE"
+
+; -----------------------------------------------------------------------------
+; check_transfer_encoding - inspect http_line_buf[0..http_line_idx) for
+;   "Transfer-Encoding: chunked" (case-insensitive, single SP after the
+;   colon — mirrors check_content_length).  Sets http_chunked=1 on match.
+;   Lenient on trailing bytes: real servers send exactly "chunked".
+;   Clobbers: A, X
+; -----------------------------------------------------------------------------
+check_transfer_encoding:
+        lda http_line_idx
+        cmp #26                 ; len("transfer-encoding: chunked")
+        bcc @cte_rts
+        ldx #25
+@cte_cmp:
+        lda http_line_buf,x
+        ora #$20                ; fold A..Z -> a..z (':',' ','-' unchanged)
+        cmp te_pattern,x
+        bne @cte_rts
+        dex
+        bpl @cte_cmp
+        lda #1
+        sta http_chunked
+@cte_rts:
+        rts
+
+        ; (pattern rides HTTP_AUX_CODE2 with the other jsr-only/data
+        ;  pieces — absolute indexed reads work cross-segment, and the
+        ;  ip65 CRYPTO_OVERLAY is at capacity.)
+        .segment "HTTP_AUX_CODE2"
+te_pattern:
+        .byte "transfer-encoding: chunked"
+        .segment "HTTP_AUX_CODE"
+
+; -----------------------------------------------------------------------------
+; body_append - consume one body byte (in A).
+;   Always increments the 24-bit http_body_total (bytes CONSUMED — this
+;   is what the W4 termination fix compares against Content-Length, and
+;   what the viewer reads as the de-chunked document length).
+;   Buffer mode (http_body_sink=0): stores into http_resp_buf while
+;     resp_len < 512; past the cap the byte is counted and discarded
+;     (truncate-at-capacity: http_resp_len reports the captured prefix).
+;   Sink mode (http_body_sink=1, BACKEND=uci): http_resp_buf is a 512 B
+;     bounce buffer — on fill it is REU-DMA-blitted to
+;     http_reu_body_base + http_reu_cursor and reused (HTTP_SINK_CODE).
+;   Both the identity and chunked body paths feed every payload byte
+;   (and only payload bytes) through here.
+;   Clobbers: A, Y, zp_ptr.  Preserves X.
+; -----------------------------------------------------------------------------
+body_append:
+        pha
+        ; http_body_total++ (24-bit)
+        inc http_body_total
+        bne @ba_counted
+        inc http_body_total+1
+        bne @ba_counted
+        inc http_body_total+2
+@ba_counted:
+        ldy http_resp_len+1
+        cpy #$02
+        bcs @ba_discard         ; >= 512 (buffer mode): count only
+        ; store byte (still on the stack) at http_resp_buf + http_resp_len
+        clc
+        lda #<http_resp_buf
+        adc http_resp_len
+        sta zp_ptr
+        lda #>http_resp_buf
+        adc http_resp_len+1
+        sta zp_ptr+1
+        pla
+        ldy #0
+        sta (zp_ptr),y
+        inc http_resp_len
+        bne @ba_check_sink
+        inc http_resp_len+1
+@ba_check_sink:
+.ifdef BACKEND_UCI
+        lda http_body_sink
+        beq @ba_done
+        lda http_resp_len+1     ; sink mode: bounce full at 512?
+        cmp #$02
+        bcc @ba_done
+        jsr http_sink_blit      ; blit the bounce, advance the cursor
+        lda #0                  ; reuse the bounce buffer
+        sta http_resp_len
+        sta http_resp_len+1
+.endif
+@ba_done:
+        rts
+@ba_discard:
+        pla                     ; byte counted, not stored
+        rts
+
+; -----------------------------------------------------------------------------
+; hex_digit - convert ASCII hex digit in A to its value.
+;   Output: C=0 + value 0..15 in A, or C=1 if A is not a hex digit.
+;   Preserves X, Y.
+;   (HTTP_AUX_CODE2 — see the http_body_begin header for the split.)
+; -----------------------------------------------------------------------------
+        .segment "HTTP_AUX_CODE2"
+hex_digit:
+        cmp #'0'
+        bcc @hd_no
+        cmp #'9'+1
+        bcc @hd_num
+        ora #$20                ; fold A-F -> a-f
+        cmp #'a'
+        bcc @hd_no
+        cmp #'f'+1
+        bcs @hd_no
+        sbc #'a'-11             ; C=0 here: A - ('a'-10)
+        clc
+        rts
+@hd_num:
+        and #$0f
+        clc
+        rts
+@hd_no:
+        sec
+        rts
+        .segment "HTTP_AUX_CODE"
+
+; ----- state 2: read body bytes -----
+; RFC 7230 behaviour: we treat an empty input as "body still arriving"
+; (return C=1, letting the caller poll for more TLS records) instead
+; of declaring the response complete.  Termination events:
+;   1. http_resp_len reaches Content-Length (identity encoding), or
+;   2. the terminal chunk 0\r\n\r\n is consumed (chunked encoding), or
+;   3. buffer full at 512 B (identity encoding only — chunked keeps
+;      consuming/discarding so it can find the terminal chunk), or
+;   4. caller-side poll-timeout in http_recv_body's @recv_loop (the
+;      caller gives up after ~65 k empty ticks with no data — the
+;      "accept whatever we have" fallback for responses with neither
+;      Content-Length nor chunked framing; we send Connection: close,
+;      so the peer's close ends those).
+http_state_body:
+        lda http_chunked
+        beq @plain
+        jmp http_state_body_chunked
+
+@plain:
+        ; W4 termination fix: terminate on body bytes CONSUMED, not
+        ; stored.  The old check compared http_resp_len against
+        ; Content-Length, but resp_len freezes at the 512 B buffer cap,
+        ; so for any identity body > 512 B the Content-Length match
+        ; could never fire and only the connection-close / poll-timeout
+        ; fallback ended the read — against a server that holds the
+        ; connection open (observed live: browserleaks.com), http_get
+        ; never returned.  http_body_done_check compares the 24-bit
+        ; consumed count http_body_total against the 24-bit
+        ; Content-Length (http_cl_valid replaces the $FFFF sentinel);
+        ; bytes past the 512 B cap are consumed and discarded (or
+        ; streamed to the REU under http_body_sink=1) instead of
+        ; ending the parse.
+        jsr http_body_done_check
+        bcc @sb_done_fin        ; C=0 -> body complete
+        jsr http_in_byte
+        bcs @sb_not_done        ; no byte right now -> poll more
+        jsr body_append         ; count + store/sink the byte
+        jmp @plain              ; keep reading (re-checks termination)
+
+@sb_done_fin:
+        jmp sink_finish_done    ; sink finalize (no-op in buffer mode), C=0
+@sb_not_done:
+        sec
+        rts
+
+; -----------------------------------------------------------------------------
+; http_state_body_chunked - strip Transfer-Encoding: chunked framing.
+;
+; Sub-state in http_chunk_state:
+;   0 = accumulating hex chunk-size digits (http_chunk_rem, 16-bit)
+;   1 = skipping the rest of the size line (chunk extensions) until LF
+;   2 = copying chunk payload (http_chunk_rem bytes) via body_append
+;   3 = skipping the CRLF that follows chunk payload, until LF
+;   4 = terminal chunk seen: skipping trailer lines; an empty line ends
+;       the response (http_line_idx is reused as a line-nonempty flag —
+;       header parsing is over, so the buffer index is free)
+;
+; A chunk larger than 65535 B would wrap http_chunk_rem and desync the
+; framing; real servers chunk at their buffer size (8-32 KB).  A desync
+; degrades to the caller's poll-timeout fallback, never to a hang.
+; -----------------------------------------------------------------------------
+http_state_body_chunked:
+        jsr http_in_byte
+        bcc @cb_have
+        rts                     ; C=1 from http_in_byte: no data -> not done
+@cb_have:
+        ldx http_chunk_state
+        beq @cs_size
+        dex
+        beq @cs_skip
+        dex
+        beq @cs_data
+        dex
+        beq @cs_crlf
+        jmp @cs_final
+
+@cs_size:
+        cmp #$0a                ; LF ends the size line
+        beq @size_eol
+        jsr hex_digit
+        bcs @to_skip            ; non-hex (CR, ';', extension) -> state 1
+        ; http_chunk_rem = http_chunk_rem*16 + digit
+        pha
+        asl http_chunk_rem
+        rol http_chunk_rem+1
+        asl http_chunk_rem
+        rol http_chunk_rem+1
+        asl http_chunk_rem
+        rol http_chunk_rem+1
+        asl http_chunk_rem
+        rol http_chunk_rem+1
+        pla
+        ora http_chunk_rem
+        sta http_chunk_rem
+        jmp http_state_body_chunked
+@to_skip:
+        lda #1
+        sta http_chunk_state
+        jmp http_state_body_chunked
+
+@cs_skip:
+        cmp #$0a
+        bne @cb_loop
+@size_eol:
+        ; size line complete: 0 -> terminal chunk, else payload follows
+        lda http_chunk_rem
+        ora http_chunk_rem+1
+        beq @final_enter
+        lda #2
+        sta http_chunk_state
+        jmp http_state_body_chunked
+@final_enter:
+        lda #4
+        sta http_chunk_state
+        lda #0
+        sta http_line_idx       ; trailer-line-nonempty flag
+        jmp http_state_body_chunked
+
+@cs_data:
+        jsr body_append         ; append-if-room (discards past 512)
+        ; 16-bit decrement of http_chunk_rem
+        lda http_chunk_rem
+        bne :+
+        dec http_chunk_rem+1
+:       dec http_chunk_rem
+        lda http_chunk_rem
+        ora http_chunk_rem+1
+        bne @cb_loop
+        lda #3
+        sta http_chunk_state
+        jmp http_state_body_chunked
+
+@cs_crlf:
+        cmp #$0a
+        bne @cb_loop
+        lda #0                  ; back to size parsing (rem is already 0)
+        sta http_chunk_state
+        jmp http_state_body_chunked
+
+@cs_final:
+        cmp #$0a
+        beq @fin_eol
+        cmp #$0d
+        beq @cb_loop            ; CR ignored
+        inc http_line_idx       ; trailer line has content
+        jmp http_state_body_chunked
+@fin_eol:
+        lda http_line_idx
+        beq @cb_done            ; empty line after terminal chunk -> done
+        lda #0
+        sta http_line_idx
+@cb_loop:
+        jmp http_state_body_chunked
+
+@cb_done:
+        jmp sink_finish_done    ; sink finalize (no-op in buffer mode), C=0
 
 ; =============================================================================
 ; check_content_length - inspect http_line_buf[0..http_line_idx) for the
@@ -668,14 +994,12 @@ http_recv_response:
 ;   single SP after the colon).  On match, the decimal value is stored in
 ;   http_content_length (24-bit little-endian — real-server bodies exceed
 ;   64 KB) and http_cl_valid is set to 1.  No-op otherwise (http_cl_valid
-;   stays 0 from the status-line reset).
+;   stays 0 from the http_hdr_init reset).
 ;   Clobbers: A, X, Y, zp_ptr, zp_temp
 ;
-; Lives in the HTTP_AUX_CODE segment (reachable via JSR from CODE in
-; LOADER): the W4 24-bit extension no longer fits the packed
-; LOADER_OVERFLOW/NET_CODE tail on either backend, so the whole W4 HTTP
-; body machinery rides a dedicated segment — LOADER slack under UCI,
-; CRYPTO_OVERLAY under ip65 (see the cfgs).
+; W4: moved from LOADER_OVERFLOW to HTTP_AUX_CODE — the 24-bit extension
+; outgrew the packed NET_CODE tail; the vacated LOADER_OVERFLOW bytes
+; are slack again.
 ; =============================================================================
         .segment "HTTP_AUX_CODE"
 check_content_length:
@@ -766,359 +1090,17 @@ check_content_length:
 ; Lowercase "content-length: " — each incoming header byte is OR'd with
 ; $20 before compare, which folds A..Z to a..z and leaves ':' and ' '
 ; unchanged.  The trailing SP is part of the match so we don't need a
-; separate whitespace-skip loop.
+; separate whitespace-skip loop.  (HTTP_AUX_CODE2 — see te_pattern.)
+        .segment "HTTP_AUX_CODE2"
 cl_pattern:
         .byte "content-length: "
-
-; =============================================================================
-; http_body_begin - reset per-response body state at the end-of-headers
-;   transition and select the body parse state: 2 (identity) normally,
-;   3 (chunk-size line) when a Transfer-Encoding: chunked header was
-;   seen.  Living here (not in the recv-loop inits) guarantees the reset
-;   runs on every parse walk regardless of entry path (http_recv_body,
-;   http_get_plain, or a test driving http_recv_response directly).
-;   Clobbers: A
-; =============================================================================
-http_body_begin:
-        lda #0
-        sta http_resp_len
-        sta http_resp_len+1
-        sta http_body_total
-        sta http_body_total+1
-        sta http_body_total+2
-        sta http_chunk_rem
-        sta http_chunk_rem+1
-        sta http_chunk_skip
-        sta http_reu_cursor
-        sta http_reu_cursor+1
-        sta http_reu_cursor+2
-        sta http_sink_flushed
-        lda http_te_chunked
-        beq @identity
-        lda #3                  ; chunked: start at the chunk-size line
-        sta http_parse_state
-        rts
-@identity:
-        lda #2
-        sta http_parse_state
-        rts
-
-; =============================================================================
-; check_header_line - run all per-header-line matchers on the line
-;   accumulated in http_line_buf.  Called once per non-empty header
-;   line from @hl_eol.
-;   Clobbers: A, X, Y, zp_ptr, zp_temp
-; =============================================================================
-check_header_line:
-        jsr check_content_length
-        ; fall through to check_transfer_encoding
-
-; =============================================================================
-; check_transfer_encoding - match "Transfer-Encoding: chunked" (case-
-;   insensitive name and value, single SP after the colon — the same
-;   shape check_content_length matches).  Sets http_te_chunked = 1 on
-;   match.  A prefix match suffices: "chunked" is by spec the final
-;   coding, and Wikipedia (the stretch-goal target) sends exactly this
-;   line.
-;   Clobbers: A, X
-; =============================================================================
-check_transfer_encoding:
-        lda http_line_idx
-        cmp #26                 ; len("transfer-encoding: chunked")
-        bcs :+
-        rts
-:       ldx #25
-@cte_cmp:
-        lda http_line_buf,x
-        ora #$20
-        cmp te_pattern,x
-        beq :+
-        rts
-:       dex
-        bpl @cte_cmp
-        lda #1
-        sta http_te_chunked
-        rts
-
-; Lowercase pattern; incoming bytes are OR'd with $20 (folds A..Z,
-; leaves '-', ':', ' ' unchanged).
-te_pattern:
-        .byte "transfer-encoding: chunked"
-
-; =============================================================================
-; http_body_done_check - is the body complete?
-;   C=0 -> complete; C=1 -> keep reading.
-;
-;   Content-Length seen (http_cl_valid=1): complete exactly when the
-;     24-bit consumed count http_body_total equals http_content_length.
-;     Works whether or not the stored copy was truncated at 512 B —
-;     that is the W4 fix.
-;   Content-Length absent: legacy behaviour — the 512 B buffer cap ends
-;     the read (chunked/streaming fallback preserved).  In sink mode
-;     there is no cap: the caller's poll-timeout is the bound.
-;   Clobbers: A
-; =============================================================================
-http_body_done_check:
-        lda http_cl_valid
-        beq @no_cl
-        lda http_body_total
-        cmp http_content_length
-        bne @more
-        lda http_body_total+1
-        cmp http_content_length+1
-        bne @more
-        lda http_body_total+2
-        cmp http_content_length+2
-        bne @more
-        clc
-        rts
-@no_cl:
-.ifdef BACKEND_UCI
-        lda http_body_sink
-        bne @more               ; sink mode: no 512 B cap
-.endif
-        lda http_resp_len+1
-        cmp #$02
-        bcs @full               ; high byte >= 2 means >= 512
-@more:
-        sec
-        rts
-@full:
-        clc
-        rts
-
-; =============================================================================
-; http_body_append - consume one body byte (in A).
-;
-;   Always increments the 24-bit http_body_total (bytes CONSUMED).
-;   Buffer mode (http_body_sink=0): stores into http_resp_buf while
-;     resp_len < 512; bytes past the cap are counted and discarded.
-;   Sink mode (http_body_sink=1): http_resp_buf is a 512 B bounce
-;     buffer — on fill it is REU-DMA-blitted to http_reu_body_base +
-;     http_reu_cursor and reused (see HTTP_SINK_CODE).
-;   Clobbers: A, Y, zp_ptr.  Preserves X.
-; =============================================================================
-http_body_append:
-        pha
-        ; http_body_total++ (24-bit)
-        inc http_body_total
-        bne @stored_count
-        inc http_body_total+1
-        bne @stored_count
-        inc http_body_total+2
-@stored_count:
-        ; room in http_resp_buf?  (resp_len < 512)
-        lda http_resp_len+1
-        cmp #$02
-        bcs @discard            ; buffer-mode overflow: count only
-        ; store byte at http_resp_buf + resp_len
-        clc
-        lda #<http_resp_buf
-        adc http_resp_len
-        sta zp_ptr
-        lda #>http_resp_buf
-        adc http_resp_len+1
-        sta zp_ptr+1
-        pla
-        ldy #0
-        sta (zp_ptr),y
-        inc http_resp_len
-        bne @check_sink
-        inc http_resp_len+1
-@check_sink:
-.ifdef BACKEND_UCI
-        lda http_body_sink
-        beq @rts
-        lda http_resp_len+1     ; sink mode: bounce full at 512?
-        cmp #$02
-        bcc @rts
-        jsr http_sink_blit      ; blit the bounce, advance the cursor
-        lda #0                  ; reuse the bounce buffer
-        sta http_resp_len
-        sta http_resp_len+1
-.endif
-@rts:
-        rts
-@discard:
-        pla                     ; byte counted, not stored
-        rts
-
-; =============================================================================
-; Chunked transfer-decoding (RFC 7230 §4.1).  Wikipedia — the stretch-
-; goal target — serves the article chunked with NO Content-Length
-; (measured live 2026-08-21: 4 data chunks of 26,931-32,768 B, body
-; 125,235 B), so on that path the terminal 0-chunk is the termination
-; signal, not a Content-Length match.
-;
-; parse_state values (3..6 dispatch here from http_recv_response):
-;   3 - chunk-size line: hex digits, optional ";extension" skipped,
-;       terminated by LF
-;   4 - chunk payload: http_chunk_rem bytes handed to http_body_append
-;   5 - the CRLF that closes a chunk's payload
-;   6 - trailer section after the 0-chunk: lines until an empty one,
-;       then the body is complete (C=0)
-;
-; Only payload bytes (state 4) reach http_body_append, so
-; http_body_total counts de-chunked payload — never framing — and the
-; http_resp_buf first-512 / REU-sink contracts hold unchanged.
-;
-; http_chunk_rem is 16-bit: chunks >= 64 KB would mis-parse, but no
-; observed server sends them (Wikipedia's max is 32,768 B) and RFC 7230
-; sets no minimum chunking granularity a client may rely on.
-;
-; Lives in its own HTTP_CHUNK_CODE segment: CRYPTO_RESIDENT slack under
-; ip65 (CRYPTO_OVERLAY is full there once HTTP_AUX_CODE lands),
-; CRYPTO_OVERLAY under UCI.
-; =============================================================================
-        .segment "HTTP_CHUNK_CODE"
-http_chunk_dispatch:
-        lda http_parse_state
-        cmp #4
-        bcc @st_size            ; state 3
-        beq @jd_data            ; state 4
-        cmp #5
-        bne @jd_trailer         ; state 6+
-        jmp @st_crlf            ; state 5
-@jd_data:
-        jmp @st_data
-@jd_trailer:
-        jmp @st_trailer
-
-@not_done:                      ; near exit for the early states (the
-        sec                     ; machine outgrew one branch's reach)
-        rts
-
-; ----- state 3: chunk-size line -----
-@st_size:
-        jsr http_in_byte
-        bcs @not_done
-        cmp #$0a                ; LF ends the size line
-        beq @size_eol
-        ldy http_chunk_skip
-        bne @st_size            ; already skipping extension/junk
-        cmp #$0d                ; CR discarded
-        beq @st_size
-        jsr chunk_hex_digit
-        bcs @size_ext           ; not a hex digit: ";ext" etc.
-        ; http_chunk_rem = rem*16 + digit
-        asl http_chunk_rem
-        rol http_chunk_rem+1
-        asl http_chunk_rem
-        rol http_chunk_rem+1
-        asl http_chunk_rem
-        rol http_chunk_rem+1
-        asl http_chunk_rem
-        rol http_chunk_rem+1
-        ora http_chunk_rem
-        sta http_chunk_rem
-        jmp @st_size
-@size_ext:
-        inc http_chunk_skip     ; ignore the rest of the line (reached at
-        jmp @st_size            ;  most once per line: the skip check above
-                                ;  short-circuits every later byte)
-@size_eol:
-        lda #0
-        sta http_chunk_skip
-        lda http_chunk_rem
-        ora http_chunk_rem+1
-        beq @last_chunk
-        lda #4
-        sta http_parse_state
-        jmp @st_data
-@last_chunk:
-        lda #6                  ; 0-chunk -> trailer section
-        sta http_parse_state
-        lda #0
-        sta http_line_idx       ; trailer-line char count
-        jmp @st_trailer
-
-; ----- state 4: chunk payload -----
-@st_data:
-        lda http_chunk_rem
-        ora http_chunk_rem+1
-        beq @data_done
-        jsr http_in_byte
-        bcs @not_done2
-        jsr http_body_append    ; count + store/sink (payload bytes only)
-        lda http_chunk_rem
-        bne :+
-        dec http_chunk_rem+1
-:       dec http_chunk_rem
-        jmp @st_data
-@data_done:
-        lda #5
-        sta http_parse_state
-        ; fall through into the CRLF eater
-
-; ----- state 5: CRLF closing the chunk payload -----
-@st_crlf:
-        jsr http_in_byte
-        bcs @not_done2
-        cmp #$0a
-        bne @st_crlf            ; eat the CR (and tolerate junk) until LF
-        lda #3                  ; next chunk-size line (rem is 0 — state 4
-        sta http_parse_state    ;  counted it down — and skip is 0 too, so
-        jmp @st_size            ;  the size parser starts fresh)
-
-; ----- state 6: trailer lines until an empty one -----
-@st_trailer:
-        jsr http_in_byte
-        bcs @not_done2
-        cmp #$0d
-        beq @st_trailer         ; CR never counts toward the line
-        cmp #$0a
-        beq @tr_eol
-        inc http_line_idx
-        jmp @st_trailer
-@tr_eol:
-        lda http_line_idx
-        beq @tr_done            ; empty line -> body complete
-        lda #0
-        sta http_line_idx
-        jmp @st_trailer
-@tr_done:
-        jmp sink_finish_done    ; sink finalize (no-op in buffer mode), C=0
-
-@not_done2:                     ; far exit for the late states
-        sec
-        rts
-
-; -----------------------------------------------------------------------------
-; chunk_hex_digit - ASCII hex digit in A -> C=0 + A=0..15, else C=1
-;   (case-insensitive).  Clobbers: A.
-; Rides HTTP_AUX_CODE (jsr'd from the chunk machine): the ip65-onchip
-; profile's CRYPTO_RESIDENT is too tight for it to sit with
-; HTTP_CHUNK_CODE.
-; -----------------------------------------------------------------------------
-        .segment "HTTP_AUX_CODE"
-chunk_hex_digit:
-        cmp #$30                ; '0'
-        bcc @nothex
-        cmp #$3a                ; '9'+1
-        bcs @alpha
-        and #$0f
-        clc
-        rts
-@alpha:
-        ora #$20                ; fold A-F to a-f
-        cmp #$61                ; 'a'
-        bcc @nothex
-        cmp #$67                ; 'f'+1
-        bcs @nothex
-        sec
-        sbc #$57                ; 'a' ($61) -> 10
-        clc
-        rts
-@nothex:
-        sec
-        rts
 
 ; =============================================================================
 ; W4 REU body sink (HTTP_SINK_CODE segment: NET_CODE tail under ip65,
 ; CRYPTO_OVERLAY under UCI).
 ;
 ; With http_body_sink = 1, http_resp_buf acts as a 512 B bounce buffer:
-; http_body_append fills it, and each time it fills http_sink_blit
+; body_append fills it, and each time it fills http_sink_blit
 ; REU-DMA-STASHes the whole bounce to http_reu_body_base +
 ; http_reu_cursor and resets it.  At completion http_body_finish blits
 ; the final partial bounce, then re-FETCHes the FIRST min(512, total)
@@ -1132,12 +1114,11 @@ chunk_hex_digit:
 ; story.  Register programming mirrors src/boot.s::reu_mul_init.
 ;
 ; UCI-ONLY: the sink is a turbo/UCI stretch feature (the build knob is
-; UCI-only) and ip65's memory map cannot fit it — every ip65 code pool
-; is within ~30 B of full after the W4 termination + chunked work.  The
-; ip65 arm below provides 3-byte inert stubs so the shared jmp/jsr
-; sites link; http_body_sink is then a dead flag on ip65 (nothing
-; tests it — the .ifdef BACKEND_UCI guards in http_body_append /
-; http_body_done_check compile the sink branches out).
+; UCI-only) and ip65's memory map cannot fit it.  The ip65 arm below
+; provides 3-byte inert stubs so the shared jmp/jsr sites link;
+; http_body_sink is then a dead flag on ip65 (the .ifdef BACKEND_UCI
+; guards in body_append / http_body_done_check compile the sink
+; branches out).
 ; =============================================================================
         .segment "HTTP_SINK_CODE"
 .ifndef BACKEND_UCI
@@ -1201,7 +1182,7 @@ http_sink_blit:
 
 ; -----------------------------------------------------------------------------
 ; sink_finish_done - shared completion tail for both body paths
-;   (identity @body_done, chunked @tr_done): finalize the sink and
+;   (identity @sb_done_fin, chunked @cb_done): finalize the sink and
 ;   return C=0 (parse complete).
 ; -----------------------------------------------------------------------------
 sink_finish_done:
@@ -1262,7 +1243,9 @@ http_body_finish:
         ; REU-profile build doing a SECOND handshake in the same
         ; session would otherwise DMA multiply rows to the wrong C64
         ; address with no diagnostic.  Onchip/comb profiles never use
-        ; the latch (guard mirrors boot.s's reu_fetch_mul_row guard).
+        ; the latch (guard mirrors boot.s's reu_fetch_mul_row guard;
+        ; the comb library programs its own registers per fetch —
+        ; verified against libs/nistcurves points256_comb.s).
         lda #<mul_dma_lo
         sta reu_c64_lo
         lda #>mul_dma_lo
@@ -1369,18 +1352,23 @@ http_host_hdr:
         .byte "Host: "
 http_conn_hdr:
         .byte "Connection: close", $0d, $0a
-http_ua_hdr:
-        .byte "User-Agent: c64-https/0.1", $0d, $0a
 http_crlf:
         .byte $0d, $0a
+
+; The two W4 data items below ride HTTP_AUX_CODE2, not RODATA:
+; CRYPTO_HOT is within ~15 B of full on the UCI plain/onchip builds and
+; cannot absorb them (absolute indexed reads work from any segment).
+        .segment "HTTP_AUX_CODE2"
+http_ua_hdr:
+        .byte "User-Agent: c64-https/0.1", $0d, $0a
 
 .ifdef BACKEND_UCI
 ; W4 REU body sink: runtime copy of the REU destination base (24-bit
 ; LE).  Initialised from the HTTP_REU_BODY_BASE equate (constants.inc;
-; default bank 16 = $10:0000, -D-overridable at build).  Lives in
-; RODATA — which is RAM at runtime — so tests and rigs can retarget it
-; by DMA without a rebuild (e.g. VICE's 512 KB REU cannot hold bank 16;
-; the harness pokes bank 3 here).
+; default bank 16 = $10:0000, -D-overridable at build).  File-backed
+; but RAM at runtime, so tests and rigs can retarget it by DMA without
+; a rebuild (e.g. VICE's 512 KB REU cannot hold bank 16; the harness
+; pokes bank 3 here).
 http_reu_body_base:
         .byte <HTTP_REU_BODY_BASE, >HTTP_REU_BODY_BASE, ^HTTP_REU_BODY_BASE
 .endif
@@ -1396,12 +1384,20 @@ http_reu_body_base:
 http_bg_idx:    .res 1          ; build_get write cursor
 http_bg_src:    .res 1          ; build_get source index temp
 ; Parser input source (issue #72 span-input redesign — see http_in_byte)
+; Exported so tools/test_http.py can drive the parser in span mode,
+; the same input mode the TLS path uses.
+        .export http_in_mode
+        .export http_in_ptr
+        .export http_in_len
 http_in_mode:   .res 1          ; 0 = TCP ring (plain HTTP), 1 = span (TLS)
 http_in_ptr:    .res 2          ; span read cursor
 http_in_len:    .res 2          ; span bytes remaining (16-bit)
-; Chunked transfer-decoding state (see http_chunk_dispatch)
-http_te_chunked: .res 1         ; 1 = "Transfer-Encoding: chunked" seen
-http_chunk_rem: .res 2          ; 16-bit payload bytes left in this chunk
-http_chunk_skip: .res 1         ; 1 = skipping rest of the chunk-size line
-; REU sink finalize-once latch (see http_body_finish)
+; W4 chunked-transfer state (see http_state_body_chunked)
+        .export http_chunked
+        .export http_chunk_state
+        .export http_chunk_rem
+http_chunked:      .res 1       ; 1 = Transfer-Encoding: chunked seen
+http_chunk_state:  .res 1       ; chunk parser sub-state (0..4)
+http_chunk_rem:    .res 2       ; bytes remaining in current chunk
+; W4 REU sink finalize-once latch (see http_body_finish)
 http_sink_flushed: .res 1       ; 1 = finish already ran for this body
