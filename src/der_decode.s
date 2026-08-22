@@ -12,6 +12,7 @@
 ;   zp_count ($FE)      - temporary
 
 .include "constants.inc"
+.include "net_tuning.inc"       ; CERT_BUF_SIZE (2048 UCI / 1536 ip65)
 
 ; --- Public exports: code ---
 .export der_read_tag
@@ -584,7 +585,10 @@ cert_curve_id:     .res 1               ; 0=P-256, 1=P-384
 ; cert_buf freely. Any future cert-chain validation that re-reads
 ; cert_buf (or hashes TBS via cert_tbs_ptr) after Certificate
 ; processing MUST first break the union in cfg/c64-https-ip65.cfg.
+; Size is backend-conditional (net_tuning.inc): 2048 under UCI (fits
+; en.wikipedia.org's 1636 B leaf; segment routed to CRYPTO_OVERLAY),
+; 1536 under ip65 (SCRATCH_UNION cap — see cfg/c64-https-ip65.cfg).
 .segment "CERT_BUF_BSS"
-cert_buf:          .res 1536            ; certificate DER buffer
+cert_buf:          .res CERT_BUF_SIZE   ; certificate DER buffer
 .segment "BSS"
 cert_buf_len:      .res 2               ; certificate length

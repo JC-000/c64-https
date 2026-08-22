@@ -162,8 +162,11 @@ Variables:
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65).
                           Changing it requires `make clean` — see above.
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
-                          `libs/x25519@v0.11.2` sibling. **UCI links;
-                          ip65 overflows CRYPTO_OVERLAY** — see
+                          `libs/x25519@v0.11.2` sibling. **Currently
+                          links under NEITHER backend: ip65 overflows
+                          CRYPTO_OVERLAY (long-standing), and UCI
+                          overflows it by 1,280 B since the 2048 B
+                          cert_buf moved in (Wikipedia growth)** — see
                           "Known issues". Off by default either way.
   - `EMBED_P256_OVERLAY=1` — stage the P-256 verify image into the
                           CRYPTO_OVERLAY slot at PRG-load (UCI). Its
@@ -903,12 +906,20 @@ Five latent bugs and three new ones were cleared to get here:
     overflow and is fixed (see the CRYPTO_COLD_SHADOW entry under
     "Memory layout").
 
-    **`USE_X25519_SIBLING=1` LINKS UNDER UCI from the v0.10.1 /
-    v0.11.0 wave pins** (issue #112), and still does not under ip65.
-    Both backends previously died on the same symbol collision; that
-    half is closed, and what remains on ip65 is a fit problem:
+    **`USE_X25519_SIBLING=1` no longer links under EITHER backend.**
+    It linked under UCI from the v0.10.1 / v0.11.0 wave pins (issue
+    #112, symbol collision resolved) until the Wikipedia cert_buf
+    growth moved the resident 2,048 B `CERT_BUF_BSS` into
+    CRYPTO_OVERLAY; the sibling's page-aligned tables no longer fit
+    alongside it + TLS_DEFRAME_CODE (measured 2026-08-21, both
+    baselines confirmed against the pre-growth tree). This is an
+    accepted casualty: the flag ships in nothing, and the resident
+    deframer + Wikipedia-capable cert_buf are worth more than an
+    opt-in nobody ships. ip65 remains the older, structural overflow:
 
-      make BACKEND=uci USE_X25519_SIBLING=1     # 62,977 B PRG, links
+      make BACKEND=uci USE_X25519_SIBLING=1
+        Segment 'X25519_BSS' overflows memory area
+        'CRYPTO_OVERLAY' by 1280 bytes             # post-cert_buf-growth
       make USE_X25519_SIBLING=1                 # ip65
         Segment 'X25519_RODATA' overflows memory area
         'CRYPTO_OVERLAY' by 3584 bytes
@@ -1908,9 +1919,18 @@ UCI layout (W1 reference — `cfg/c64-https-uci.cfg`):
   $4000 (size 0) UCI_BSS_REGION   Zero-size alias post-W1 (UCI_BSS moved
                                   into NET_BSS_TAIL above, which is why
                                   NET_BSS_TAIL now runs through $41FF)
-  $4200-$5FFF  CRYPTO_OVERLAY     7.5 KB swappable overlay slot
+  $4200-$5FFF  CRYPTO_OVERLAY     7.5 KB slot. Resident in EVERY
+                                  default UCI build since the sprint:
+                                  TLS_DEFRAME_CODE (~1.4 KB) +
+                                  CERT_BUF_BSS (2,048 B — Wikipedia
+                                  growth); comb adds RODATA/
+                                  CRYPTO_RODATA/LIB rodata/LIMLEE_BSS
+                                  (used through ~$5BD2, ~1.1 KB tail
+                                  free). The overlay-embed flags
                                   (X25519 sibling / P-384 SHA-384 /
-                                  P-384 curve / W3 P-256 verify embed)
+                                  P-384 curve / W3 P-256 embed) contend
+                                  for what remains — see the
+                                  CRYPTO_OVERLAY bullet below.
   $6000-$9FFF  CRYPTO_HOT         16 KB file-backed; resident code +
                                   rodata + small BSS (UCI_BSS, most of
                                   libs/nistcurves P-256). No segment
@@ -1986,7 +2006,26 @@ Tight regions (post-W1):
   - **CRYPTO_OVERLAY** under UCI doubles as P-384 SHA-384/curve overlay
     paging slot, the W3 P-256 overlay embed slot, AND the
     USE_X25519_SIBLING=1 X25519 sibling rodata + BSS slot. Mutually
-    exclusive at link time across the three flags.
+    exclusive at link time across the three flags — and since the
+    real-server sprint the region also carries two RESIDENT tenants in
+    every default UCI build: `TLS_DEFRAME_CODE` (~1.4 KB, W1 deframer)
+    and `CERT_BUF_BSS` (2,048 B — `CERT_BUF_SIZE` in
+    `src/net/uci/net_tuning.inc`, grown from 1536 so
+    en.wikipedia.org's 1636 B leaf fits; under ip65 cert_buf stays
+    1536 B at $A000 in the SCRATCH_UNION, untouched). Measured
+    occupancy 2026-08-21: plain-uci and uci-onchip use $4200-$4F62
+    (4,253 B free); uci-comb through ~$5BD2 (~1.1 KB free, still
+    enough for the rigs' ~390 B of DMA scratch — verified via
+    `_memory_policy` arbiter + `rig_https_live.py --selfcheck`).
+    Consequences for the flags: `USE_X25519_SIBLING` now overflows
+    under UCI too (see Known issues); `EMBED_P256_OVERLAY` /
+    `USE_OVERLAY_P384_EMBED` were already broken before the growth
+    (the `build/labels.txt` ordering defect) and remain so. Moving
+    cert_buf out of CRYPTO_COLD_SHADOW also removed the packing that
+    used to land sqtab at $BC00, so both UCI cfgs now pin
+    `TABLES_BSS` with `start = $BA00` — the sibling reads the shared
+    sqtab through equates baked to LIB_SHARED_SQTAB_BASE=$BC00 and
+    the Makefile's post-link check still asserts it.
 
 There is a known TODO to restructure the MEMORY map so that all
 file-backed regions are physically contiguous in a single ROM-like
@@ -2014,7 +2053,9 @@ ld65 and ca65 edge cases; they are intentional and should stay:
     doing it inside the `.inc` header would duplicate on every include.
     Only **backend-agnostic** symbols live here: `tcp_recv_buf`,
     `fe_src1`, `fe_src2`, `fe_dst`, `cc20_data_ptr`, `cc20_remain`,
-    `zp_ptr`. The ip65-specific ones (`ip65_init`, `ip65_process`) moved
+    `zp_ptr`, and `cert_buf_size` (the CERT_BUF_SIZE equate as an
+    absolute export — 2048 UCI / 1536 ip65 — which tests/rigs MUST
+    read from labels.txt instead of hardcoding either number). The ip65-specific ones (`ip65_init`, `ip65_process`) moved
     to `src/net/ip65/exports.s`, which is linked only under
     `BACKEND=ip65` and also carries the `cert_buf = $A000`
     SCRATCH_UNION link-time assert.

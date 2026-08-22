@@ -30,3 +30,15 @@
 ; an INNER of 0 into 256 iterations.
 NET_SH_DRAIN_OUTER = 1
 NET_SH_DRAIN_INNER = 16
+
+; CERT_BUF_SIZE: capacity of cert_buf (src/der_decode.s, CERT_BUF_BSS).
+;
+; 2048 under UCI so en.wikipedia.org's 1636 B leaf certificate fits —
+; the last blocker for Wikipedia as a real-server HTTPS target. The
+; segment rides CRYPTO_OVERLAY under both UCI cfgs (it no longer fits
+; CRYPTO_COLD_SHADOW at this size); ip65 keeps 1536, pinned at $A000
+; and unioned with LIB_NISTCURVES_P256_BSS (see cfg/c64-https-ip65.cfg
+; SCRATCH_UNION — its $600 cap is a link-time assert and MUST NOT
+; grow). The deframer's leaf cap check requires the low byte to be
+; zero (asserted in src/tls_deframe.s).
+CERT_BUF_SIZE = 2048

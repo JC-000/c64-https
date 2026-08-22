@@ -74,7 +74,7 @@ REQUIRED_LABELS = [
     "tls_rec_buf", "tls_rec_len",
     "tls_transcript_init", "tls_transcript_hash", "tls_transcript",
     "tls_s_hs_secret",
-    "cert_buf", "cert_buf_len",
+    "cert_buf", "cert_buf_len", "cert_buf_size",
     "ecdsa_pubkey_x", "ecdsa_pubkey_y", "ecdsa_curve_id",
 ]
 
@@ -412,10 +412,12 @@ def run_cases(transport, labels):
     # --- 13. leaf larger than cert_buf: explicit error, before any copy ---
     # The cap check fires when the entry length completes, i.e. BEFORE a
     # single cert_data byte is copied — cert_buf must remain untouched.
-    # (A sentinel at cert_buf+1536 cannot test this: that address is
-    # tls_rec_buf[0] under both cfgs, which the record layer writes
-    # legitimately. Watching cert_buf itself is collision-free.)
-    big_cert = cert_msg([(b"\xbb" * 1600, b"")])   # wikipedia-sized leaf
+    # (A sentinel at cert_buf+cap cannot test this: the byte after the
+    # cap can be legitimately-written memory. Watching cert_buf itself
+    # is collision-free.)
+    # cap comes from labels.txt (`cert_buf_size`): 2048 UCI / 1536 ip65.
+    cap = labels.address("cert_buf_size")
+    big_cert = cert_msg([(b"\xbb" * (cap + 64), b"")])
     rig.reset()
     write_bytes(transport, labels["cert_buf"], b"\x5a" * 64)
     ev = rig.drive(chunks(big_cert, 300))
@@ -424,14 +426,28 @@ def run_cases(transport, labels):
     check("oversize leaf: cert_buf untouched (guard before copy)",
           read_bytes(transport, labels["cert_buf"], 64) == b"\x5a" * 64, "")
 
-    # --- 13b. leaf of exactly 1536 B is still accepted by the cap ---
+    # --- 13b. leaf of exactly cap bytes is still accepted by the cap ---
     # (no EC key inside, so it must fail LATER with CERT_FMT — proving
     # the boundary itself is not rejected)
-    edge_cert = cert_msg([(b"\xcc" * 1536, b"")])
+    edge_cert = cert_msg([(b"\xcc" * cap, b"")])
     rig.reset()
     ev = rig.drive(chunks(edge_cert, 300))
-    check("1536 B leaf passes the cap (fails later on extraction)",
+    check(f"{cap} B leaf passes the cap (fails later on extraction)",
           ev == [("err", ERR_CERT_FMT)], f"events={ev}")
+
+    # --- 13c. Wikipedia-sized 1636 B leaf: the gate the 2048 B UCI cap
+    # exists for. Above the historical 1536 B cap; must pass the size
+    # check on a 2048 B build (garbage DER, so CERT_FMT later) and be
+    # the clean TOO_BIG reject on a 1536 B (ip65) build.
+    wiki_cert = cert_msg([(b"\xdd" * 1636, b"")])
+    rig.reset()
+    ev = rig.drive(chunks(wiki_cert, 300))
+    if 1636 <= cap:
+        check("1636 B (wikipedia) leaf passes the cap",
+              ev == [("err", ERR_CERT_FMT)], f"events={ev}")
+    else:
+        check("1636 B (wikipedia) leaf rejected on a 1536 B build",
+              ev == [("err", ERR_CERT_TOO_BIG)], f"events={ev}")
 
     # --- 14. non-zero certificate_request_context ---
     bad_ctx = bytearray(cert_msg([(leaf_der, b"")]))

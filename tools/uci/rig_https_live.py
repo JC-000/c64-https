@@ -16,9 +16,11 @@ Targets (2026-08-21 re-probe, ``tools/probe_server_tls.py``, 2 runs each):
     browserleaks.com        529 B     45 s (2/2)       952 B   12 recs
     en.wikipedia.org        529 B   ~120 s (2/2)      1636 B   14 recs
 
-en.wikipedia.org's leaf (1636 B) exceeds the 1536 B ``cert_buf``; the rig
-warns loudly when it is selected but does not refuse — the run is how the
-"certificate too large" error path gets exercised once W2 lands.
+en.wikipedia.org's leaf (1636 B) fits the UCI ``cert_buf`` since it grew
+to 2048 B (``cert_buf_size`` in labels.txt — the rig reads it from there);
+on an old 1536 B build the rig warns loudly when wikipedia is selected but
+does not refuse, since that run exercises the W2 "certificate too large"
+error path.
 
 How the target reaches the C64: this rig programs ``http_host_ptr`` /
 ``http_host_len`` over DMA and calls ``http_get``, whose prologue copies the
@@ -143,7 +145,11 @@ _KNOWN_TARGETS: dict[str, dict] = {
     "browserleaks.com": {"tolerance_s": 45,  "leaf_b": 952,  "records": 12},
     "en.wikipedia.org": {"tolerance_s": 120, "leaf_b": 1636, "records": 14},
 }
-CERT_BUF_BYTES = 1536      # src/der_decode.s cert_buf capacity
+# cert_buf capacity fallback, used only when labels.txt predates the
+# `cert_buf_size` export (src/exports.s). Current builds carry the real
+# value in labels.txt: 2048 UCI / 1536 ip65 (Wikipedia growth) — always
+# prefer the label over this constant.
+CERT_BUF_FALLBACK_BYTES = 1536
 
 # Comb marker: manifest equate bit for REU bank 2 (Lim-Lee anchor table).
 _BANKS_EQUATE = "LIB_NISTCURVES_REU_BANKS_USED"
@@ -292,7 +298,8 @@ def build_live_routine(labels: dict[str, int], *,
     return bytes(code)
 
 
-def _print_target_context(target: str, port: int) -> None:
+def _print_target_context(target: str, port: int,
+                          cert_buf_b: int = CERT_BUF_FALLBACK_BYTES) -> None:
     info = _KNOWN_TARGETS.get(target)
     print(f"\nLive target     : {target}:{port}")
     if info is None:
@@ -303,13 +310,13 @@ def _print_target_context(target: str, port: int) -> None:
           f"(2026-08-21 probe; live servers change — re-probe before "
           f"trusting)")
     print(f"  leaf cert         : {info['leaf_b']} B "
-          f"(cert_buf = {CERT_BUF_BYTES} B)")
+          f"(cert_buf = {cert_buf_b} B)")
     print(f"  server flight     : ~{info['records']} records, all <= 529 B")
-    if info["leaf_b"] > CERT_BUF_BYTES:
+    if info["leaf_b"] > cert_buf_b:
         print(f"  *** WARNING: leaf exceeds cert_buf by "
-              f"{info['leaf_b'] - CERT_BUF_BYTES} B — expect the client to "
+              f"{info['leaf_b'] - cert_buf_b} B — expect the client to "
               f"abort at Certificate (this exercises the W2 'certificate "
-              f"too large' path; it cannot PASS until cert_buf is raised)")
+              f"too large' path; it cannot PASS on this build)")
 
 
 def main() -> int:
@@ -361,7 +368,9 @@ def main() -> int:
     for base, last, note in arbiter.allocations:
         print(f"  ${base:04X}-${last:04X}  {note}")
 
-    _print_target_context(HTTPS_TARGET, HTTPS_TARGET_PORT)
+    _print_target_context(HTTPS_TARGET, HTTPS_TARGET_PORT,
+                          labels.get("cert_buf_size",
+                                     CERT_BUF_FALLBACK_BYTES))
 
     host_bytes = HTTPS_TARGET.encode("ascii")
     routine_bytes = build_live_routine(
