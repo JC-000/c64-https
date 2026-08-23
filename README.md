@@ -18,7 +18,10 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
 ## I just want to run it
 
 Grab a release — latest is
-[**v0.4.0**](https://github.com/JC-000/c64-https/releases/tag/v0.4.0).
+[**v0.4.1**](https://github.com/JC-000/c64-https/releases/tag/v0.4.1).
+**If you have v0.4.0, replace it**: a server presenting a P-384 certificate
+could corrupt resident code and hang the machine (no real server triggered
+it — see the v0.4.1 notes).
 Every build is prebuilt, as a `.prg` and as a bootable `.d64`.
 No assembler, no cc65, no Python packages, no build step. **Three products,
 one disk each** — the label is the whole contents, and `MANIFEST.txt` in the
