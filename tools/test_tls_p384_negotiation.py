@@ -254,7 +254,7 @@ def test_cert_verify_p384_dispatch(transport, labels):
     print("\n  [1b] CertificateVerify dispatch on signature_scheme=0x0503")
 
     required = [
-        "tls_handle_cert_verify", "tls_rec_buf", "cv_sig_scheme",
+        "tls_handle_cert_verify", "tls_hs_ptr_reset", "tls_rec_buf", "cv_sig_scheme",
         "ecdsa_curve_id",
     ]
     missing = [n for n in required if labels.address(n) is None]
@@ -288,6 +288,18 @@ def test_cert_verify_p384_dispatch(transport, labels):
     write_bytes(transport, curve_id_addr, bytes([0xFF]))
 
     try:
+        # Point the handler at the message we just staged.
+        #
+        # Under TLS_STREAM_DEFRAME — the DEFAULT for BACKEND=uci —
+        # tls_handle_cert_verify deliberately does NOT reset tls_hs_ptr,
+        # because the deframer sets it before dispatch. This test wrote the
+        # message to tls_rec_buf and called the handler without setting it, so
+        # on a UCI build the handler read whatever tls_hs_ptr happened to hold
+        # and reported cv_sig_scheme=0xFF. It only ever worked on ip65, which
+        # still has the .ifndef reset — a backend-dependent pass that looked
+        # like coverage on both. tls_hs_ptr_reset is exported and does the
+        # right thing on either backend.
+        jsr(transport, labels["tls_hs_ptr_reset"], timeout=30.0)
         carry = jsr_with_carry(transport, handler, timeout=60.0)
     except Exception as e:
         print(f"       FAIL: jsr_with_carry raised {e}")
