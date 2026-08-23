@@ -83,6 +83,16 @@ CA65FLAGS += --bin-include-dir $(abspath build)
 # a networking one.
 ifeq ($(BACKEND),uci)
 CA65FLAGS += -D BACKEND_UCI=1
+# Issue #135: server name validation (src/x509_name.s) is UCI-only.
+#
+# Not a scope judgement — a size one, and the numbers are why. The routine is
+# 491 B. ip65's largest free block is 170 B (NET_CODE tail); its other regions
+# hold 40 B (CRYPTO_RESIDENT), 22 B (CRYPTO_OVERLAY) and 16 B (LOADER). There
+# is nowhere to put it without a memory-map restructure, and ip65 cannot reach
+# a real internet server anyway (~36 min/handshake against ~45-100 s of server
+# patience), so the check has the least to do exactly where it does not fit.
+# Documented in README and tracked on #135 rather than left to be discovered.
+CA65FLAGS += -D X509_VERIFY_NAME=1
 else
 CA65FLAGS += -D BACKEND_IP65=1
 endif

@@ -2289,6 +2289,42 @@ ld65 and ca65 edge cases; they are intentional and should stay:
     `BACKEND=ip65` and also carries the `cert_buf = $A000`
     SCRATCH_UNION link-time assert.
 
+### Server name validation is UCI-only, and the reason is size
+
+`src/x509_name.s` (491 B) checks the leaf's SAN `dNSName` entries against
+`tls_hostname` — SAN only, no CN fallback (RFC 6125 §6.4.4 deprecates CN and
+every CA-issued cert since ~2017 carries SAN), no-SAN is a reject, wildcards
+are leftmost-label only. It hangs off `x509_extract_pubkey`'s success exit as
+a **tail call**, the single choke point both the streaming and non-streaming
+certificate paths reach, so its carry *becomes* the caller's result. Falling
+through to the caller's `clc` instead would silently accept a certificate for
+the wrong host.
+
+**ip65 compiles it out** (`X509_VERIFY_NAME` is set only under `BACKEND=uci`).
+Measured at the time: ip65's largest free block is 170 B (NET_CODE tail), with
+40 B in CRYPTO_RESIDENT, 22 B in CRYPTO_OVERLAY and 16 B in LOADER. There is
+nowhere to link 491 B without a memory-map restructure, and shrinking below
+~170 B would mean dropping wildcards — which breaks en.wikipedia.org, whose
+certificate matches via `*.wikipedia.org`. ip65 also cannot reach a real
+internet server (~36 min/handshake), so the check has least to do exactly
+where it does not fit. Both ip65 images are byte-identical across this change.
+
+**It filled the CRYPTO_OVERLAY tail the rigs were using, and that is worth
+knowing before adding anything else there.** On comb the tail went from 714 B
+to 223 B, and `rig_https_wiki.py` died with `MemoryArbiterError` — it wanted
+464 B for a DMA trampoline plus host/path/marker scratch. This is exactly the
+hazard the CRYPTO_OVERLAY-collision note warns about. The fix was to stop
+needing the scratch: the rig now drives the MENU ('G') by default, because for
+a build made with matching `HTTPS_HOST` / `HTTPS_PATH` / `HTTPS_BODY_TO_REU`
+— which that rig requires anyway — `do_https_get` already programs host, path
+and port, sets `http_body_sink=1`, and enters the viewer. `WIKI_TRAMPOLINE=1`
+restores the old path. Note that relocating the scratch would NOT have worked:
+no single free region on comb held 256 B, the trampoline alone.
+
+Verified on hardware at 48 MHz, both UCI profiles, with the check live:
+en.wikipedia.org 125,258 B, HTTP 200, prefix byte-compared against a live
+reference fetch.
+
 ## Packaging
 
 `make package` builds the release artifacts into `dist/` (gitignored).
@@ -2449,6 +2485,20 @@ the TLS state machine. For a quick sanity check after a build:
   - `tools/test_tls_handshake.py`  — full handshake state machine
   - `tools/test_http.py`           — HTTP request/response build + parse
   - `tools/test_x509.py`           — X.509 parser
+  - `tools/test_x509_name.py` — server name validation (#135). 23 vectors,
+                                **9 of them rejects**, including the four
+                                wildcard over-matches that are how name
+                                checking classically goes wrong (`*.example.org`
+                                vs `example.org` and vs `a.b.example.org`,
+                                `*.com` vs `example.com`, prefix/suffix
+                                near-misses). Six vectors are REAL production
+                                leaves fetched live (wikipedia / github /
+                                lwn), each accepted for its own host and
+                                rejected for a wrong one — a parser exercised
+                                only against certificates its own test wrote
+                                is not evidence about the ones it will meet.
+                                Skips with a loud message on ip65, where the
+                                feature is compiled out.
   - `tools/test_p384_overlay_hazard.py` — a P-384 certificate must NOT
                                      corrupt resident code. Asserts the safe
                                      behaviour, so a failure IS the finding.

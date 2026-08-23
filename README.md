@@ -138,16 +138,25 @@ otherwise, and nothing here said it before:
 
 - **No certificate chain validation.** There is no trust store, no root CAs,
   no issuer check — `src/der_decode.s:271` skips the issuer field outright.
-- **No hostname / SAN check.** The name you built with is sent as SNI and in
-  the `Host:` header; nothing verifies the certificate matches it.
+- **Server name validation exists, but only on the UCI images** (`uci-onchip`,
+  `uci-comb`). Since v0.4.2 they check the certificate's subjectAltName
+  `dNSName` entries against the host you built for, case-insensitively, with
+  leftmost-label wildcards, rejecting a certificate that carries no SAN.
+  `ip65-onchip` does **not** — the routine is 491 B and that layout's largest
+  free block is 170 B. See issue #135.
 
 What the client *does* prove is that the peer holds the private key for the
 leaf certificate it presented (the CertificateVerify signature is genuinely
 checked against the transcript, and a forged server Finished is genuinely
 rejected — see `tools/test_finished_verify.py`). What it does not prove is
-that anyone vouches for that certificate. **A self-signed certificate for any
-hostname is accepted**, so an active network attacker can impersonate any
-server.
+that anyone vouches for that certificate.
+
+**Name validation alone does not fix this.** Without a chain to a trust
+anchor, an attacker who can redirect your connection simply self-signs a
+certificate carrying the *correct* name and the check passes. What it buys is
+narrower: "any certificate is accepted" becomes "any certificate naming the
+right host is accepted". Useful, and not the same as authentication — an
+active network attacker can still impersonate any server.
 
 That is a deliberate scope decision for a 1 MHz machine — a chain walk means
 more ECDSA verifies at ~16-30 s each, and a root store means kilobytes of

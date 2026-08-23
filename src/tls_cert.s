@@ -33,8 +33,17 @@
         .export tls_handle_cert_verify
         .export tls_hs_ptr_reset
         .export cv_sig_scheme           ; Phase 4b: exported for negotiation tests
+.ifdef X509_VERIFY_NAME
+        ; #135: x509_name.s walks the same leaf both entry paths stage here,
+        ; rather than assuming cert_buf — the non-streaming path points this
+        ; into tls_rec_buf instead.
+        .export cert_data_ptr
+.endif
 
-        .import tls_rec_buf
+        .ifdef X509_VERIFY_NAME
+.import x509_verify_hostname
+.endif
+.import tls_rec_buf
         .import tls_rec_len
         .import tls_transcript
         .import sha256_init
@@ -581,9 +590,19 @@ x509_extract_pubkey:
         bne @copy_y_p256_loop
 
 @copy_y_done:
-        ; Success
+        ; --- Issue #135: the key is extracted; now check the NAME ---
+        ; Single choke point on purpose: both the streaming path
+        ; (tls_cert_stream_finish) and the non-streaming path reach the leaf
+        ; through here, so one call covers both. A mismatch must fail the
+        ; handshake exactly like a bad key would — the carry we return is the
+        ; caller's success/failure, so falling through to its `clc` would
+        ; silently accept a certificate for the wrong host.
+.ifdef X509_VERIFY_NAME
+        jmp x509_verify_hostname        ; tail call: its carry IS our result
+.else
         clc
         rts
+.endif
 
 
 ; =============================================================================

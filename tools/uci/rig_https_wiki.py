@@ -112,7 +112,8 @@ from c64_test_harness.keyboard import send_text
 from c64_test_harness.labels import Labels
 from c64_test_harness.uci_network import disable_uci, enable_uci
 
-from _memory_policy import build_policy_and_arbiter_with_overlay_carveout
+from _memory_policy import (build_policy,
+                            build_policy_and_arbiter_with_overlay_carveout)
 from _reu_preflight import ReuPreflightError, preflight_reu
 from _temp_gc import gc_temp
 
@@ -140,6 +141,14 @@ WIKI_PATH = os.environ.get(
     "WIKI_PATH", "/w/index.php?title=Commodore_64&action=raw")
 WIKI_PORT = int(os.environ.get("WIKI_PORT", "443"))
 EXPECT_STATUS = int(os.environ.get("EXPECT_STATUS", "200"))
+
+# Issue #135 fallout: the DMA trampoline's ~464 B of harness scratch came out
+# of the CRYPTO_OVERLAY tail, which the 491 B src/x509_name.s consumed on the
+# comb profile (223 B left). Menu mode needs no scratch at all and is the
+# default; WIKI_TRAMPOLINE=1 restores the old path for a host/path that does
+# not match what the PRG was built with.
+MENU_MODE = os.environ.get("WIKI_TRAMPOLINE") != "1"
+MENU_STABLE_POLLS = int(os.environ.get("MENU_STABLE_POLLS", "3"))
 # Wikipedia's robot policy 403s UA-less clients; the reference fetch
 # must send one (the C64 side's UA is baked by the HTTP lane).
 WIKI_REF_UA = os.environ.get(
@@ -536,19 +545,33 @@ def main() -> int:
     init_wait = float(os.environ.get("C64_INIT_WAIT",
                                      str(default_init_wait(labels))))
 
-    memory_policy, arbiter = build_policy_and_arbiter_with_overlay_carveout(
-        LABELS_PATH, PRG_PATH,
-    )
-    routine_addr  = arbiter.alloc(256, name="trampoline")
-    host_str_addr = arbiter.alloc(64,  name="host_str")
-    path_str_addr = arbiter.alloc(128, name="path_str")
-    marker_base   = arbiter.alloc(16,  name="markers")
-    sentinel_addr, progress_addr, carry_flag_addr = (
-        marker_base, marker_base + 1, marker_base + 2)
-    print(f"\nMemoryPolicy reserved {len(memory_policy.reserved_regions)}"
-          f" region(s); arbiter allocations:")
-    for base, last, note in arbiter.allocations:
-        print(f"  ${base:04X}-${last:04X}  {note}")
+    # Menu mode needs no C64-side scratch, so it does not ask the arbiter for
+    # any — which is the point. Allocating unconditionally is what made this
+    # rig fail on the comb profile with MemoryArbiterError once the 491 B
+    # src/x509_name.s (#135) took the CRYPTO_OVERLAY tail it was drawing from.
+    routine_addr = host_str_addr = path_str_addr = marker_base = 0
+    sentinel_addr = progress_addr = carry_flag_addr = 0
+    if MENU_MODE:
+        # Still build the POLICY — the write guard matters (keyboard-buffer
+        # pokes go through it) — just not the arbiter, which is the part that
+        # needs a free region to hand out.
+        memory_policy = build_policy(LABELS_PATH, PRG_PATH)
+        print(f"\nMemoryPolicy reserved {len(memory_policy.reserved_regions)}"
+              f" region(s); menu mode allocates no C64 scratch")
+    else:
+        memory_policy, arbiter = build_policy_and_arbiter_with_overlay_carveout(
+            LABELS_PATH, PRG_PATH,
+        )
+        routine_addr  = arbiter.alloc(256, name="trampoline")
+        host_str_addr = arbiter.alloc(64,  name="host_str")
+        path_str_addr = arbiter.alloc(128, name="path_str")
+        marker_base   = arbiter.alloc(16,  name="markers")
+        sentinel_addr, progress_addr, carry_flag_addr = (
+            marker_base, marker_base + 1, marker_base + 2)
+        print(f"\nMemoryPolicy reserved {len(memory_policy.reserved_regions)}"
+              f" region(s); arbiter allocations:")
+        for base, last, note in arbiter.allocations:
+            print(f"  ${base:04X}-${last:04X}  {note}")
 
     host_bytes = WIKI_HOST.encode("ascii")
     path_bytes = WIKI_PATH.encode("ascii")
@@ -656,37 +679,56 @@ def main() -> int:
         if init_flag == 0:
             print("WARNING: net_initialized is 0 — auto-init may have failed")
 
-        print("Sending 'Q' to exit PRG main_loop...")
-        send_text(transport, "q\r")
-        time.sleep(2.0 * _TIMEOUT_SCALE)
+        if MENU_MODE:
+            # --- menu path: no DMA scratch at all --------------------------
+            # This rig REQUIRES a PRG built with matching HTTPS_HOST /
+            # HTTPS_PATH / HTTPS_BODY_TO_REU (see the module docstring), and
+            # for such a build do_https_get already does everything the
+            # trampoline did: it programs host/path/port, sets
+            # http_body_sink=1, and enters the viewer. Driving the menu is
+            # therefore equivalent AND needs no harness scratch.
+            #
+            # That matters beyond tidiness. The trampoline's ~464 B came out
+            # of the CRYPTO_OVERLAY tail, and on the comb profile that tail is
+            # now ~223 B — adding src/x509_name.s (491 B, issue #135) took it.
+            # The rig failed with MemoryArbiterError before this path existed.
+            # Not needing the scratch is a better answer than hunting for a
+            # region big enough to hold it.
+            print("Menu mode: pressing 'G' (no DMA trampoline, no scratch)")
+            send_text(transport, "g")
+        else:
+            print("Sending 'Q' to exit PRG main_loop...")
+            send_text(transport, "q\r")
+            time.sleep(2.0 * _TIMEOUT_SCALE)
 
-        # DMA-write routine + data
-        CHUNK = 64
-        for i in range(0, len(routine_bytes), CHUNK):
-            transport.write_memory(routine_addr + i,
-                                   routine_bytes[i:i + CHUNK])
-        transport.write_memory(host_str_addr,
-                               (host_bytes + b"\x00").ljust(64, b"\x00"))
-        transport.write_memory(path_str_addr,
-                               (path_bytes + b"\x00").ljust(128, b"\x00"))
-        transport.write_memory(marker_base, bytes(16))
+        if not MENU_MODE:
+            # DMA-write routine + data (trampoline mode only)
+            CHUNK = 64
+            for i in range(0, len(routine_bytes), CHUNK):
+                transport.write_memory(routine_addr + i,
+                                       routine_bytes[i:i + CHUNK])
+            transport.write_memory(host_str_addr,
+                                   (host_bytes + b"\x00").ljust(64, b"\x00"))
+            transport.write_memory(path_str_addr,
+                                   (path_bytes + b"\x00").ljust(128, b"\x00"))
+            transport.write_memory(marker_base, bytes(16))
 
-        # Arm the REU body sink explicitly. The HTTPS_BODY_TO_REU build
-        # sets http_body_sink=1 in do_https_get (the menu 'G' path), but
-        # this trampoline JSRs http_get directly and never crosses it —
-        # without this poke the body would not be sunk (lane E contract:
-        # poking the exported flag by DMA before http_get is supported).
-        # http_body_sink lives in CRYPTO_COLD_SHADOW ($A000-$BFFF), which
-        # the MemoryPolicy reserves — this single-byte poke is the lane E
-        # supported contract, so bypass with a named override rather than
-        # widening the policy.
-        transport.write_memory(labels["http_body_sink"], b"\x01",
-                               override="arm http_body_sink (lane E DMA contract)")
-        print("Armed http_body_sink=1 (trampoline bypasses do_https_get)")
+            # Arm the REU body sink explicitly. The HTTPS_BODY_TO_REU build
+            # sets http_body_sink=1 in do_https_get (the menu 'G' path), but
+            # this trampoline JSRs http_get directly and never crosses it —
+            # without this poke the body would not be sunk (lane E contract:
+            # poking the exported flag by DMA before http_get is supported).
+            # http_body_sink lives in CRYPTO_COLD_SHADOW ($A000-$BFFF), which
+            # the MemoryPolicy reserves — this single-byte poke is the lane E
+            # supported contract, so bypass with a named override rather than
+            # widening the policy.
+            transport.write_memory(labels["http_body_sink"], b"\x01",
+                                   override="arm http_body_sink (lane E DMA contract)")
+            print("Armed http_body_sink=1 (trampoline bypasses do_https_get)")
 
-        sys_line = f"sys{routine_addr}\r"
-        print(f"Triggering: {sys_line.strip()}")
-        send_text(transport, sys_line)
+            sys_line = f"sys{routine_addr}\r"
+            print(f"Triggering: {sys_line.strip()}")
+            send_text(transport, sys_line)
 
         # --- Poll sentinel + body progress ------------------------------- #
         body_total_addr = labels["http_body_total"]
@@ -696,13 +738,18 @@ def main() -> int:
         last_print = 0.0
         last_body_total = 0
         sentinel_seen = False
+        menu_stable = 0
+        menu_last_total = -1
         phase_timing = os.environ.get("PHASE_TIMING", "0") == "1"
         phase_log: list[tuple[str, float]] = []
         cur_phase = None
         while time.time() < deadline:
             time.sleep(POLL_INTERVAL)
-            blob = transport.read_memory(sentinel_addr, 2)
-            sentinel, progress = blob[0], blob[1]
+            if MENU_MODE:
+                sentinel, progress = 0, 0
+            else:
+                blob = transport.read_memory(sentinel_addr, 2)
+                sentinel, progress = blob[0], blob[1]
             bt = transport.read_memory(body_total_addr, 3)
             body_total = bt[0] | (bt[1] << 8) | (bt[2] << 16)
             now = time.time()
@@ -727,7 +774,23 @@ def main() -> int:
                     cur_phase = phase
                     phase_log.append((phase, now - start))
                     print(f"  phase +{phase_log[-1][1]:7.1f}s  {phase}")
-            if sentinel == SENTINEL_VALUE:
+            if MENU_MODE:
+                # No sentinel on this path — do_https_get enters the viewer
+                # instead of returning to a trampoline. Completion = the body
+                # counter has stopped moving with a 200 already parsed.
+                if body_total > 0 and body_total == menu_last_total:
+                    menu_stable += 1
+                else:
+                    menu_stable = 0
+                menu_last_total = body_total
+                if menu_stable >= MENU_STABLE_POLLS:
+                    st = transport.read_memory(labels["http_status"], 2)
+                    if (st[0] | (st[1] << 8)) == EXPECT_STATUS:
+                        print(f"  body settled at {body_total:,} B after "
+                              f"{now - start:.1f}s — transfer complete")
+                        sentinel_seen = True
+                        break
+            elif sentinel == SENTINEL_VALUE:
                 print(f"  sentinel set after {now - start:.1f}s — "
                       "routine complete")
                 sentinel_seen = True
@@ -743,7 +806,10 @@ def main() -> int:
                 print(f"  (could not write phase_timing.txt: {exc})")
 
         # --- Read results (all DMA reads — safe even with viewer live) --- #
-        carry = transport.read_memory(carry_flag_addr, 1)[0] & 0x01
+        # Menu mode has no carry latch (do_https_get keeps its own carry and
+        # tail-calls the viewer); http_status is the oracle there.
+        carry = (0 if MENU_MODE
+                 else transport.read_memory(carry_flag_addr, 1)[0] & 0x01)
         status_raw = transport.read_memory(labels["http_status"], 2)
         http_status = status_raw[0] | (status_raw[1] << 8)
         bt = transport.read_memory(body_total_addr, 3)
