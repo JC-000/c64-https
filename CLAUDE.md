@@ -211,6 +211,15 @@ Variables:
                           untested. The only `$(error)` guards in the
                           Makefile are lines 91/94/97 (all keyed on
                           USE_NISTCURVES_ONCHIP) and 245 (bad BACKEND).
+  - `ENABLE_P384_VERIFY=1` — re-arms `ecdsa_verify`'s P-384 arm.
+                          **OFF by default and unsafe on its own** — without
+                          a staged overlay image it reproduces the hazard
+                          above on purpose (live code overwritten, machine
+                          hung). It exists so the safety gate can be
+                          mutation-tested: a gate nobody can switch off is a
+                          gate nobody can prove is load-bearing. Turning it
+                          on is expected to make
+                          `tools/test_p384_overlay_hazard.py` FAIL.
   - `USE_NISTCURVES_ONCHIP=1` — link the libs/nistcurves
                           FP_ONCHIP_MUL turbo-profile P-256 verify
                           archive (no REU row-fetch DMA; ~22 MHz
@@ -412,8 +421,34 @@ buffers in the crypto BSS — see per-module headers for details):
     PRG bytes (hashes identical with and without it) and, from v0.9.0,
     zero ld65 warnings, since the version equates are exported `:abs`.
 
-P-384 is *stubbed at the TLS layer* (see `project_p384_stubbed` memory
-note). The sibling `libs/nistcurves` P-384 primitives were meant to be
+**P-384 is PARKED, and "stubbed at the TLS layer" was wrong in a way that
+mattered.** This file said that for months; the wire path was fully live.
+ClientHello advertised `ecdsa_secp384r1_sha384` (`tls_handshake.s:603`), an
+attacker-supplied P-384 curve OID set `ecdsa_curve_id = 1`
+(`tls_cert.s:422`), and `ecdsa_verify` routed into `ecdsa_verify_384_tls`,
+whose step 4 calls `crypto_swap_to_p384_sha384`. That swap DMAs `$1E00` bytes
+from REU into `__CRYPTO_OVERLAY_START__` with **no check that anything was
+ever staged** — and `reu_p384_overlay_init` is `.ifdef
+USE_OVERLAY_P384_EMBED`, an empty RTS in every shipped build. What was
+stubbed was the *overlay image*, which is precisely the combination that
+makes it destructive rather than inert.
+
+Measured on the **shipped v0.4.0 images** with
+`tools/test_p384_overlay_hazard.py`: a P-384 certificate overwrote live
+resident code and hung the machine — `uci-onchip` 5,316 / 7,680 B,
+`ip65-onchip` 7,496 / 7,680 B (ip65 is worse: the fixed `$1E00` length
+overruns its 4,212 B slot by 3,468 B, through `RODATA` and `HTTP_AUX_CODE2`
+into `CRYPTO_CODE`). Real servers never triggered it only because
+github/browserleaks/lwn/wikipedia all serve P-256.
+
+Closed by two independent changes, deliberately: the ClientHello no longer
+advertises `0x0503`, **and** `ecdsa_verify`'s P-384 arm is a clean `sec`
+reject unless `ENABLE_P384_VERIFY=1`. Advertising is a request, never a
+guarantee — the curve comes from the certificate, so the gate is what makes
+the advertisement change safe. The dispatcher and sibling primitives stay in
+tree; re-enabling needs that flag *plus* a P-384 overlay that builds (see
+"Known issues"). The old `project_p384_stubbed` memory note describes the
+intent, not the code that shipped. The sibling `libs/nistcurves` P-384 primitives were meant to be
 buildable as an external overlay image (Phase C.3b, `make
 p384-overlay`) but no P-384 build target has ever completed — see
 "Known issues" for the current failure chain. Fix the build
@@ -2414,6 +2449,20 @@ the TLS state machine. For a quick sanity check after a build:
   - `tools/test_tls_handshake.py`  — full handshake state machine
   - `tools/test_http.py`           — HTTP request/response build + parse
   - `tools/test_x509.py`           — X.509 parser
+  - `tools/test_p384_overlay_hazard.py` — a P-384 certificate must NOT
+                                     corrupt resident code. Asserts the safe
+                                     behaviour, so a failure IS the finding.
+                                     Mutation-proven: build with
+                                     `ENABLE_P384_VERIFY=1` and it fails.
+                                     **Note the trap it was written around** —
+                                     the first version fed garbage into
+                                     `ecdsa_sig_r/s` and got a clean PASS,
+                                     because `ecdsa_verify_384_tls` parses DER
+                                     out of `tls_rec_buf+8` and bails at
+                                     :205-207 *before* the swap at :268. It
+                                     proved only that the DER parser rejects
+                                     garbage. A well-formed DER signature is
+                                     the only gate on reaching the swap.
   - `tools/test_finished_verify.py` — server-Finished **rejection** path
                                      (18 cases, 2 vector sets; see below)
 

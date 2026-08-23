@@ -109,9 +109,42 @@ ecdsa_verify:
 
         lda ecdsa_curve_id
         beq @p256
-        ; Phase 4a: P-384 dispatcher composes the dual-overlay swap
-        ; (sha384 -> curve) + sibling ecdsa_verify_384.
+
+        ; --- P-384: REJECTED, and this is a safety gate, not a TODO ---
+        ;
+        ; Reaching ecdsa_verify_384_tls from a shipped build is destructive.
+        ; Its step 4 calls crypto_swap_to_p384_sha384, which DMAs OVERLAY_SIZE
+        ; ($1E00) bytes from REU into __CRYPTO_OVERLAY_START__ with no check
+        ; that anything was ever staged — and in every shipped configuration
+        ; reu_p384_overlay_init is `.ifdef USE_OVERLAY_P384_EMBED`, i.e. an
+        ; empty RTS, so those REU banks are never written. The destination is
+        ; not spare: under UCI it is HTTP_SINK_CODE + TLS_DEFRAME_CODE +
+        ; CERT_BUF_BSS + VIEWER_CODE + HTTPS_TARGET_RODATA; under ip65 the
+        ; fixed $1E00 length overruns the 4,212 B slot by 3,468 B, through
+        ; RODATA and HTTP_AUX_CODE2 into CRYPTO_CODE.
+        ;
+        ; Measured on the SHIPPED v0.4.0 images with
+        ; tools/test_p384_overlay_hazard.py — live resident code overwritten
+        ; and the routine never returned:
+        ;
+        ;   uci-onchip  (1950c6e8…)  5,316 / 7,680 B corrupted, hung
+        ;   ip65-onchip (0a420911…)  7,496 / 7,680 B corrupted, hung
+        ;
+        ; The ClientHello no longer advertises ecdsa_secp384r1_sha384, so a
+        ; compliant server will not choose P-384. This gate is what makes that
+        ; safe against a server that does anyway: the certificate parser sets
+        ; ecdsa_curve_id from an attacker-supplied OID (src/tls_cert.s:422),
+        ; so the advertisement is a request, never a guarantee. Two independent
+        ; changes are needed to reach the swap again, by design.
+        ;
+        ; P-384 is parked as roadmap work, not deleted: the dispatcher and the
+        ; sibling primitives stay in tree, and re-enabling is this flag plus a
+        ; P-384 overlay image that actually builds (see "Known issues").
+        .ifdef ENABLE_P384_VERIFY
         jsr ecdsa_verify_384_tls
+        .else
+        sec                             ; C=1 — unsupported curve, clean reject
+        .endif
         jmp @done
 
 @p256:

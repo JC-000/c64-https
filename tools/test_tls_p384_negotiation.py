@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """test_tls_p384_negotiation.py - Phase 4b negotiation plumbing test.
 
-Verifies the c64-https TLS layer offers ecdsa_secp384r1_sha384 (0x0503)
+Phase 4b originally verified that the TLS layer OFFERS ecdsa_secp384r1_sha384
+(0x0503). That assertion is inverted now: advertising 0x0503 was the bug, since
+the client answers it destructively. This file verifies
 alongside ecdsa_secp256r1_sha256 (0x0403) in the ClientHello, and that the
 CertificateVerify handler accepts a 0x0503 signature_scheme by routing
 through the ecdsa_verify dispatcher with curve_id=1.
@@ -115,8 +117,8 @@ def jsr_with_carry(transport, addr, timeout=120.0, poll_interval=0.5):
 # ---------------------------------------------------------------------------
 
 def test_client_hello_sig_algs(transport, labels, rng):
-    """Verify ClientHello signature_algorithms contains 0x0403 + 0x0503."""
-    print("\n  [1a] ClientHello signature_algorithms: 0x0403 AND 0x0503")
+    """Verify ClientHello offers 0x0403 and does NOT offer 0x0503."""
+    print("\n  [1a] ClientHello signature_algorithms: 0x0403 only, NOT 0x0503")
 
     required = [
         "tls_build_client_hello", "tls_rec_buf", "tls_rec_len",
@@ -197,20 +199,29 @@ def test_client_hello_sig_algs(transport, labels, rng):
         if i + 2 <= len(inner):
             schemes.add((inner[i] << 8) | inner[i + 1])
 
-    missing = []
+    # This assertion is INVERTED from Phase 4b on purpose. It used to require
+    # 0x0503 to be advertised; advertising it was the bug. The client cannot
+    # perform P-384 — the verify path swaps in an overlay image no shipped
+    # build stages, corrupting live resident code — so offering the scheme
+    # handed a server the choice of breaking us. See the gate in
+    # src/crypto/ecdsa_verify.s and tools/test_p384_overlay_hazard.py.
+    scheme_hex = ", ".join(f"0x{s:04x}" for s in sorted(schemes)) or "(none)"
+    problems = []
     if 0x0403 not in schemes:
-        missing.append("0x0403 (ecdsa_secp256r1_sha256)")
-    if 0x0503 not in schemes:
-        missing.append("0x0503 (ecdsa_secp384r1_sha384)")
+        problems.append("0x0403 (ecdsa_secp256r1_sha256) MISSING — "
+                        "the one scheme we can actually verify")
+    if 0x0503 in schemes:
+        problems.append("0x0503 (ecdsa_secp384r1_sha384) ADVERTISED — "
+                        "P-384 is parked and answering it is destructive")
 
-    if missing:
-        scheme_hex = ", ".join(f"0x{s:04x}" for s in sorted(schemes))
-        print(f"       FAIL: missing scheme(s): {', '.join(missing)}")
+    if problems:
+        for pr in problems:
+            print(f"       FAIL: {pr}")
         print(f"             advertised: {scheme_hex}")
         return 0, 1
 
-    scheme_hex = ", ".join(f"0x{s:04x}" for s in sorted(schemes))
-    print(f"       PASS: schemes advertised = {scheme_hex}")
+    print(f"       PASS: schemes advertised = {scheme_hex} "
+          "(0x0503 correctly absent)")
     return 1, 0
 
 

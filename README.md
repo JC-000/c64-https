@@ -124,9 +124,32 @@ is checked against it (`:380`). There is no AES anywhere in `src/crypto/`.
 - **AEAD:** ChaCha20-Poly1305 — in-tree `src/crypto/{chacha20,poly1305,aead}.s`, originally from [c64-wireguard](https://github.com/JC-000/c64-wireguard)
 - **Hash:** SHA-256 — in-tree `src/crypto/sha256.s`, originally from [c64-aes256-ecdsa](https://github.com/JC-000/c64-aes256-ecdsa)
 - **Key exchange:** ECDHE with X25519 only — `supported_groups` and `key_share` carry the single group 0x001D (`src/tls_handshake.s:204`); in-tree `src/crypto/{x25519,fe25519}.s`
-- **Certificate signatures:** ECDSA P-256 (`ecdsa_secp256r1_sha256`, 0x0403) from the [c64-nist-curves](https://github.com/JC-000/c64-nist-curves) submodule at `libs/nistcurves`, via the thin dispatcher `src/crypto/ecdsa_verify.s`. P-384 (0x0503) is advertised but stubbed — see Known Issues.
+- **Certificate signatures:** ECDSA P-256 (`ecdsa_secp256r1_sha256`, 0x0403) from the [c64-nist-curves](https://github.com/JC-000/c64-nist-curves) submodule at `libs/nistcurves`, via the thin dispatcher `src/crypto/ecdsa_verify.s`. P-384 (0x0503) is **no longer advertised** and is rejected — parked as roadmap work, see Known Issues.
 - **Key derivation:** HKDF-SHA256, built from HMAC-SHA256 (`src/hkdf.s`)
 - **PRNG:** HMAC-DRBG seeded from SID voice 3 noise + CIA timer entropy (`src/entropy.s`, `src/crypto/hmac_drbg.s`)
+
+### What this client does NOT authenticate
+
+Worth stating plainly, because "TLS 1.3 / HTTPS client" reasonably implies
+otherwise, and nothing here said it before:
+
+- **No certificate chain validation.** There is no trust store, no root CAs,
+  no issuer check — `src/der_decode.s:271` skips the issuer field outright.
+- **No hostname / SAN check.** The name you built with is sent as SNI and in
+  the `Host:` header; nothing verifies the certificate matches it.
+
+What the client *does* prove is that the peer holds the private key for the
+leaf certificate it presented (the CertificateVerify signature is genuinely
+checked against the transcript, and a forged server Finished is genuinely
+rejected — see `tools/test_finished_verify.py`). What it does not prove is
+that anyone vouches for that certificate. **A self-signed certificate for any
+hostname is accepted**, so an active network attacker can impersonate any
+server.
+
+That is a deliberate scope decision for a 1 MHz machine — a chain walk means
+more ECDSA verifies at ~16-30 s each, and a root store means kilobytes of
+resident keys — not an oversight. Treat the transport as confidential against
+passive observers, not authenticated against active ones.
 
 ### Zero Page Time-Sharing (ip65 backend)
 
