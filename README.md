@@ -18,10 +18,10 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
 ## I just want to run it
 
 Grab a release — latest is
-[**v0.4.1**](https://github.com/JC-000/c64-https/releases/tag/v0.4.1).
+[**v0.4.2**](https://github.com/JC-000/c64-https/releases/tag/v0.4.2).
 **If you have v0.4.0, replace it**: a server presenting a P-384 certificate
-could corrupt resident code and hang the machine (no real server triggered
-it — see the v0.4.1 notes).
+could corrupt resident code and hang the machine (fixed in v0.4.1; no real
+server triggered it).
 Every build is prebuilt, as a `.prg` and as a bootable `.d64`.
 No assembler, no cc65, no Python packages, no build step. **Three products,
 one disk each** — the label is the whole contents, and `MANIFEST.txt` in the
@@ -32,6 +32,16 @@ release walks you through the choice:
 | `c64-https-ip65-onchip` | bone-stock C64 + RR-Net cartridge | maximum compatibility: no REU, no turbo, nothing optional. If you are not sure what you have, this is the one that runs. ~36 min per handshake at 1 MHz. |
 | `c64-https-uci-onchip` | Ultimate 64 / C64 Ultimate at turbo, REU off | boots straight to the menu |
 | `c64-https-uci-comb` | Ultimate 64 / C64 Ultimate at turbo, REU **on** | fastest — 1.73x quicker verify (16.4 s vs 28.4 s, U64E at 48 MHz). Builds a 16 KB table into REU bank 2 at each boot first: ~34 s at 64 MHz, ~45 s at 48 MHz. |
+
+Every image is built for **one** host, baked in at build time (`make
+HTTPS_HOST=...`); the released images target the bundled test listener, so
+point them at that unless you rebuild. New in v0.4.2: the two **UCI** images
+check the server's certificate actually names the host they asked for.
+`ip65-onchip` does not — the check is 491 B and that layout has 170 B free
+(issue #135). Read ["What this client does NOT
+authenticate"](#what-this-client-does-not-authenticate) before relying on
+either: there is still no certificate chain validation on any image, so this
+is not server authentication.
 
 The screen blanks during the slow crypto on every image — that is deliberate,
 it stops the VIC-II stealing bus cycles and buys ~6.5%. The progress line
