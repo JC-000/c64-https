@@ -202,7 +202,7 @@ UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s
 # USE_NISTCURVES_ONCHIP=1 (issue #69 / nistcurves v0.5.0): swap in the
 # FP_ONCHIP_MUL turbo-profile archive — fp_mul/fp_sqr generate multiply
 # rows on-chip instead of REU DMA row fetches, removing the ~1 MHz-anchored
-# DMA floor on turbo hosts (crossover ~30 MHz; see CLAUDE.md "Why turbo
+# DMA floor on turbo hosts (crossover ~30 MHz; see docs/engineering-notes.md "Why turbo
 # stops paying"). Gates: data.s yields sqtab to the lib's $BC00 equates,
 # poly1305.s provides the §8.3 canonical ct_mul_8x8 + SMC bake sites,
 # boot.s skips reu_mul_init + yields the reu_fetch_mul_row export.
