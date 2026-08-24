@@ -2891,3 +2891,19 @@ pattern (copy still capped, C=0, stream continues, code left in
 `net_last_error`). Allocated in SPEC §13.2's table before the adapter
 emitted it — the first code to go through the rule the table exists for.
 
+**Correction, same evening — `$FFFF` is the no-data sentinel.** The
+c64-wireguard lane measured every *idle* UDP `SOCKET_READ` returning
+header `$FFFF`, `rx_len` 0, across 11 sizes. Re-reading our own capture:
+`tls_last_state=2` means the first polls after ClientHello, while
+ServerHello is still in flight — idle polls. "~690 B queued" above was
+an inference, not a measurement, and the mechanism note warned against
+exactly that. So `$FFFF` is the firmware's no-data sentinel on both
+transports; the drop-and-error cut aborted on an empty read, and
+c64-wireguard's "`$8A` fires routinely during healthy sessions" runbook
+line was the same misfiling, documented as a firmware quirk for four
+days. The shipped code is unaffected (cap, then the `DATA_AV` check
+copies zero bytes) but every comment that said "more than you asked"
+was wrong and is corrected. Registry rows now pair `$8A` (datagram:
+drop, terminal) with `$8B` (stream: cap, advisory) as one observation
+with family-specific disposition, and require excluding `$FFFF` first.
+

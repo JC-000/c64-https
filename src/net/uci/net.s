@@ -291,32 +291,33 @@ net_poll:
 
 @have_data:
         ; --- Bound the copy by the request (#140, SPEC §13.3) --------------
-        ; The response header is NOT a delivered-byte count on the TCP
-        ; SOCKET_READ path. Measured on fw 3.14d (U64E, 2026-08-24, real
-        ; github.com session, first poll, ring empty): request $0200,
-        ; header $FFFF — the same sentinel c64-wireguard saw for a 1500 B
-        ; UDP request. The copy below used to survive that only because it
-        ; re-checks ring-full and DATA_AV per byte; a refactor of the loop
-        ; would have turned the header into a runaway copy. So the count is
-        ; capped at uci_req_len — what this poll actually asked for, which
-        ; the ring clamp above may have made smaller than UCI_READ_CHUNK_MAX.
-        ; Bytes beyond the request were never delivered (they stay in the
-        ; firmware for the next poll), so capping loses nothing and is not
-        ; a trim of real data. A drop-and-error here (the first cut of this
-        ; check, emitting UCI_ERR_LONG_READ) aborted every real handshake at
-        ; ServerHello: "header > request" is routine on TCP, so $8A is a
-        ; UDP-path code and this adapter never emits it.
+        ; The response header is not a delivered-byte count. On fw 3.14d
+        ; $FFFF is the NO-DATA sentinel on both transports (c64-wireguard:
+        ; every idle UDP poll; here: the idle polls after ClientHello while
+        ; ServerHello is still in flight answer $FFFF to a 512 B request).
+        ; The copy below survived it only because it re-checks ring-full
+        ; and DATA_AV per byte and so copied zero bytes; a refactor of the
+        ; loop would have turned the header into a runaway copy. So the
+        ; count is capped at uci_req_len — what this poll actually asked
+        ; for, which the ring clamp above may have made smaller than
+        ; UCI_READ_CHUNK_MAX. Bytes beyond the request were never delivered
+        ; (they stay queued for the next poll), so the cap loses nothing.
+        ; A drop-and-error here (the first cut, emitting UCI_ERR_LONG_READ)
+        ; aborted every real handshake on its first idle poll — the same
+        ; misfiling c64-wireguard carried for four days as a "firmware
+        ; quirk". $FFFF MUST be excluded before any over-claim test.
         lda uci_req_len+0
         cmp uci_poll_rem+0
         lda uci_req_len+1
         sbc uci_poll_rem+1          ; C=1 iff req >= header (16-bit)
         bcs @len_bounded
-        ; header > request. $FFFF is the firmware's routine "more than you
-        ; asked" sentinel; anything else above the request is a header the
-        ; firmware has no documented mode for. Leave a breadcrumb for that
-        ; case ($8B, best-effort: C=0, stream continues — the cap below
-        ; makes it safe either way) so a post-mortem can tell the two
-        ; apart. Allocated in c64-lib-contract SPEC §13.2 before use.
+        ; header > request. $FFFF is the no-data sentinel (routine, copied
+        ; as zero bytes by the DATA_AV check); anything else above the
+        ; request is a header the firmware has no documented mode for.
+        ; Leave a breadcrumb for that case ($8B, best-effort: C=0, stream
+        ; continues — the cap below makes it safe either way) so a
+        ; post-mortem can tell the two apart. Allocated in c64-lib-contract
+        ; SPEC §13.2 before use; the datagram-family counterpart is $8A.
         lda uci_poll_rem+0
         and uci_poll_rem+1
         cmp #$FF

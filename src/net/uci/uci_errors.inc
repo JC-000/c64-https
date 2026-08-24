@@ -21,17 +21,20 @@ UCI_ERR_READ_FAIL      = $86    ; SOCKET_READ returned an error bit
 UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE wrote fewer bytes than requested
 UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
 UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
-UCI_ERR_LONG_READ      = $8A    ; UDP path (c64-wireguard, 2026-08-24):
-                                ; SOCKET_READ reported a datagram length
-                                ; exceeding the request; the datagram is
-                                ; dropped. Reserved here, NEVER emitted: on
-                                ; the TCP path the header is not a delivered
-                                ; count (fw 3.14d answers a 512 B request with
-                                ; $FFFF on every session), so net_poll caps the
-                                ; copy at the request instead (#140).
-UCI_ERR_BAD_READ_HDR   = $8B    ; SOCKET_READ header exceeded the request and
-                                ; was NOT the $FFFF sentinel — a value the
-                                ; firmware has no documented mode for. Best-
+UCI_ERR_LONG_READ      = $8A    ; Datagram family (c64-wireguard): the
+                                ; SOCKET_READ header claimed more than the
+                                ; request and was NOT the $FFFF no-data
+                                ; sentinel; the datagram is dropped. Reserved
+                                ; here, NEVER emitted: on a stream the same
+                                ; observation is $8B below. $FFFF is the
+                                ; firmware's no-data sentinel on BOTH
+                                ; transports and must be excluded before any
+                                ; over-claim test (#140; both adapters got
+                                ; this wrong independently).
+UCI_ERR_BAD_READ_HDR   = $8B    ; Stream family: SOCKET_READ header exceeded
+                                ; the request and was NOT the $FFFF no-data
+                                ; sentinel — a value the firmware has no
+                                ; documented mode for. Best-
                                 ; effort breadcrumb (§13.1 short-write pattern):
                                 ; the copy is still capped at the request and
                                 ; net_poll returns normally; the code stays in

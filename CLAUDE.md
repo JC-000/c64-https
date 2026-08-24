@@ -184,11 +184,12 @@ drops a symbol fails the link by name on both backends. Surface:
   - Error codes: ip65 `$40-$7F` (`ip65_errors.inc`, `NET_ERR_IP65_*`),
     UCI `$80-$BF` (`uci_errors.inc`, `UCI_ERR_*`). The UCI range is ONE
     namespace shared with c64-wireguard — `$8A UCI_ERR_LONG_READ` is theirs
-    and UDP-only: on TCP the SOCKET_READ header is not a delivered count
-    (fw 3.14d answers a 512 B request with `$FFFF` on every session), so
-    `net_poll` caps the copy at the request and never emits `$8A` (#140);
-    a header above the request that is NOT `$FFFF` leaves the breadcrumb
-    `$8B UCI_ERR_BAD_READ_HDR` (C=0, stream continues). Allocate new codes
+    and datagram-only. **`$FFFF` is the SOCKET_READ no-data sentinel on both
+    transports** (idle polls answer it) and must be excluded before any
+    over-claim test — both fleet adapters misfiled it independently (#140).
+    `net_poll` caps the copy at the request and never emits `$8A`; a header
+    above the request that is NOT `$FFFF` leaves `$8B UCI_ERR_BAD_READ_HDR`
+    (C=0, stream continues) — the stream-family counterpart of `$8A`. Allocate new codes
     in SPEC §13.2's table first — `$8B` was the first one allocated that way.
   - Gone, per §13.1: `net_tcp_set_recv_cb` (stub), `net_recv_ready`,
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
