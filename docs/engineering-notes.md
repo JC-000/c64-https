@@ -2694,3 +2694,50 @@ ACKs only when polled, so peers less patient than Linux drop the
 connection during multi-minute crypto stalls (see the drain note in
 "Design note — bounded timeouts"). Whether anything else remains needs
 a fresh repro rather than trust in the old note.
+
+## Issue #118 — EMBED_P256_OVERLAY retired (2026-08-24)
+
+Validated at master-era HEAD `78663a1`, `libs/nistcurves` v0.11.2, from a
+clean tree, exactly as the issue's last comment describes:
+
+    make clean && make BACKEND=uci EMBED_P256_OVERLAY=1
+      make: *** No rule to make target `build/labels.txt',
+            needed by `build/lib/nistcurves-p256-verify.bin'.
+    make clean && make BACKEND=uci EMBED_P256_OVERLAY=1 USE_OVERLAY_P256_EMBED=0
+      -> OK, build/labels.txt produced
+    make BACKEND=uci EMBED_P256_OVERLAY=1
+      ld65: Warning: cfg/p256-overlay-verify.cfg(26): Segment
+            'LIB_NISTCURVES_P256_CODE' overflows memory area
+            'OVERLAY_REGION' by 644 bytes
+
+Sizes from the bootstrap link's map: `LIB_NISTCURVES_P256_CODE` = `$2084`
+(8,324 B) against a `$1E00` (7,680 B) region — 644 B exactly, the same
+figure the issue recorded at v0.10.1, so the shortfall is structural.
+
+**The finding the issue did not have**: the slot the image would be paged
+into is no longer free. In every default UCI build `CRYPTO_OVERLAY` carries
+
+    TLS_DEFRAME_CODE      $4389-$48EB   1,379 B
+    CERT_BUF_BSS          $48EC-$50EB   2,048 B
+    X509_NAME_CODE        $5591-$577B     491 B
+    HTTPS_TARGET_RODATA   $577C-$578B      16 B
+
+so `crypto_swap_to_p256_verify`'s `$1E00`-byte DMA into `$4200` would
+overwrite the streaming deframer, the leaf certificate buffer and the
+server-name check — the same hazard class as the P-384 overlay corruption
+fixed in v0.4.1, and the deframer + cert_buf are precisely what made real
+servers reachable. The three options the issue names (shrink the archive,
+enlarge the slot, split the image) all presuppose a free slot, and none of
+them has a consumer: all three shipped products use the resident verify in
+`CRYPTO_HOT`, and the W3 P-256 swap arm was never on a live code path
+(`ecdsa_verify` calls `ecdsa_verify_256` directly; only the boot stash and
+the `crypto_overlay_call` dispatcher reference it).
+
+Resolution: the flag now fails at Makefile parse with a message naming both
+reasons (c64-lib-contract §6.3), for both `EMBED_P256_OVERLAY=1` and the
+ca65-level `USE_OVERLAY_P256_EMBED=1`. Plain `make BACKEND=uci` is
+byte-identical across the change (`3030c11b…`, 62,977 B). The overlay
+plumbing stays in tree; deleting it is a separate, larger cleanup. The
+`build/labels.txt` order-only defect is untouched — after this guard it
+affects only `USE_OVERLAY_P384_EMBED`, which cannot complete anyway, so a
+fix there would be unverifiable.

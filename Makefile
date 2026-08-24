@@ -307,24 +307,37 @@ else ifeq ($(BACKEND),uci)
 NET_SRCS := $(UCI_SRCS)
 CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
 
-# --- W3: EMBED_P256_OVERLAY=1 stages the P-256 verify .bin as a
-# .incbin into CRYPTO_OVERLAY at PRG-load time.  Mutually exclusive
-# with USE_OVERLAY_P384_EMBED (same slot at $4200) — the rules below
-# turn the P-384 SHA embed off when EMBED_P256_OVERLAY=1 to avoid
-# overflowing the 7,680 B slot.  Default 0 so the un-flagged UCI
-# build is byte-identical to today.
-#
-# Mirrors the P-384 USE_OVERLAY_P384_EMBED bootstrap pattern: the user-
-# visible Make flag is `EMBED_P256_OVERLAY=1`; the ca65-level symbol
-# `USE_OVERLAY_P256_EMBED` (which gates the .incbin in
-# src/crypto/shared/p256_overlay_blobs.s) defaults to the same value
-# but can be explicitly overridden via the command line for the
-# bootstrap prelim link (avoids the overlay-bin <-> labels.txt cycle on
-# a clean tree).  Bootstrap workflow:
-#   make BACKEND=uci EMBED_P256_OVERLAY=1 USE_OVERLAY_P256_EMBED=0
-#   make BACKEND=uci EMBED_P256_OVERLAY=1
+# --- W3 (RETIRED, see the guard below): EMBED_P256_OVERLAY=1 was meant
+# to stage the P-256 verify .bin as a .incbin into CRYPTO_OVERLAY at
+# PRG-load time, mutually exclusive with USE_OVERLAY_P384_EMBED (same
+# slot at $4200).  The user-visible flag is `EMBED_P256_OVERLAY`; the
+# ca65-level symbol `USE_OVERLAY_P256_EMBED` gates the .incbin in
+# src/crypto/shared/p256_overlay_blobs.s and the boot stash in boot.s.
+# Both default to 0 so the un-flagged UCI build is unchanged.
 EMBED_P256_OVERLAY ?= 0
 USE_OVERLAY_P256_EMBED ?= $(EMBED_P256_OVERLAY)
+
+# Issue #118: the W3 P-256 overlay embed cannot be built and, if it could,
+# would corrupt the running image. Fail here rather than three rules later
+# with an error that names a library segment (c64-lib-contract §6.3: a knob
+# naming an axis selects it or fails loudly). Two independent reasons,
+# both measured at libs/nistcurves v0.11.2:
+#   1. LIB_NISTCURVES_P256_CODE is 8,324 B; OVERLAY_REGION is 7,680 B.
+#      The 644 B shortfall survived every pin from v0.7.0 to v0.11.2, so
+#      it is structural, not drift.
+#   2. CRYPTO_OVERLAY ($4200-$5FFF) is no longer a free paging slot: every
+#      UCI build keeps TLS_DEFRAME_CODE, CERT_BUF_BSS, X509_NAME_CODE and
+#      HTTPS_TARGET_RODATA resident there (~5 KB). crypto_swap_to_p256_verify
+#      DMAs $1E00 bytes over that span - the same hazard class as the
+#      P-384 overlay corruption fixed in v0.4.1.
+# The resident P-256 verify in CRYPTO_HOT is what every shipped product
+# uses; the overlay plumbing stays in tree for a future memory-map rework.
+ifeq ($(EMBED_P256_OVERLAY),1)
+$(error EMBED_P256_OVERLAY=1 is retired (issue #118): the P-256 verify image is 644 B larger than OVERLAY_REGION, and CRYPTO_OVERLAY now holds resident deframer/cert_buf/name-check code that the swap would overwrite. The resident verify in CRYPTO_HOT is the supported path)
+endif
+ifeq ($(USE_OVERLAY_P256_EMBED),1)
+$(error USE_OVERLAY_P256_EMBED=1 is the ca65-level half of EMBED_P256_OVERLAY, which is retired (issue #118))
+endif
 
 # Phase 3: embed the two P-384 split overlay blobs in the PRG so boot
 # can populate REU banks 6/7 at startup.  Gated to UCI (ip65 has no

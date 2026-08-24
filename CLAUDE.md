@@ -73,8 +73,16 @@ Variables:
     ~36 min at 1 MHz — rigs need `C64_INIT_WAIT`). Fastest above ~5-7 MHz.
   - `USE_X25519_SIBLING=1` — links under **neither** backend today (see
     Known issues). Off by default, ships in nothing.
-  - `EMBED_P256_OVERLAY=1`, `USE_OVERLAY_P384_EMBED=1` — broken
-    (`build/labels.txt` ordering defect); not guarded against each other.
+  - `EMBED_P256_OVERLAY=1` — **retired, `$(error)`-guarded (#118)**: the
+    P-256 verify image is 644 B larger than the 7,680 B slot at every pin
+    since v0.7.0, and `CRYPTO_OVERLAY` now holds ~5 KB of resident
+    deframer/`cert_buf`/name-check code that the swap would DMA over. The
+    plumbing (`p256_overlay_blobs.s`, `crypto_swap_to_p256_verify`,
+    `cfg/p256-overlay-verify.cfg`, `make p256-overlay`) stays in tree.
+  - `USE_OVERLAY_P384_EMBED=1` — broken: from a clean tree the overlay
+    `.bin` rules order-only depend on `build/labels.txt`, which only the
+    (gated-off) main link produces; past that, the SHA-384 tables overflow
+    the slot by 1,536 B.
   - `ENABLE_P384_VERIFY=1` — re-arms the P-384 verify arm. **Unsafe on its
     own** (overwrites live code — see Crypto ABI); exists so
     `tools/test_p384_overlay_hazard.py` can be mutation-tested.
