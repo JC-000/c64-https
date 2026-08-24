@@ -10,15 +10,13 @@
 ;                     GET_IPADDR command. Does NOT run DHCP ourselves —
 ;                     the firmware already did that before the PRG started.
 ;
-; Exports two symbol families:
-;
-;   (a) net_abi.inc contract — the long-term public names.
-;   (b) legacy caller names currently imported by boot.s / http.s /
-;       tls_record_io.s — kept as thin aliases until those callers are
-;       migrated onto net_abi.inc in a later phase.
-;
-; Also publishes `net_banner_str`, the backend-specific banner line
-; consumed by boot.s's startup print.
+; Exports exactly the surface src/net_abi.inc imports (c64-lib-contract
+; SPEC §13 core/TCP/DNS families, issue #70) plus the two c64-https
+; extensions declared there: net_recv_byte (the drain entry) and
+; net_banner_str (the backend-specific banner line boot.s prints).
+; Error codes live in uci_errors.inc, in the §13.2 UCI range $80-$BF,
+; which is ONE namespace shared with c64-wireguard — allocate in SPEC
+; §13.2's table first.
 
 .include "uci_regs.inc"
 .include "uci_errors.inc"
@@ -292,6 +290,45 @@ net_poll:
         rts
 
 @have_data:
+        ; --- Bound the copy by the request (#140, SPEC §13.3) --------------
+        ; The response header is NOT a delivered-byte count on the TCP
+        ; SOCKET_READ path. Measured on fw 3.14d (U64E, 2026-08-24, real
+        ; github.com session, first poll, ring empty): request $0200,
+        ; header $FFFF — the same sentinel c64-wireguard saw for a 1500 B
+        ; UDP request. The copy below used to survive that only because it
+        ; re-checks ring-full and DATA_AV per byte; a refactor of the loop
+        ; would have turned the header into a runaway copy. So the count is
+        ; capped at uci_req_len — what this poll actually asked for, which
+        ; the ring clamp above may have made smaller than UCI_READ_CHUNK_MAX.
+        ; Bytes beyond the request were never delivered (they stay in the
+        ; firmware for the next poll), so capping loses nothing and is not
+        ; a trim of real data. A drop-and-error here (the first cut of this
+        ; check, emitting UCI_ERR_LONG_READ) aborted every real handshake at
+        ; ServerHello: "header > request" is routine on TCP, so $8A is a
+        ; UDP-path code and this adapter never emits it.
+        lda uci_req_len+0
+        cmp uci_poll_rem+0
+        lda uci_req_len+1
+        sbc uci_poll_rem+1          ; C=1 iff req >= header (16-bit)
+        bcs @len_bounded
+        ; header > request. $FFFF is the firmware's routine "more than you
+        ; asked" sentinel; anything else above the request is a header the
+        ; firmware has no documented mode for. Leave a breadcrumb for that
+        ; case ($8B, best-effort: C=0, stream continues — the cap below
+        ; makes it safe either way) so a post-mortem can tell the two
+        ; apart. Allocated in c64-lib-contract SPEC §13.2 before use.
+        lda uci_poll_rem+0
+        and uci_poll_rem+1
+        cmp #$FF
+        beq @len_cap                ; $FFFF sentinel — routine, no breadcrumb
+        lda #UCI_ERR_BAD_READ_HDR
+        sta net_last_error
+@len_cap:
+        lda uci_req_len+0
+        sta uci_poll_rem+0
+        lda uci_req_len+1
+        sta uci_poll_rem+1
+@len_bounded:
         ; Copy exactly (uci_poll_rem) bytes from UCI_RESP_DATA into the
         ; ring at tcp_recv_buf + tcp_recv_tail, advancing the masked tail.
         ; The store uses SMC on @rb_store so we can hit the full 4 KB

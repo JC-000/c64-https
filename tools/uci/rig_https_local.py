@@ -715,7 +715,7 @@ def _dump_diag(transport: Ultimate64Transport,
                  "tls_recv_progress", "tls_recv_sub_progress"):
         if name in labels:
             print(f"  {name:22s} : 0x{r8(name):02X}")
-    for name in ("tcp_recv_head", "tcp_recv_tail",
+    for name in ("tcp_recv_head", "tcp_recv_tail", "uci_req_len", "uci_read_hdr",
                  "http_status", "http_resp_len"):
         if name in labels:
             print(f"  {name:22s} : ${r16(name):04X}")

@@ -2839,3 +2839,55 @@ region ends); hashes changed, as they must.
   2026-08-24 and only a cross-repo diff noticed.
 - c64-wireguard#48 keeps its own items (UDP-family renames, manifests);
   `d9cd021`'s ring clamp is flagged there as §13.3 context for wg#46.
+
+### #140 — the SOCKET_READ header is not a length (same day)
+
+Filed by the c64-wireguard lane while reviewing the above: `net_poll` took
+the response header straight into `uci_poll_rem` and copied; a wild
+header was survived only because the copy loop re-checks ring-full and
+DATA_AV per byte. They had learned it the hard way — c64-wireguard PR #62
+trusted the header and copied ~18 KB through `$D000`, leaving packet
+bytes in the VIC registers.
+
+**First cut, and why it was wrong.** Ported their UDP check verbatim:
+compare the header to `uci_req_len`, and on an over-claim drop the
+response, emit `$8A UCI_ERR_LONG_READ`, mark the socket `NET_TCP_ERROR`.
+It fired on **every** real github.com session, at the first poll, with
+the ring empty (`tls_last_state=2`). Adding the pair to the rig's
+post-mortem dump gave the numbers:
+
+    uci_req_len   $0200
+    uci_read_hdr  $FFFF
+
+fw 3.14d answers a 512 B TCP `SOCKET_READ` with `$FFFF` — the same
+sentinel c64-wireguard measured for a 1500 B UDP request. On TCP the
+header is not a delivered count; the FIFO simply delivers what it has
+(bounded by the request) and `DATA_AV` drops. "Over-claim" is therefore
+routine on this path and the wrong frame for a code; a drop would abort
+every handshake, which is exactly what it did.
+
+**What landed instead**: the copy count is capped at `uci_req_len` — a
+memory-safety bound, not an error. Bytes beyond the request were never
+delivered (they stay in the firmware for the next poll), so the cap loses
+nothing. `$8A` stays reserved with c64-wireguard's UDP meaning (datagram
+length exceeded the request → datagram dropped) and this adapter never
+emits it; the registry row in c64-lib-contract#139 is being reworded to
+scope the meaning by transport, because two UCI-family adapters were
+about to give one byte two operational meanings — the `$88` failure one
+row down, caught by the cross-repo view a second time in one release
+cycle.
+
+The reverse port — our ring-free clamp into c64-wireguard — does NOT
+apply either: their inbound is a flat interlocked buffer with no wrap,
+and on 3.14d any request size other than 512 breaks their read path
+outright (GideonZ/1541ultimate#802).
+
+**Detector kept.** A bare cap would also have normalised a third case —
+a header above the request that is *not* `$FFFF`, which the firmware has
+no documented mode for — silently. The review on c64-lib-contract#139
+asked for that to stay distinguishable, and it does: `$8B
+UCI_ERR_BAD_READ_HDR`, a best-effort breadcrumb on the §13.1 short-write
+pattern (copy still capped, C=0, stream continues, code left in
+`net_last_error`). Allocated in SPEC §13.2's table before the adapter
+emitted it — the first code to go through the rule the table exists for.
+
