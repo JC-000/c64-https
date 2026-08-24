@@ -119,14 +119,8 @@
         .import crypto_init
 
         ; ---- imports: network (backend adapter — ip65 or uci) ----
-        .import net_init
-        .import net_dhcp
-        .import net_poll
-        .import net_print_ip
-        .import net_dns_resolve
-        .import net_tcp_connect
-        .import net_tcp_close
-        .import net_banner_str
+        ; Networking comes ONLY through the §13 ABI header (issue #70).
+        .include "net_abi.inc"
 
         ; ---- imports: TLS state machine ----
         .import tls_connect
@@ -421,7 +415,7 @@ do_net_init:
         ldy #>dhcp_msg
         jsr print_string
 
-        jsr net_dhcp
+        jsr net_dhcp_acquire
         bcc @dhcp_ok
 
         lda #<dhcp_fail_msg
@@ -433,7 +427,7 @@ do_net_init:
         lda #<dhcp_ok_msg
         ldy #>dhcp_ok_msg
         jsr print_string
-        jsr net_print_ip
+        jsr print_local_ip
 
         lda #1
         sta net_initialized
@@ -1122,6 +1116,80 @@ reu_p384_overlay_init:
 ; =============================================================================
 ; Strings (read-only)
 ; =============================================================================
+; =============================================================================
+; print_local_ip - print net_local_ip in dotted decimal + CR
+;
+; Consumer UI, deliberately outside the network ABI (c64-lib-contract SPEC
+; §13.1 lists net_print_ip under "deliberately not in the contract"). One
+; copy for both backends now that net_local_ip is ABI data on ip65 too;
+; it replaced two identical per-backend routines. Rides LOADER_OVERFLOW:
+; the ip65 LOADER region is the tightest in the image and this was the
+; one routine that could leave it.
+; =============================================================================
+        .segment "LOADER_OVERFLOW"
+print_local_ip:
+        lda net_local_ip+0
+        jsr @print_byte
+        lda #'.'
+        jsr chrout
+        lda net_local_ip+1
+        jsr @print_byte
+        lda #'.'
+        jsr chrout
+        lda net_local_ip+2
+        jsr @print_byte
+        lda #'.'
+        jsr chrout
+        lda net_local_ip+3
+        jsr @print_byte
+        lda #$0d
+        jmp chrout
+
+; print decimal byte value (0-255), no leading zeros
+@print_byte:
+        sta @pb_val
+        ldx #0
+        sec
+@pb_100:
+        sbc #100
+        bcc @pb_100d
+        inx
+        jmp @pb_100
+@pb_100d:
+        adc #100
+        cpx #0
+        beq @pb_tens            ; skip leading zero
+        pha
+        txa
+        ora #$30
+        jsr chrout
+        pla
+@pb_tens:
+        ldx #0
+        sec
+@pb_10:
+        sbc #10
+        bcc @pb_10d
+        inx
+        jmp @pb_10
+@pb_10d:
+        adc #10
+        cpx #0
+        bne @pb_t_out
+        ldy @pb_val
+        cpy #10
+        bcc @pb_ones            ; value < 10, skip tens digit
+@pb_t_out:
+        pha
+        txa
+        ora #$30
+        jsr chrout
+        pla
+@pb_ones:
+        ora #$30
+        jmp chrout
+@pb_val: .byte 0
+
         .segment "RODATA"
 
 ; Banner is split in two so the per-backend `net_banner_str` (imported

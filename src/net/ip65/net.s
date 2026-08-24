@@ -22,22 +22,30 @@
 
 .include "constants.inc"
 .include "ip65_symbols.inc"
+.include "ip65_errors.inc"      ; NET_ERR_IP65_* ($40-$7F, SPEC §13.2)
+.include "net_states.inc"       ; NET_TCP_* (SPEC §13.1)
 
-; --- Public ABI (what the rest of the firmware imports) ---
-; Names match the legacy ACME entry points; net_abi.inc-style renames
-; (net_dhcp_acquire, net_tcp_set_recv_cb, etc.) are deferred to Phase 7.
+; --- Public ABI: exactly the surface src/net_abi.inc imports (SPEC §13) ---
+; Core family
 .export net_init
-.export net_dhcp
+.export net_dhcp_acquire
 .export net_poll
-.export net_dns_resolve
+.export net_local_ip
+.export net_last_error
+; TCP family
 .export net_tcp_connect
 .export net_tcp_send
-.export net_tcp_close
-.export net_print_ip
-.export net_recv_ready
-.export net_recv_byte
 .export net_send_len
-.export net_tcp_recv_cb
+.export net_tcp_close
+.export net_tcp_state
+; DNS family
+.export net_dns_resolve
+.export net_resolved_ip
+; c64-https extension (not §13)
+.export net_recv_byte
+; net_tcp_recv_cb, net_save_zp, net_restore_zp are adapter-internal (§13.5)
+; and deliberately NOT exported. tools/test_net.py reaches them through
+; build/labels.txt, which carries local labels too.
 
 ; --- BSS imports from data.s ---
 .import zp_save_buf
@@ -51,7 +59,8 @@
 
 ; =============================================================================
 ; net_init - initialize ip65 + ethernet (RR-Net CS8900a)
-; Output: C=0 success, C=1 failure
+; Output: C=0 success (net_last_error/net_tcp_state cleared),
+;         C=1 failure (net_last_error = NET_ERR_IP65_INIT)
 ; =============================================================================
 net_init:
         jsr net_save_zp
@@ -63,20 +72,41 @@ net_init:
         bcs @init_fail
         ; resolve variable table pointers for TCP callback SMC
         jsr net_init_cb_addrs
+        lda #0
+        sta net_last_error
+        sta net_tcp_state       ; NET_TCP_CLOSED
         clc
+        rts
 @init_fail:
+        lda #NET_ERR_IP65_INIT
+        sta net_last_error
+        sec
         rts
 
 ; =============================================================================
-; net_dhcp - obtain IP address via DHCP
-; Output: C=0 success, C=1 failure
+; net_dhcp_acquire - obtain IP address via DHCP (SPEC §13.1 core family)
+; Output: C=0 success, net_local_ip = the lease
+;         C=1 failure, net_last_error = NET_ERR_IP65_DHCP
 ; =============================================================================
-net_dhcp:
+net_dhcp_acquire:
         jsr net_save_zp
         jsr ip65_dhcp_init
         php
         jsr net_restore_zp
         plp
+        bcs @dhcp_fail
+        ldx #3
+@dhcp_copy:
+        lda ip65_cfg_ip,x
+        sta net_local_ip,x
+        dex
+        bpl @dhcp_copy
+        clc
+        rts
+@dhcp_fail:
+        lda #NET_ERR_IP65_DHCP
+        sta net_last_error
+        sec
         rts
 
 ; =============================================================================
@@ -98,9 +128,10 @@ net_poll:
         rts
 
 ; =============================================================================
-; net_dns_resolve - resolve hostname to IP address
+; net_dns_resolve - resolve hostname to IP address (eager, SPEC §13.1)
 ; Input: A/X = pointer to null-terminated hostname string
-; Output: C=0 success (IP in ip65_dns_ip_addr), C=1 failure
+; Output: C=0 success (IP in ip65_dns_ip_addr and net_resolved_ip),
+;         C=1 failure (net_last_error = NET_ERR_IP65_DNS)
 ; =============================================================================
 net_dns_resolve:
         pha                     ; save A (hostname lo) across ZP save
@@ -115,6 +146,19 @@ net_dns_resolve:
         php
         jsr net_restore_zp
         plp
+        bcs @dns_fail
+        ldx #3
+@dns_copy:
+        lda ip65_dns_ip_addr,x
+        sta net_resolved_ip,x
+        dex
+        bpl @dns_copy
+        clc
+        rts
+@dns_fail:
+        lda #NET_ERR_IP65_DNS
+        sta net_last_error
+        sec
         rts
 
 ; =============================================================================
@@ -145,12 +189,23 @@ net_tcp_connect:
         php
         jsr net_restore_zp
         plp
+        bcs @connect_fail
+        lda #NET_TCP_CONNECTED
+        sta net_tcp_state
+        clc
+        rts
+@connect_fail:
+        lda #NET_TCP_CONNECT_FAIL
+        sta net_tcp_state
+        lda #NET_ERR_IP65_CONNECT
+        sta net_last_error
+        sec
         rts
 
 ; =============================================================================
 ; net_tcp_send - send data over TCP
 ; Input: A/X = pointer to data, net_send_len = 16-bit length
-; Output: C=0 success, C=1 failure
+; Output: C=0 success, C=1 failure (net_last_error = NET_ERR_IP65_SEND)
 ; =============================================================================
 net_tcp_send:
         sta net_send_ptr
@@ -168,104 +223,22 @@ net_tcp_send:
         php
         jsr net_restore_zp
         plp
+        bcc @send_ok
+        lda #NET_ERR_IP65_SEND
+        sta net_last_error
+        sec
+@send_ok:
         rts
 
 ; =============================================================================
-; net_tcp_close - close TCP connection
+; net_tcp_close - close TCP connection; always leaves NET_TCP_CLOSED (§13.1)
 ; =============================================================================
 net_tcp_close:
         jsr net_save_zp
         jsr ip65_tcp_close
         jsr net_restore_zp
-        rts
-
-; =============================================================================
-; net_print_ip - display current IP address in dotted decimal
-; =============================================================================
-net_print_ip:
-        lda ip65_cfg_ip
-        jsr @print_byte
-        lda #'.'
-        jsr chrout
-        lda ip65_cfg_ip+1
-        jsr @print_byte
-        lda #'.'
-        jsr chrout
-        lda ip65_cfg_ip+2
-        jsr @print_byte
-        lda #'.'
-        jsr chrout
-        lda ip65_cfg_ip+3
-        jsr @print_byte
-        lda #$0d
-        jsr chrout
-        rts
-
-; print decimal byte value (0-255)
-@print_byte:
-        sta @pb_val
-        ; hundreds
-        ldx #0
-        sec
-@pb_100:
-        sbc #100
-        bcc @pb_100d
-        inx
-        jmp @pb_100
-@pb_100d:
-        adc #100
-        cpx #0
-        beq @pb_tens            ; skip leading zero
-        pha
-        txa
-        ora #$30
-        jsr chrout
-        pla
-@pb_tens:
-        ldx #0
-        sec
-@pb_10:
-        sbc #10
-        bcc @pb_10d
-        inx
-        jmp @pb_10
-@pb_10d:
-        adc #10
-        ; print tens (always if hundreds was printed, otherwise skip leading zero)
-        cpx #0
-        bne @pb_t_out
-        ldy @pb_val
-        cpy #10
-        bcc @pb_ones            ; value < 10, skip tens
-@pb_t_out:
-        pha
-        txa
-        ora #$30
-        jsr chrout
-        pla
-@pb_ones:
-        ora #$30
-        jsr chrout
-        rts
-@pb_val: .byte 0
-
-; =============================================================================
-; net_recv_ready - check if data is available in receive ring buffer
-; Output: C=0 if data available, C=1 if empty
-;
-; The ring is empty iff head == tail (16-bit compare).
-; =============================================================================
-net_recv_ready:
-        lda tcp_recv_head+0
-        cmp tcp_recv_tail+0
-        bne @has
-        lda tcp_recv_head+1
-        cmp tcp_recv_tail+1
-        bne @has
-        sec                     ; empty
-        rts
-@has:
-        clc
+        lda #NET_TCP_CLOSED
+        sta net_tcp_state
         rts
 
 ; =============================================================================
@@ -503,3 +476,12 @@ net_restore_zp:
 ; =============================================================================
 net_send_ptr:   .word 0         ; pointer for tcp_send wrapper
 net_send_len:   .word 0         ; length for tcp_send wrapper
+
+; SPEC §13.1 core/TCP/DNS data. Zero at boot (BSS lives under the BASIC
+; ROM shadow, which boot's zbss loop clears): net_tcp_state starts
+; NET_TCP_CLOSED, net_last_error at $00, both IPs unset.
+.segment "BSS"
+net_local_ip:       .res 4      ; lease copied from ip65_cfg_ip on DHCP success
+net_resolved_ip:    .res 4      ; copied from ip65_dns_ip_addr on resolve success
+net_last_error:     .res 1      ; NET_ERR_IP65_* (ip65_errors.inc); $00 = OK
+net_tcp_state:      .res 1      ; NET_TCP_* (net_states.inc)

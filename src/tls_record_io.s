@@ -25,9 +25,7 @@
 .export tls_recv_state
 .export tls_recv_count
 
-.import net_tcp_send
-.import net_recv_byte
-.import net_send_len
+.include "net_abi.inc"          ; net_tcp_send, net_recv_byte, net_send_len
 .import tls_record_encrypt
 .import tls_record_decrypt
 .import tls_rec_header

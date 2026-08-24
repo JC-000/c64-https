@@ -78,13 +78,7 @@
         .import tls_recv
 
         ; ---- imports: net.asm wrappers around ip65 ----
-        .import net_dns_resolve
-        .import net_tcp_connect
-        .import net_tcp_close
-        .import net_tcp_send
-        .import net_send_len
-        .import net_poll
-        .import net_recv_byte
+        .include "net_abi.inc"  ; the §13 surface, nothing imported directly
 
 ; =============================================================================
 ; http_get - perform an HTTPS GET request

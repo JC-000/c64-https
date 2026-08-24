@@ -1,8 +1,15 @@
 ; src/net/uci/uci_errors.inc — UCI backend error codes
 ;
 ; Values stored in net_last_error by the UCI adapter. 0 = OK.
-; Kept deliberately small and distinct from any ip65 error values so
-; that future multi-backend debugging can tell them apart at a glance.
+;
+; $80-$BF is the UCI-family range c64-lib-contract SPEC §13.2 grandfathers,
+; and it is ONE namespace shared by every UCI-family adapter in the fleet
+; (c64-https and c64-wireguard today). The allocation table in SPEC §13.2
+; is the authority: allocate a new code THERE first, then here, so the two
+; adapters cannot hand out the same value with different meanings.
+; ip65-family codes live in $40-$7F (src/net/ip65/ip65_errors.inc).
+
+.include "net_states.inc"       ; NET_TCP_* (SPEC §13.1) — the primary names
 
 UCI_ERR_OK             = $00    ; no error
 UCI_ERR_NOT_PRESENT    = $81    ; $DF1D did not read back UCI_ID_VALUE ($C9)
@@ -12,14 +19,22 @@ UCI_ERR_CONNECT_FAIL   = $84    ; TCP_CONNECT returned an error bit
 UCI_ERR_SEND_FAIL      = $85    ; SOCKET_WRITE returned an error bit
 UCI_ERR_READ_FAIL      = $86    ; SOCKET_READ returned an error bit
 UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE wrote fewer bytes than requested
-UCI_ERR_NO_SOCKET      = $88    ; TCP_CONNECT response yielded no socket_id
-UCI_ERR_WAIT_TIMEOUT   = $89    ; uci_wait_idle exceeded its wall-clock budget
+UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
+UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
+UCI_ERR_LONG_READ      = $8A    ; SOCKET_READ claimed more bytes than we asked
+                                ; for. Allocated by c64-wireguard (2026-08-24);
+                                ; reserved here with the same meaning. This
+                                ; adapter does not emit it yet — net_poll
+                                ; stops at DATA_AV rather than checking the
+                                ; claimed length against the request.
 
-; TCP state values stored in net_tcp_state
-UCI_TCP_CLOSED         = $00    ; no active socket
-UCI_TCP_CONNECTED      = $01    ; connected, reads/writes valid
-UCI_TCP_ERROR          = $02    ; saw an error on a read — stop polling
-UCI_TCP_CONNECT_FAIL   = $03    ; TCP_CONNECT did not yield a usable socket
+; TCP state values stored in net_tcp_state. The NET_TCP_* spellings in
+; net_states.inc are the contract's (§13.1); these aliases keep the
+; historical names readable in diagnostics and in c64-wireguard's copy.
+UCI_TCP_CLOSED         = NET_TCP_CLOSED
+UCI_TCP_CONNECTED      = NET_TCP_CONNECTED
+UCI_TCP_ERROR          = NET_TCP_ERROR
+UCI_TCP_CONNECT_FAIL   = NET_TCP_CONNECT_FAIL
 
 ; UCI firmware data queue max per SOCKET_WRITE push (see uci_network.py)
 UCI_DATA_QUEUE_MAX     = 800
