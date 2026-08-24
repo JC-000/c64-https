@@ -29,8 +29,11 @@ UCI_ERR_LONG_READ      = $8A    ; Datagram family (c64-wireguard): the
                                 ; observation is $8B below. $FFFF is the
                                 ; firmware's no-data sentinel on BOTH
                                 ; transports and must be excluded before any
-                                ; over-claim test (#140; both adapters got
-                                ; this wrong independently).
+                                ; length arithmetic (#140; both adapters got
+                                ; this wrong independently). No non-sentinel
+                                ; over-claim has been observed on either
+                                ; transport; both codes are reserved
+                                ; defensively.
 UCI_ERR_BAD_READ_HDR   = $8B    ; Stream family: SOCKET_READ header exceeded
                                 ; the request and was NOT the $FFFF no-data
                                 ; sentinel — a value the firmware has no

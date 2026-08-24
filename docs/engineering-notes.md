@@ -2907,3 +2907,17 @@ was wrong and is corrected. Registry rows now pair `$8A` (datagram:
 drop, terminal) with `$8B` (stream: cap, advisory) as one observation
 with family-specific disposition, and require excluding `$FFFF` first.
 
+**And the founding incident retires too.** The contract reviewer went
+back to c64-wireguard PR #62 (`6fecc97`), the commit `$8A` was born
+on: its own message says the copy count came straight from the header
+into a loop whose SMC store bumps its own high byte, from a buffer at
+`$89D4`. `$FFFF` = 65535 as a copy count from an idle poll writes
+straight through `$D000` — the ~18 KB, the VIC damage, all of it, with
+no firmware over-claim involved. So after excluding the sentinel there
+is **no measured non-sentinel over-claim on either transport**; `$8A`
+and `$8B` are reserved defensively, and the registry says so. The rule
+that travels: exclude the sentinel before any length arithmetic, and
+never let a device-supplied count be the only bound on a store loop —
+which is what the cap in `net_poll` now guarantees regardless of what
+the header says.
+
