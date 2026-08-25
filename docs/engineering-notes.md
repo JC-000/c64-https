@@ -2921,3 +2921,17 @@ never let a device-supplied count be the only bound on a store loop —
 which is what the cap in `net_poll` now guarantees regardless of what
 the header says.
 
+
+**The UDP header, measured (c64-wireguard lane, 2026-08-25, fresh power
+cycle, each row repeated):** 600/768/1024/1280 B datagrams against a
+512 B request all return `rx_len` 512 and header `$0200` — the delivered
+count, never the true size, never above the request. So on 3.14d the
+over-claim condition has **no observable trigger on either transport**:
+TCP's header is a sentinel on idle polls, UDP's is the delivered count.
+The two transports are not uniform, and each adapter had generalised
+from its own to the other. Consequences recorded in c64-lib-contract#139:
+`$8A`/`$8B` stay allocated but the "adapter drops it" clause is gone —
+a truncated 1280 B datagram is byte-identical to a complete 512 B one in
+every readable register, so truncation is silent and the consumer's MTU
+pin is the sole defence (now stated in SPEC §13.3). For c64-https the
+TCP cap in `net_poll` (#143) remains the right bound and is unaffected.
