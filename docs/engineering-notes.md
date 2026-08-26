@@ -2935,3 +2935,33 @@ a truncated 1280 B datagram is byte-identical to a complete 512 B one in
 every readable register, so truncation is silent and the consumer's MTU
 pin is the sole defence (now stated in SPEC §13.3). For c64-https the
 TCP cap in `net_poll` (#143) remains the right bound and is unaffected.
+
+**Correction (c64-wireguard lane, 2026-08-26): the 512 cap was theirs, and
+ours.** `UCI_READ_CHUNK_MAX = 512` was c64-wireguard's Phase 3 MVP
+constant; having only ever asked for 512 they measured only ever
+receiving 512 and reported it as a firmware ceiling — and our
+`uci_errors.inc` says the same "conservative MVP choice". The real cap is
+**894** = `CMD_MAX_REPLY_LEN` (896) − 2 (GideonZ/1541ultimate#802,
+root-caused by chrisgleissner, re-measured on a U64E: 512-893 B datagrams
+arrive whole with the header reporting the TRUE length). A 1024 request
+is rejected with `82,PARAMETER(S) OUT OF RANGE` on STATUS — which our
+adapter, like theirs, drains without reading. **Never request exactly
+894 on 3.14d**: it fills the response queue exactly and the FPGA repeats
+it forever. So "the header never reports the true length" was an
+artifact of always truncating; the indistinguishability problem is real
+only for genuinely oversized datagrams. Unchanged: no non-sentinel
+over-claim observed; `$FFFF` is `lwip_recv()` returning −1 stored as
+signed 16-bit.
+
+Two consequences here. (1) Our clamp had the same latent trap the
+wireguard lane hit when their cap moved to `$037D`: `cmp #>MAX / bcc /
+bne / lda lo / beq` accepts the equal-high-byte case only when the low
+byte is zero — correct for `$0200`, wrong for any other cap, and in our
+direction it would have *raised* a sub-cap request to the cap, i.e. the
+wikipedia-stall class. Rewritten as a full 16-bit compare in #143 so
+the constant can move. (2) Raising `UCI_READ_CHUNK_MAX` toward 893 is a
+plausible throughput win on TCP (fewer ~40 ms round-trips per flight)
+but every byte read carries a fence (~5.45 ms at 1 MHz), so it is a
+measured follow-up, not a free change — and any test around it should
+find the accepted length by bisection, not hard-code it.
+

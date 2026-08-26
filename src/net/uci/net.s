@@ -166,14 +166,18 @@ net_poll:
         bne :+
         rts                     ; ring effectively full — poll again later
 :
-        ; clamp to UCI_READ_CHUNK_MAX (512 = $0200)
-        lda uci_req_len+1
-        cmp #>UCI_READ_CHUNK_MAX
-        bcc @len_clamped        ; high < 2  -> under 512, keep
-        bne @len_use_max        ; high > 2  -> over, clamp
+        ; clamp to UCI_READ_CHUNK_MAX — full 16-bit compare. The previous
+        ; shape (cmp #>MAX / bcc / bne / lda lo / beq) accepted the
+        ; equal-high-byte case only when the low byte was zero: correct
+        ; for $0200, silently wrong for any other cap (c64-wireguard hit
+        ; exactly that at $037D and read the result as firmware
+        ; misbehaviour). Written cap-shape-independently so raising the
+        ; constant cannot reintroduce it.
         lda uci_req_len+0
-        beq @len_clamped        ; exactly 512, keep
-@len_use_max:
+        cmp #<UCI_READ_CHUNK_MAX
+        lda uci_req_len+1
+        sbc #>UCI_READ_CHUNK_MAX    ; C=1 iff req >= MAX
+        bcc @len_clamped            ; req < MAX -> keep
         lda #<UCI_READ_CHUNK_MAX
         sta uci_req_len+0
         lda #>UCI_READ_CHUNK_MAX

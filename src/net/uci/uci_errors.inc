@@ -56,6 +56,16 @@ UCI_TCP_CONNECT_FAIL   = NET_TCP_CONNECT_FAIL
 UCI_DATA_QUEUE_MAX     = 800
 
 ; SOCKET_READ max-length cap we ask for per net_poll cycle.
-; 512 bytes is well under the 4 KB ring and the firmware data queue,
-; and matches the conservative Phase 3 MVP choice.
+;
+; 512 is a CONSUMER choice, not the firmware's limit — it was c64-wireguard's
+; Phase 3 MVP constant, and both repos carried it as a hardware ceiling
+; because nothing larger had ever been requested. The real ceiling is 894
+; (= CMD_MAX_REPLY_LEN 896 - the 2-byte header; GideonZ/1541ultimate#802,
+; re-measured on a U64E: 512-893 B arrive whole in one poll). NEVER request
+; exactly 894 on fw 3.14d: the reply exactly fills the response queue and
+; the FPGA repeats it forever with DATA_AV asserted (guard only in 3.15,
+; not downloadable). Raising this toward 893 is a measured follow-up, not a
+; free win: every byte read carries a uci_fence (~5.45 ms at 1 MHz), and
+; net_poll's clamp is written cap-shape-independently so the change is one
+; constant.
 UCI_READ_CHUNK_MAX     = 512
