@@ -100,7 +100,7 @@
 .endif
 
 ; --- Networking (net.s) ---
-.import net_poll
+.include "net_abi.inc"          ; net_poll
 
 ; --- Console output (main/util) ---
 .import print_string

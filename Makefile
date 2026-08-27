@@ -47,7 +47,7 @@ IP65_DIR     := ip65
 IP65_BUILD   := ip65-build
 IP65_BIN     := $(IP65_BUILD)/ip65-c64.bin
 
-CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net/$(BACKEND) -I build --debug-info
+CA65FLAGS := -I src -I src/inc -I src/crypto/shared -I src/net -I src/net/$(BACKEND) -I build --debug-info
 # Binary-include search roots for `.incbin` (issue #116).
 #
 # `-I` above does NOT feed `.incbin` — that is a separate search path in ca65,
@@ -191,8 +191,8 @@ CRYPTO_SRCS_ALL := $(wildcard src/crypto/*.s)
 # overlay swap dispatcher, init orchestrator, shared sqtab stub. Always
 # linked; sibling-lib integration (Phase C.3) hangs off these.
 CRYPTO_SHARED_SRCS := $(wildcard src/crypto/shared/*.s)
-IP65_SRCS   := src/net/ip65/ip65_blob.s src/net/ip65/net.s src/net/ip65/net_banner.s src/net/ip65/exports.s
-UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s
+IP65_SRCS   := src/net/ip65/ip65_blob.s src/net/ip65/net.s src/net/ip65/net_banner.s src/net/ip65/exports.s src/net/ip65/net_manifest.s
+UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s src/net/uci/net_manifest.s
 
 # Sibling-lib archive set. Phase C.3's nistcurves-p384 archive remains an
 # external overlay image (see below), not linked into the main PRG.

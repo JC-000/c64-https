@@ -32,7 +32,8 @@ def test_build_integrity(labels):
     # Our code references ip65_base = $2000 in constants
     # Verify key labels exist
     required = [
-        "net_init", "net_dhcp", "net_poll", "net_tcp_connect",
+        "net_init", "net_dhcp_acquire", "net_poll", "net_tcp_connect",
+        "net_local_ip", "net_last_error", "net_tcp_state", "net_resolved_ip",
         "net_tcp_send", "net_tcp_close", "net_save_zp", "net_restore_zp",
         "zp_save_buf", "tcp_recv_buf", "tcp_recv_head", "tcp_recv_tail",
         "net_send_ptr", "net_send_len",
@@ -137,7 +138,8 @@ def test_recv_ring_buffer(transport, labels):
     """Test the TCP receive ring buffer read/write logic.
 
     Manually write data to tcp_recv_buf and manipulate head/tail,
-    then call net_recv_byte and net_recv_ready to verify behavior.
+    then call net_recv_byte to verify behavior. (net_recv_ready was retired
+    with issue #70 — net_recv_byte's C flag is the same test.)
     """
     passed = 0
     failed = 0
@@ -145,21 +147,24 @@ def test_recv_ring_buffer(transport, labels):
     recv_buf = labels.address("tcp_recv_buf")
     recv_head = labels.address("tcp_recv_head")
     recv_tail = labels.address("tcp_recv_tail")
-    recv_ready = labels.address("net_recv_ready")
     recv_byte = labels.address("net_recv_byte")
 
-    if None in (recv_buf, recv_head, recv_tail, recv_ready, recv_byte):
+    if None in (recv_buf, recv_head, recv_tail, recv_byte):
         print("  FAIL: ring buffer labels not found")
         return 0, 1
 
-    # Test 1: Empty buffer — head == tail
-    write_bytes(transport, recv_head, [0])
-    write_bytes(transport, recv_tail, [0])
-    jsr(transport, recv_ready)
-    # After jsr, we can read the processor status from the stack or check carry
-    # Actually, let's test net_recv_byte which returns C=1 when empty
-    # We can check the carry flag indirectly by reading the status register
-    # For simplicity, test by writing known data and reading it back
+    # Test 1: Empty buffer — head == tail. net_recv_byte must not advance
+    # head on an empty ring (it returns C=1; the carry is not observable
+    # through jsr(), so the head is the oracle).
+    write_bytes(transport, recv_head, [0, 0])
+    write_bytes(transport, recv_tail, [0, 0])
+    jsr(transport, recv_byte)
+    head_val = list(read_bytes(transport, recv_head, 2))
+    if head_val == [0, 0]:
+        passed += 1
+    else:
+        print(f"  FAIL: net_recv_byte advanced head on an empty ring: {head_val}")
+        failed += 1
 
     # Test 2: Write 5 bytes to buffer, set tail=5, head=0
     test_data = [0x48, 0x65, 0x6C, 0x6C, 0x6F]  # "Hello"

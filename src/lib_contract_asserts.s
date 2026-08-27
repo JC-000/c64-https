@@ -294,10 +294,7 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 
 
 ; =====================================================================
-; §13.3 — TCP rx ring shape
+; §13 — network backend ABI
 ; =====================================================================
-; The ring mask must be 2^n - 1 or the backends' `and TCP_RECV_MASK`
-; wrap arithmetic aliases addresses instead of wrapping. Assemble-time
-; (`error`, not `lderror`) because TCP_RECV_MASK is a local equate from
-; constants.inc, not an import.
-.assert (TCP_RECV_MASK & (TCP_RECV_MASK + 1)) = 0, error, "TCP_RECV_MASK must be 2^n - 1 (c64-lib-contract SPEC §13.3)"
+; Lives in src/net_abi_asserts.s (issue #70): the §13.0 family asserts
+; plus the §13.3 ring-mask check that used to sit here.

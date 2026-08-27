@@ -17,6 +17,10 @@
 
 .segment "NET_CODE"
 
+; Span labels for the §13.7 footprint assert in net_manifest.s.
+.export ip65_blob_start, ip65_blob_end
+ip65_blob_start:
+
 ; The blob is found through ca65's BINARY include path, set by the
 ; Makefile to an absolute $(abspath $(IP65_BUILD)). Hence the bare
 ; filename: there is deliberately no `../` here to resolve.
@@ -55,3 +59,4 @@
 ; see through .incbin, so without it this object could be assembled before
 ; the blob exists (issue #89).
 .incbin "ip65-c64.bin"
+ip65_blob_end:

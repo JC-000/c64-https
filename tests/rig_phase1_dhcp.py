@@ -2,7 +2,7 @@
 """Phase 1 e2e test: boot c64-https.prg in VICE, press I, see DHCP OK.
 
 This test runs the real c64-https binary in VICE on a Linux bridge with
-RR-Net ethernet and a host-side dnsmasq. It exercises ip65's net_dhcp
+RR-Net ethernet and a host-side dnsmasq. It exercises ip65's net_dhcp_acquire
 end-to-end. It touches NO TLS/HTTP logic -- it only asserts that the
 boot menu appears and that pressing 'I' produces the 'DHCP OK' banner.
 

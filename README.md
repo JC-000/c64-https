@@ -118,15 +118,15 @@ The TLS, HTTP, and crypto layers are backend-agnostic: switching backend
 is a link-line change (different cfg + different `src/net/<backend>/*.o`),
 not a call-site change.
 
-`src/net_abi.inc` is **documentation, not an enforced interface**. No
-translation unit `.include`s it (`grep -rn net_abi src/ tools/ cfg/ Makefile`
-returns only comments), so none of its twelve `.import`s is checked by
-the assembler or the linker. The symbols it declares and the
-symbols TLS/HTTP/boot actually import overlap in 6 of 17, and the ip65
-adapter exports neither `net_dhcp_acquire`, `net_tcp_set_recv_cb`,
-`net_local_ip`, `net_resolved_ip`, `net_last_error` nor `net_tcp_state`
-(`net_last_error` exists only under UCI, so ip65 has no error channel).
-Making the header real, or deleting it, is item P1 of issue #70.
+`src/net_abi.inc` is the **build-enforced** boundary between those layers
+and the backend, aligned with
+[c64-lib-contract SPEC §13](https://github.com/JC-000/c64-lib-contract)
+(issue #70): every consumer TU that touches the network `.include`s it and
+imports nothing else, both backends export the full core + TCP + DNS
+surface, each ships a `net_manifest.s` declaring its families (ip65 also
+declares its blob footprint per §13.7), and `src/net_abi_asserts.s` fails
+the link if a backend stops providing a family. Error codes are
+namespaced per §13.2: ip65 `$40-$7F`, UCI `$80-$BF`.
 
 ### TLS 1.3 Cipher Suite
 

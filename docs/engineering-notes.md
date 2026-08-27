@@ -2741,3 +2741,101 @@ plumbing stays in tree; deleting it is a separate, larger cleanup. The
 `build/labels.txt` order-only defect is untouched — after this guard it
 affects only `USE_OVERLAY_P384_EMBED`, which cannot complete anyway, so a
 fix there would be unverifiable.
+
+## Issue #70 — the network ABI becomes real (2026-08-24)
+
+What `src/net_abi.inc` used to be is recorded above ("Networking backend
+ABI": nothing included it, 6 of 17 symbols overlapped, ip65 had no error
+channel). This entry records what changed and what it cost.
+
+### The change
+
+- `src/net_abi.inc` is `.include`d by `boot.s`, `http.s`,
+  `tls_record_io.s`, `tls13.s`; their ad-hoc `.import net_*` lines are
+  gone. ld65 requires every import to resolve even when unused, so the
+  header now forces both backends to export the whole core/TCP/DNS surface.
+- ip65 grew `net_dhcp_acquire` (was `net_dhcp`), `net_local_ip`
+  (copy of `ip65_cfg_ip` on DHCP success), `net_resolved_ip` (copy of
+  `ip65_dns_ip_addr`), `net_last_error` (`NET_ERR_IP65_*`, `$41-$45`,
+  `src/net/ip65/ip65_errors.inc`) and `net_tcp_state`. The ip65 driver
+  reports only a carry, so each code names the adapter entry that failed.
+- UCI: `net_dhcp` alias, `net_tcp_set_recv_cb` stub and `net_print_ip`
+  deleted; `UCI_TCP_*` → `NET_TCP_*` (aliases kept in `uci_errors.inc`);
+  ring-full now sets `tcp_recv_overflow` (§13.3); `$8A UCI_ERR_LONG_READ`
+  reserved (allocated by c64-wireguard, not emitted here).
+- `net_print_ip` was two identical routines, one per backend, differing
+  only in which IP variable they read. With `net_local_ip` on both it is
+  one consumer-side `print_local_ip` in `boot.s` (SPEC §13.1 lists
+  `net_print_ip` under "deliberately not in the contract").
+- `net_recv_ready` retired (nobody imported it; `net_recv_byte`'s C flag
+  is the same test). `net_tcp_recv_cb` / `net_save_zp` / `net_restore_zp`
+  un-exported (§13.5); `tools/test_net.py` reaches them via
+  `build/labels.txt`, which carries local labels.
+- New: `src/net/net_families.inc` (contract block verbatim),
+  `src/net/net_states.inc`, `src/net/{ip65,uci}/net_manifest.s`,
+  `src/net_abi_asserts.s` (§13.8; also took the §13.3 ring-mask assert
+  from `lib_contract_asserts.s`). ip65's manifest carries the §13.7 blob
+  equates and link-asserts `LIB_NET_IP65_BLOB_SIZE` against
+  `ip65_blob_end - ip65_blob_start`, labels added around the `.incbin`.
+- `NET_BACKEND_FAMILIES` is exported `: absolute`. Without it ld65 warns
+  `Address size mismatch` — the byte-sized value infers zeropage — which
+  is contract #74 recurring in §13.0; worth a spec note upstream.
+
+### Byte accounting (the part that constrained the design)
+
+ip65 LOADER had 16 B free. The new ip65 logic (~95 B: four state stores,
+two 4-byte copies, six error stores) fits only because `net_print_ip`
+(~83 B) and `net_recv_ready` (14 B) left LOADER first:
+
+  region / segment (ip65)        before        after
+  LOADER free                    16 B          58 B
+  LOADER_OVERFLOW                $DE (222 B)   $14C (332 B)  + print_local_ip
+  NET_CODE tail free             170 B         60 B
+  BSS (COLD_SHADOW)              +10 B (net_local_ip, net_resolved_ip,
+                                        net_last_error, net_tcp_state)
+
+`print_local_ip` went to `LOADER_OVERFLOW` (NET_CODE tail) rather than
+`HTTP_AUX_CODE2` (CRYPTO_RESIDENT, 150 B free on ip65-plain) on purpose:
+CRYPTO_RESIDENT is where the next `libs/nistcurves` bump lands, and
+ip65-onchip's copy of it is much tighter than ip65-plain's. The cost is
+the ip65 `HTTPS_HOST`/`HTTPS_PATH` budget, which is now ~60 B beyond the
+default strings. Measured: the wikipedia target (+46 B) still builds on
+ip65-plain and ip65-onchip (`HTTPS_TARGET_RODATA` ends `$3FF1`, 14 B to
+spare on onchip); the theoretical 63+100 B maximum no longer does. ip65
+cannot reach a real server in any case (~36 min per handshake), so the
+budget that shrank is the one with the least to buy.
+
+PRG sizes are unchanged (47,105 / 62,977 B — both images are padded to
+region ends); hashes changed, as they must.
+
+### Evidence
+
+- VICE: `tools/test_net.py` 65/65 (ring, callback, ZP save/restore, the
+  new empty-ring `net_recv_byte` oracle), `tools/test_http.py` 61/61,
+  `tools/test_tls_handshake.py` 21/21.
+- Builds: ip65-plain, uci-plain, ip65-onchip + wikipedia target,
+  uci-comb + wikipedia target + `HTTPS_BODY_TO_REU=1`, all clean, no
+  ld65 warnings.
+- Hardware (U64E, uci-onchip PRG `9e31c1bc…`, 48 MHz): `boot_check` PASS;
+  `phase2_check` PASS — DHCP through `net_dhcp_acquire`, `net_local_ip` =
+  10.43.23.81 read back over DMA, `net_last_error` = 0; `rig_https_live`
+  github.com **PASS, HTTP 200, CFIN 48.1 s** through the full ABI path.
+  `rig_https_local` FAILs — and fails identically on master `ab5de2b` as a
+  control (`tls_last_state=4`, sub-progress `$31`): it sends the listener's
+  IP as the hostname and the v0.4.2 SAN check rejects it. Pre-existing,
+  filed as #141; not evidence about this change.
+- The `UCI_TCP_*` → `NET_TCP_*` promotion is byte-neutral: the onchip PRG
+  hashed `9e31c1bc…` before and after the rename (aliases are equal).
+- Not run: the ip65 VICE ethernet rig (`tests/rig_vice_https_macos.py`)
+  needs `sudo` for the feth pair; the ip65 changes are covered by
+  `test_net.py` at the adapter level only.
+
+### Cross-repo
+
+- c64-lib-contract: §13.2 gains the cross-consumer error-code allocation
+  table (ip65 `$41-$45`, UCI `$81-$8A`) and the allocate-here-first rule;
+  §13.0 gains a canonical `net_families.inc`; §13.8 records c64-https as
+  aligned. The `$8A` case is why: c64-wireguard allocated it on
+  2026-08-24 and only a cross-repo diff noticed.
+- c64-wireguard#48 keeps its own items (UDP-family renames, manifests);
+  `d9cd021`'s ring clamp is flagged there as §13.3 context for wg#46.

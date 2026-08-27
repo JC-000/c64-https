@@ -24,28 +24,26 @@
 .include "uci_errors.inc"
 .include "constants.inc"
 
-; --- net_abi.inc contract ---
+.include "net_states.inc"       ; NET_TCP_* (SPEC §13.1)
+
+; --- Public ABI: exactly the surface src/net_abi.inc imports (SPEC §13) ---
 .export net_init
 .export net_poll
 .export net_dhcp_acquire
 .export net_tcp_connect
 .export net_tcp_send
 .export net_tcp_close
-.export net_tcp_set_recv_cb
 .export net_dns_resolve
 .export net_local_ip
 .export net_resolved_ip
 .export net_last_error
 .export net_tcp_state
 
-; --- legacy caller names (still imported by boot.s / http.s / tls_record_io.s) ---
-.export net_dhcp
-.export net_print_ip
-.export net_recv_byte
-.export net_send_len
-
-; --- banner label consumed by boot.s ---
-.export net_banner_str
+; --- c64-https extensions (not SPEC §13), imported via src/net_abi.inc ---
+.export net_recv_byte           ; the blessed drain entry (#72)
+.export net_send_len            ; §13.1 TCP-family data, listed here for the
+                                ; UCI file layout only
+.export net_banner_str          ; boot banner identity line
 
 ; --- UCI-owned state exported for future phases ---
 .export uci_host_buf
@@ -70,6 +68,7 @@
 ; --- ring BSS owned by src/data.s ---
 .import tcp_recv_head
 .import tcp_recv_tail
+.import tcp_recv_overflow      ; §13.3: set when the ring fills
 
 ; (chrout is provided by constants.inc)
 
@@ -119,22 +118,20 @@ net_init:
 ; =============================================================================
 ; net_poll — pump UCI receive into the TCP ring buffer.
 ;
-; If no socket is open (net_tcp_state != UCI_TCP_CONNECTED) we just RTS.
+; If no socket is open (net_tcp_state != NET_TCP_CONNECTED) we just RTS.
 ; Otherwise we issue SOCKET_READ(sock, UCI_READ_CHUNK_MAX) and, for each
 ; data byte returned after the 2-byte actual_len header, store into
 ; tcp_recv_buf at tcp_recv_tail and advance the masked tail.
 ;
-; We intentionally do NOT honor net_tcp_set_recv_cb here — the HTTP/TLS
-; path drains via net_recv_byte, not via a callback. The set-cb call site
-; exists only in net_abi.inc and is never actually invoked in-tree
-; (Phase 3 grep: 0 `jsr net_tcp_set_recv_cb`), so the UCI backend leaves
-; its set-cb entry point as an RTS stub.
+; There is no receive callback: the HTTP/TLS path drains the ring via
+; net_recv_byte (SPEC §13.3 drain model). The old net_tcp_set_recv_cb
+; RTS stub was deleted per §13.1 (issue #70).
 ;
 ; Clobbers: A, X, Y
 ; =============================================================================
 net_poll:
         lda net_tcp_state
-        cmp #UCI_TCP_CONNECTED
+        cmp #NET_TCP_CONNECTED
         beq @do_poll
         rts
 @do_poll:
@@ -189,7 +186,7 @@ net_poll:
         ; FPGA wedged before we could push SOCKET_READ — net_last_error is
         ; already UCI_ERR_WAIT_TIMEOUT. Force tcp_state to ERROR so the
         ; HTTP/TLS layer stops polling on this socket.
-        lda #UCI_TCP_ERROR
+        lda #NET_TCP_ERROR
         sta net_tcp_state
         rts
 :
@@ -215,7 +212,7 @@ net_poll:
         ; FPGA wedged waiting for SOCKET_READ response — net_last_error is
         ; already UCI_ERR_WAIT_TIMEOUT. Force tcp_state to ERROR so the
         ; HTTP/TLS layer stops polling on this socket.
-        lda #UCI_TCP_ERROR
+        lda #NET_TCP_ERROR
         sta net_tcp_state
         rts
 :
@@ -225,7 +222,7 @@ net_poll:
 
         lda #UCI_ERR_READ_FAIL
         sta net_last_error
-        lda #UCI_TCP_ERROR
+        lda #NET_TCP_ERROR
         sta net_tcp_state
         jsr uci_drain_resp
         bcs @pe_drain_to            ; drain wedged — tcp_state already ERROR
@@ -271,7 +268,7 @@ net_poll:
         jsr uci_ack
         rts
 @hds_drain_to:
-        lda #UCI_TCP_ERROR
+        lda #NET_TCP_ERROR
         sta net_tcp_state
         rts
 
@@ -290,7 +287,7 @@ net_poll:
         jsr uci_ack
         rts
 @hd0_drain_to:
-        lda #UCI_TCP_ERROR
+        lda #NET_TCP_ERROR
         sta net_tcp_state
         rts
 
@@ -322,7 +319,14 @@ net_poll:
         lda uci_next_hi
         cmp tcp_recv_head+1
         bne @not_full
-        jmp @done_data          ; ring full — drop the rest
+        ; ring full — record it (SPEC §13.3: the backend sets the flag,
+        ; then drops) and stop copying this delivery. The clamp at
+        ; @do_poll makes this unreachable in practice: the request never
+        ; exceeds free-1. If it latches, the request/free-space arithmetic
+        ; has regressed — that is the wikipedia-stall bug's signature.
+        lda #1
+        sta tcp_recv_overflow
+        jmp @done_data
 
 @not_full:
         ; Wait for DATA_AV — the firmware streams data in bursts; if the
@@ -373,7 +377,7 @@ net_poll:
         jsr uci_ack
         rts
 @dd_drain_to:
-        lda #UCI_TCP_ERROR
+        lda #NET_TCP_ERROR
         sta net_tcp_state
         rts
 
@@ -504,10 +508,6 @@ net_dhcp_acquire:
         clc
         rts
 
-; Legacy alias — boot.s still imports `net_dhcp` directly.
-net_dhcp:
-        jmp net_dhcp_acquire
-
 ; =============================================================================
 ; net_tcp_connect — open a TCP socket to (uci_host_buf, port).
 ;
@@ -519,7 +519,7 @@ net_dhcp:
 ; port_hi, host_bytes..., 0]. Response = [socket_id].
 ;
 ; On success: stores socket_id in uci_socket_id, sets net_tcp_state =
-; UCI_TCP_CONNECTED, returns C=0. On failure: sets net_last_error =
+; NET_TCP_CONNECTED, returns C=0. On failure: sets net_last_error =
 ; UCI_ERR_CONNECT_FAIL and returns C=1.
 ; =============================================================================
 net_tcp_connect:
@@ -530,7 +530,7 @@ net_tcp_connect:
         bcc :+
         ; FPGA wedged before we even queued anything — surface the timeout
         ; (net_last_error already set) with the connect-fail tcp_state.
-        lda #UCI_TCP_CONNECT_FAIL
+        lda #NET_TCP_CONNECT_FAIL
         sta net_tcp_state
         sec
         rts
@@ -572,7 +572,7 @@ net_tcp_connect:
         ; FPGA wedged waiting for TCP_CONNECT response — net_last_error is
         ; already UCI_ERR_WAIT_TIMEOUT. Force tcp_state to CONNECT_FAIL so
         ; callers don't try to use a phantom socket.
-        lda #UCI_TCP_CONNECT_FAIL
+        lda #NET_TCP_CONNECT_FAIL
         sta net_tcp_state
         sec
         rts
@@ -615,7 +615,7 @@ net_tcp_connect:
         jsr uci_ack
         jmp @tc_validate
 @tc_ok_drain_to:
-        lda #UCI_TCP_CONNECT_FAIL
+        lda #NET_TCP_CONNECT_FAIL
         sta net_tcp_state
         sec
         rts
@@ -631,7 +631,7 @@ net_tcp_connect:
         lda uci_socket_id
         beq @tc_no_socket
 
-        lda #UCI_TCP_CONNECTED
+        lda #NET_TCP_CONNECTED
         sta net_tcp_state
         clc
         rts
@@ -639,7 +639,7 @@ net_tcp_connect:
 @tc_no_socket:
         lda #UCI_ERR_NO_SOCKET
         sta net_last_error
-        lda #UCI_TCP_CONNECT_FAIL
+        lda #NET_TCP_CONNECT_FAIL
         sta net_tcp_state
         sec
         rts
@@ -846,14 +846,14 @@ net_tcp_send:
 ; =============================================================================
 ; net_tcp_close — CMD_SOCKET_CLOSE on the open socket. Best-effort; the
 ; UCI error bit is drained but not surfaced, and net_tcp_state is always
-; forced back to UCI_TCP_CLOSED.
+; forced back to NET_TCP_CLOSED.
 ; =============================================================================
 net_tcp_close:
         jsr uci_wait_idle
         bcc :+
         ; FPGA wedged on close — force CLOSED state and bail. Best-effort
         ; semantics already match the existing close path (no return code).
-        lda #UCI_TCP_CLOSED
+        lda #NET_TCP_CLOSED
         sta net_tcp_state
         rts
 :
@@ -871,7 +871,7 @@ net_tcp_close:
         bcc :+
         ; FPGA wedged on close — force CLOSED state and bail. Best-effort
         ; semantics: skip drains (FIFO state is undefined when wedged).
-        lda #UCI_TCP_CLOSED
+        lda #NET_TCP_CLOSED
         sta net_tcp_state
         rts
 :
@@ -883,17 +883,8 @@ net_tcp_close:
         jsr uci_ack
 
 @cl_drain_to:
-        lda #UCI_TCP_CLOSED
+        lda #NET_TCP_CLOSED
         sta net_tcp_state
-        rts
-
-; =============================================================================
-; net_tcp_set_recv_cb — RTS stub.
-; Phase 3 grep (src/): no `jsr net_tcp_set_recv_cb` call sites exist;
-; only the `.import` in net_abi.inc. Keep the entry point so the ABI
-; link resolves. If a future caller appears, wire it into net_poll.
-; =============================================================================
-net_tcp_set_recv_cb:
         rts
 
 ; =============================================================================
@@ -938,78 +929,6 @@ net_dns_resolve:
         sta net_last_error
         clc
         rts
-
-; =============================================================================
-; net_print_ip — print net_local_ip as dotted decimal (PETSCII + CR)
-;
-; Shared with the ip65 backend in shape: three `.`-separated decimal octets
-; plus a trailing carriage return. Implementation is local so the UCI
-; backend has no ip65 dependencies.
-; =============================================================================
-net_print_ip:
-        lda net_local_ip+0
-        jsr @print_byte
-        lda #'.'
-        jsr chrout
-        lda net_local_ip+1
-        jsr @print_byte
-        lda #'.'
-        jsr chrout
-        lda net_local_ip+2
-        jsr @print_byte
-        lda #'.'
-        jsr chrout
-        lda net_local_ip+3
-        jsr @print_byte
-        lda #$0d
-        jsr chrout
-        rts
-
-@print_byte:
-        sta @pb_val
-        ; hundreds
-        ldx #0
-        sec
-@pb_100:
-        sbc #100
-        bcc @pb_100d
-        inx
-        jmp @pb_100
-@pb_100d:
-        adc #100
-        cpx #0
-        beq @pb_tens                    ; skip leading zero
-        pha
-        txa
-        ora #$30
-        jsr chrout
-        pla
-@pb_tens:
-        ldx #0
-        sec
-@pb_10:
-        sbc #10
-        bcc @pb_10d
-        inx
-        jmp @pb_10
-@pb_10d:
-        adc #10
-        cpx #0
-        bne @pb_t_out
-        ldy @pb_val
-        cpy #10
-        bcc @pb_ones                    ; value < 10, skip tens digit
-@pb_t_out:
-        pha
-        txa
-        ora #$30
-        jsr chrout
-        pla
-@pb_ones:
-        ora #$30
-        jsr chrout
-        rts
-@pb_val: .byte 0
 
 ; =============================================================================
 ; net_recv_byte — pop one byte from the TCP receive ring.

@@ -162,13 +162,37 @@ bank 2; banks 6-7 reserved for the P-384 overlay experiment.
 
 Switching backend = a different cfg + different `src/net/<backend>/*.o`.
 
-**`src/net_abi.inc` is documentation, not an enforced interface.** Nothing
-includes it; the surface TLS/HTTP/boot actually import is `net_init`,
-`net_dhcp`, `net_poll`, `net_print_ip`, `net_dns_resolve`,
-`net_tcp_connect/close/send`, `net_send_len`, `net_recv_byte`,
-`net_banner_str`. ip65 exports only six of the header's twelve and has no
-`net_last_error` (no error channel at all); UCI exports all twelve. Treat
-the header as a TODO list until #70 lands.
+**`src/net_abi.inc` is the build-enforced boundary** (c64-lib-contract
+SPEC §13, issue #70). `boot.s`, `http.s`, `tls_record_io.s` and `tls13.s`
+`.include` it and import no `net_*` symbol directly, so a backend that
+drops a symbol fails the link by name on both backends. Surface:
+
+  core   net_init, net_dhcp_acquire, net_poll, net_local_ip (4 B),
+         net_last_error (1 B)
+  TCP    net_tcp_connect (A/X = port), net_tcp_send (+ net_send_len),
+         net_tcp_close, net_tcp_state (NET_TCP_* in src/net/net_states.inc),
+         consumer-owned rx ring tcp_recv_{buf,head,tail,overflow} (§13.3)
+  DNS    net_dns_resolve, net_resolved_ip ($FF x4 = resolved by the device)
+  ours   net_recv_byte (the drain entry, #72), net_banner_str
+
+  - `src/net/<backend>/net_manifest.s` exports `NET_BACKEND_FAMILIES`
+    (CORE|TCP|DNS on both; UCI's DNS is by deferral); ip65's also carries
+    the §13.7 blob footprint, link-asserted against the `.incbin`'d size.
+    `src/net_abi_asserts.s` (§13.8) asserts the families and the ring
+    mask. The `NET_FAMILY_*` bits are `src/net/net_families.inc`, copied
+    verbatim from the contract and never exported.
+  - Error codes: ip65 `$40-$7F` (`ip65_errors.inc`, `NET_ERR_IP65_*`),
+    UCI `$80-$BF` (`uci_errors.inc`, `UCI_ERR_*`). The UCI range is ONE
+    namespace shared with c64-wireguard — `$8A UCI_ERR_LONG_READ` is theirs
+    and reserved here; allocate new codes in SPEC §13.2's table first.
+  - Gone, per §13.1: `net_tcp_set_recv_cb` (stub), `net_recv_ready`,
+    `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
+    is now `print_local_ip` in `boot.s`, one copy for both backends.
+  - Byte accounting on ip65 (the tight one): LOADER went from 16 B free to
+    58 B; `print_local_ip` rides LOADER_OVERFLOW, so the NET_CODE tail that
+    is `HTTPS_HOST`/`HTTPS_PATH`'s ip65 budget shrank from 170 to ~60 B
+    beyond the default strings (wikipedia's +46 B still builds on both ip65
+    profiles; the theoretical 165 B host+path maximum no longer does).
 
   - `src/net/ip65/` — ip65/RR-Net (cs8900a). Blob loaded at $2000 via
     `.incbin`; `net.s` is the adapter; `ip65_symbols.inc` is the single
