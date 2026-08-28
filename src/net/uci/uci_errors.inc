@@ -43,3 +43,22 @@ UCI_DATA_QUEUE_MAX     = 800
 ; 512 bytes is well under the 4 KB ring and the firmware data queue,
 ; and matches the conservative Phase 3 MVP choice.
 UCI_READ_CHUNK_MAX     = 512
+
+; =============================================================================
+; Status-line capture (#147)
+;
+; $DF1F is where every UCI target reports its result, in ASCII: "00,OK",
+; "02,NO DATA: 9", "85,ERROR OPENING SOCKET", and on fw 3.15
+; "04,DATAGRAM TRUNCATED: <real length>". The adapter used to drain this
+; without reading it, collapsing every failure into a single UCI_ERR_*
+; value.
+;
+; That namespace is OURS and is unrelated to the digits the firmware
+; sends: our $86 and the firmware's "86,INTERNAL ERROR" are a coincidence.
+; Never map one onto the other.
+;
+; 16 bytes holds "12,SEND ERROR: 9" exactly — the shape worth keeping,
+; since errno 9 is EBADF, which the firmware's owned-socket guard sets on
+; READ/WRITE (GideonZ/1541ultimate#814). Longer lines truncate to a still
+; diagnostic prefix.
+UCI_STATUS_MAX = 16

@@ -36,6 +36,10 @@
 
 .export uci_abort
 .export uci_tod_start
+.export uci_status_buf
+.export uci_status_len
+.export uci_status_seen
+.export uci_status_force
 .export uci_wait_idle
 .export uci_wait_not_busy
 .export uci_begin_cmd
@@ -306,6 +310,17 @@ uci_check_err:
         clc
         rts
 @has_err:
+        ; Re-arm the status capture. The passive filter in uci_drain_status
+        ; drops the routine "00,OK" and "02,NO DATA: 11" lines so they cannot
+        ; squat in the single sticky slot, but that filter would also drop
+        ; "02,NO DATA: 9" — errno 9 is EBADF, the firmware's owned-socket
+        ; guard (GideonZ/1541ultimate#814), and the one line most worth
+        ; having. So an error path takes the slot unconditionally: whatever
+        ; the next drain sees belongs to a command that just failed.
+        lda #$00
+        sta uci_status_len
+        sta uci_status_force
+        dec uci_status_force        ; $FF — capture the next line regardless
         ; clear the latched error
         lda #UCI_CTRL_CLR_ERR
         sta UCI_CONTROL
@@ -454,17 +469,48 @@ uci_drain_resp:
 @drn_elapsed:     .byte 0
 
 ; =============================================================================
-; uci_drain_status — ACK remaining status string bytes until STAT_AV is clear.
-; Phase 2 discards the status string; later phases may want to capture it.
+; uci_drain_status — drain the status line, and CAPTURE it (#147).
+;
+; "Later phases may want to capture it" — this is that phase. $DF1F is
+; where every UCI target reports its result; the ERROR bit in $DF1C means
+; only "a command was sent while not idle" and is NOT a result channel.
+; Discarding this line is why every failure collapsed into one UCI_ERR_*
+; byte with the firmware's named reason thrown away.
+;
+; Two things here were learned the hard way in the c64-wireguard lane,
+; which ports this adapter's design, and are copied from it:
+;
+;   * NO PER-BYTE ACK. The FIFO auto-advances on read (the same Phase 2
+;     finding net_poll's header read relies on). The NEXT_DATA pulse this
+;     loop used to issue per byte popped the whole line, so the drain read
+;     byte one and then saw STAT_AV clear and stopped. Measured here
+;     before the port: the capture returned "0" where the firmware had
+;     sent "02,NO DATA: 9". Every status line this adapter ever drained
+;     was truncated after one byte; nobody noticed because the bytes went
+;     nowhere.
+;   * STICKY-FIRST commit. net_poll drains status several times per
+;     cycle; the first drain after a command takes the whole line and the
+;     later ones catch at most a stray byte. Publishing the LAST non-empty
+;     capture therefore lets a 1-byte remnant overwrite the real line.
+;     The first capture wins and stays until a consumer zeroes
+;     uci_status_len.
+;
+; uci_status_seen is NON-sticky — bytes this drain actually saw, rewritten
+; (0 included) every call — so a caller can distinguish "the firmware
+; refused and said why" from "nothing came back".
 ;
 ; Phase 5j — wall-clock-bounded via CIA1 TOD (5 s budget, mirrors
 ; uci_drain_resp above).
 ;
 ; Output: C=0 on drain complete, C=1 on timeout
 ;         (net_last_error = UCI_ERR_WAIT_TIMEOUT).
-; Clobbers: A
+; Clobbers: A, X  (X is the capture index; no call site holds it — the
+;                  DHCP probe keeps its interface index in memory, and
+;                  net_poll already documents clobbering X)
 ; =============================================================================
 uci_drain_status:
+        lda #$00
+        sta @dst_idx
         ; Sample initial TENTHS for delta-tracking. Latch via HOUR,
         ; release via TENTHS.
         lda CIA_TOD_HOUR
@@ -477,14 +523,27 @@ uci_drain_status:
         uci_fence                   ; settle before testing STAT_AV
         and #UCI_STAT_STAT_AV
         bne @dst_have
+        jsr @dst_commit
         clc
         rts
 @dst_have:
         lda UCI_STATUS_DATA
-        uci_fence                   ; settle before NEXT_DATA write
-        lda #UCI_CTRL_NEXT_DATA
-        sta UCI_CONTROL
         uci_fence
+        ; Hold the committed line intact. uci_status_len is sticky, but the
+        ; BUFFER is shared, so without this a later drain scribbles over the
+        ; bytes the length still describes: a held "02,NO DATA: 11" with a
+        ; subsequent "00,OK" written across its head reads back as
+        ; '00,OK DATA: 11'. Measured on hardware — a plausible-looking string
+        ; that never came off the wire, which is worse than no capture at all.
+        ldx uci_status_len
+        bne @dst_seen_only          ; a line is already held — count only
+        ldx @dst_idx
+        cpx #UCI_STATUS_MAX
+        bcs @dst_seen_only          ; buffer full — count only
+        sta uci_status_buf,x
+@dst_seen_only:
+        inc @dst_idx                ; counts every byte SEEN, stored or not
+        ; NO PER-BYTE ACK — see the header. The read advanced the FIFO.
 
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
         lda CIA_TOD_HOUR
@@ -499,18 +558,67 @@ uci_drain_status:
         ; Timeout
         lda #UCI_ERR_WAIT_TIMEOUT
         sta net_last_error
+        jsr @dst_commit
         sec
+        rts
+@dst_commit:
+        lda @dst_idx
+        sta uci_status_seen         ; non-sticky: what THIS drain saw
+        beq @dst_commit_done
+        ldx uci_status_len
+        bne @dst_commit_done        ; one already held — do not clobber it
+        ldx uci_status_force
+        beq @dst_filter
+        ldx #$00
+        stx uci_status_force        ; one-shot
+        beq @dst_commit_take        ; forced: skip the routine-line filter
+@dst_filter:
+        ; Skip a success line. We diverge from the c64-wireguard lane here,
+        ; deliberately: their consumer reads the line in band and clears the
+        ; slot, ours is a post-mortem dump with no consumer to clear it. Plain
+        ; sticky-first would therefore park "00,OK" from the run's first drain
+        ; in the one slot the first real failure needs. A line shorter than two
+        ; bytes cannot be "00,..." and is kept.
+        cmp #2
+        bcc @dst_commit_take
+        lda uci_status_buf+0
+        cmp #'0'
+        bne @dst_commit_take        ; not "0x," — always interesting
+        lda uci_status_buf+1
+        cmp #'0'
+        beq @dst_commit_done        ; "00,OK"
+        cmp #'2'
+        beq @dst_commit_done        ; "02,NO DATA: 11" — every idle poll
+@dst_commit_take:
+        lda @dst_idx
+        sta uci_status_len
+@dst_commit_done:
         rts
 @dst_loop_long:
         jmp @dst_loop               ; long branch: fence too wide for BEQ/BCC
 @dst_last_tenths: .byte 0
 @dst_elapsed:     .byte 0
+; MUST stay above the non-local uci_status_* labels: those close this
+; routine's ca65 cheap-local (@) scope, so an @dst_idx declared after them
+; is a DIFFERENT symbol from the one this routine references. The
+; c64-wireguard lane hit exactly that, and it also presents as capturing
+; one byte and looking like the firmware emitting nothing.
+@dst_idx:         .byte 0
 
 ; =============================================================================
 ; Control block for uci_read_resp_bytes — lives in UCI_BSS so no ZP is needed
 ; and the block persists across backend calls.
 ; =============================================================================
 .segment "UCI_BSS"
+
+; Captured status line (ASCII, e.g. "02,NO DATA: 9"). Not NUL-terminated;
+; uci_status_len says how many bytes are valid, and is STICKY-FIRST — it
+; holds the first non-empty line until a consumer zeroes it. net_init does
+; that so a line cannot outlive the run that produced it.
+uci_status_buf:  .res UCI_STATUS_MAX
+uci_status_len:  .res 1
+uci_status_seen: .res 1
+uci_status_force: .res 1
 
 uci_resp_dst:    .res 2         ; destination pointer (lo, hi)
 uci_resp_max:    .res 1         ; max bytes to store

@@ -720,6 +720,25 @@ def _dump_diag(transport: Ultimate64Transport,
         if name in labels:
             print(f"  {name:22s} : ${r16(name):04X}")
 
+    # The firmware's own STATUS string for the first error of the run
+    # (#147). The adapter used to discard this, so every failure collapsed
+    # to one UCI_ERR_* byte. errno 9 is EBADF — the firmware's owned-socket
+    # guard (GideonZ/1541ultimate#814) — so its presence discriminates a
+    # firmware-side regression from a plain lwip error.
+    if "uci_status_buf" in labels and "uci_status_len" in labels:
+        # uci_status_len counts bytes SEEN; only the first UCI_STATUS_MAX
+        # are stored, so clamp or we read past the buffer into the
+        # bookkeeping bytes that follow it.
+        n = r8("uci_status_len")
+        stored = min(n, 16)
+        if n == 0:
+            print(f"  {'uci_status':22s} : (none captured)")
+        else:
+            raw = bytes(transport.read_memory(labels["uci_status_buf"], stored))
+            text = raw.decode("ascii", "replace")
+            trunc = f" [truncated, {n} B seen]" if n > stored else ""
+            print(f"  {'uci_status':22s} : {text!r}{trunc}")
+
 
 def _dump_tls_state_snapshot(transport: Ultimate64Transport,
                              labels: dict[str, int],
