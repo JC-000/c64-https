@@ -51,6 +51,7 @@
 
 ; --- primitives from uci_cmd.s ---
 .import uci_abort
+.import uci_tod_start
 .import uci_wait_idle
 .import uci_wait_not_busy
 .import uci_begin_cmd
@@ -88,6 +89,13 @@
 ; Clobbers: A, X
 ; =============================================================================
 net_init:
+        ; Start CIA1's TOD before anything that waits on it. The CIA's
+        ; TOD is halted out of reset and every bounded wait in uci_cmd.s
+        ; measures wall-clock by watching it tick, so without this the
+        ; 5 s bounds are infinite on real hardware (#145). uci_abort
+        ; below spins on an iteration count, not the TOD, so the order
+        ; here is about net_dhcp_acquire and everything after it.
+        jsr uci_tod_start
         jsr uci_abort
 
         lda UCI_ID
