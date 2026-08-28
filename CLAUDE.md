@@ -211,7 +211,11 @@ hostname to `uci_host_buf`.
 
 **Every spin-wait is wall-clock bounded** (5 s via CIA1 TOD) and every
 caller `bcs` out — see "Design note — bounded timeouts" below. Never add an
-iteration-counted wait.
+iteration-counted wait. The bound is only real because `net_init` calls
+`uci_tod_start` first: the CIA's TOD is **halted out of reset** and nothing
+in the KERNAL starts it, so until #145 every one of these waits was
+unbounded on hardware. VICE runs the TOD from reset, so no emulator test
+can catch a regression here — the guard is `tools/uci/boot_check.py`.
 
 ### Firmware quirk — FPGA register timing (delay-loop fence)
 
@@ -430,6 +434,14 @@ template: sample CIA1 TOD (HOUR $DC0B latch → TENTHS $DC08 unlatch), bail
 after 50 tenths transitions with C=1 + `UCI_ERR_WAIT_TIMEOUT`, state in
 two SMC bytes. `uci_wait_not_busy`, `uci_drain_resp`, `uci_drain_status`
 and `uci_push_wait` all follow it; all 22+ call sites `bcs` out.
+
+A wall-clock bound needs a wall clock that is *running*: `uci_tod_start`
+(#145). Measured on the U64E at 48 MHz once it does — TOD/wall rate 0.996
+(the "5 s" budget is 5.02 s, and turbo does not shrink it, which is the
+whole point), and the longest bounded wait observed across four full
+github.com handshakes is **one tenth**. The budget is ~50x the worst real
+wait, but a `$89` has been seen in the field on a passing run, so it is
+reachable; re-measure before tightening it.
 
 ### Design note — the post-ServerHello drain, and why its budget is per-backend
 
