@@ -59,13 +59,24 @@ UCI_DATA_QUEUE_MAX     = 800
 ;
 ; 512 is a CONSUMER choice, not the firmware's limit — it was c64-wireguard's
 ; Phase 3 MVP constant, and both repos carried it as a hardware ceiling
-; because nothing larger had ever been requested. The real ceiling is 894
-; (= CMD_MAX_REPLY_LEN 896 - the 2-byte header; GideonZ/1541ultimate#802,
-; re-measured on a U64E: 512-893 B arrive whole in one poll). NEVER request
-; exactly 894 on fw 3.14d: the reply exactly fills the response queue and
-; the FPGA repeats it forever with DATA_AV asserted (guard only in 3.15,
-; not downloadable). Raising this toward 893 is a measured follow-up, not a
-; free win: every byte read carries a uci_fence (~5.45 ms at 1 MHz), and
-; net_poll's clamp is written cap-shape-independently so the change is one
-; constant.
+; because nothing larger had ever been requested. The FIRMWARE ceiling is
+; version-dependent; 893 is OURS on every version.
+;
+;   fw 3.14d        894 = CMD_MAX_REPLY_LEN 896 - the 2-byte header
+;                   (GideonZ/1541ultimate#802, re-measured on a U64E:
+;                   512-893 B arrive whole in one poll). NEVER request
+;                   exactly 894: the reply exactly fills the response queue
+;                   and the FPGA repeats it forever with DATA_AV asserted.
+;   fw 3.15 + #806  accepts up to 1472 and the 894 hang is gone, but a reply
+;                   over 893 payload bytes comes back SPLIT across response
+;                   blocks (the command interface's Data More mechanism), and
+;                   the 2-byte header is then the total for the whole command
+;                   rather than the count in the first block. net_poll reads
+;                   ONE block, so a request above 893 would silently drop the
+;                   continuation.
+;
+; So 893 is the number to raise toward on either firmware, and going past it
+; needs a multi-block reader first. Not a free win either: every byte read
+; carries a uci_fence (~5.45 ms at 1 MHz). net_poll's clamp is written
+; cap-shape-independently so the change is one constant.
 UCI_READ_CHUNK_MAX     = 512

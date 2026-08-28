@@ -278,7 +278,10 @@ it never writes device config. `C64_SKIP_REU_PREFLIGHT=1` bypasses.
     wall) and a REU-profile build with no REU (`net_last_error=$00` — the
     row-fetch DMA no-ops, the X25519 secret is wrong, the first AEAD tag
     fails, and it *spins* for ~44 min). Check `net_last_error`; the REU half
-    is now excluded by the preflight above.
+    is now excluded by the preflight above. `$86` discriminates only *within*
+    that stall: it is set on any SOCKET_READ error bit, including the one
+    that ends a normal fetch, so it is present in PASSING runs too
+    (github.com HTTP 200, 2026-08-28) and is never on its own a wedge.
   - **Lease poisoning**: resetting the C64 with a live firmware socket makes
     `GET_IPADDR` return 0.0.0.0 forever ("REQUESTING DHCP" loop). Only a
     wall power cycle clears it. Rigs therefore let fetches finish and send

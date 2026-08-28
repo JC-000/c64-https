@@ -985,6 +985,14 @@ Disabled ⇒ stalls at RX (issue #97).
                               enable the REU, or use an onchip build
                               (c64-https-uci-onchip.prg needs none)
 
+  `$86` is a discriminator only *inside* this stall, never on its own.
+  `net_poll` sets it on any SOCKET_READ error bit, and one such bit ends
+  an ordinary fetch: the live github.com run of 2026-08-28 finished
+  `http_status=200`, `http_get` C=0, and still dumped
+  `net_last_error=$86` with `net_tcp_state=$00` (the `$86` path forces
+  `NET_TCP_ERROR`, then `net_tcp_close` returns it to CLOSED). Reading a
+  bare `$86` as a wedge is the #97 mistake in a new costume.
+
   `tls_recv_sub_progress` is `$02` in BOTH and distinguishes nothing.
   Do not act on the screen alone — that mistake was made on #97 and
   cost an outside contributor a wasted cold power cycle.
