@@ -985,6 +985,14 @@ Disabled ⇒ stalls at RX (issue #97).
                               enable the REU, or use an onchip build
                               (c64-https-uci-onchip.prg needs none)
 
+  `$86` is a discriminator only *inside* this stall, never on its own.
+  `net_poll` sets it on any SOCKET_READ error bit, and one such bit ends
+  an ordinary fetch: the live github.com run of 2026-08-28 finished
+  `http_status=200`, `http_get` C=0, and still dumped
+  `net_last_error=$86` with `net_tcp_state=$00` (the `$86` path forces
+  `NET_TCP_ERROR`, then `net_tcp_close` returns it to CLOSED). Reading a
+  bare `$86` as a wedge is the #97 mistake in a new costume.
+
   `tls_recv_sub_progress` is `$02` in BOTH and distinguishes nothing.
   Do not act on the screen alone — that mistake was made on #97 and
   cost an outside contributor a wasted cold power cycle.
@@ -2839,3 +2847,129 @@ region ends); hashes changed, as they must.
   2026-08-24 and only a cross-repo diff noticed.
 - c64-wireguard#48 keeps its own items (UDP-family renames, manifests);
   `d9cd021`'s ring clamp is flagged there as §13.3 context for wg#46.
+
+### #140 — the SOCKET_READ header is not a length (same day)
+
+Filed by the c64-wireguard lane while reviewing the above: `net_poll` took
+the response header straight into `uci_poll_rem` and copied; a wild
+header was survived only because the copy loop re-checks ring-full and
+DATA_AV per byte. They had learned it the hard way — c64-wireguard PR #62
+trusted the header and copied ~18 KB through `$D000`, leaving packet
+bytes in the VIC registers.
+
+**First cut, and why it was wrong.** Ported their UDP check verbatim:
+compare the header to `uci_req_len`, and on an over-claim drop the
+response, emit `$8A UCI_ERR_LONG_READ`, mark the socket `NET_TCP_ERROR`.
+It fired on **every** real github.com session, at the first poll, with
+the ring empty (`tls_last_state=2`). Adding the pair to the rig's
+post-mortem dump gave the numbers:
+
+    uci_req_len   $0200
+    uci_read_hdr  $FFFF
+
+fw 3.14d answers a 512 B TCP `SOCKET_READ` with `$FFFF` — the same
+sentinel c64-wireguard measured for a 1500 B UDP request. On TCP the
+header is not a delivered count; the FIFO simply delivers what it has
+(bounded by the request) and `DATA_AV` drops. "Over-claim" is therefore
+routine on this path and the wrong frame for a code; a drop would abort
+every handshake, which is exactly what it did.
+
+**What landed instead**: the copy count is capped at `uci_req_len` — a
+memory-safety bound, not an error. Bytes beyond the request were never
+delivered (they stay in the firmware for the next poll), so the cap loses
+nothing. `$8A` stays reserved with c64-wireguard's UDP meaning (datagram
+length exceeded the request → datagram dropped) and this adapter never
+emits it; the registry row in c64-lib-contract#139 is being reworded to
+scope the meaning by transport, because two UCI-family adapters were
+about to give one byte two operational meanings — the `$88` failure one
+row down, caught by the cross-repo view a second time in one release
+cycle.
+
+The reverse port — our ring-free clamp into c64-wireguard — does NOT
+apply either: their inbound is a flat interlocked buffer with no wrap,
+and on 3.14d any request size other than 512 breaks their read path
+outright (GideonZ/1541ultimate#802).
+
+**Detector kept.** A bare cap would also have normalised a third case —
+a header above the request that is *not* `$FFFF`, which the firmware has
+no documented mode for — silently. The review on c64-lib-contract#139
+asked for that to stay distinguishable, and it does: `$8B
+UCI_ERR_BAD_READ_HDR`, a best-effort breadcrumb on the §13.1 short-write
+pattern (copy still capped, C=0, stream continues, code left in
+`net_last_error`). Allocated in SPEC §13.2's table before the adapter
+emitted it — the first code to go through the rule the table exists for.
+
+**Correction, same evening — `$FFFF` is the no-data sentinel.** The
+c64-wireguard lane measured every *idle* UDP `SOCKET_READ` returning
+header `$FFFF`, `rx_len` 0, across 11 sizes. Re-reading our own capture:
+`tls_last_state=2` means the first polls after ClientHello, while
+ServerHello is still in flight — idle polls. "~690 B queued" above was
+an inference, not a measurement, and the mechanism note warned against
+exactly that. So `$FFFF` is the firmware's no-data sentinel on both
+transports; the drop-and-error cut aborted on an empty read, and
+c64-wireguard's "`$8A` fires routinely during healthy sessions" runbook
+line was the same misfiling, documented as a firmware quirk for four
+days. The shipped code is unaffected (cap, then the `DATA_AV` check
+copies zero bytes) but every comment that said "more than you asked"
+was wrong and is corrected. Registry rows now pair `$8A` (datagram:
+drop, terminal) with `$8B` (stream: cap, advisory) as one observation
+with family-specific disposition, and require excluding `$FFFF` first.
+
+**And the founding incident retires too.** The contract reviewer went
+back to c64-wireguard PR #62 (`6fecc97`), the commit `$8A` was born
+on: its own message says the copy count came straight from the header
+into a loop whose SMC store bumps its own high byte, from a buffer at
+`$89D4`. `$FFFF` = 65535 as a copy count from an idle poll writes
+straight through `$D000` — the ~18 KB, the VIC damage, all of it, with
+no firmware over-claim involved. So after excluding the sentinel there
+is **no measured non-sentinel over-claim on either transport**; `$8A`
+and `$8B` are reserved defensively, and the registry says so. The rule
+that travels: exclude the sentinel before any length arithmetic, and
+never let a device-supplied count be the only bound on a store loop —
+which is what the cap in `net_poll` now guarantees regardless of what
+the header says.
+
+
+**The UDP header, measured (c64-wireguard lane, 2026-08-25, fresh power
+cycle, each row repeated):** 600/768/1024/1280 B datagrams against a
+512 B request all return `rx_len` 512 and header `$0200` — the delivered
+count, never the true size, never above the request. So on 3.14d the
+over-claim condition has **no observable trigger on either transport**:
+TCP's header is a sentinel on idle polls, UDP's is the delivered count.
+The two transports are not uniform, and each adapter had generalised
+from its own to the other. Consequences recorded in c64-lib-contract#139:
+`$8A`/`$8B` stay allocated but the "adapter drops it" clause is gone —
+a truncated 1280 B datagram is byte-identical to a complete 512 B one in
+every readable register, so truncation is silent and the consumer's MTU
+pin is the sole defence (now stated in SPEC §13.3). For c64-https the
+TCP cap in `net_poll` (#143) remains the right bound and is unaffected.
+
+**Correction (c64-wireguard lane, 2026-08-26): the 512 cap was theirs, and
+ours.** `UCI_READ_CHUNK_MAX = 512` was c64-wireguard's Phase 3 MVP
+constant; having only ever asked for 512 they measured only ever
+receiving 512 and reported it as a firmware ceiling — and our
+`uci_errors.inc` says the same "conservative MVP choice". The real cap is
+**894** = `CMD_MAX_REPLY_LEN` (896) − 2 (GideonZ/1541ultimate#802,
+root-caused by chrisgleissner, re-measured on a U64E: 512-893 B datagrams
+arrive whole with the header reporting the TRUE length). A 1024 request
+is rejected with `82,PARAMETER(S) OUT OF RANGE` on STATUS — which our
+adapter, like theirs, drains without reading. **Never request exactly
+894 on 3.14d**: it fills the response queue exactly and the FPGA repeats
+it forever. So "the header never reports the true length" was an
+artifact of always truncating; the indistinguishability problem is real
+only for genuinely oversized datagrams. Unchanged: no non-sentinel
+over-claim observed; `$FFFF` is `lwip_recv()` returning −1 stored as
+signed 16-bit.
+
+Two consequences here. (1) Our clamp had the same latent trap the
+wireguard lane hit when their cap moved to `$037D`: `cmp #>MAX / bcc /
+bne / lda lo / beq` accepts the equal-high-byte case only when the low
+byte is zero — correct for `$0200`, wrong for any other cap, and in our
+direction it would have *raised* a sub-cap request to the cap, i.e. the
+wikipedia-stall class. Rewritten as a full 16-bit compare in #143 so
+the constant can move. (2) Raising `UCI_READ_CHUNK_MAX` toward 893 is a
+plausible throughput win on TCP (fewer ~40 ms round-trips per flight)
+but every byte read carries a fence (~5.45 ms at 1 MHz), so it is a
+measured follow-up, not a free change — and any test around it should
+find the accepted length by bisection, not hard-code it.
+

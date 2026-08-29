@@ -338,6 +338,7 @@ def main() -> int:
         "net_init", "net_initialized", "uci_socket_id",
         "net_last_error", "net_tcp_state",
         "tcp_recv_head", "tcp_recv_tail",
+        "uci_req_len", "uci_read_hdr",      # #140: SOCKET_READ request vs claim
         "http_resp_buf", "http_resp_len", "http_status",
         "tls_state", "tls_last_state",
     ]

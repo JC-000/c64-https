@@ -21,12 +21,28 @@ UCI_ERR_READ_FAIL      = $86    ; SOCKET_READ returned an error bit
 UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE wrote fewer bytes than requested
 UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
 UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
-UCI_ERR_LONG_READ      = $8A    ; SOCKET_READ claimed more bytes than we asked
-                                ; for. Allocated by c64-wireguard (2026-08-24);
-                                ; reserved here with the same meaning. This
-                                ; adapter does not emit it yet — net_poll
-                                ; stops at DATA_AV rather than checking the
-                                ; claimed length against the request.
+UCI_ERR_LONG_READ      = $8A    ; Datagram family (c64-wireguard): the
+                                ; SOCKET_READ header claimed more than the
+                                ; request and was NOT the $FFFF no-data
+                                ; sentinel; the datagram is dropped. Reserved
+                                ; here, NEVER emitted: on a stream the same
+                                ; observation is $8B below. $FFFF is the
+                                ; firmware's no-data sentinel on BOTH
+                                ; transports and must be excluded before any
+                                ; length arithmetic (#140; both adapters got
+                                ; this wrong independently). No non-sentinel
+                                ; over-claim has been observed on either
+                                ; transport; both codes are reserved
+                                ; defensively.
+UCI_ERR_BAD_READ_HDR   = $8B    ; Stream family: SOCKET_READ header exceeded
+                                ; the request and was NOT the $FFFF no-data
+                                ; sentinel — a value the firmware has no
+                                ; documented mode for. Best-
+                                ; effort breadcrumb (§13.1 short-write pattern):
+                                ; the copy is still capped at the request and
+                                ; net_poll returns normally; the code stays in
+                                ; net_last_error for post-mortems. Allocated in
+                                ; SPEC §13.2's table first (c64-lib-contract#139).
 
 ; TCP state values stored in net_tcp_state. The NET_TCP_* spellings in
 ; net_states.inc are the contract's (§13.1); these aliases keep the
@@ -40,6 +56,27 @@ UCI_TCP_CONNECT_FAIL   = NET_TCP_CONNECT_FAIL
 UCI_DATA_QUEUE_MAX     = 800
 
 ; SOCKET_READ max-length cap we ask for per net_poll cycle.
-; 512 bytes is well under the 4 KB ring and the firmware data queue,
-; and matches the conservative Phase 3 MVP choice.
+;
+; 512 is a CONSUMER choice, not the firmware's limit — it was c64-wireguard's
+; Phase 3 MVP constant, and both repos carried it as a hardware ceiling
+; because nothing larger had ever been requested. The FIRMWARE ceiling is
+; version-dependent; 893 is OURS on every version.
+;
+;   fw 3.14d        894 = CMD_MAX_REPLY_LEN 896 - the 2-byte header
+;                   (GideonZ/1541ultimate#802, re-measured on a U64E:
+;                   512-893 B arrive whole in one poll). NEVER request
+;                   exactly 894: the reply exactly fills the response queue
+;                   and the FPGA repeats it forever with DATA_AV asserted.
+;   fw 3.15 + #806  accepts up to 1472 and the 894 hang is gone, but a reply
+;                   over 893 payload bytes comes back SPLIT across response
+;                   blocks (the command interface's Data More mechanism), and
+;                   the 2-byte header is then the total for the whole command
+;                   rather than the count in the first block. net_poll reads
+;                   ONE block, so a request above 893 would silently drop the
+;                   continuation.
+;
+; So 893 is the number to raise toward on either firmware, and going past it
+; needs a multi-block reader first. Not a free win either: every byte read
+; carries a uci_fence (~5.45 ms at 1 MHz). net_poll's clamp is written
+; cap-shape-independently so the change is one constant.
 UCI_READ_CHUNK_MAX     = 512

@@ -184,7 +184,13 @@ drops a symbol fails the link by name on both backends. Surface:
   - Error codes: ip65 `$40-$7F` (`ip65_errors.inc`, `NET_ERR_IP65_*`),
     UCI `$80-$BF` (`uci_errors.inc`, `UCI_ERR_*`). The UCI range is ONE
     namespace shared with c64-wireguard — `$8A UCI_ERR_LONG_READ` is theirs
-    and reserved here; allocate new codes in SPEC §13.2's table first.
+    and datagram-only. **`$FFFF` is the SOCKET_READ no-data sentinel on both
+    transports** (idle polls answer it) and must be excluded before any
+    over-claim test — both fleet adapters misfiled it independently (#140).
+    `net_poll` caps the copy at the request and never emits `$8A`; a header
+    above the request that is NOT `$FFFF` leaves `$8B UCI_ERR_BAD_READ_HDR`
+    (C=0, stream continues) — the stream-family counterpart of `$8A`. Allocate new codes
+    in SPEC §13.2's table first — `$8B` was the first one allocated that way.
   - Gone, per §13.1: `net_tcp_set_recv_cb` (stub), `net_recv_ready`,
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
     is now `print_local_ip` in `boot.s`, one copy for both backends.
@@ -276,7 +282,10 @@ it never writes device config. `C64_SKIP_REU_PREFLIGHT=1` bypasses.
     wall) and a REU-profile build with no REU (`net_last_error=$00` — the
     row-fetch DMA no-ops, the X25519 secret is wrong, the first AEAD tag
     fails, and it *spins* for ~44 min). Check `net_last_error`; the REU half
-    is now excluded by the preflight above.
+    is now excluded by the preflight above. `$86` discriminates only *within*
+    that stall: it is set on any SOCKET_READ error bit, including the one
+    that ends a normal fetch, so it is present in PASSING runs too
+    (github.com HTTP 200, 2026-08-28) and is never on its own a wedge.
   - **Lease poisoning**: resetting the C64 with a live firmware socket makes
     `GET_IPADDR` return 0.0.0.0 forever ("REQUESTING DHCP" loop). Only a
     wall power cycle clears it. Rigs therefore let fetches finish and send

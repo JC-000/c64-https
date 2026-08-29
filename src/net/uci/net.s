@@ -10,15 +10,13 @@
 ;                     GET_IPADDR command. Does NOT run DHCP ourselves —
 ;                     the firmware already did that before the PRG started.
 ;
-; Exports two symbol families:
-;
-;   (a) net_abi.inc contract — the long-term public names.
-;   (b) legacy caller names currently imported by boot.s / http.s /
-;       tls_record_io.s — kept as thin aliases until those callers are
-;       migrated onto net_abi.inc in a later phase.
-;
-; Also publishes `net_banner_str`, the backend-specific banner line
-; consumed by boot.s's startup print.
+; Exports exactly the surface src/net_abi.inc imports (c64-lib-contract
+; SPEC §13 core/TCP/DNS families, issue #70) plus the two c64-https
+; extensions declared there: net_recv_byte (the drain entry) and
+; net_banner_str (the backend-specific banner line boot.s prints).
+; Error codes live in uci_errors.inc, in the §13.2 UCI range $80-$BF,
+; which is ONE namespace shared with c64-wireguard — allocate in SPEC
+; §13.2's table first.
 
 .include "uci_regs.inc"
 .include "uci_errors.inc"
@@ -176,14 +174,18 @@ net_poll:
         bne :+
         rts                     ; ring effectively full — poll again later
 :
-        ; clamp to UCI_READ_CHUNK_MAX (512 = $0200)
-        lda uci_req_len+1
-        cmp #>UCI_READ_CHUNK_MAX
-        bcc @len_clamped        ; high < 2  -> under 512, keep
-        bne @len_use_max        ; high > 2  -> over, clamp
+        ; clamp to UCI_READ_CHUNK_MAX — full 16-bit compare. The previous
+        ; shape (cmp #>MAX / bcc / bne / lda lo / beq) accepted the
+        ; equal-high-byte case only when the low byte was zero: correct
+        ; for $0200, silently wrong for any other cap (c64-wireguard hit
+        ; exactly that at $037D and read the result as firmware
+        ; misbehaviour). Written cap-shape-independently so raising the
+        ; constant cannot reintroduce it.
         lda uci_req_len+0
-        beq @len_clamped        ; exactly 512, keep
-@len_use_max:
+        cmp #<UCI_READ_CHUNK_MAX
+        lda uci_req_len+1
+        sbc #>UCI_READ_CHUNK_MAX    ; C=1 iff req >= MAX
+        bcc @len_clamped            ; req < MAX -> keep
         lda #<UCI_READ_CHUNK_MAX
         sta uci_req_len+0
         lda #>UCI_READ_CHUNK_MAX
@@ -300,6 +302,46 @@ net_poll:
         rts
 
 @have_data:
+        ; --- Bound the copy by the request (#140, SPEC §13.3) --------------
+        ; The response header is not a delivered-byte count. On fw 3.14d
+        ; $FFFF is the NO-DATA sentinel on both transports (c64-wireguard:
+        ; every idle UDP poll; here: the idle polls after ClientHello while
+        ; ServerHello is still in flight answer $FFFF to a 512 B request).
+        ; The copy below survived it only because it re-checks ring-full
+        ; and DATA_AV per byte and so copied zero bytes; a refactor of the
+        ; loop would have turned the header into a runaway copy. So the
+        ; count is capped at uci_req_len — what this poll actually asked
+        ; for, which the ring clamp above may have made smaller than
+        ; UCI_READ_CHUNK_MAX. Bytes beyond the request were never delivered
+        ; (they stay queued for the next poll), so the cap loses nothing.
+        ; A drop-and-error here (the first cut, emitting UCI_ERR_LONG_READ)
+        ; aborted every real handshake on its first idle poll — the same
+        ; misfiling c64-wireguard carried for four days as a "firmware
+        ; quirk". $FFFF MUST be excluded before any over-claim test.
+        lda uci_req_len+0
+        cmp uci_poll_rem+0
+        lda uci_req_len+1
+        sbc uci_poll_rem+1          ; C=1 iff req >= header (16-bit)
+        bcs @len_bounded
+        ; header > request. $FFFF is the no-data sentinel (routine, copied
+        ; as zero bytes by the DATA_AV check); anything else above the
+        ; request is a header the firmware has no documented mode for.
+        ; Leave a breadcrumb for that case ($8B, best-effort: C=0, stream
+        ; continues — the cap below makes it safe either way) so a
+        ; post-mortem can tell the two apart. Allocated in c64-lib-contract
+        ; SPEC §13.2 before use; the datagram-family counterpart is $8A.
+        lda uci_poll_rem+0
+        and uci_poll_rem+1
+        cmp #$FF
+        beq @len_cap                ; $FFFF sentinel — routine, no breadcrumb
+        lda #UCI_ERR_BAD_READ_HDR
+        sta net_last_error
+@len_cap:
+        lda uci_req_len+0
+        sta uci_poll_rem+0
+        lda uci_req_len+1
+        sta uci_poll_rem+1
+@len_bounded:
         ; Copy exactly (uci_poll_rem) bytes from UCI_RESP_DATA into the
         ; ring at tcp_recv_buf + tcp_recv_tail, advancing the masked tail.
         ; The store uses SMC on @rb_store so we can hit the full 4 KB
