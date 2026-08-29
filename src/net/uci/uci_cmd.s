@@ -304,7 +304,7 @@ uci_push_wait:
 ; =============================================================================
 uci_check_err:
         lda UCI_STATUS
-        uci_fence                   ; settle before testing error bit
+        jsr uci_settle               ; settle before testing error bit
         and #UCI_STAT_ERROR
         bne @has_err
         clc
@@ -324,8 +324,30 @@ uci_check_err:
         ; clear the latched error
         lda #UCI_CTRL_CLR_ERR
         sta UCI_CONTROL
-        uci_fence
+        jsr uci_settle
         sec
+        rts
+
+; =============================================================================
+; uci_settle — one fence, as a subroutine.
+;
+; The macro is ~17 bytes inline and NET_CODE has no room to spare: #143 and
+; #148 each linked against master, and the merge of the two overflowed the
+; area by 35 bytes. The drain and error paths call this instead of expanding
+; the macro, at 3 bytes a site rather than 17.
+;
+; Behaviourally identical for the callers: uci_fence preserves A and X, rts
+; preserves both, and no caller can rely on flags across a fence because the
+; macro clobbers them either way. The jsr/rts overhead only WIDENS the gap
+; the fence exists to guarantee, which is the safe direction — the hazard is
+; a gap that is too short.
+;
+; The two fences in the hot response-copy loop stay inline.
+;
+; Clobbers: nothing
+; =============================================================================
+uci_settle:
+        uci_fence
         rts
 
 ; =============================================================================
@@ -335,7 +357,7 @@ uci_check_err:
 uci_ack:
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
-        uci_fence
+        jsr uci_settle
         rts
 
 ; =============================================================================
@@ -436,17 +458,17 @@ uci_drain_resp:
         sta @drn_elapsed
 @drn_loop:
         lda UCI_STATUS
-        uci_fence                   ; settle before testing DATA_AV
+        jsr uci_settle               ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
         bne @drn_have
         clc
         rts
 @drn_have:
         lda UCI_RESP_DATA
-        uci_fence                   ; settle before NEXT_DATA write
+        jsr uci_settle               ; settle before NEXT_DATA write
         lda #UCI_CTRL_NEXT_DATA
         sta UCI_CONTROL
-        uci_fence
+        jsr uci_settle
 
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
         lda CIA_TOD_HOUR
@@ -520,7 +542,7 @@ uci_drain_status:
         sta @dst_elapsed
 @dst_loop:
         lda UCI_STATUS
-        uci_fence                   ; settle before testing STAT_AV
+        jsr uci_settle               ; settle before testing STAT_AV
         and #UCI_STAT_STAT_AV
         bne @dst_have
         jsr @dst_commit
@@ -528,7 +550,7 @@ uci_drain_status:
         rts
 @dst_have:
         lda UCI_STATUS_DATA
-        uci_fence
+        jsr uci_settle
         ; Hold the committed line intact. uci_status_len is sticky, but the
         ; BUFFER is shared, so without this a later drain scribbles over the
         ; bytes the length still describes: a held "02,NO DATA: 11" with a
