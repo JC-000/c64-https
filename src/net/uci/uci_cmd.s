@@ -35,6 +35,7 @@
 .import net_last_error
 
 .export uci_abort
+.export uci_tod_start
 .export uci_wait_idle
 .export uci_wait_not_busy
 .export uci_begin_cmd
@@ -68,6 +69,64 @@ uci_abort:
         rts
 
 ; =============================================================================
+; uci_tod_start — start CIA1's Time-of-Day clock (issue #145)
+;
+; Every bounded wait below measures wall-clock time by watching CIA1's
+; TENTHS register advance. The CIA's TOD does NOT run out of reset: it
+; stays halted until TENTHS is written. Nothing in the KERNAL writes it
+; (the jiffy clock is Timer A, not TOD), and until this routine landed
+; nothing here did either — so on real hardware every "5 s bounded" wait
+; was in fact unbounded, `cmp last_tenths` comparing a frozen value
+; forever. The bound was decorative, not real.
+;
+; Measured on a U64E (fw 3.15) by the c64-wireguard lane, which ports
+; this adapter's design: with the machine hung inside a wait, 207 IRQ
+; samples over 3 s read TOD 00:00:00.0 every time, hour byte $91 (the
+; untouched reset value). Writing TENTHS once from the IRQ hook started
+; the clock and the hung wait expired within 2 s with C=1. VICE's CIA
+; runs the TOD from reset, which is exactly why no emulator test here
+; ever caught it, and why the regression guard for this is a hardware
+; rig (tools/uci/boot_check.py) rather than a VICE suite.
+;
+; Write order is the datasheet's: writing HOURS halts the clock and
+; writing TENTHS starts it, so tenths goes last. CRB bit 7 selects
+; whether these writes land in the clock or the alarm — clear it,
+; preserving Timer B's control bits.
+;
+; Called from net_init, which every entry path runs before the first
+; bounded wait (do_net_init reaches net_init before net_dhcp_acquire),
+; and a C64 reset halts the TOD again — so this belongs in init, not in
+; a one-off boot hook.
+;
+; Measured once the clock actually runs (U64E @ 48 MHz, 2026-08-28,
+; instrumented high-water mark over four full github.com handshakes): the
+; longest bounded wait observed is ONE tenth, 0.1 s, against a 5 s budget.
+; The budget is ~50x the worst real wait, so it fires only on a genuine
+; wedge — which is what it is for. One UCI_ERR_WAIT_TIMEOUT ($89) has been
+; seen in the field on an otherwise PASSING run, so the ceiling is not
+; purely theoretical; do not tighten it without re-measuring.
+;
+; The TOD counts its own 60 Hz input rather than CPU cycles, which is the
+; whole point: turbo cannot shrink it. Measured on the U64E at 48 MHz,
+; TOD-elapsed / wall-elapsed = 0.996 over a 10 s window, i.e. the "5 s"
+; budget really is 5.02 s. On a PAL machine the 50 Hz input
+; against the default CRA bit 7 = 0 runs the clock at 5/6 rate, stretching
+; a 5 s budget to 6 s — harmless for a timeout, and not worth detecting.
+;
+; Clobbers: A
+; =============================================================================
+uci_tod_start:
+        lda CIA_CRB
+        and #$7F                    ; CRB bit 7 = 0 → writes set clock, not alarm
+        sta CIA_CRB
+        lda #$00
+        sta CIA_TOD_HOUR            ; writing HOURS halts the TOD
+        sta CIA_TOD_MIN
+        sta CIA_TOD_SEC
+        sta CIA_TOD_TENTHS          ; writing TENTHS starts it running
+        rts
+
+; =============================================================================
 ; uci_wait_idle — spin until STATE==0 AND CMD_BUSY==0, with wall-clock cap
 ; UCI_STAT_STATE ($30) covers the state field; CMD_BUSY ($01) is bit 0.
 ; ORing them (MASK $31) and looping while nonzero gives "fully idle".
@@ -94,7 +153,10 @@ uci_abort:
 ; Clobbers: A
 ; =============================================================================
 CIA_TOD_TENTHS = $DC08
+CIA_TOD_SEC    = $DC09
+CIA_TOD_MIN    = $DC0A
 CIA_TOD_HOUR   = $DC0B
+CIA_CRB        = $DC0F
 UCI_WAIT_IDLE_BUDGET_TENTHS = 50      ; 5 seconds at 10 Hz
 
 uci_wait_idle:

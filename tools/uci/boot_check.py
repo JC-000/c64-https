@@ -19,6 +19,13 @@ Pass criteria (all must hold):
   4. No `FAILED` anywhere on the screen (`NETWORK INIT FAILED`,
      `DHCP FAILED`, ...).
   5. The main menu (`Q=QUIT`) was reached, i.e. boot ran to completion.
+  6. (uci only) CIA1's TOD is ticking. The CIA's TOD is halted out of
+     reset and starts only when TENTHS is written; every bounded wait in
+     `src/net/uci/uci_cmd.s` measures wall-clock by watching TENTHS
+     advance, so a halted TOD makes all of them infinite (#145).
+     `net_init` calls `uci_tod_start`; this is the regression guard, and
+     it has to live in a hardware rig because VICE's CIA runs the TOD
+     from reset and cannot reproduce the bug.
 
 The old criterion — "screen has some text and >= 3 distinct byte values" —
 only distinguished a booted machine from a blank screen. An ip65/RR-Net
@@ -68,6 +75,12 @@ BACKEND_BANNERS = {
 
 COMMON_BANNER = "C64-HTTPS CLIENT V0.1"
 MENU_MARKER = "Q=QUIT"
+
+# CIA1 time-of-day tenths-of-a-second register, and how long to watch it
+# before calling it halted. TOD ticks at 10 Hz, so ~1.5 s of sampling is
+# many ticks' worth of margin over any plausible REST round-trip jitter.
+CIA_TOD_TENTHS = 0xDC08
+TOD_SAMPLE_WINDOW = 1.5
 
 
 # Commodore screen-code -> ASCII (uppercase/graphics mode, codes $00-$3F
@@ -190,6 +203,36 @@ def check_prg_image(prg: bytes, backend: str) -> list[tuple[str, bool, str]]:
     return results
 
 
+def check_tod_running(client) -> tuple[str, bool, str]:
+    """Assert CIA1's TOD is actually running — issue #145.
+
+    Reads only TENTHS. Reading the HOUR register would latch the TOD
+    until TENTHS is read, and we have no reason to disturb the latch
+    state of a machine the adapter is sharing.
+    """
+    first = client.read_mem(CIA_TOD_TENTHS, 1)[0] & 0x0F
+    samples = 1
+    deadline = time.monotonic() + TOD_SAMPLE_WINDOW
+    while time.monotonic() < deadline:
+        time.sleep(0.2)
+        now = client.read_mem(CIA_TOD_TENTHS, 1)[0] & 0x0F
+        samples += 1
+        if now != first:
+            return (
+                "CIA1 TOD is running",
+                True,
+                f"TENTHS advanced {first} -> {now} within {samples} samples",
+            )
+    return (
+        "CIA1 TOD is running",
+        False,
+        f"TENTHS frozen at {first} across {samples} samples over "
+        f"{TOD_SAMPLE_WINDOW:.1f}s — every TOD-bounded wait in the UCI "
+        f"adapter is therefore unbounded (#145). Is uci_tod_start still "
+        f"called from net_init?",
+    )
+
+
 def report(results: list[tuple[str, bool, str]]) -> bool:
     ok = True
     for name, passed, detail in results:
@@ -284,7 +327,13 @@ def main() -> int:
         print("--- boot checks ---")
         screen_ok = report(evaluate_screen(lines, BACKEND))
 
-        if image_ok and screen_ok:
+        # The UCI adapter is the only backend with TOD-bounded waits.
+        tod_ok = True
+        if BACKEND == "uci":
+            print("\n--- CIA1 TOD check (#145) ---")
+            tod_ok = report([check_tod_running(client)])
+
+        if image_ok and screen_ok and tod_ok:
             print(f"\nPASS: {BACKEND} PRG booted cleanly to the menu")
             return 0
         print(f"\nFAIL: boot check failed for expected backend {BACKEND}",
