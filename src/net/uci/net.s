@@ -50,6 +50,8 @@
 ; --- primitives from uci_cmd.s ---
 .import uci_abort
 .import uci_tod_start
+.import uci_status_len
+.import uci_status_force
 .import uci_wait_idle
 .import uci_wait_not_busy
 .import uci_begin_cmd
@@ -94,6 +96,14 @@ net_init:
         ; below spins on an iteration count, not the TOD, so the order
         ; here is about net_dhcp_acquire and everything after it.
         jsr uci_tod_start
+
+        ; Arm the status capture: uci_status_len is sticky-first, so a line
+        ; captured by a previous run on this machine would otherwise be
+        ; read as this run's diagnostic (#147).
+        lda #$00
+        sta uci_status_len
+        sta uci_status_force
+
         jsr uci_abort
 
         lda UCI_ID
