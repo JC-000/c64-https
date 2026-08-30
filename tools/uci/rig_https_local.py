@@ -3,6 +3,20 @@
 Phase 5 LOCAL HTTPS: exercise the real http_get (TLS 1.3) code path through
 the UCI backend on a real Ultimate 64 Elite.
 
+BUILD REQUIREMENT (issue #141): the PRG must present a name the test cert
+carries, so build it with an SNI override:
+
+    make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.bar
+
+The C64 dials this host's dotted-quad IP — it must, the firmware needs an
+address — but src/x509_name.s (v0.4.2+) validates the certificate's SAN
+dNSName entries against tls_hostname, and an IP literal matches no dNSName.
+Without the override the handshake is correctly rejected at Certificate
+(tls_state=$FF, tls_last_state=$04).  The clean is not optional: HTTPS_SNI=
+is a flag change make cannot see, and a stale http.o gives a mixed link that
+embeds the string but never runs the override.  main() asserts all of this
+offline before it touches DeviceLock — see tools/uci/_sni_precondition.py.
+
 Environment variables:
   U64_HOST              — U64E IP address (default 192.168.1.81)
   TURBO_MHZ             — C64 CPU MHz (default 48). TURBO_MHZ=1 runs the test
@@ -101,6 +115,7 @@ from _memory_policy import (
     build_policy_and_arbiter_with_overlay_carveout,
 )
 from _reu_preflight import ReuPreflightError, preflight_reu
+from _sni_precondition import enforce_sni_precondition
 
 
 DEBUG_CAPTURE_ENABLED = os.environ.get("DEBUG_CAPTURE", "1") != "0"
@@ -482,6 +497,10 @@ def _check_server_result(server_result: dict, *,
                 f"(got {req[:40]!r})"
             )
         if expect_host is not None:
+            # Still the listener's IP, even on an HTTPS_SNI= build (#141):
+            # http_build_request composes `Host:` from http_host_ptr, which
+            # the SNI override does not touch — it only writes tls_hostname.
+            # Do not "fix" this to expect the SNI name.
             want_host = b"Host: " + expect_host.encode("ascii")
             if want_host not in req:
                 problems.append(
@@ -1332,6 +1351,42 @@ def main() -> int:
 
     for n in sorted(required):
         print(f"  {n:22s} = ${labels[n]:04X}")
+
+    # --- issue #141: does this PRG present a name the cert names? ---
+    # The C64 dials the dev host's dotted-quad IP (it must — see below), and
+    # since v0.4.2 src/x509_name.s validates the certificate's SAN dNSNames
+    # against tls_hostname, which an IP literal can never match. So the image
+    # has to carry an HTTPS_SNI override. That is a property of the artifacts
+    # on disk, so it is checked HERE: offline, and before
+    # lock.acquire_or_raise() below, so a wrong PRG costs zero device time
+    # instead of a multi-minute run that dies at Certificate.
+    #
+    # Deliberately NOT a `make` invocation: building here would burn
+    # DeviceLock time, fight C64_SKIP_BUILD, and `make HTTPS_SNI=...` without
+    # a clean is itself the mixed-link trap this check exists to catch.
+    #
+    # SAFETY: `.bar` is a live gTLD. Only the *presented* name changes; the
+    # host DMA'd into http_host_ptr below stays the listener's IP. DMA'ing
+    # www.foo.bar as the connect host would hand it to the UCI firmware's
+    # resolver and send the C64 to a stranger's address on any LAN that
+    # resolves it. Also note http_build_request composes `Host:` from
+    # http_host_ptr independently of tls_hostname (src/http.s), so the
+    # server-side request matcher still sees `Host: <listener IP>` — do not
+    # "fix" _check_server_result to expect the SNI name.
+    #
+    # Under EXTERNAL_LISTENER=1 no repo cert is loaded and we cannot know
+    # what the out-of-band listener will present, so the cert half is
+    # skipped; the mixed-link half still applies and is still checked.
+    sni_problem = enforce_sni_precondition(
+        labels,
+        PRG_PATH,
+        None if EXTERNAL_LISTENER else CERT_PATH,
+        EXTERNAL_HOST or _detect_local_ip(HOST),
+        backend=os.environ.get("BACKEND", "uci"),
+    )
+    if sni_problem is not None:
+        print(f"ERROR: {sni_problem}", file=sys.stderr)
+        return 2
 
     # --- Memory policy + arbiter: derive scratch addresses from the
     # current build's segment layout instead of hardcoding them.  The
