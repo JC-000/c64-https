@@ -154,8 +154,24 @@
         .import tls_hostname_len
 
         ; ---- imports: comb precompute (sibling nistcurves, comb profile) ----
+        ; vic_blank/vic_unblank (src/vic.s, LOADER_OVERFLOW) are pulled in
+        ; only here: the precompute is the one boot-time stretch long
+        ; enough for the badline tax to matter.
         .ifdef USE_NISTCURVES_COMB
         .import ec_precompute_256
+        .import vic_blank
+        .import vic_unblank
+
+        ; Border colours for the blanked precompute (see the call site).
+        ; While DEN is clear the whole display area is border colour, so
+        ; this IS the progress indicator. $0B (dark grey) is picked
+        ; because the KERNAL never leaves the border there, so it cannot
+        ; be mistaken for an idle machine; $0E (light blue) is the
+        ; KERNAL default and is restored as a constant, never as a
+        ; saved byte -- an unbalanced pair with a saved value leaves the
+        ; border wrong forever, a constant self-heals.
+COMB_BUSY_BORDER = $0B
+BORDER_DEFAULT   = $0E
         .endif
 
         ; ---- imports: multiply / REU staging (data.asm) ----
@@ -316,7 +332,59 @@ start:
         ; onchip row generator; runs once per boot. ~seconds at turbo,
         ; ~25 s at stock 1 MHz.
         .ifdef USE_NISTCURVES_COMB
+        ; The precompute is by far the longest CPU-bound stretch of boot
+        ; and prints nothing of its own, so the badline DMA it pays is
+        ; pure loss — exactly the shape src/vic.s says to blank. At the
+        ; measured 6.3-6.8% that is a PREDICTED ~3 s of the ~45 s pass at
+        ; 48 MHz. Nobody has measured it on this call site yet; see the
+        ; PR for the bench_ecdsa_u64e-style A/B that would confirm it.
+        ;
+        ; UX: the border is the liveness indicator, not the banner.
+        ; vic_blank clears DEN only, so for the whole 45 s the display
+        ; area is solid BORDER colour and anything printed first is
+        ; invisible — reading a banner in the instant before the screen
+        ; dies is not a design, and a press-a-key acknowledgement would
+        ; cost more than the blank buys. So $D020 goes to a colour the
+        ; KERNAL never leaves it at, and the entire screen becomes that
+        ; colour for the duration: an unmistakable "working" signal that
+        ; is persistent, costs two register writes, and costs ZERO
+        ; cycles inside the compute loop. Badline DMA does not care what
+        ; colour the border is, so the 6.3-6.8% is untouched.
+        ;
+        ; Restored to a CONSTANT ($0E, the KERNAL default), not to a
+        ; saved value — same reasoning src/vic.s gives for restoring DEN
+        ; with ORA rather than a stashed byte. An unbalanced begin/end
+        ; with a saved value leaves the border wrong forever; with a
+        ; constant the next pass through here self-heals.
+        ;
+        ; Scoped to THIS call site rather than folded into vic_blank/
+        ; vic_unblank, deliberately: those two also wrap the X25519
+        ; scalar mults and the ecdsa_verify dispatch, which blank for
+        ; seconds mid-handshake and unblank onto the CH/SH/HK1/KEYS/
+        ; ENC1/RX markers. Recolouring the border around those would
+        ; churn the field diagnostic for no gain — they are short enough
+        ; that nobody mistakes them for a hang.
+        ;
+        ; Both writes run under `make VIC_BLANK=0` too, which keeps that
+        ; A/B control clean: the two arms then differ only in whether
+        ; DEN is touched, and the control arm still shows the busy
+        ; colour (with the text visible behind it).
+        ;
+        ; No PHP/PLP is needed around the unblank here, unlike the
+        ; ecdsa_verify dispatch in src/crypto/ecdsa_verify.s:
+        ; ec_precompute_256 returns no value and boot consumes no flag
+        ; from it. vic_blank/vic_unblank clobber only A, which is dead
+        ; across both calls, as is the A used for the border writes.
+        lda #<comb_precompute_msg
+        ldy #>comb_precompute_msg
+        jsr print_string
+        lda #COMB_BUSY_BORDER
+        sta border_color
+        jsr vic_blank
         jsr ec_precompute_256
+        jsr vic_unblank
+        lda #BORDER_DEFAULT
+        sta border_color
         .endif
 
         ; Phase 3: stash both P-384 split overlay images in REU banks 6
@@ -1203,6 +1271,22 @@ banner_msg:
 
 banner_msg_tail:
         .byte $0d, 0
+
+; Comb profile only: printed immediately before the boot precompute. It is
+; NOT the liveness indicator -- the blank hides it for the whole 45 s and
+; the border colour carries that job (see the call site). It is here so the
+; boot log on screen says what the machine went quiet for, and so a run
+; captured after the fact (rigs read $0400 over DMA, which the blank does
+; not affect) explains itself. 30 columns, so it does not wrap. The
+; duration is the 48 MHz figure because the shipped comb image
+; (c64-https-uci-comb) is turbo-only; a stock 1 MHz machine takes ~34 min
+; and no one-line banner is going to make that look healthy. No `~` -- $7E
+; is not a printable PETSCII character.
+        .ifdef USE_NISTCURVES_COMB
+comb_precompute_msg:
+        .byte "COMB PRECOMPUTE - 45S AT 48MHZ"
+        .byte $0d, 0
+        .endif
 
 menu_msg:
         .byte "I=INIT  H=HTTP  G=HTTPS  Q=QUIT"

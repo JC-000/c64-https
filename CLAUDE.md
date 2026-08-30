@@ -393,10 +393,18 @@ engineering-notes ("Summary of recent fixes").
 
 ### VIC-II blanking — worth 6.3%, not the fleet's "20-25%"
 
-`src/vic.s` `vic_blank`/`vic_unblank` wrap the two X25519 scalar mults and
-the `ecdsa_verify` dispatch only, so the CH/SH/HK1/KEYS/ENC1/RX progress
-markers stay visible (they are the field diagnostic). The dispatch arms
-are `jsr` + `php`/`plp` so the verify carry survives the unblank.
+`src/vic.s` `vic_blank`/`vic_unblank` wrap the two X25519 scalar mults, the
+`ecdsa_verify` dispatch, and (comb only) the `ec_precompute_256` boot pass
+— nothing else, so the CH/SH/HK1/KEYS/ENC1/RX progress markers stay visible
+(they are the field diagnostic). The dispatch arms are `jsr` + `php`/`plp`
+so the verify carry survives the unblank; the precompute needs no such
+guard (no return value). The precompute is the one blank long enough to
+look like a hang, so `boot.s` recolours the border ($D020 = $0B dark grey,
+restored to the $0E constant) across it: with DEN clear the whole display
+is border colour, so that — not the banner it prints first — is the
+persistent "working" signal. Both writes are at the call site, not in
+`vic.s`, so the mid-handshake blanks keep the markers untouched, and they
+run under `VIC_BLANK=0` too, which keeps that A/B control clean.
 
 Measured: 6.35% (VICE, 1 MHz), 6.60% (U64E 48 MHz, REU profile), 6.78%
 (U64E 48 MHz, onchip, n=3), vs 6.31% from first principles (25 badlines ×
