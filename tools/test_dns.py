@@ -108,7 +108,28 @@ def main():
     os.chdir(PROJECT_ROOT)
 
     if skip_if_no_network():
-        sys.exit(0)
+        # An involuntary skip is a failure: nothing above was configured, so
+        # not one of the four DNS assertions ran and exiting 0 would report
+        # "DNS resolution is fine" on a host that cannot even reach the
+        # emulated wire. Exit 2 ("could not run"), distinct from 1 ("tests
+        # failed"), so a caller can tell the two apart.
+        #
+        # An operator who knows this host has no TAP rig and wants the
+        # network suites out of the way makes that choice EXPLICIT — the
+        # other half of the audit rule (7497e48): an explicit skip is
+        # allowed, but must never be silent.
+        if os.environ.get("C64_NET_TESTS_OPTIONAL") == "1":
+            print("EXPLICIT SKIP (C64_NET_TESTS_OPTIONAL=1): test_dns.py did "
+                  "NOT run.\n  0 of 4 DNS assertions executed; this exit 0 "
+                  "certifies nothing about DNS.")
+            sys.exit(0)
+        print("CANNOT RUN: test_dns.py needs the TAP network rig "
+              "(tools/rig-up-macos.sh or the Linux tap-c64 setup).\n"
+              "  0 of 4 DNS assertions executed — this run certifies "
+              "nothing.\n"
+              "  Set C64_NET_TESTS_OPTIONAL=1 to make skipping it a "
+              "deliberate, exit-0 choice.", file=sys.stderr)
+        sys.exit(2)
 
     # Late imports -- only needed if prerequisites are met
     from c64_test_harness import (

@@ -206,9 +206,17 @@ def main() -> int:
             "tls_hostname", "tls_hostname_len", "cert_buf_size"]
     for n in need:
         if labels.address(n) is None:
-            print(f"SKIP: label {n} missing — this is a BACKEND=uci-only feature "
-                  f"(see #135); nothing to test on this build.")
-            return 0
+            # An involuntary skip is a failure. This suite is the only
+            # coverage server-name validation has; on a build that does not
+            # export the routine (BACKEND=ip65, see #135) every one of the
+            # vectors below is silently dropped, and exiting 0 here would
+            # report "hostname checking is fine" having checked nothing.
+            # Run it against a BACKEND=uci build, or do not run it.
+            print(f"CANNOT RUN: label {n} missing — server name validation is "
+                  f"a BACKEND=uci-only feature (see #135). None of the "
+                  f"vectors executed; this run certifies nothing.",
+                  file=sys.stderr)
+            return 2
     cert_cap = labels.address("cert_buf_size")
 
     vectors = build_vectors()
@@ -230,9 +238,19 @@ def main() -> int:
             return 2
 
         passed = failed = 0
+        oversize = []
         for name, der, host, want, why in vectors:
             if len(der) > cert_cap:
-                print(f"  SKIP {name}: {len(der)} B exceeds cert_buf")
+                # Declared vector, no verdict: it leaves the denominator
+                # unless it is accounted for. Same rule as the KAT oracle's
+                # "every declared vector must produce a verdict" check, and
+                # this one is load-bearing — the vectors most likely to
+                # outgrow cert_buf are the real CA-issued leaves, i.e. the
+                # ones the client actually has to get right.
+                print(f"  [-] CANNOT RUN {name}: {len(der)} B exceeds "
+                      f"cert_buf ({cert_cap} B) — counted as a failure")
+                oversize.append((name, len(der)))
+                failed += 1
                 continue
             write_bytes(t, labels["cert_buf"], der)
             write_bytes(t, labels["cert_data_ptr"],
@@ -248,7 +266,12 @@ def main() -> int:
             gs = "hung" if got is None else f"C={got}"
             print(f"  [{verdict}] {name}: {gs} (want C={want}) — {why}")
 
-        print(f"\nRESULTS: {passed}/{passed+failed} passed")
+        if oversize:
+            print(f"\n  VECTORS THAT COULD NOT RUN (counted as failures)")
+            for name, n in oversize:
+                print(f"  [-] {name}: {n} B > cert_buf {cert_cap} B")
+        print(f"\nRESULTS: {passed}/{passed+failed} passed"
+              f"{f' ({len(oversize)} could not run)' if oversize else ''}")
         return 0 if failed == 0 else 1
 
 
