@@ -508,9 +508,12 @@ tls_recv_server_hello:
         dey
         bne @sh_drain_outer
 
-        ; compute ECDH shared secret now that tls_server_pubkey is populated
+        ; Compute ECDH shared secret now that tls_server_pubkey is populated.
+        ; C=1 means the server's key_share drove the shared secret to all
+        ; zeros (RFC 8446 §7.4.2 / RFC 7748 §6.1) — abort, see the comment in
+        ; src/tls_ecdh.s. This used to be an unconditional `clc`.
         jsr tls_ecdh_compute_shared
-        clc
+        bcs @sh_error
 
         ; update transcript with ServerHello
         lda #<tls_rec_buf
