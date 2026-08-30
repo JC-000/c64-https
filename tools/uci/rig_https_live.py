@@ -27,7 +27,7 @@ How the target reaches the C64: this rig programs ``http_host_ptr`` /
 hostname into ``tls_hostname`` for SNI (src/http.s:95-111) and resolves it
 via UCI firmware DNS — so any hostname works with today's PRG, unmodified.
 The PRG's *menu-driven* 'G' path is a different story: its host is baked in
-(``www.foo.bar``, src/boot.s) until W3's ``make HTTPS_HOST=<host>`` /
+(``www.foo.invalid``, src/boot.s) until W3's ``make HTTPS_HOST=<host>`` /
 ``HTTPS_HOST_LEN`` build defines land. This rig does not depend on W3.
 
 Environment variables:

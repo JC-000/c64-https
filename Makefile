@@ -111,13 +111,19 @@ ifdef HTTPS_BODY_TO_REU
 CA65FLAGS += -D HTTPS_BODY_TO_REU=1
 endif
 endif
-# Optional HTTPS target-host override (src/boot.s defaults to www.foo.bar).
+# Optional HTTPS target-host override (default www.foo.invalid — RFC 2606 /
+# RFC 6761 reserved, so a default build cannot dial anything real).
 # `make HTTPS_HOST=github.com` retargets the GET + SNI + DNS lookup.
 # ca65's -D accepts numeric values only, so the hostname travels via a
 # generated include (build/https_host.inc, reached through `-I build`).
 # The generator rule is content-compared: changing HTTPS_HOST= rebuilds
 # boot.o with no `make clean`, and an unchanged value touches nothing.
-HTTPS_HOST ?= www.foo.bar
+# This value is BAKED INTO THE SHIPPED PRG. It must stay under a TLD the
+# DNS can never answer for: pressing G on a default build dials it, on
+# whatever LAN the machine is on. `.bar` (the predecessor) is a live gTLD.
+# tools/test_reserved_test_host.py fails if this stops being true, and it
+# tracks the property, not the spelling — `foo.baz` fails it too.
+HTTPS_HOST ?= www.foo.invalid
 # Companion request-path override (default "/"), same mechanism/caveats.
 # e.g. make HTTPS_PATH='/w/index.php?title=Commodore_64&action=raw'
 HTTPS_PATH ?= /
@@ -534,9 +540,11 @@ build/net/ip65/ip65_blob.o: $(IP65_BIN)
 # (CLAUDE.md, "Build"), and it is a rule that only has to be forgotten once:
 # the result is not an error but a MIXED LINK, with exit status 0.
 #
-# Measured 2026-08-30, from a UCI onchip tree with no `make clean`:
+# Measured 2026-08-30, from a UCI onchip tree with no `make clean`. The
+# hashes are that day's tree and the then-current default host; they are the
+# shape of the evidence, not values to reproduce today:
 #
-#     make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.bar
+#     make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.invalid
 #       -> d1b63508...   (mixed)
 #     make clean; make <the same flags>
 #       -> a65fff60...   (correct)
@@ -652,7 +660,7 @@ $(FLAGS_STAMP):
 #      previous link is NOT newer than the PRG and the link is skipped. `make`
 #      then `make HTTPS_HOST=<other>` back-to-back printed nothing, exited 0,
 #      and left a PRG still carrying the OLD host. That is precisely "the
-#      wikipedia build still connects to foo.bar".
+#      wikipedia build still connects to the default host".
 #
 #   2. Delete boot.o AND the PRG from inside the recipe. Worse: make stats its
 #      targets before this recipe runs and caches the result, so it used the

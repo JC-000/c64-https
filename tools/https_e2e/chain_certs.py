@@ -207,6 +207,8 @@ def _selftest() -> int:
             failures.append(name)
 
     print("chain_certs selftest (host-only, loopback)")
+    from ensure_certs import SANS  # noqa: PLC0415
+    sni = SANS[-1]                 # derived, never spelled — see gen_certs
     chain_pem, key_path = ensure_chain_certs()
     leaf_der = base64.b64decode("".join(
         line for line in
@@ -227,7 +229,7 @@ def _selftest() -> int:
         ctx.verify_mode = ssl.CERT_NONE
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
-            with ctx.wrap_socket(s, server_hostname="www.foo.bar") as tls:
+            with ctx.wrap_socket(s, server_hostname=sni) as tls:
                 check("TLS 1.3 negotiated", tls.version() == "TLSv1.3",
                       str(tls.version()))
                 peer_leaf = tls.getpeercert(binary_form=True)
@@ -249,7 +251,8 @@ def _selftest() -> int:
                 else:
                     print("  (get_unverified_chain unavailable on this "
                           "Python — chain count unchecked)")
-                tls.sendall(b"GET / HTTP/1.0\r\nHost: www.foo.bar\r\n\r\n")
+                tls.sendall(b"GET / HTTP/1.0\r\nHost: "
+                            + sni.encode("ascii") + b"\r\n\r\n")
                 resp = b""
                 try:
                     while True:

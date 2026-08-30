@@ -14,7 +14,9 @@
         ; HTTPS target host. `make HTTPS_HOST=github.com` writes the
         ; string into build/https_host.inc (ca65 -D is numeric-only, so
         ; a string override must travel via a generated include). The
-        ; default is www.foo.bar and the default build byte-identical.
+        ; default is www.foo.invalid (RFC 2606 / RFC 6761 reserved: it can
+        ; never resolve, so a default build cannot dial anything real) and
+        ; the default build byte-identical.
         .include "https_host.inc"
 
         ; ---- exports: entry + print helpers ----
@@ -525,7 +527,8 @@ do_https_get:
 @net_ok:
         ; Issue #128: print the ACTUAL target, not a hardcoded literal.
         ; This banner used to read "HTTPS GET WWW.FOO.BAR..." unconditionally,
-        ; so a `make HTTPS_HOST=en.wikipedia.org` build announced foo.bar on
+        ; so a `make HTTPS_HOST=en.wikipedia.org` build announced the default
+        ; host on
         ; screen while connecting to wikipedia perfectly well. The connection
         ; was always right — http_host_target drives both the SNI copy and
         ; net_dns_resolve, a few lines below — but the only thing the operator

@@ -20,9 +20,9 @@ The certificate this produces is byte-shaped like the one the previous
 
   * key   : ECDSA on NIST P-256 (secp256r1 / prime256v1)
   * sig   : ecdsa-with-SHA256
-  * CN    : www.foo.bar  (overridable via --cn)
+  * CN    : www.foo.invalid  (overridable via --cn)
   * files : server.pem / server.key
-  * SAN   : foo.bar, www.foo.bar  (overridable via --san, repeatable)
+  * SAN   : foo.invalid, www.foo.invalid  (overridable via --san, repeatable)
   * valid : now-5min .. now+3650 days, UTCTime
   * exts  : subjectAltName ONLY, non-critical
 
@@ -51,6 +51,78 @@ import hashlib
 import secrets
 import sys
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# The test identity — ONE definition, imported by every other minting path
+# (listener.py's auto-generate, tools/https_e2e/ensure_certs.py) so they
+# cannot drift apart. Three copies of these literals used to exist.
+#
+# `.invalid` is reserved by RFC 2606 §2 and RFC 6761 §6.4: never delegated,
+# and resolvers are required not to resolve it. That is the whole
+# requirement here. The predecessor was `www.foo.bar`, and `.bar` is a live
+# gTLD — a default-built PRG dialled a name the open internet could answer.
+# Do NOT "improve" this to `.com`/`.local`/`example.com`: example.com
+# resolves to real IANA servers and `.local` is mDNS.
+#
+# The two-entry shape is load-bearing too — a bare name plus its `www.`
+# prefix is what tools/test_x509_name.py's leftmost-label and
+# "SAN entry is a prefix of the host" vectors are built from.
+# tools/test_reserved_test_host.py pins both properties.
+DEFAULT_CN = "www.foo.invalid"
+DEFAULT_SANS = ["foo.invalid", "www.foo.invalid"]
+
+
+def san_dns_names(cert_path) -> list:
+    """dNSName entries from a PEM certificate's subjectAltName.
+
+    Stdlib only, and a deliberate hand walk of the DER — `ssl` cannot read
+    a self-signed leaf's SAN off disk without a connection, and this file's
+    entire premise is no third-party dependency.
+
+    Callers use it to decide whether a cert already on disk is *stale*
+    rather than merely present: the pairs are gitignored and nothing deletes
+    them, so renaming the identity above would otherwise leave every machine
+    that had run before serving the old names, silently.
+
+    Returns [] if the file is unreadable or carries no SAN — either way the
+    caller should re-mint, which is the safe direction.
+    """
+    import base64
+
+    def tlv(buf, off):
+        tag, n, off = buf[off], buf[off + 1], off + 2
+        if n & 0x80:
+            k = n & 0x7F
+            n = int.from_bytes(buf[off:off + k], "big")
+            off += k
+        return tag, off, n, off + n
+
+    try:
+        der = base64.b64decode("".join(
+            line for line in Path(cert_path).read_text().splitlines()
+            if "-----" not in line))
+        i = der.find(b"\x06\x03\x55\x1d\x11")   # OID 2.5.29.17 subjectAltName
+        if i == -1:
+            return []
+        tag, vs, vl, nxt = tlv(der, i + 5)
+        if tag == 0x01:                          # optional `critical` BOOLEAN
+            tag, vs, vl, nxt = tlv(der, nxt)
+        tag, vs, vl, _ = tlv(der, vs)            # OCTET STRING -> GeneralNames
+        names, cur, end = [], vs, vs + vl
+        while cur < end:
+            tag, s, ln, cur = tlv(der, cur)
+            if tag == 0x82:                      # [2] IMPLICIT dNSName
+                names.append(der[s:s + ln].decode("ascii"))
+        return names
+    except Exception:                            # noqa: BLE001
+        return []
+
+
+def sans_match(cert_path, wanted=None) -> bool:
+    """True iff the cert on disk carries exactly *wanted* (default: DEFAULT_SANS)."""
+    wanted = DEFAULT_SANS if wanted is None else wanted
+    return sorted(n.lower() for n in san_dns_names(cert_path)) == \
+        sorted(n.lower() for n in wanted)
 
 # ---------------------------------------------------------------------------
 # Domain parameters — SEC 2 / FIPS 186-4.
@@ -348,11 +420,11 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--cn", default="www.foo.bar",
-                   help="certificate Common Name (default: www.foo.bar)")
+    p.add_argument("--cn", default=DEFAULT_CN,
+                   help=f"certificate Common Name (default: {DEFAULT_CN})")
     p.add_argument("--san", action="append", default=None, metavar="DNS",
                    help="Subject Alternative Name DNS entry (repeatable; "
-                        "default: foo.bar and www.foo.bar)")
+                        f"default: {' and '.join(DEFAULT_SANS)})")
     p.add_argument("--out-dir", default=None,
                    help="output directory for server.pem/server.key "
                         "(default: ./certs)")
@@ -364,7 +436,7 @@ def main(argv=None) -> int:
                         "server-p384.{pem,key} so both pairs can coexist")
     args = p.parse_args(argv)
 
-    sans = args.san if args.san else ["foo.bar", "www.foo.bar"]
+    sans = args.san if args.san else list(DEFAULT_SANS)
     out_dir = Path(args.out_dir) if args.out_dir else Path.cwd() / "certs"
 
     generate(args.cn, sans, out_dir, force=args.force, curve=args.curve)

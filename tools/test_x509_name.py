@@ -32,6 +32,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _vice_helpers import default_vice_config  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools", "package", "listener"))
+# The names the bundled listener's certificate actually carries. Single
+# source (gen_certs.DEFAULT_SANS); the real-cert vectors below are built
+# from it so they can never drift out of step with server.pem.
+from gen_certs import DEFAULT_SANS as CERT_SANS  # noqa: E402
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 REAL_CERT = os.path.join(PROJECT_ROOT, "tools", "https_e2e", "certs", "server.pem")
@@ -120,13 +125,20 @@ def build_vectors():
     v = []
     real = real_cert_der()
     if real:
+        # Derived from the cert's own SAN entries rather than spelled out, so
+        # renaming the test identity cannot leave these vectors testing a name
+        # the listener no longer serves — they would still all PASS, having
+        # quietly stopped exercising the real certificate at all. CERT_SANS is
+        # the bare name + its `www.` prefix; that shape is what makes the last
+        # two vectors meaningful, and tools/test_reserved_test_host.py pins it.
+        bare, www = sorted(CERT_SANS, key=len)
         for host, want, why in [
-            ("www.foo.bar", 0, "matches the 2nd SAN entry of the real listener cert"),
-            ("foo.bar",     0, "matches the 1st SAN entry"),
-            ("WWW.FOO.BAR", 0, "DNS names are case-insensitive (RFC 4343)"),
+            (www,          0, "matches the 2nd SAN entry of the real listener cert"),
+            (bare,         0, "matches the 1st SAN entry"),
+            (www.upper(),  0, "DNS names are case-insensitive (RFC 4343)"),
             ("evil.example", 1, "REJECT: name not in the cert"),
-            ("www.foo.ba",   1, "REJECT: prefix of a SAN entry must not match"),
-            ("www.foo.barx", 1, "REJECT: SAN entry is a prefix of the host"),
+            (www[:-1],     1, "REJECT: prefix of a SAN entry must not match"),
+            (www + "x",    1, "REJECT: SAN entry is a prefix of the host"),
         ]:
             v.append((f"real cert / {host}", real, host, want, why))
     else:

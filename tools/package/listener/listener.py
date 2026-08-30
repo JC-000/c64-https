@@ -83,19 +83,54 @@ HTTP_RESPONSE = (
 DEFAULT_PORT = int(os.environ.get("HTTPS_PORT", "443"))
 FALLBACK_PORT = 4433
 
+# gen_certs.py ships in the same bundle (build_listener.PAYLOAD_FILES) and
+# sits beside this file in-tree, so it is always importable. The test
+# identity is defined there, once — see DEFAULT_CN/DEFAULT_SANS. Importing
+# it rather than repeating the literals is what keeps the name the selftest
+# presents as SNI identical to the name in the cert it just minted.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gen_certs import DEFAULT_CN, DEFAULT_SANS, san_dns_names, sans_match  # noqa: E402
+
+# The name a client should present: the `www.` entry, i.e. the one a real
+# browser would have been pointed at.
+SELFTEST_SNI = DEFAULT_SANS[-1]
+
 
 def _ensure_certs(cert_path: Path, key_path: Path) -> None:
-    """Auto-generate a P-256 cert/key pair if either file is missing."""
-    if cert_path.is_file() and key_path.is_file():
-        return
-    print(f"cert/key missing ({cert_path} / {key_path}); generating...")
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    """Generate a P-256 cert/key pair if either file is missing OR stale.
+
+    "Stale" is the case that bites on an upgrade: a ./certs left over from
+    an earlier release carries the old names, this listener would serve it
+    happily, and the C64 — which now checks the server name against its
+    built-in host — would reject the handshake with nothing on screen to
+    say why. Present is not the same as correct, so check the SANs.
+    """
     import gen_certs
+
+    if cert_path.is_file() and key_path.is_file():
+        if sans_match(cert_path):
+            return
+        found = san_dns_names(cert_path) or "(no SAN)"
+        # Only ever re-mint over the pair we generate ourselves. `--cert`
+        # can point at the operator's own certificate, and clobbering that
+        # because its names are not ours would be indefensible; say so and
+        # serve what was asked for.
+        if (cert_path.name, key_path.name) != ("server.pem", "server.key"):
+            print(f"note: {cert_path} carries {found}, not {DEFAULT_SANS}. "
+                  f"Serving it as given (it is not a pair this tool "
+                  f"generated). A C64 built for {DEFAULT_SANS[-1]} will "
+                  f"reject it at the server-name check.")
+            return
+        print(f"cert {cert_path} carries {found} but this listener serves "
+              f"{DEFAULT_SANS} — re-minting")
+    else:
+        print(f"cert/key missing ({cert_path} / {key_path}); generating...")
+
     gen_certs.generate(
-        cn="www.foo.bar",
-        sans=["foo.bar", "www.foo.bar"],
+        cn=DEFAULT_CN,
+        sans=list(DEFAULT_SANS),
         out_dir=cert_path.parent,
-        force=False,
+        force=True,
     )
 
 
@@ -279,7 +314,8 @@ def selftest() -> int:
                         print(f"  [{label}] client handshake: "
                               f"{version} / {cipher}")
                         tls.sendall(
-                            b"GET / HTTP/1.1\r\nHost: www.foo.bar\r\n\r\n")
+                            b"GET / HTTP/1.1\r\nHost: "
+                            + SELFTEST_SNI.encode("ascii") + b"\r\n\r\n")
                         while len(got) < len(HTTP_RESPONSE):
                             chunk = tls.recv(4096)
                             if not chunk:
@@ -342,9 +378,10 @@ def selftest() -> int:
             proc = subprocess.run(
                 [openssl, "s_client", "-connect", f"127.0.0.1:{port}",
                  "-tls1_3", "-ciphersuites", "TLS_CHACHA20_POLY1305_SHA256",
-                 "-CAfile", str(cert_path), "-servername", "www.foo.bar",
+                 "-CAfile", str(cert_path), "-servername", SELFTEST_SNI,
                  "-quiet", "-ign_eof"],
-                input=b"GET / HTTP/1.1\r\nHost: www.foo.bar\r\n\r\n",
+                input=b"GET / HTTP/1.1\r\nHost: "
+                      + SELFTEST_SNI.encode("ascii") + b"\r\n\r\n",
                 capture_output=True, timeout=60)
             t2.join(timeout=30)
             blob = proc.stdout + proc.stderr

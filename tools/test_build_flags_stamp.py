@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """build/flags.stamp — a build-flag change must never survive as a mixed link.
 
-The defect this pins, measured 2026-08-30 on a UCI onchip tree:
+The defect this pins, measured 2026-08-30 on a UCI onchip tree. The hashes
+below are that day's tree, kept as the shape of the evidence; they are NOT
+current — the default HTTPS_HOST changed afterwards, which moves every one
+of them. The test recomputes its own oracle, so nothing here is load-bearing:
 
     make BACKEND=uci USE_NISTCURVES_ONCHIP=1                    # 1bb5fad9...
-    make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.bar
+    make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.invalid
                                                                 # d1b63508...
-    make clean && make ... HTTPS_SNI=www.foo.bar                # a65fff60...
+    make clean && make ... HTTPS_SNI=www.foo.invalid                # a65fff60...
 
 The middle line is the bug. `HTTPS_SNI=` feeds TWO consumers: the string
 travels in the generated build/https_host.inc (content-compared at parse
@@ -137,15 +140,15 @@ def test_flag_change_without_clean_matches_a_clean_build():
     if missing:
         print(f"SKIP: {missing} not on PATH")
         return
-    oracle = _clean_build_sha(*UCI, "HTTPS_SNI=www.foo.bar")
+    oracle = _clean_build_sha(*UCI, "HTTPS_SNI=www.foo.invalid")
     with Farm() as farm:
         farm.make(*UCI)
         plain = farm.sha()
-        farm.make(*UCI, "HTTPS_SNI=www.foo.bar")
+        farm.make(*UCI, "HTTPS_SNI=www.foo.invalid")
         dirty = farm.sha()
 
     assert plain != oracle, (
-        "HTTPS_SNI=www.foo.bar produced the same PRG as no SNI at all, even "
+        "HTTPS_SNI=www.foo.invalid produced the same PRG as no SNI at all, even "
         "from a clean tree. The test's own oracle is vacuous — the flag has "
         "stopped doing anything, or the wrong flags are being passed."
     )
