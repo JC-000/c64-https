@@ -134,7 +134,24 @@ TLS_CT_HANDSHAKE = 22
 TLS_CT_APPLICATION = 23
 TLS_HS_ENCRYPTED_EXT = 8
 TLS_HS_CERTIFICATE = 11
+TLS_HS_CERT_VERIFY = 15
+TLS_HS_FINISHED = 20
+TLS_STATE_ENCRYPTED_EXT = 3
 TLS_STATE_CERTIFICATE = 4          # >= ENCRYPTED_EXT(3): decrypt with hs read keys
+TLS_STATE_CERT_VERIFY = 5
+TLS_STATE_FINISHED = 6
+
+# Since issue #152 the dispatcher refuses any handshake message that is not
+# the one `tls_state` says is due, so the rig must step the state before each
+# received message exactly as `tls_connect` does — one state per message, not
+# one per flight. Every value here is >= ENCRYPTED_EXT and < CONNECTED, so the
+# record layer still decrypts with the handshake read keys throughout.
+STATE_FOR_TYPE = {
+    TLS_HS_ENCRYPTED_EXT: TLS_STATE_ENCRYPTED_EXT,
+    TLS_HS_CERTIFICATE: TLS_STATE_CERTIFICATE,
+    TLS_HS_CERT_VERIFY: TLS_STATE_CERT_VERIFY,
+    TLS_HS_FINISHED: TLS_STATE_FINISHED,
+}
 
 # cert_buf capacity — resolved in main() from build/labels.txt
 # (`cert_buf_size`, an absolute export in src/exports.s: 2048 under UCI,
@@ -273,7 +290,24 @@ def ring_is_empty(transport, labels) -> bool:
     return head == tail
 
 
-def drive_flight(transport, labels, record_bytes, n_records, n_msgs):
+def states_for_stream(stream: bytes) -> list[int]:
+    """tls_state for each handshake message in the plaintext *stream*.
+
+    Walks the 4-byte message headers. A trailing partial message contributes
+    nothing; an unknown type maps to CERTIFICATE, the state this rig has
+    always used as its default.
+    """
+    states: list[int] = []
+    i = 0
+    while i + 4 <= len(stream):
+        body_len = int.from_bytes(stream[i + 1:i + 4], "big")
+        states.append(STATE_FOR_TYPE.get(stream[i], TLS_STATE_CERTIFICATE))
+        i += 4 + body_len
+    return states
+
+
+def drive_flight(transport, labels, record_bytes, n_records, n_msgs,
+                 msg_states=None):
     """Prime the ring and pump tls_recv_encrypted until the flight drains.
 
     Returns the list of carry flags observed (diagnostic only; the oracle is
@@ -294,6 +328,12 @@ def drive_flight(transport, labels, record_bytes, n_records, n_msgs):
     # spin the suite forever.
     max_calls = min(n_records + 2, 8)
     for _ in range(max_calls):
+        # Step tls_state to the message this call is meant to receive
+        # (issue #152 — see STATE_FOR_TYPE).
+        if msg_states:
+            state = (msg_states[successes] if successes < len(msg_states)
+                     else msg_states[-1])
+            write_bytes(transport, labels["tls_state"], [state])
         regs = jsr(transport, labels["tls_recv_encrypted"], timeout=120.0)
         carry = None
         if regs:
@@ -559,7 +599,8 @@ def run_scenario(transport, labels, sc):
 
     record_bytes, n_records = records_from_chunks(sc.chunks)
     carries = drive_flight(transport, labels, record_bytes, n_records,
-                           sc.n_msgs)
+                           sc.n_msgs,
+                           states_for_stream(b"".join(sc.chunks)))
 
     problems = []
 

@@ -69,6 +69,7 @@
 
 .include "constants.inc"
 .include "net_tuning.inc"       ; CERT_BUF_SIZE (2048 UCI / 1536 ip65)
+.include "tls_hs_seq.inc"       ; TLS_HS_SEQ_CHECK / _TABLE (issue #152)
 
 .ifdef TLS_STREAM_DEFRAME
 
@@ -84,6 +85,10 @@
 .export df_rec_off
 .export df_last_err
 .export df_carry_buf
+; Exported for tools/test_hs_sequence.py, which reads the bytes ADJACENT to
+; the table to build the out-of-window cases that give the gate's two range
+; checks real teeth (a wrong-state index would land on those bytes).
+.export tls_hs_allowed
 
 .import tls_rec_buf
 .import tls_rec_len
@@ -95,6 +100,7 @@
 .import tls_cert_stream_finish
 .import cert_buf
 .import tls_recv_sub_progress
+.import tls_state               ; issue #152: which message is due (data.s)
 
 ; Carry buffer: 4-byte handshake header + body. EncryptedExtensions,
 ; CertificateVerify and Finished are all well under 256 B; Certificate
@@ -109,6 +115,7 @@ DF_ERR_DISPATCH   = $03         ; message handler returned C=1
 DF_ERR_TYPE      = $04          ; unknown handshake message type
 DF_ERR_CERT_FMT   = $05         ; streamed Certificate malformed / no usable key
 DF_ERR_CERT_TOO_BIG = $06       ; leaf certificate exceeds cert_buf (CERT_BUF_SIZE)
+DF_ERR_SEQ        = $07         ; message is not the one tls_state requires (#152)
 
 ; df_mode values
 DF_MODE_HDR       = 0           ; collecting the 4-byte message header
@@ -224,11 +231,42 @@ tls_deframe_pump:
         lda #$30
         sta tls_recv_sub_progress
 
+        ; =====================================================================
+        ; Issue #152 — THE sequence gate. Every handshake message the deframer
+        ; produces passes through here, whichever route it takes below, and
+        ; this is the last point at which they have not yet diverged: df_hdr
+        ; is complete (df_hdr_have == 4) and df_hdr_split is already known,
+        ; but @in_place, @route_carry and df_stream_begin are all still ahead.
+        ;
+        ; INVARIANT FOR ANYONE ADDING A ROUTE: nothing below may accept a
+        ; message that did not come through this check. Do not re-implement it
+        ; per route — that is exactly how the first cut of this fix failed.
+        ; It gated df_dispatch only, and the streamed-Certificate route
+        ; (@route_spanning -> df_stream_begin -> df_stream_body) never reaches
+        ; df_dispatch: it consumes the message incrementally and returns C=0
+        ; from @msg_end. The attacker picks the record framing, so "spanning"
+        ; costs them nothing — a 2-byte first record splits the header of any
+        ; Certificate, however small — and four spanning Certificates then
+        ; satisfied all four of tls_connect's receives with no
+        ; CertificateVerify and no server Finished. Same security outcome as
+        ; the four-EncryptedExtensions attack, different filler message.
+        ;
+        ; Placed before the transcript snapshot/fold below so a rejected
+        ; message leaves the running hash untouched.
+        ; =====================================================================
+        lda df_hdr              ; message type
+        TLS_HS_SEQ_CHECK @hdr_seq_bad
+
         ; 24-bit length high byte must be 0 (no handshake message we
         ; accept exceeds 64 KB; the record layer caps well below that)
         lda df_hdr+1
         beq :+
         lda #DF_ERR_HDR_LEN
+        jmp df_fail
+@hdr_seq_bad:
+        ; Not the message this step of the handshake requires. Refused before
+        ; the transcript fold, before any route, before any handler.
+        lda #DF_ERR_SEQ
         jmp df_fail
 :
         lda df_hdr+2
@@ -386,9 +424,20 @@ df_carry_body:
         sta tls_hs_ptr+1
         jmp df_dispatch
 
+        ; Expected-type table read by the TLS_HS_SEQ_CHECK at @hdr_complete
+        ; (issue #152). It sits here, between routines, because a
+        ; non-cheap-local label inside a routine closes its @-label scope.
+        TLS_HS_SEQ_TABLE
+
 ; =============================================================================
 ; df_dispatch — (tls_hs_ptr) points at a complete message (incl. 4-byte
 ; header, type = df_hdr[0]). Resets per-message state, runs the handler.
+;
+; Issue #152: df_dispatch does NOT re-check the message sequence. It is
+; reachable only from @in_place and the carry-complete path, both of which
+; are downstream of the single gate at @hdr_complete — putting a second copy
+; here would suggest per-route gating is the pattern, which is the mistake
+; that let the streamed-Certificate route through.
 ; =============================================================================
 df_dispatch:
         lda #0

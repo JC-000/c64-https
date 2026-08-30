@@ -41,6 +41,27 @@ Modes
     records what the client actually did, in ``client_accepted_finished``: a
     client that goes on to send its own Finished did not check ours.
 
+``mode="omit_cert"``  (env: ``CERT_MODE=omit``)
+    Issue #152. After ServerHello the server emits **four EncryptedExtensions
+    messages** under the handshake write key and nothing else: no Certificate,
+    no CertificateVerify, no server Finished. Every byte is correctly framed
+    and correctly encrypted — this is not a malformed flight, it is a
+    well-formed flight of the *wrong messages*.
+
+    It targets a client that walks the encrypted handshake with a fixed number
+    of "receive one message" calls and dispatches on the message-type byte
+    alone: four dispatches satisfy four calls, and the client derives traffic
+    keys having authenticated nothing. It also bypasses server-name validation
+    by omitting the certificate the check reads, rather than by defeating the
+    check.
+
+    The transcript stays consistent with what was actually sent, so a
+    vulnerable client's keys agree with the server's and it sails through to
+    HTTP 200 — a fast, unambiguous signal rather than a stall. The verdict is
+    recorded in ``client_accepted_no_cert``. Python's own ``ssl`` client
+    rejects this flight (``--selftest`` proves it), which is what makes it
+    evidence about the C64 client rather than about the fixture.
+
 Record framing (``record_frame`` / ``RECORD_FRAME`` env)
 -------------------------------------------------------
 Orthogonal to *mode*. Controls how the encrypted **handshake content stream**
@@ -211,6 +232,16 @@ def _plaintext_record(content_type: int, payload: bytes) -> bytes:
 
 VALID_RECORD_FRAMES = ("onepermsg", "mfl512", "pathological")
 
+#: Server behaviours. See the module docstring.
+VALID_MODES = ("good", "bad_finished", "omit_cert")
+
+#: How many EncryptedExtensions messages the ``omit_cert`` flight sends. It is
+#: exactly the number of "receive one handshake message" calls the c64-https
+#: client makes after ServerHello (EncryptedExtensions, Certificate,
+#: CertificateVerify, Finished — src/tls13.s), which is what makes a client
+#: that dispatches on the type byte alone complete the handshake.
+OMIT_CERT_EE_COUNT = 4
+
 
 def frame_handshake_stream(stream: bytes, mode: str) -> list[bytes]:
     """Cut the handshake content *stream* into record-payload fragments.
@@ -346,8 +377,8 @@ class EvilTls13Server:
                  mode: str = "good",
                  body: str = DEFAULT_BODY,
                  record_frame: str = "onepermsg"):
-        if mode not in ("good", "bad_finished"):
-            raise ValueError(f"unknown mode {mode!r}")
+        if mode not in VALID_MODES:
+            raise ValueError(f"unknown mode {mode!r}; expected one of {VALID_MODES}")
         if record_frame not in VALID_RECORD_FRAMES:
             raise ValueError(
                 f"unknown record_frame {record_frame!r}; "
@@ -374,6 +405,10 @@ class EvilTls13Server:
             "client_hello_seen": False,
             "server_flight_sent": False,
             "finished_corrupted": False,
+            # omit_cert (issue #152): did the server present a certificate at
+            # all, and did the client complete the handshake without one?
+            "certificate_sent": mode != "omit_cert",
+            "client_accepted_no_cert": None,
             # The load-bearing one: did the client go on to send its own
             # Finished after our (possibly corrupted) Finished? A client that
             # checks the server Finished MUST NOT.
@@ -480,20 +515,35 @@ class EvilTls13Server:
                 hs_stream.extend(msg)
 
         ee = _handshake(HS_ENCRYPTED_EXTENSIONS, b"\x00\x00")
-        emit(ee)
-        transcript += ee
 
-        cert = self._certificate()
-        emit(cert)
-        transcript += cert
+        if self.mode == "omit_cert":
+            # Issue #152. Four EncryptedExtensions, nothing else: no
+            # Certificate, no CertificateVerify, no server Finished. Correctly
+            # framed and correctly encrypted, so a client that counts
+            # dispatches instead of checking WHICH message arrived cannot tell
+            # the difference. The transcript below folds exactly what was
+            # sent, so such a client's traffic keys agree with ours and it
+            # reaches HTTP 200 instead of stalling.
+            for _ in range(OMIT_CERT_EE_COUNT):
+                emit(ee)
+                transcript += ee
+            self.result["ee_messages_sent"] = OMIT_CERT_EE_COUNT
+            self.result["certificate_sent"] = False
+        else:
+            emit(ee)
+            transcript += ee
 
-        cv = self._certificate_verify(_sha256(transcript))
-        emit(cv)
-        transcript += cv
+            cert = self._certificate()
+            emit(cert)
+            transcript += cert
 
-        fin, corrupted = self._finished(s_hs, _sha256(transcript))
-        emit(fin)
-        self.result["finished_corrupted"] = corrupted
+            cv = self._certificate_verify(_sha256(transcript))
+            emit(cv)
+            transcript += cv
+
+            fin, corrupted = self._finished(s_hs, _sha256(transcript))
+            emit(fin)
+            self.result["finished_corrupted"] = corrupted
 
         if self.record_frame != "onepermsg":
             fragments = frame_handshake_stream(bytes(hs_stream), self.record_frame)
@@ -509,7 +559,12 @@ class EvilTls13Server:
         # is deliberate: it means a client with a broken check does not merely
         # stall, it sails through to HTTP 200 — a fast, unambiguous failure
         # signal instead of a test timeout.
-        transcript += fin
+        #
+        # Under "omit_cert" there is no Finished to fold: the transcript is
+        # already CH || SH || EE x 4, exactly what went on the wire, for the
+        # same reason.
+        if self.mode != "omit_cert":
+            transcript += fin
 
         master = _hkdf_extract(
             derive_secret(handshake_secret, b"derived", _sha256(b"")),
@@ -613,7 +668,20 @@ def serve_one_connection(srv: socket.socket, cert_path: str, key_path: str, *,
     ``None`` it falls back to the ``RECORD_FRAME`` environment variable, then to
     ``"onepermsg"`` — so an out-of-band rig can pick the framing without the
     caller threading a new argument.
+
+    ``CERT_MODE=omit`` in the environment overrides *mode* with ``omit_cert``
+    (issue #152), for the same reason: an existing rig that only knows how to
+    ask for ``good`` / ``bad_finished`` can drive the no-certificate flight
+    without being modified. It is an override, so it wins over the argument;
+    any other value of ``CERT_MODE`` is rejected rather than ignored.
     """
+    cert_mode = os.environ.get("CERT_MODE", "").strip().lower()
+    if cert_mode in ("omit", "omit_cert"):
+        mode = "omit_cert"
+    elif cert_mode not in ("", "present", "normal"):
+        raise ValueError(
+            f"CERT_MODE must be 'omit' or 'present', got {cert_mode!r}"
+        )
     if record_frame is None:
         record_frame = os.environ.get("RECORD_FRAME", "onepermsg")
     conn = None
@@ -634,6 +702,13 @@ def serve_one_connection(srv: socket.socket, cert_path: str, key_path: str, *,
             result.update(server.result)
             result["client_addr"] = addr
             result["listening"] = True
+            if server.mode == "omit_cert":
+                # The loop that watches for the client's reply records its
+                # verdict under client_accepted_finished; under omit_cert the
+                # same evidence means something stronger, so name it.
+                result["client_accepted_no_cert"] = result.get(
+                    "client_accepted_finished"
+                )
     except Exception as exc:                      # noqa: BLE001 — fixture
         result["error"] = f"{type(exc).__name__}: {exc}"
     finally:
@@ -668,7 +743,8 @@ def _selftest() -> int:
         (mode, frame, expect)
         for frame in VALID_RECORD_FRAMES
         for mode, expect in (("good", "handshake completes"),
-                             ("bad_finished", "client rejects"))
+                             ("bad_finished", "client rejects"),
+                             ("omit_cert", "client rejects"))
     ]
 
     for mode, record_frame, expect in cases:
@@ -706,7 +782,7 @@ def _selftest() -> int:
                 detail = f"handshake COMPLETED — server never rejected: {data[:60]!r}"
         except ssl.SSLError as exc:
             detail = f"{type(exc).__name__}: {exc}"
-            if mode == "bad_finished":
+            if mode in ("bad_finished", "omit_cert"):
                 ok = True
         except Exception as exc:                  # noqa: BLE001
             detail = f"{type(exc).__name__}: {exc}"

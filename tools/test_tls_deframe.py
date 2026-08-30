@@ -76,6 +76,7 @@ REQUIRED_LABELS = [
     "tls_s_hs_secret",
     "cert_buf", "cert_buf_len", "cert_buf_size",
     "ecdsa_pubkey_x", "ecdsa_pubkey_y", "ecdsa_curve_id",
+    "tls_state",
 ]
 
 # Handshake message types
@@ -91,6 +92,24 @@ ERR_DISPATCH = 3
 ERR_TYPE = 4
 ERR_CERT_FMT = 5
 ERR_CERT_TOO_BIG = 6
+ERR_SEQ = 7
+
+# TLS state machine (src/constants.inc). Since issue #152 the dispatcher
+# refuses any message that is not the one `tls_state` says is due, so this
+# rig has to step the state exactly as `tls_connect` does — before each
+# received message, not once per flight. `drive()` does it automatically
+# from the message types in the records it is handed.
+TLS_STATE_ENCRYPTED_EXT = 3
+TLS_STATE_CERTIFICATE = 4
+TLS_STATE_CERT_VERIFY = 5
+TLS_STATE_FINISHED = 6
+
+STATE_FOR_TYPE = {
+    HS_EE: TLS_STATE_ENCRYPTED_EXT,
+    HS_CERT: TLS_STATE_CERTIFICATE,
+    HS_CV: TLS_STATE_CERT_VERIFY,
+    HS_FIN: TLS_STATE_FINISHED,
+}
 
 TLS_HS_PTR = 0x3E               # ZP base pointer (src/constants.inc)
 
@@ -180,10 +199,29 @@ def install_stub(transport, pump_addr: int) -> None:
         raise RuntimeError("pump stub readback mismatch")
 
 
+def states_for_stream(stream: bytes) -> list[int]:
+    """tls_state for each handshake message in *stream*, in order.
+
+    Walks the 4-byte headers of the concatenated record payloads. A trailing
+    partial message (the records were cut mid-message) contributes nothing;
+    an unknown type maps to ENCRYPTED_EXT, which is a legal state to be in and
+    lets the dispatcher's own type handling produce the verdict.
+    """
+    states: list[int] = []
+    i = 0
+    while i + 4 <= len(stream):
+        msg_type = stream[i]
+        body_len = int.from_bytes(stream[i + 1:i + 4], "big")
+        states.append(STATE_FOR_TYPE.get(msg_type, TLS_STATE_ENCRYPTED_EXT))
+        i += 4 + body_len
+    return states
+
+
 class Rig:
     def __init__(self, transport, labels):
         self.t = transport
         self.l = labels
+        self._state = None      # last tls_state written (issue #152)
 
     def reset(self):
         """Fresh transcript + deframer state (record marked consumed)."""
@@ -208,14 +246,33 @@ class Rig:
             raise RuntimeError("carry latch never written — stub did not run")
         return carry, a
 
-    def drive(self, records, max_pumps=64):
+    def set_state(self, state: int):
+        """Install tls_state — which handshake message is due (issue #152)."""
+        if state != self._state:
+            write_bytes(self.t, self.l["tls_state"], bytes([state]))
+            self._state = state
+
+    def drive(self, records, states=None, max_pumps=64):
         """Feed records, pumping each dry. Returns event list:
         'msg' per dispatched message, ('err', code) on error,
-        implicit 'need-data' consumes the next record."""
+        implicit 'need-data' consumes the next record.
+
+        *states* is the sequence of `tls_state` values to install, one per
+        dispatched message, mimicking `tls_connect`'s step-then-receive loop.
+        It defaults to the state each message's own type belongs to, parsed
+        out of the record stream — so a case that feeds a legal flight needs
+        no annotation, and a case that deliberately feeds the WRONG message
+        for a step passes an explicit list.
+        """
+        if states is None:
+            states = states_for_stream(b"".join(records))
         events = []
         for rec in records:
             self.feed_record(rec)
             for _ in range(max_pumps):
+                self.set_state(states[len(events)]
+                               if len(events) < len(states)
+                               else TLS_STATE_ENCRYPTED_EXT)
                 carry, a = self.pump()
                 if carry == 0:
                     events.append("msg")
@@ -329,10 +386,42 @@ def run_cases(transport, labels):
           ev == ["msg", ("err", ERR_DISPATCH)], f"events={ev}")
 
     # --- 8. unknown handshake type ---
+    # Since issue #152 this is caught one step earlier than it used to be: the
+    # sequence gate runs before the type switch, and 0x63 is not the message
+    # any state expects, so the code is ERR_SEQ rather than ERR_TYPE. The
+    # ERR_TYPE arm is kept in the dispatcher as a backstop for a future state
+    # whose expected set is wider than one type.
     rig.reset()
     ev = rig.drive([hs_msg(0x63, b"\x00" * 5)])
     check("unknown handshake type rejected",
-          ev == [("err", ERR_TYPE)], f"events={ev}")
+          ev == [("err", ERR_SEQ)], f"events={ev}")
+
+    # --- 8b. right message, wrong step: the issue #152 attack in miniature.
+    # A well-formed EncryptedExtensions presented where the Certificate is
+    # due must be refused before any handler runs. (tools/test_hs_sequence.py
+    # covers the whole state x type matrix directly against df_dispatch; this
+    # case proves the gate is reached through the real pump path too.)
+    rig.reset()
+    ev = rig.drive([m1], states=[TLS_STATE_CERTIFICATE])
+    check("EE where Certificate is due rejected",
+          ev == [("err", ERR_SEQ)], f"events={ev}")
+
+    # --- 8c. the same, on the STREAMED route. A Certificate that spans
+    # records is routed to df_stream_begin and never reaches df_dispatch, so
+    # a gate living in df_dispatch missed it entirely — that was a working
+    # bypass of 8b's fix (adversarial review, 2026-08-30). A 2-byte first
+    # record forces the spanning route for a Certificate of any size, and the
+    # attacker picks the framing. The gate now sits at @hdr_complete, ahead
+    # of the route fork, so both framings must answer identically.
+    cert_ss = hs_msg(HS_CERT, bytes(60))
+    rig.reset()
+    ev = rig.drive([cert_ss], states=[TLS_STATE_ENCRYPTED_EXT])
+    check("Certificate at the EE step rejected (one record)",
+          ev == [("err", ERR_SEQ)], f"events={ev}")
+    rig.reset()
+    ev = rig.drive([cert_ss[:2], cert_ss[2:]], states=[TLS_STATE_ENCRYPTED_EXT])
+    check("Certificate at the EE step rejected (spanning/streamed route)",
+          ev == [("err", ERR_SEQ)], f"events={ev}")
 
     # --- 9. spanning non-Certificate message beyond the carry cap ---
     big = hs_msg(HS_EE, bytes(300))
