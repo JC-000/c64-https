@@ -47,9 +47,20 @@ Neither exit code nor file size proves a build; **compare the PRG's sha256**.
 `.o` hashes are never evidence — ca65 stamps build time into every object;
 ld65 does not propagate it, so the PRG is deterministic.
 
-The one exception is `HTTPS_HOST`/`HTTPS_PATH`/`HTTPS_SNI`: a generated
+The one exception is `HTTPS_HOST`/`HTTPS_PATH`: a generated
 `build/https_host.inc` is content-compared **at Makefile parse time** and
 invalidates `boot.o` + the PRG, so no `make clean` is needed for those (#128).
+**`HTTPS_SNI` is NOT exempt — it needs `make clean`.** Its string rides the
+same include, but a non-empty value also adds `-D HTTPS_SNI_OVERRIDE=1`, read
+by `src/http.s` (the `http_get` prologue that writes `tls_hostname`) as well
+as `boot.s`. The compare deletes only `boot.o`, so `http.o` keeps the
+non-override code and you get a mixed link that embeds the SNI string but
+never runs the override — indistinguishable from not passing the flag. The
+PRG hash changes and the name greps out of the image (it is also `boot.s`'s
+default host), so only a diff against a cleaned build catches it. The general
+flag rule wins over this exception; `HTTPS_PORT` and `HTTPS_BODY_TO_REU` are
+pure `-D` flags outside the compare and were never exempt.
+
 Also: `$(PRG)`'s recipe `rm -f`s the target first, because ld65 writes
 nothing on a memory-area overflow and every rig loads the PRG by path — an
 absent PRG is the honest state after a failed link. Keep prose out of recipe
