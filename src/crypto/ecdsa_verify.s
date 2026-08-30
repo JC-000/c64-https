@@ -132,10 +132,22 @@ ecdsa_verify:
         ;
         ; The ClientHello no longer advertises ecdsa_secp384r1_sha384, so a
         ; compliant server will not choose P-384. This gate is what makes that
-        ; safe against a server that does anyway: the certificate parser sets
-        ; ecdsa_curve_id from an attacker-supplied OID (src/tls_cert.s:422),
-        ; so the advertisement is a request, never a guarantee. Two independent
-        ; changes are needed to reach the swap again, by design.
+        ; safe against a server that does anyway. ecdsa_curve_id has TWO
+        ; writers that can select this arm, both attacker-controlled, and the
+        ; second overrides the first:
+        ;
+        ;   1. src/tls_cert.s, "P-384 curve confirmed" — the curve OID in the
+        ;      certificate's SubjectPublicKeyInfo.
+        ;   2. src/tls_cert.s, the "P-384 short-circuit (Phase 4b)" block —
+        ;      cv_sig_scheme, i.e. the CertificateVerify's signature
+        ;      algorithm. It stores curve_id = 1 over whatever (1) decided
+        ;      and TAIL-CALLS this dispatcher, so a P-256 certificate with a
+        ;      0x0503 CertificateVerify still lands here.
+        ;
+        ; (Grep those strings rather than trusting a line number; both have
+        ; moved before.) The advertisement is therefore a request, never a
+        ; guarantee. Two independent changes are needed to reach the swap
+        ; again, by design.
         ;
         ; P-384 is parked as roadmap work, not deleted: the dispatcher and the
         ; sibling primitives stay in tree, and re-enabling is this flag plus a

@@ -293,10 +293,15 @@ it never writes device config. `C64_SKIP_REU_PREFLIGHT=1` bypasses.
     wall) and a REU-profile build with no REU (`net_last_error=$00` — the
     row-fetch DMA no-ops, the X25519 secret is wrong, the first AEAD tag
     fails, and it *spins* for ~44 min). Check `net_last_error`; the REU half
-    is now excluded by the preflight above. `$86` discriminates only *within*
-    that stall: it is set on any SOCKET_READ error bit, including the one
-    that ends a normal fetch, so it is present in PASSING runs too
-    (github.com HTTP 200, 2026-08-28) and is never on its own a wedge.
+    is now excluded by the preflight above. `$86` is not by itself a wedge —
+    it has been seen on PASSING runs (github.com HTTP 200, 2026-08-28) — but
+    it is never noise either: the `$DF1C` bit 3 it reports has exactly one
+    setter in the FPGA (`command_protocol.vhd`, the `PUSH_CMD`-while-not-idle
+    branch), so it always means *our* push was rejected, and a passing run
+    that carries one recovered from a real rejected push. A normal
+    end-of-fetch cannot set it: the firmware closes on `lwip_recvmsg` == 0 and
+    reports `01,CONNECTION CLOSED BY HOST` on the `$DF1F` status channel,
+    which touches no status bit.
   - **Lease poisoning**: resetting the C64 with a live firmware socket makes
     `GET_IPADDR` return 0.0.0.0 forever ("REQUESTING DHCP" loop). Only a
     wall power cycle clears it. Rigs therefore let fetches finish and send
@@ -354,8 +359,12 @@ engineering-notes ("Summary of recent fixes").
     member-name bug was ours (fixed), and the chain now stops at
     `LIB_NISTCURVES_SHA384_TABLES` overflowing `OVERLAY_REGION` by 1,536 B
     (`cfg/p384-overlay-sha384.cfg`); the embed variant dies on the
-    `build/labels.txt` ordering defect. `ec_scalar_mul_384_shim` is dead
-    code to retire. Issues #32/#45 closed stale; file fresh ones.
+    `build/labels.txt` ordering defect. `ec_scalar_mul_384_shim` is
+    unreferenced by any shipped PRG, but it is the only provider of
+    `ec_scalar_mul_384` in the P-384 curve archive (upstream's
+    `lib-p384-verify` excludes `points384_comb.s`) — retire it with the
+    P-384 lane, not separately. Issues #32/#45 closed stale; file fresh
+    ones.
   - **Sibling archive member names are discovered, never hardcoded.**
     Upstream v0.9.0 made them per-variant; a hardcoded `zp_config.o` means
     the ZP-override object is silently dropped and `zp_ptr2` reverts to
@@ -441,9 +450,21 @@ magnitude first.
 
 ### ECDSA P-384 verify wall-clock
 
-Unmeasured and unmeasurable until the P-384 build is fixed. Expect ~5x the
-P-256 verify (~7 min at 48 MHz); `rig_https_local_p384.py` has a 90-minute
-budget ready.
+Unmeasured and unmeasurable until the P-384 build is fixed. **Every figure
+here is an extrapolation, not a measurement** — treat it as a rig budget, not
+a result.
+
+Scale the **onchip** P-256 verify, not the REU one: the REU profile's
+42-56 s floor is row-fetch DMA anchored to the ~1 MHz bus and does not grow
+with field width, so multiplying it mis-shapes the estimate. Onchip is
+CPU-bound and structurally the same code path — `ec_scalar_mul_384_shim`
+runs the variable-base ladder for u1*G exactly as the no-comb P-256
+`ec_scalar_mul` shim does. From operation counts: 48-byte vs 32-byte limbs
+make each schoolbook `fp_mul` ~(48/32)^2 = 2.25x, and a 384-bit scalar is
+1.5x the ladder steps, so ~3-4x the onchip P-256 verify — **~1.5-2.5 min at
+48 MHz** against the 30.5 s onchip row above. SHA-384 is excluded as
+negligible beside two variable-base scalar mults. `rig_https_local_p384.py`
+keeps its 90-minute budget (it also has to cover 1 MHz).
 
 ### Design note — bounded timeouts must use wall-clock time
 
@@ -484,7 +505,10 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
   $0801-$1FFF  LOADER              BASIC stub + boot + HTTP + net wrapper
   $2000-$3B65  NET_CODE            UCI adapter + LOADER_OVERFLOW + TLS_CODE
                                    + CRYPTO_AUX_CODE
-  $3B66-$41FF  NET_BSS_TAIL        UCI_BSS + LIB_NISTCURVES_P256_BSS spill
+  $3B66-$41FF  NET_BSS_TAIL        NET_BSS_TAIL segment (deframer/viewer BSS)
+                                   + LIB_NISTCURVES_P256_BSS. NOT `BSS_TAIL`
+                                   and NOT `UCI_BSS` — both are elsewhere
+                                   (below, and CRYPTO_HOT). Read the map.
   $4200-$5FFF  CRYPTO_OVERLAY      7.5 KB. Resident tenants in every UCI
                                    build: TLS_DEFRAME_CODE (~1.4 KB),
                                    CERT_BUF_BSS (2,048 B), HTTPS_TARGET_RODATA,
@@ -493,8 +517,10 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
                                    (broken) overlay-embed flags.
   $6000-$9FFF  CRYPTO_HOT          resident code + rodata + small BSS
   $A000-$BFFF  CRYPTO_COLD_SHADOW  large BSS (RAM under BASIC ROM, $01=$36);
-                                   TABLES_BSS pinned at $BA00 so sqtab lands
-                                   at $BC00 (LIB_SHARED_SQTAB_BASE, asserted
+                                   BSS_TAIL packs first, so `tls_rec_buf`
+                                   (548 B) sits at $A000; TABLES_BSS pinned
+                                   at $BA00 so sqtab lands at $BC00
+                                   (LIB_SHARED_SQTAB_BASE, asserted
                                    post-link)
   $C000-$DFFF  OVERLAY_FILE_PAD    zero-pad; runtime TCP ring at $C000
   $E000-$FDFF  OVERLAY_BLOB_CURVE_RAM  P-384 curve blob staging (unused)
@@ -557,7 +583,10 @@ vacuously (zero checks = fail; any `SKIP_*` = `PARTIAL VERIFICATION`).
   tools/test_entropy.py, test_hkdf.py, test_chained_hmac.py,
   test_keyschedule_steps.py, test_tls_handshake.py, test_http.py,
   test_x509.py, test_x509_name.py (23 vectors, 9 rejects, 6 real leaves;
-  skips loudly on ip65), test_p384_overlay_hazard.py (fails under
+  **`return 0` on a non-uci build — the whole suite exits green having
+  verified nothing**; the exemplars to copy are `test_x509.py` (missing
+  labels counted as failures) and `test_finished_verify.py` (missing label
+  = FATAL)), test_p384_overlay_hazard.py (fails under
   ENABLE_P384_VERIFY=1 by design; needs a well-formed DER sig to reach the
   swap), test_finished_verify.py (18 cases), test_ecdsa_kat_oracle.py
   (6 vectors incl. 3 negative), test_tls_deframer.py, test_x25519.py.
