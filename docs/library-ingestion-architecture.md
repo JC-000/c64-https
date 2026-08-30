@@ -393,7 +393,9 @@ Suitable to file as GitHub issues against `JC-000/c64-https`. Each is sized for 
 
 ### W6 — Test harness updates: deterministic VICE config
 
-**Scope:** Centralize `ViceConfig(..., extra_args=["-reu", "-reusize", "512"])` into a helper at `tools/_vice_helpers.py::default_vice_config()`. Today this is duplicated across `tools/test_x509.py:769`, `tools/test_ecdsa_kat_oracle.py:293`, `tools/test_x25519.py:722`, `tools/bench_x25519.py:138`, `tools/test_p384_symbols.py:370`. Memory `vice_reu_required_for_p256` is the canonical motivation. With the hot/cold split, *every* test that exercises crypto needs `-reu`, so the default should be the helper.
+**Scope:** Centralize `ViceConfig(..., extra_args=["-reu", "-reusize", "512"])` into a helper at `tools/_vice_helpers.py::default_vice_config()`. Memory `vice_reu_required_for_p256` is the canonical motivation. With the hot/cold split, *every* test that exercises crypto needs `-reu`, so the default should be the helper.
+
+**Status: LANDED for the roster this item named.** `tools/test_x509.py`, `tools/test_ecdsa_kat_oracle.py`, `tools/test_x25519.py`, `tools/bench_x25519.py` and `tools/test_p384_symbols.py` all call `default_vice_config()` today — all five, not the three this item once tracked. The remaining work is the long tail: `grep -Ln default_vice_config $(grep -rln 'reusize' tools/ tests/)` still finds suites (including `tools/run_all_tests.py`) spelling the flags by hand.
 
 **Expected output:** New tests get correct VICE config by default. Existing tests pass; existing call sites get refactored to use the helper.
 

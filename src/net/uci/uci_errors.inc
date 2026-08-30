@@ -13,11 +13,28 @@
 
 UCI_ERR_OK             = $00    ; no error
 UCI_ERR_NOT_PRESENT    = $81    ; $DF1D did not read back UCI_ID_VALUE ($C9)
-UCI_ERR_CMD_FAILED     = $82    ; UCI reported an error bit after PUSH_CMD
+; $82/$84/$85/$86 all report the SAME observation, distinguished only by
+; which command we were pushing: uci_check_err saw UCI_STAT_ERROR ($DF1C
+; bit 3) set. That bit is NOT a command-failure report. In the FPGA it is
+; `error_busy` (command_protocol.vhd), and it has exactly one setter: a
+; PUSH_CMD arriving while the command interface is not in the idle state,
+; i.e. OUR push was rejected and never reached the firmware. The names
+; below are historical; read every one of them as "push rejected, interface
+; not idle" — usually a missing/short uci_fence, a previous command left
+; un-drained, or a device still busy.
+;
+; The protocol has no command-failure bit at all. Firmware-side failures
+; arrive only as an ASCII status line on $DF1F ("02,NO DATA: 9",
+; "85,ERROR OPENING SOCKET", "01,CONNECTION CLOSED BY HOST") — see the
+; status-line capture block at the end of this file. In particular a normal
+; end-of-fetch is the CONNECTION CLOSED status line and sets no status bit,
+; so a $86 is always a genuine rejected push, never the tail of a clean
+; transfer.
+UCI_ERR_CMD_FAILED     = $82    ; push rejected (not idle) at PUSH_CMD
 UCI_ERR_NO_IP          = $83    ; GET_IPADDR returned all-zero IP
-UCI_ERR_CONNECT_FAIL   = $84    ; TCP_CONNECT returned an error bit
-UCI_ERR_SEND_FAIL      = $85    ; SOCKET_WRITE returned an error bit
-UCI_ERR_READ_FAIL      = $86    ; SOCKET_READ returned an error bit
+UCI_ERR_CONNECT_FAIL   = $84    ; push rejected (not idle) at TCP_CONNECT
+UCI_ERR_SEND_FAIL      = $85    ; push rejected (not idle) at SOCKET_WRITE
+UCI_ERR_READ_FAIL      = $86    ; push rejected (not idle) at SOCKET_READ
 UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE wrote fewer bytes than requested
 UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
 UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
