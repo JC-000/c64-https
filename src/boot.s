@@ -329,8 +329,14 @@ start:
 
         ; Comb profile (SPEC §8.5): build the P-256 Lim-Lee anchor table
         ; into REU bank 2 $0000-$3FFF. Needs sqtab (built above) + the
-        ; onchip row generator; runs once per boot. ~seconds at turbo,
-        ; ~25 s at stock 1 MHz.
+        ; onchip row generator; runs once per boot. ~45 s at 48 MHz
+        ; (U64E, measured via boot_check) and ~34 min at a stock 1 MHz —
+        ; which is why every comb rig needs C64_INIT_WAIT and why the
+        ; shipped comb image is turbo-only. This comment used to say
+        ; "~seconds at turbo, ~25 s at stock 1 MHz"; the 1 MHz half was
+        ; ~86x low. Upstream carried the same error (libs/nistcurves
+        ; issue #121, "~25 Mcyc" against a measured ~2,061 Mcyc for the
+        ; FP_ONCHIP_MUL profile the comb build uses).
         .ifdef USE_NISTCURVES_COMB
         ; The precompute is by far the longest CPU-bound stretch of boot
         ; and prints nothing of its own, so the badline DMA it pays is
