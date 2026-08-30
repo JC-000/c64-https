@@ -833,7 +833,15 @@ def main():
     print(f"  Passed: {passed}/{total}")
     print(f"  Failed: {failed}/{total}")
     if total == 0:
-        print("\n  [?] No tests ran (routines not yet implemented?)")
+        # Zero assertions is not a pass. Every group returning (0, 0) means
+        # the routines under test were never exercised — an unrequested,
+        # involuntary skip — and "0 failed" would otherwise exit 0 and read
+        # as a green record layer.
+        print("\n  [-] TLS RECORD LAYER: NO TESTS RAN — every group was "
+              "skipped\n      (routines missing or all groups errored). "
+              "This run certifies nothing.")
+        print(f"{'='*60}")
+        sys.exit(1)
     elif failed == 0:
         print(f"\n  [+] TLS RECORD LAYER: ALL {total} TESTS PASSED")
     else:

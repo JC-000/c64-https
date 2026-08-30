@@ -44,7 +44,9 @@ Usage:
                 the dual-overlay swap dispatch + SHA-384 + splice path
                 works without paying for the verify (which on a busy
                 VICE warp host can take 5-30 min/vector).  Use this
-                first if --full hangs.
+                first if --full hangs.  It leaves every vector without a
+                verdict, so it always exits non-zero and can never report
+                OVERALL: PASS — read the per-step output, not the tally.
 
 Environment:
     C64_SKIP_BUILD=1            Reuse existing build artifacts (skip make).
@@ -544,20 +546,31 @@ def _run_one_vector(target, vec: dict, addresses: dict[str, int], *,
     if err: return err
 
     if sha_only:
-        # Diagnostic short-circuit: confirm dual-overlay flow + SHA + splice
-        # all work without paying for the (slow) ecdsa_verify_384 call.
-        # We've already verified the digest matched host hashlib above; the
-        # swap_to_curve completed; treat that as a "structural PASS" and
-        # synthesise a result dict.
+        # Diagnostic short-circuit: the dual-overlay swap, SHA-384 and the
+        # digest splice have all been confirmed above without paying for
+        # the (slow) ecdsa_verify_384 call.
+        #
+        # What must NOT happen here is synthesising `valid` from
+        # vec["expected_valid"]: that fabricates the answer the test exists
+        # to obtain, makes every vector compare equal to its own
+        # expectation, and prints OVERALL: PASS for a run in which
+        # ecdsa_verify_384 was never executed. The vector has no verdict,
+        # so it is reported as one that could not run — a failure, per the
+        # audit rule that an involuntary skip is a failure. --sha-only is a
+        # diagnostic; by construction it can never certify the verify path.
         if verbose:
-            print(f"      [--sha-only] dual-overlay structural PASS "
-                  f"(skipped ecdsa_verify_384)")
+            print(f"      [--sha-only] swap + SHA-384 + splice OK; "
+                  f"ecdsa_verify_384 NOT run — no verdict for this vector")
         return {
-            "valid": vec["expected_valid"],   # synthesised: assume PASS
+            "error": "--sha-only: ecdsa_verify_384 was never executed, so "
+                     "this vector has no verdict (counted as a failure). "
+                     "The swap/SHA-384/splice steps up to it did pass.",
+            "valid": None,
             "carry": 0xFE,                    # marker for "skipped"
             "seconds": 0.0,
             "overall_seconds": time.perf_counter() - t_overall,
             "sha_only": True,
+            "failed_step": "ecdsa_verify_384 (skipped by --sha-only)",
         }
 
     # Step 9: verify (the slow one — bench wall-clock ~75-90 s on real
@@ -850,6 +863,12 @@ def main() -> int:
     total_fail = v_fail + u_fail
     overall = "PASS" if total_fail == 0 else "FAIL"
     print(f"OVERALL: {overall}")
+    if sha_only:
+        print("NOTE: --sha-only skips ecdsa_verify_384, so no vector can "
+              "produce a verdict\n      and this mode can never report "
+              "OVERALL: PASS. It is a diagnostic for the\n      "
+              "swap + SHA-384 + splice path only; drop --sha-only to test "
+              "the verify.")
     return 0 if total_fail == 0 else 1
 
 

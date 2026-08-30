@@ -1318,7 +1318,13 @@ def main():
     print(f"  Passed: {passed}/{total}")
     print(f"  Failed: {failed}/{total}")
     if total == 0:
-        print("\n  [?] No tests ran (routines not yet implemented?)")
+        # Zero assertions is not a pass — see the same guard in
+        # test_tls_record.py. An involuntary skip is a failure.
+        print("\n  [-] TLS HANDSHAKE: NO TESTS RAN — every group was "
+              "skipped\n      (routines missing or all groups errored). "
+              "This run certifies nothing.")
+        print(f"{'='*60}")
+        sys.exit(1)
     elif failed == 0:
         print(f"\n  [+] TLS HANDSHAKE: ALL {total} TESTS PASSED")
     else:

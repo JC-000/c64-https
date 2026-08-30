@@ -89,7 +89,27 @@ def main():
     os.chdir(PROJECT_ROOT)
 
     if not check_prerequisites():
-        sys.exit(0)
+        # An involuntary skip is a failure: none of the five end-to-end HTTP
+        # assertions ran, so exiting 0 would report a working HTTP path on a
+        # host that has no TAP rig at all. Exit 2 ("could not run") to keep
+        # that distinct from 1 ("tests failed").
+        #
+        # C64_NET_TESTS_OPTIONAL=1 is the explicit, deliberate skip — the
+        # other half of the audit rule (7497e48): explicit skips are allowed,
+        # but never silent.
+        if os.environ.get("C64_NET_TESTS_OPTIONAL") == "1":
+            print("EXPLICIT SKIP (C64_NET_TESTS_OPTIONAL=1): "
+                  "test_http_integration.py did NOT run.\n  0 of 5 HTTP "
+                  "assertions executed; this exit 0 certifies nothing about "
+                  "the HTTP path.")
+            sys.exit(0)
+        print("CANNOT RUN: test_http_integration.py needs the TAP network "
+              "rig (tap-c64 + x64sc + dnsmasq).\n"
+              "  0 of 5 HTTP assertions executed — this run certifies "
+              "nothing.\n"
+              "  Set C64_NET_TESTS_OPTIONAL=1 to make skipping it a "
+              "deliberate, exit-0 choice.", file=sys.stderr)
+        sys.exit(2)
 
     # Late imports -- only needed if prerequisites are met
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
