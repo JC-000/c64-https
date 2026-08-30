@@ -116,4 +116,32 @@ tls_ecdh_compute_shared:
         dex
         bpl @copy_ss
 
+        ; --- All-zero shared secret => abort (issue #153) -------------------
+        ; RFC 8446 §7.4.2 and RFC 7748 §6.1 both require this check. A server
+        ; (or an on-path attacker rewriting the ServerHello) that sends a
+        ; low-order key_share — 32 zero bytes is the simplest of them — forces
+        ; x25519(k, U) = 0 for every clamped scalar k. The key schedule then
+        ; collapses: handshake_secret = HKDF-Extract(constant, 0^32) is a
+        ; constant, and every secret below it is Derive-Secret(constant,
+        ; label, Transcript-Hash(CH || SH)) over two PLAINTEXT messages. Any
+        ; passive observer who recorded the session can then derive the
+        ; traffic keys — the attacker who injected the key_share need not stay
+        ; on the path. That is a passive decryption break, not merely the
+        ; documented "an active attacker can impersonate any server".
+        ;
+        ; Checking the OUTPUT (rather than blacklisting known-bad key_shares)
+        ; is what the RFC mandates and is what catches every low-order point.
+        ; C=1 here aborts the handshake in tls_recv_server_hello.
+        ldx #31
+        lda #0
+@ss_or:
+        ora tls_shared_secret,x
+        dex
+        bpl @ss_or
+        tax                     ; Z = (accumulated OR == 0); dex/bpl clobbered it
+        bne @ss_ok
+        sec
+        rts
+@ss_ok:
+        clc
         rts
