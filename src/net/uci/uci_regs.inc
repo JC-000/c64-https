@@ -37,7 +37,19 @@ UCI_STAT_CMD_BUSY = $01         ; command FIFO busy / command in flight
 ; Control register bits (write to UCI_CONTROL)
 ; =============================================================================
 UCI_CTRL_PUSH_CMD = $01         ; commit pushed bytes as a command
-UCI_CTRL_NEXT_DATA= $02         ; advance response data FIFO
+; DATA_ACC — the end-of-transfer accept, NOT a per-byte FIFO advance.
+; Register API v1.1 §2.4.1: "Writing a '1' to this register bit tells the
+; communication layer that all data from the Ultimate was accepted. ...
+; Writing to this bit also causes the transfer of the data/status queues
+; to be aborted and reset. Thus, the data response and status response
+; queues will be empty after writing this bit."
+; The queues advance by THEMSELVES on a read (command_protocol.vhd:
+; `when c_cif_slot_response => response_pointer <= response_pointer + 1`),
+; so a drain loop needs no host action per byte, and one pulse mid-drain
+; throws away the rest of the response AND the whole status line.
+; Exactly one of these per transaction, after both queues are read.
+; (Was named UCI_CTRL_NEXT_DATA, with the wrong comment; issue #144.)
+UCI_CTRL_DATA_ACC = $02         ; accept + end transfer (resets both queues)
 UCI_CTRL_ABORT    = $04         ; abort in-flight command
 UCI_CTRL_CLR_ERR  = $08         ; clear error state
 

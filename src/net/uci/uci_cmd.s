@@ -18,11 +18,15 @@
 ;   uci_read_resp_bytes— drain DATA_AV bytes to caller-provided buffer
 ;                        (caller fills uci_resp_dst/uci_resp_max beforehand;
 ;                         uci_resp_count returned; Y = count)
-;   uci_drain_resp     — drain remaining DATA_AV bytes to nowhere, ACKing
-;                        each; TOD-bounded (5 s wall-clock)
-;   uci_drain_status   — drain remaining STAT_AV bytes to nowhere, ACKing
-;                        each; TOD-bounded (5 s wall-clock)
-;   uci_ack            — single NEXT_DATA pulse
+;   uci_drain_resp     — read the remaining DATA_AV bytes to nowhere;
+;                        TOD-bounded (5 s wall-clock)
+;   uci_drain_status   — read the remaining STAT_AV bytes, capturing the
+;                        line; TOD-bounded (5 s wall-clock)
+;   uci_ack            — the single DATA_ACC pulse that ends the transfer
+;
+; Neither drain ACKs per byte: the queues auto-advance on read, and a
+; DATA_ACC mid-drain resets BOTH of them (issue #144). Every transaction
+; is drain_resp -> drain_status -> uci_ack, in that order, exactly once.
 ;
 ; Phase 2 only needs enough machinery for GET_IPADDR (12-byte response,
 ; one interface-index parameter). Later phases will extend as needed.
@@ -351,11 +355,18 @@ uci_settle:
         rts
 
 ; =============================================================================
-; uci_ack — single NEXT_DATA pulse (advance response/status FIFO by one byte)
+; uci_ack — the DATA_ACC pulse that ends a transaction.
+;
+; Tells the Ultimate every response byte was accepted and returns its state
+; machine to idle. Both queues are reset by it, so it must come AFTER
+; uci_drain_status has read the status line, and it is mandatory on every
+; exit path: without it the next PUSH_CMD hits the FPGA's `error_busy` and
+; is silently dropped, while the command pointer keeps advancing (#144).
+;
 ; Clobbers: A
 ; =============================================================================
 uci_ack:
-        lda #UCI_CTRL_NEXT_DATA
+        lda #UCI_CTRL_DATA_ACC
         sta UCI_CONTROL
         jsr uci_settle
         rts
@@ -372,7 +383,8 @@ uci_ack:
 ;   Y                      — same value (convenience for callers)
 ;
 ; Reads while DATA_AV is set AND count < max, storing each byte via a
-; self-modified `STA uci_resp_dst,Y`, ACKing each byte with NEXT_DATA.
+; self-modified `STA uci_resp_dst,Y`. The FIFO auto-advances on read, so
+; nothing is written to UCI_CONTROL here.
 ; If DATA_AV clears before max is reached, returns early. If max is reached
 ; while DATA_AV is still set, the excess is left for uci_drain_resp.
 ;
@@ -432,10 +444,22 @@ uci_read_resp_bytes:
 @rd_ctr_hi: .byte 0
 
 ; =============================================================================
-; uci_drain_resp — ACK remaining response bytes until DATA_AV is clear.
+; uci_drain_resp — read remaining response bytes until DATA_AV is clear.
 ; Used after uci_read_resp_bytes when the caller only wanted the first N bytes
-; of a potentially longer response. Reads UCI_RESP_DATA (forcing the FIFO to
-; advance on firmwares that require a read), then pulses NEXT_DATA.
+; of a potentially longer response. Reading UCI_RESP_DATA is the whole of it:
+; the FIFO advances on the read strobe (command_protocol.vhd).
+;
+; NO PER-BYTE ACK (#144, and the same finding uci_drain_status carries).
+; This loop used to pulse DATA_ACC after every byte, which does not advance
+; anything — it ENDS the transfer and resets both queues. So the drain read
+; byte one, saw DATA_AV clear, and stopped; and the status line the caller
+; drains next was gone before uci_drain_status looked at it. That destroyed
+; the firmware's own explanation at exactly the moments worth having it:
+; net_poll's error path and the ring-full early exits.
+;
+; The 5 s TOD bound below stays. network_target.h documents that a reply of
+; exactly CMD_MAX_REPLY_LEN leaves DATA_AV asserted indefinitely; our 512 B
+; cap cannot reach it, but the bound is the backstop if that ever changes.
 ;
 ; Phase 5j — wall-clock-bounded via CIA1 TOD (5 s budget, mirrors
 ; uci_wait_idle / uci_wait_not_busy from issue #37 and Phase 5b).
@@ -465,10 +489,8 @@ uci_drain_resp:
         rts
 @drn_have:
         lda UCI_RESP_DATA
-        jsr uci_settle               ; settle before NEXT_DATA write
-        lda #UCI_CTRL_NEXT_DATA
-        sta UCI_CONTROL
         jsr uci_settle
+        ; NO PER-BYTE ACK — see the header. The read advanced the FIFO.
 
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
         lda CIA_TOD_HOUR
@@ -503,7 +525,7 @@ uci_drain_resp:
 ; which ports this adapter's design, and are copied from it:
 ;
 ;   * NO PER-BYTE ACK. The FIFO auto-advances on read (the same Phase 2
-;     finding net_poll's header read relies on). The NEXT_DATA pulse this
+;     finding net_poll's header read relies on). The DATA_ACC pulse this
 ;     loop used to issue per byte popped the whole line, so the drain read
 ;     byte one and then saw STAT_AV clear and stopped. Measured here
 ;     before the port: the capture returned "0" where the firmware had
