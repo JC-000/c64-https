@@ -269,17 +269,27 @@ tls_rec_len:            .res 2
 
 ; W1 partial: tls_rec_buf (548 B) lives in BSS_TAIL — a separate BSS
 ; segment that BOTH cfgs route to CRYPTO_COLD_SHADOW ($A000-$BFFF, RAM
-; under the BASIC ROM). BSS_TAIL packs first there, so tls_rec_buf sits
-; at $A000; check build/c64-https.map rather than this comment if it
-; matters. Keeps the largest single c64-https BSS entry out of the
-; CRYPTO_HOT overflow path.
+; under the BASIC ROM). Keeps the largest single c64-https BSS entry out
+; of the CRYPTO_HOT overflow path. Where inside the region it lands is
+; per-backend, because ld65 packs in declaration order:
+;
+;   UCI   BSS_TAIL is declared first, so tls_rec_buf sits at $A000
+;         (measured, build/c64-https.map, uci onchip 2026-08-31);
+;         cert_buf is not in the way — it moved to CERT_BUF_BSS in
+;         CRYPTO_OVERLAY when CERT_BUF_SIZE grew for wikipedia.
+;   ip65  CERT_BUF_BSS is pinned at $A000 for the SCRATCH_UNION overlap,
+;         so BSS_TAIL follows it at $A600 (cfg/c64-https-ip65.cfg).
+;         tls_rec_buf MUST stay outside that union span — it is live
+;         during verify.
+;
+; Read build/c64-https.map, not this comment, if an address matters.
 ;
 ; It does NOT land in the NET_BSS_TAIL region ($3B66-$41FF under UCI) —
 ; that region carries the deframer/viewer BSS plus the sibling's
-; LIB_NISTCURVES_P256_BSS — and ip65 does not alias BSS_TAIL to BSS;
-; it declares the same CRYPTO_COLD_SHADOW routing of its own. Both
-; claims stood here until 2026-08-31 and were the origin of the same
-; error restated in CLAUDE.md (fixed separately, #156).
+; LIB_NISTCURVES_P256_BSS — and ip65 does not alias BSS_TAIL to BSS; it
+; declares its own CRYPTO_COLD_SHADOW routing. Both of those claims stood
+; here until 2026-08-31 and were the origin of the same error restated in
+; CLAUDE.md (corrected separately as #156).
 .segment "BSS_TAIL"
 tls_rec_buf:            .res 548
 .segment "BSS"

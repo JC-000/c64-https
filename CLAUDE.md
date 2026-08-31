@@ -78,8 +78,9 @@ Targets: `make` (PRG + `build/labels.txt` + `build/c64-https.dbg`),
 `make package-verify`.
 
 Variables:
-  - `BACKEND=ip65|uci` — selects `cfg/c64-https-$(BACKEND).cfg` and
-    `src/net/$(BACKEND)/`. Default ip65.
+  - `BACKEND=ip65|uci` — selects `cfg/c64-https-$(BACKEND).cfg`,
+    `src/net/$(BACKEND)/`, and the `-I src/net/$(BACKEND)` include path
+    that resolves `net_tuning.inc`. Default ip65.
   - `USE_NISTCURVES_ONCHIP=1` — libs/nistcurves FP_ONCHIP_MUL profile: no
     REU row-fetch DMA, wins above ~18-22 MHz. Keeps the **base**
     `cfg/c64-https-$(BACKEND).cfg` — it only adds a `-D` and swaps the

@@ -888,6 +888,11 @@ tail); the W2 streaming consumer stages the leaf into a UCI-only 2048 B
 `cert_buf` (`CERT_BUF_SIZE`, so wikipedia's 1636 B leaf fits); the
 sibling library verifies real CA-issued chains.
 
+Target is a build knob:
+`make HTTPS_HOST=<host> HTTPS_PATH=<path>` (+ `HTTPS_BODY_TO_REU=1` and
+the `src/viewer.s` viewer for the wikipedia flow). Rigs:
+`tools/uci/rig_https_live.py`, `rig_https_wiki.py`.
+
 **Deframer error codes** (`DF_ERR_*`, defined at the top of
 `src/tls_deframe.s`, last value latched in `df_last_err`):
 
@@ -943,10 +948,7 @@ still happens, by code layout rather than by logic. `tools/test_hs_sequence.py`
 therefore READS the bytes adjacent to `tls_hs_allowed` (exported for exactly
 this) and uses those values as the message type, so removing either bound
 turns the reject into an accept. Mutation-checked: widening the upper bound,
-and deleting both bounds, are each detected. Target is a build knob:
-`make HTTPS_HOST=<host> HTTPS_PATH=<path>` (+ `HTTPS_BODY_TO_REU=1` and
-the `src/viewer.s` viewer for the wikipedia flow). Rigs:
-`tools/uci/rig_https_live.py`, `rig_https_wiki.py`.
+and deleting both bounds, are each detected.
 
 Three bugs the local-listener path never exposed, all fixed:
   - **512-content records** (what MFL-honoring servers send) hit a latent
