@@ -2,9 +2,9 @@
 """Phase 3 e2e test: boot c64-https.prg, do DHCP, then HTTPS GET.
 
 This test extends Phase 2 by pressing 'G' after DHCP succeeds, which
-triggers an HTTPS GET to www.foo.bar (resolved via dnsmasq to the
+triggers an HTTPS GET to www.foo.invalid (resolved via dnsmasq to the
 host bridge IP 10.0.65.1). A Python HTTPS server (TLS 1.3, self-signed
-P-256 ECDSA cert, CN=www.foo.bar) on 10.0.65.1:443 serves a known
+P-256 ECDSA cert, CN=www.foo.invalid) on 10.0.65.1:443 serves a known
 response body.
 
 The C64 X25519 keygen is slow (~3.6 min at normal speed), so the TLS
@@ -164,10 +164,10 @@ def _dump_diagnostics(transport=None) -> None:
     # Host-side DNS check
     try:
         r = subprocess.run(
-            ["dig", "+short", "@10.0.65.1", "www.foo.bar"],
+            ["dig", "+short", "@10.0.65.1", "www.foo.invalid"],
             capture_output=True, text=True, timeout=5,
         )
-        _emit(f"\n  dig @10.0.65.1 www.foo.bar -> {r.stdout.strip()}")
+        _emit(f"\n  dig @10.0.65.1 www.foo.invalid -> {r.stdout.strip()}")
     except Exception as e:
         _emit(f"  dig check failed: {e}")
 

@@ -729,8 +729,12 @@ def _selftest() -> int:
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from https_listener import _ensure_certs_p256  # noqa: PLC0415
+    # check_hostname is left ON below, so this SNI has to be a name the
+    # certificate actually carries — derive it rather than spell it.
+    from ensure_certs import SANS  # noqa: PLC0415
 
     cert_path, key_path = _ensure_certs_p256()
+    sni = SANS[-1]
     failures = 0
 
     # Every (mode, record_frame) combination must behave correctly against
@@ -772,8 +776,9 @@ def _selftest() -> int:
         detail = ""
         try:
             raw = socket.create_connection(("127.0.0.1", port), timeout=20.0)
-            with ctx.wrap_socket(raw, server_hostname="www.foo.bar") as tls:
-                tls.sendall(b"GET / HTTP/1.1\r\nHost: www.foo.bar\r\n\r\n")
+            with ctx.wrap_socket(raw, server_hostname=sni) as tls:
+                tls.sendall(b"GET / HTTP/1.1\r\nHost: "
+                            + sni.encode("ascii") + b"\r\n\r\n")
                 data = tls.recv(4096)
             if mode == "good":
                 ok = b"200 OK" in data and DEFAULT_BODY.encode() in data

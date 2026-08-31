@@ -70,8 +70,8 @@ else
         --dhcp-range=10.0.65.100,10.0.65.150,255.255.255.0,5m \
         --dhcp-option=6,"$HOST_ADDR" \
         --no-ping \
-        --address=/www.foo.bar/"$HOST_ADDR" \
-        --address=/foo.bar/"$HOST_ADDR" \
+        --address=/www.foo.invalid/"$HOST_ADDR" \
+        --address=/foo.invalid/"$HOST_ADDR" \
         --address=/c64test.local/"$HOST_ADDR" \
         --log-queries --log-dhcp --no-resolv \
         --pid-file="$DNSMASQ_PID" \

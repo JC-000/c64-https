@@ -14,8 +14,18 @@ entirely (issue #93). This module is the single entry point both now use.
 
 Generation is delegated to ``tools/package/listener/gen_certs.py`` rather
 than duplicated, so the packaged listener and the in-tree tests produce
-identical material: self-signed ECDSA, CN ``www.foo.bar``, SAN covering
-``foo.bar`` and ``www.foo.bar``, 10 year validity.
+identical material: self-signed ECDSA, CN ``www.foo.invalid``, SAN covering
+``foo.invalid`` and ``www.foo.invalid``, 10 year validity. Those two names
+are ``gen_certs.DEFAULT_CN`` / ``DEFAULT_SANS`` — imported, not repeated,
+so the two paths cannot drift apart. ``.invalid`` is RFC 2606 §2 /
+RFC 6761 §6.4 reserved and can never resolve; see gen_certs.py.
+
+**Staleness, not just absence.** An existing pair is reused, so changing
+the names above would otherwise leave a cert on disk carrying the OLD ones
+— silently, since the files are gitignored and nobody deletes them. Every
+downstream check would then disagree with this module. ``ensure_certs``
+therefore compares the SAN entries of the cert it finds against
+``SANS`` and re-mints on a mismatch.
 
 That generator is **pure Python stdlib** (PR #96): no ``cryptography``, no
 pip, no venv on either path. P-384 was the one profile that still needed
@@ -45,8 +55,23 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CERTS_DIR = REPO_ROOT / "tools" / "https_e2e" / "certs"
 GEN_DIR = REPO_ROOT / "tools" / "package" / "listener"
 
-CN = "www.foo.bar"
-SANS = ["foo.bar", "www.foo.bar"]
+if str(GEN_DIR) not in sys.path:
+    sys.path.insert(0, str(GEN_DIR))
+try:
+    from gen_certs import (  # noqa: E402
+        DEFAULT_CN, DEFAULT_SANS, san_dns_names, sans_match,
+    )
+except ImportError as _exc:                          # pragma: no cover
+    # The generator is stdlib-only, so this is a missing/broken file rather
+    # than a missing package. Say which file, in one line. Deliberately NOT
+    # falling back to literals: a second copy of the names is exactly the
+    # drift this import exists to remove.
+    raise SystemExit(
+        f"cannot import the test-cert identity: {_exc} (expected the "
+        f"stdlib-only generator at {GEN_DIR / 'gen_certs.py'})") from _exc
+
+CN = DEFAULT_CN
+SANS = list(DEFAULT_SANS)
 PROFILES = ("p256", "p384", "p256-chain")
 
 # Filenames per profile — must stay in step with gen_certs.CURVE_PROFILES
@@ -69,13 +94,24 @@ def cert_paths(profile: str = "p256",
     return base / cert_name, base / key_name
 
 
+def _is_stale(cert_path: Path) -> bool:
+    """True if the cert on disk does not carry exactly the SANs we want."""
+    return not sans_match(cert_path, SANS)
+
+
 def ensure_certs(profile: str = "p256",
                  certs_dir: Path | None = None,
                  force: bool = False,
                  quiet: bool = False) -> tuple[Path, Path]:
-    """Return (cert_path, key_path), generating them if absent.
+    """Return (cert_path, key_path), generating them if absent OR stale.
 
-    Idempotent: an existing pair is returned untouched unless *force*.
+    Idempotent for a *matching* pair: it is returned untouched unless
+    *force*. A pair whose subjectAltName no longer matches ``SANS`` is
+    re-minted, because "the certs are gitignored so they will regenerate"
+    is false — nothing deletes them, so a rename of the test identity would
+    otherwise be invisible on every machine that had run the tests before,
+    and every downstream check would silently disagree with this module.
+
     Raises SystemExit with a one-line actionable message if generation is
     impossible — never a bare traceback, since the usual cause is a missing
     dependency rather than a bug.
@@ -92,14 +128,26 @@ def ensure_certs(profile: str = "p256",
         from chain_certs import ensure_chain_certs  # noqa: PLC0415
         return ensure_chain_certs(certs_dir, force=force, quiet=quiet)
 
-    if cert_path.is_file() and key_path.is_file() and not force:
+    pretty = f"P-{profile[1:]}"              # p256 -> P-256
+    have_pair = cert_path.is_file() and key_path.is_file()
+    stale = have_pair and _is_stale(cert_path)
+
+    if have_pair and not stale and not force:
         return cert_path, key_path
 
     if not quiet:
-        pretty = f"P-{profile[1:]}"          # p256 -> P-256
-        print(f"test certs not found in {cert_path.parent} — generating "
-              f"(self-signed {pretty}, CN={CN}); "
-              f"they are gitignored by design")
+        if stale:
+            print(f"test cert {cert_path} carries "
+                  f"{san_dns_names(cert_path) or '(no SAN)'} but this tree "
+                  f"wants {SANS} — re-minting")
+        else:
+            print(f"test certs not found in {cert_path.parent} — generating "
+                  f"(self-signed {pretty}, CN={CN}); "
+                  f"they are gitignored by design")
+
+    # A stale pair must be overwritten, not skipped: gen_certs refuses to
+    # clobber an existing file unless told to.
+    force = force or stale
 
     if str(GEN_DIR) not in sys.path:
         sys.path.insert(0, str(GEN_DIR))

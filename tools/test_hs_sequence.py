@@ -158,7 +158,7 @@ ALL_TYPES = [D.HS_EE, D.HS_CERT, D.HS_CV, D.HS_FIN]
 # tls_hostname_len is 0, which is the state a DMA rig leaves it in because
 # http_get (the only writer) never runs. Setting it is what makes the accept
 # control an actual accept instead of a reject for an unrelated reason.
-CONTROL_HOST = "www.foo.bar"
+CONTROL_HOST = "www.foo.invalid"
 
 
 def gen_cert_with_san(host: str) -> bytes:

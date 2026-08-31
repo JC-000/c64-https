@@ -222,10 +222,10 @@ def _dump_diagnostics(transport=None) -> None:
     # Host-side DNS check
     try:
         r = subprocess.run(
-            ["dig", "+short", "@10.0.65.1", "www.foo.bar"],
+            ["dig", "+short", "@10.0.65.1", "www.foo.invalid"],
             capture_output=True, text=True, timeout=5,
         )
-        _emit(f"\n  dig @10.0.65.1 www.foo.bar -> {r.stdout.strip()}")
+        _emit(f"\n  dig @10.0.65.1 www.foo.invalid -> {r.stdout.strip()}")
     except Exception as e:
         _emit(f"  dig check failed: {e}")
 

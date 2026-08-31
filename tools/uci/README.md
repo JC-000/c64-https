@@ -49,7 +49,7 @@ its two wrappers, and `rig_https_bad_finished.py` — need a PRG built with an
 SNI override (issue #141):
 
 ```sh
-make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.bar
+make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.invalid
 ```
 
 The C64 dials the dev host's dotted-quad IP, because the firmware needs an

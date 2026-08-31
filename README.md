@@ -484,7 +484,7 @@ sudo ./scripts/setup-bridge-tap.sh
 sudo ./scripts/cleanup-bridge-tap.sh
 ```
 
-The setup script creates `br-c64` with `tap-c64-0`/`tap-c64-1`, assigns `10.0.65.1/24` to the bridge, and starts dnsmasq providing DHCP (pool 10.0.65.50-150) with DNS overrides (`zimmers.net` and `foo.bar` → `10.0.65.1`). The `BridgeEnv` context manager in `tools/https_e2e/env.py` wraps both scripts for use in tests.
+The setup script creates `br-c64` with `tap-c64-0`/`tap-c64-1`, assigns `10.0.65.1/24` to the bridge, and starts dnsmasq providing DHCP (pool 10.0.65.50-150) with DNS overrides (`zimmers.net` and `foo.invalid` → `10.0.65.1`; a dnsmasq `--address=/d/` answers for `d` and every subdomain, so `www.foo.invalid` is covered too). The `BridgeEnv` context manager in `tools/https_e2e/env.py` wraps both scripts for use in tests.
 
 **Library:** `tools/https_e2e/` exposes a reusable public API:
 

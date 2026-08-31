@@ -6,7 +6,8 @@
 # FORWARD rules, and then starts a dnsmasq bound to br-c64 that:
 #   - serves DHCP leases on 10.0.65.50-10.0.65.150 (1h)
 #   - pushes default gw + DNS = 10.0.65.1
-#   - overrides zimmers.net and foo.bar to 10.0.65.1
+#   - overrides zimmers.net and foo.invalid (dnsmasq covers www.foo.invalid
+#     too — an --address=/d/ answers for d and every subdomain) to 10.0.65.1
 #
 # Idempotent -- safe to run twice. Run via sudo. Pair with cleanup-bridge-tap.sh.
 #
@@ -138,7 +139,7 @@ dnsmasq \
     --dhcp-option=3,"$BRIDGE_IP" \
     --dhcp-option=6,"$BRIDGE_IP" \
     --address=/zimmers.net/"$BRIDGE_IP" \
-    --address=/foo.bar/"$BRIDGE_IP" \
+    --address=/foo.invalid/"$BRIDGE_IP" \
     --log-queries \
     --log-dhcp \
     >>"$DNSMASQ_LOGFILE" 2>&1 &

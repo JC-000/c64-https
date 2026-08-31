@@ -279,7 +279,11 @@ Variables:
     image rather than by a ld65 segment. Empty to the linker, live at
     runtime.
 
-  - `HTTPS_HOST=<host>` — build-time HTTPS target (default `www.foo.bar`;
+  - `HTTPS_HOST=<host>` — build-time HTTPS target (default `www.foo.invalid`
+                          — RFC 2606 §2 / RFC 6761 §6.4 reserved, so a
+                          default build cannot dial a name the public DNS
+                          will answer for; the earlier `www.foo.bar` could,
+                          `.bar` being a live gTLD;
                           feeds the GET, SNI and DNS lookup). Travels via
                           a generated `build/https_host.inc` because
                           ca65's `-D` is numeric-only; the generator is
@@ -294,7 +298,10 @@ Variables:
 **Two #128 hazards, both silent, both fixed — read this before touching the
 `HTTPS_HOST` plumbing.** The report was "the wikipedia build still connects to
 foo.bar", and it had two independent causes, neither of which is a bad
-hostname:
+hostname. (Both quotes below are verbatim from 2026-08; `www.foo.bar` was the
+default host at the time. It is `www.foo.invalid` now — `.bar` is a live gTLD
+and a default build could dial it, which is a *different* defect, fixed
+separately.)
 
   1. **The banner was a hardcoded literal.** `do_https_get` printed
      `"HTTPS GET WWW.FOO.BAR..."` unconditionally while connecting to the real
@@ -2694,7 +2701,7 @@ block the listener's sockets until a one-time GUI prompt is approved;
 the test self-probes for that, because the symptom otherwise looks
 like a C64-side TCP failure.
 
-End-to-end HTTPS against a real server (`www.foo.bar` via the local
+End-to-end HTTPS against a real server (`www.foo.invalid` via the local
 bridge rig — never a real internet domain) was historically blocked on
 an "upstream ip65 bug" recorded only in a since-lost memory note. Part
 of that story is now understood and fixed: ip65 sends no MSS option and

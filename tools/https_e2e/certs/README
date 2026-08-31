@@ -3,7 +3,7 @@ Test certificates for the https_e2e listener
 
 These are self-signed certs used by the local TLS 1.3 listener
 (`https_listener.py`) for end-to-end testing of the c64-https client
-against `www.foo.bar`. They are NOT trust-anchors for anything; do not
+against `www.foo.invalid`. They are NOT trust-anchors for anything; do not
 deploy them anywhere real.
 
 **This directory is empty in a fresh clone.** The cert files are
@@ -18,7 +18,7 @@ Two cert profiles are supported:
   server-p384.pem / server-p384.key  -- P-384 (secp384r1),
                                         ecdsa-with-SHA384
 
-CN is `www.foo.bar` and SAN covers `foo.bar` + `www.foo.bar` for both.
+CN is `www.foo.invalid` and SAN covers `foo.invalid` + `www.foo.invalid` for both.
 Validity is 10 years from generation.
 
 Auto-generation (default path)
@@ -71,10 +71,10 @@ cert:
     x509_extensions = v3_ext
 
     [dn]
-    CN = www.foo.bar
+    CN = www.foo.invalid
 
     [v3_ext]
-    subjectAltName = DNS:foo.bar, DNS:www.foo.bar
+    subjectAltName = DNS:foo.invalid, DNS:www.foo.invalid
     EOF
 
     openssl ecparam -name secp384r1 -genkey -noout \

@@ -42,11 +42,16 @@ mixed link gets its own error message here.
 
 Safety — the DMA'd connect host must stay the IP
 ------------------------------------------------
-``.bar`` is a live gTLD. The rigs deliberately pass ``www.foo.bar`` only as the
-*presented* name; the host the C64 dials is still the dev host's IP. DMA'ing
-``www.foo.bar`` as the connect host would hand the hostname to the UCI
-firmware's resolver and send the C64 to a stranger's address on any LAN whose
-DNS resolves it. Change ``tls_hostname``, never ``http_host_ptr``.
+The rigs deliberately pass ``www.foo.invalid`` only as the *presented* name;
+the host the C64 dials is still the dev host's IP. DMA'ing any hostname in as
+the connect host would hand it to the UCI firmware's resolver and send the C64
+wherever that answers. Change ``tls_hostname``, never ``http_host_ptr``.
+
+That the test identity is now unresolvable (``.invalid``, RFC 2606 §2) does
+not make it safe to relax: the predecessor was ``www.foo.bar`` under the live
+``.bar`` gTLD, and the whole hazard is that a resolvable name in this position
+sends the machine to a stranger's address on any LAN whose DNS answers for it.
+The rule is about the *field*, not about today's spelling of the name.
 
 Related: ``http_build_request`` composes ``Host:`` from ``http_host_ptr``
 independently of ``tls_hostname`` (src/http.s), so the listener still sees
@@ -176,8 +181,8 @@ def suggested_sni(dns_names: list[str]) -> str | None:
 
     The most specific non-wildcard SAN — a wildcard is a legal SNI for the
     client but a confusing thing to type, and the longest concrete name is the
-    one a real client would have sent (``www.foo.bar`` over ``foo.bar`` for
-    the repo's test cert).
+    one a real client would have sent (``www.foo.invalid`` over
+    ``foo.invalid`` for the repo's test cert).
     """
     concrete = [n for n in dns_names if not n.startswith("*.")]
     if not concrete:
@@ -378,7 +383,7 @@ _GOOD = {SNI_STRING_LABEL: 0x5772, SNI_CODE_LABEL: 0x0F5D,
          "@copy_sni_done": 0x0F68}
 _NONE: dict[str, int] = {"@copy_host": 0x099D}
 _MIXED = {SNI_STRING_LABEL: 0x5772, "@copy_host": 0x099D}
-_CERT_NAMES = ["foo.bar", "www.foo.bar"]
+_CERT_NAMES = ["foo.invalid", "www.foo.invalid"]
 _IP = "10.43.23.99"
 
 
@@ -399,7 +404,7 @@ def _selftest() -> int:
         if not cond:
             failures.append(name)
 
-    good_prg = _prg_with(0x5772, "www.foo.bar")
+    good_prg = _prg_with(0x5772, "www.foo.invalid")
 
     print("check_sni_precondition")
     # 1. Not built with HTTPS_SNI at all: the connect host is an IP literal,
@@ -408,7 +413,7 @@ def _selftest() -> int:
                                  connect_host=_IP)
     check("no symbols -> 'not built with HTTPS_SNI' error",
           msg is not None and "NOT built with HTTPS_SNI=" in msg
-          and _IP in msg and "HTTPS_SNI=www.foo.bar" in msg, repr(msg))
+          and _IP in msg and "HTTPS_SNI=www.foo.invalid" in msg, repr(msg))
 
     # 2. The one that matters: string without code. Links, greps, new hash,
     #    fails identically to case 1 on hardware.
@@ -462,39 +467,39 @@ def _selftest() -> int:
     # 8. A hostname connect host that the cert names needs no override.
     check("no override but connect host matches the cert -> passes",
           check_sni_precondition(_NONE, prg=good_prg, dns_names=_CERT_NAMES,
-                                 connect_host="www.foo.bar") is None)
+                                 connect_host="www.foo.invalid") is None)
 
     print("sni_string_from_prg")
     check("reads the embedded string",
-          sni_string_from_prg(good_prg, 0x5772) == "www.foo.bar")
+          sni_string_from_prg(good_prg, 0x5772) == "www.foo.invalid")
     check("address past the end of the image -> None",
           sni_string_from_prg(good_prg, 0xE000) is None)
     check("address below the load address -> None",
           sni_string_from_prg(good_prg, 0x0400) is None)
     check("non-hostname bytes -> None",
           sni_string_from_prg(_prg_with(0x5772, "") + b"", 0x5772) is None)
-    binary = bytearray(_prg_with(0x5772, "www.foo.bar"))
+    binary = bytearray(_prg_with(0x5772, "www.foo.invalid"))
     binary[0x5772 - 0x0801 + 2] = 0x8E
     check("binary garbage at the address -> None",
           sni_string_from_prg(bytes(binary), 0x5772) is None)
 
     print("name_matches (mirrors src/x509_name.s)")
-    check("exact", name_matches("www.foo.bar", "www.foo.bar"))
-    check("case-insensitive", name_matches("WWW.Foo.Bar", "www.foo.bar"))
-    check("different name", not name_matches("foo.bar", "www.foo.bar"))
+    check("exact", name_matches("www.foo.invalid", "www.foo.invalid"))
+    check("case-insensitive", name_matches("WWW.Foo.Invalid", "www.foo.invalid"))
+    check("different name", not name_matches("foo.invalid", "www.foo.invalid"))
     check("IP literal never matches a dNSName",
-          not name_matches("10.43.23.99", "www.foo.bar"))
-    check("leftmost wildcard", name_matches("www.foo.bar", "*.foo.bar"))
+          not name_matches("10.43.23.99", "www.foo.invalid"))
+    check("leftmost wildcard", name_matches("www.foo.invalid", "*.foo.invalid"))
     check("wildcard spans one label only",
-          not name_matches("a.www.foo.bar", "*.foo.bar"))
+          not name_matches("a.www.foo.invalid", "*.foo.invalid"))
     check("wildcard does not match the bare domain",
-          not name_matches("foo.bar", "*.foo.bar"))
+          not name_matches("foo.invalid", "*.foo.invalid"))
 
     print("suggested_sni")
     check("most specific concrete name",
-          suggested_sni(["foo.bar", "www.foo.bar"]) == "www.foo.bar")
+          suggested_sni(["foo.invalid", "www.foo.invalid"]) == "www.foo.invalid")
     check("wildcards are not suggested",
-          suggested_sni(["*.foo.bar"]) is None)
+          suggested_sni(["*.foo.invalid"]) is None)
 
     print()
     if failures:
