@@ -313,12 +313,20 @@ build is deterministic: 6,951 B, sha256 `cf1a5ff7809af4e4655e385b378b936054f4104
 `make clean` does not remove it, which is why the step is normally
 invisible. The UCI backend does not use the blob at all.
 
-One measurement trap, since it has already produced a wrong conclusion once:
-ca65 also resolves `.incbin` relative to the current directory, and
-`../../../` from a repo root escapes three levels up — which is exactly the
-depth of a git worktree under `.claude/worktrees/<name>/`. Such a worktree
-with no blob of its own silently assembles the parent checkout's blob and
-appears to build fine. Check blob behaviour in a real clone, not a worktree.
+You can build ip65 from a nested git worktree. The trap this paragraph used
+to describe — ca65 resolving `.incbin` against the current directory, so
+`../../../` from a worktree three levels down silently assembled the parent
+checkout's blob — was closed by issue #116, which replaced the operand: it is
+now a bare `.incbin "ip65-c64.bin"` resolved through
+`--bin-include-dir $(abspath ip65-build)`, with no `../` left to resolve.
+Re-verified in that exact geometry on 2026-08-31.
+
+What a fresh worktree does need first is `git submodule update --init
+--recursive`; without the submodule working trees the ip65 link fails loudly
+by name. And if you ever want to check which blob a build actually read,
+**flip a byte of it** — do not move it aside, because `make` will simply
+rebuild it to the same deterministic hash, which looks exactly like the trap
+it is supposed to detect.
 
 ## Project Status
 
