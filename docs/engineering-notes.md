@@ -2541,9 +2541,65 @@ The list is 8 entries, not the 7 this line used to claim, and the
 "97/97 assertions" total predates `test_finished_verify.py` being added
 to it — so do not quote either number without re-running. There is also
 no single runner behind an "all N pass" claim: `tools/run_all_tests.py`
-dispatches 11 suites and includes neither `test_finished_verify` nor
-`test_chained_hmac`. Run the ones you care about individually, or
-`tools/run_all_tests.py` and read what it actually covered.
+dispatches the suites named in its own `SUITE_ORDER` and nothing else.
+Since #169 that set is pinned by `tools/test_runner_coverage.py` rather
+than maintained by memory, and `test_finished_verify` is in it; suites
+that are standalone `main()` programs with no `run_tests()` —
+`test_chained_hmac` among them — remain outside it by construction. Run
+the ones you care about individually, or `tools/run_all_tests.py` and
+read what it actually covered.
+
+### The aggregate runner's omissions (issue #169)
+
+Found during the #168 documentation-drift audit and measured with
+`grep -n '^def run_tests' tools/test_*.py` plus an AST scan. Two
+different gaps, and conflating them is why the drift went unchased for
+so long:
+
+  - **Gap A — dispatchable but not dispatched (4).** Modules already
+    speaking the runner's interface (a module-level `run_tests()`), which
+    the hardcoded list simply never named: `test_hs_sequence` (#152, the
+    server-impersonation fix), `test_ecdh_zero_check` (#153),
+    `test_finished_verify` (the suite the 2026-08-12 audit demanded
+    because the server-Finished path had no test at all), and
+    `test_tls_deframer`.
+  - **Gap B — no `run_tests()` at all (6).** `test_x509_name`,
+    `test_ecdsa_kat_oracle`, `test_p384_overlay_hazard`, `test_viewer`,
+    `test_transcript_large`, `test_chained_hmac`. The runner cannot
+    dispatch these as written; giving them an interface is a separate
+    decision, filed separately.
+
+So the pattern was not random: the suites covering the highest-risk paths
+were precisely the ones the aggregate TOTAL did not include, and the
+TOTAL looked like coverage. Three of Gap A are now wired.
+`test_tls_deframer` is on the runner's explicit `UNDISPATCHED_SUITES`
+list with its reason inline — its `run_tests()` takes minted cert
+fixtures and returns a 4-tuple `(plumb_pass, plumb_fail, defr_pass,
+defr_fail)`, and its deframer scenarios are an acceptance gate that
+xfails by design on the ip65 build the runner produces, so folding it
+into the TOTAL would report expected xfails as regressions.
+
+`test_hs_sequence` drives `tls_deframe_pump`, which exists only under
+`TLS_STREAM_DEFRAME` (uci). The runner drops it from the schedule as an
+**accounted** SKIP — the same reporting path `--skip-slow` uses for
+`x509`, so it appears in the summary with a reason and a warning rather
+than shrinking the denominator. `build()` runs a bare `make`, and the
+Makefile's `BACKEND ?= ip65` means the environment wins, so
+`BACKEND=uci python3 tools/run_all_tests.py` covers it.
+
+The guard, `tools/test_runner_coverage.py`, is the sibling of
+`tools/test_pytest_boundary.py` and was written red first: against the
+pre-fix runner it named exactly those four modules. It carries no counts
+— counts are what rotted — and its anti-vacuity anchor is structural
+rather than numeric: every module the runner schedules must also have
+been found by the guard's own `tools/` scan, so a scan that comes back
+empty fails instead of passing. It also refuses to read a missing
+`UNDISPATCHED_SUITES` as "no exclusions", requires each exclusion to name
+a module that really does define `run_tests()`, and requires the dispatch
+chain to end in a `raise` so an unmatched suite name cannot return
+`0 passed / 0 failed` and be summarised as a clean PASS. Mutation-checked
+five ways (drop a name, drop a whole suite, add an unwired suite, rename
+the constant, blind the scanner); all five go red.
 
 ### `pytest` is not the runner — the collection boundary
 
