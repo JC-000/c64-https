@@ -41,9 +41,63 @@ So instead:
     ``--address=/d/ip`` answers for ``d`` *and* every subdomain of it,
     which is why one script lists both names and the other only the
     parent.
+  * every ``HTTPS_HOST=``/``HTTPS_SNI=`` value written down anywhere in
+    the tracked tree — README, module docstring, Makefile comment — must
+    be a name a reader can safely type. See below.
 
 That fails for ``foo.bar``. It fails for ``foo.baz``. It passes only for
 names that genuinely cannot resolve.
+
+The written-down build instructions, and why they need their own check
+----------------------------------------------------------------------
+The first three checks read the *shipped default* and the *emitted
+certificate*. Neither can see a README or a docstring that tells a human
+to type a name — and that is the half that rotted. The 2026-08 rename of
+the test identity left three instructions (``tools/uci/README.md``,
+``rig_https_local.py``, ``rig_https_bad_finished.py``) still passing the
+old ``www.foo.bar`` as the SNI override to ``make``. That is not merely
+stale: ``.bar`` is a live gTLD, and the PRG such a line builds
+presents a name the certificate no longer carries, so
+``tools/uci/_sni_precondition.py`` rejects it before the device is even
+touched. A doc example is a thing people copy; it has to be as correct as
+the default.
+
+So ``test_build_instruction_hosts_are_safe`` scans every tracked text
+file for ``HTTPS_HOST=``/``HTTPS_SNI=`` followed by a literal, and sorts
+each value into exactly one of four buckets:
+
+  reserved      ends in a reserved TLD — the good case
+  ip            a dotted quad; the rigs' connect host *must* be an IP,
+                and no dNSName can ever match one (that is what the SNI
+                knob exists for)
+  external      an explicitly allowlisted real public host — retargeting
+                at a real server is a documented feature, so
+                ``make HTTPS_HOST=github.com`` is correct as written
+  placeholder   ``<host>``, ``{sni}``, ``...`` — not a name at all
+
+Anything else fails. That keeps the property rather than the spelling:
+``foo.baz`` fails, ``example.com`` fails, and a newly invented live name
+fails. The one way past it is adding a line to ``EXTERNAL_HOSTS`` below,
+which is deliberate, reviewed, and has to be justified in a comment —
+never a silent exemption.
+
+Note what it does NOT cover, so that nothing here is a *silent* bound:
+
+  * names written in some other shape — an ``openssl req`` ``CN =`` /
+    ``DNS:`` recipe, or a bare mention in prose. The historical record in
+    ``docs/engineering-notes.md`` and this file's own negative vectors
+    below both contain ``foo.bar`` on purpose, and neither sits in an
+    assignment, so neither needs an exemption;
+  * a value carrying URL punctuation (``HTTPS_HOST=https://x.com``) is
+    bucketed as a placeholder rather than a name. It is not a working
+    instruction either way: the value is baked in verbatim as a hostname
+    (``build/https_host.inc`` → ``src/boot.s``, which also caps it at 63
+    chars), so such a line is already broken for a louder reason.
+
+The buckets are asserted directly by ``test_build_instruction_classifier``,
+and ``test_build_instruction_scan_is_not_vacuous`` pins a floor under what
+the scan sees, so a regex that quietly stopped matching fails instead of
+going green.
 
 Runs under pytest, and standalone for anyone without pytest installed
 (the repo declares no pytest dependency)::
@@ -164,6 +218,150 @@ def san_dns_names(pem_path: Path) -> list[str]:
             names.append(der[s:s + ln].decode("ascii"))
     assert names, f"{pem_path}: subjectAltName carries no dNSName entries"
     return names
+
+
+# --- written-down build instructions -----------------------------------------
+#
+# Real public hosts that a build instruction may legitimately name. Retargeting
+# the client at a real server is a documented feature (README "Real public-
+# internet HTTPS"), so these are not exceptions to the rule — they are a
+# different rule, and each one has to be a site the project actually documents
+# fetching from.
+#
+# ADDING TO THIS LIST IS A DELIBERATE ACT. It says "a reader who copies this
+# line will open a TCP connection to somebody else's server, and that is
+# intended". If you are reaching for it to make a *local-listener* instruction
+# pass, you have the wrong fix: those must name the test certificate's
+# identity, which lives under `.invalid`.
+EXTERNAL_HOSTS = frozenset({
+    "github.com",         # README/CLAUDE.md: first real-server HTTP 200
+    "en.wikipedia.org",   # the 125,235 B article fetch (HTTPS_BODY_TO_REU)
+})
+
+# `HTTPS_HOST=` / `HTTPS_SNI=`, plus make's `?=` / `:=` / `+=` spellings.
+#
+# Whitespace after the `=` is tolerated ONLY for the make-style operators.
+# A shell/command-line assignment cannot contain one — `make HTTPS_SNI= foo`
+# passes an empty value — so allowing it there would swallow the next word of
+# any sentence that mentions the flag ("`HTTPS_SNI=` feeds two consumers"),
+# and every one of those would read as a live hostname.
+_ASSIGN_RE = re.compile(r"\bHTTPS_(?:HOST|SNI)\s*(?:[?:+]=\s*|=)(\S+)")
+
+# Punctuation that wraps a value in prose, markdown, reST, Python or shell.
+# `*` is NOT stripped: `*.foo.invalid` is a legitimate wildcard SNI and must
+# stay visible to the classifier rather than being trimmed into a placeholder.
+_WRAPPERS = " \t\r\n`'\"(),;:\\|"
+
+# A hostname literal: labels of alphanumerics/hyphens, optional leading `*.`.
+_HOSTNAME_RE = re.compile(r"^\*?\.?[A-Za-z0-9][A-Za-z0-9.\-_]*$")
+_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+# Characters that mark a value as a placeholder rather than a name. Spelled
+# out so that a value matching neither this nor _HOSTNAME_RE is a *failure*
+# ("unrecognised") and not a silent skip.
+_PLACEHOLDER_CHARS = set("<>{}$()%\\\"'*|=/?&")
+
+# Directories the fallback tree walk must not descend into (submodules, build
+# artifacts, agent scratch). Only used when `git ls-files` is unavailable.
+_WALK_SKIP = {".git", ".claude", "build", "dist", "libs", "ip65",
+              "ip65-build", "__pycache__", ".venv", "node_modules"}
+
+# Anti-vacuity floors. A regex that quietly stops matching, or a tree walk
+# that finds nothing, must fail rather than pass having checked nothing.
+_MIN_LITERAL_VALUES = 8
+_MIN_FILES_WITH_LITERALS = 5
+
+
+def tracked_text_files() -> tuple[list[Path], str]:
+    """Every tracked, decodable text file, plus how the list was obtained.
+
+    Prefers `git ls-files` so an untracked scratch note cannot fail the
+    build. Falls back to a tree walk (never a skip: a check that silently
+    stops checking is the failure mode this whole file exists to prevent).
+    """
+    import subprocess                                     # noqa: PLC0415
+
+    mode = "git ls-files"
+    names: list[str] = []
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO), "ls-files", "-z"],
+            capture_output=True, check=True, timeout=60,
+        ).stdout
+        names = [n for n in out.decode("utf-8", "replace").split("\0") if n]
+    except (OSError, subprocess.SubprocessError):
+        names = []
+    if not names:
+        mode = "tree walk (git unavailable)"
+        import os                                         # noqa: PLC0415
+        for root, dirs, files in os.walk(REPO):
+            dirs[:] = [d for d in dirs if d not in _WALK_SKIP]
+            for f in files:
+                names.append(str(Path(root, f).relative_to(REPO)))
+
+    out_paths = []
+    for name in names:
+        p = REPO / name
+        try:
+            if p.stat().st_size > 1 << 20:     # no build artifact is a doc
+                continue
+            p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):  # submodule gitlink, or binary
+            continue
+        out_paths.append(p)
+    return out_paths, mode
+
+
+def classify_host_value(value: str) -> tuple[str, str]:
+    """Sort one `HTTPS_HOST=`/`HTTPS_SNI=` value into a bucket.
+
+    Returns (bucket, cleaned) where bucket is one of "reserved", "ip",
+    "external", "placeholder", "live" or "unrecognised".
+    """
+    cleaned = value.strip(_WRAPPERS)
+    if not cleaned or set(cleaned) <= {"."}:
+        return "placeholder", cleaned
+    if _PLACEHOLDER_CHARS & set(cleaned) and not cleaned.startswith("*."):
+        return "placeholder", cleaned
+    if _IPV4_RE.match(cleaned):
+        return "ip", cleaned
+    if not _HOSTNAME_RE.match(cleaned):
+        return "unrecognised", cleaned
+    if is_unresolvable(cleaned):
+        return "reserved", cleaned
+    if cleaned.lower().lstrip("*.") in EXTERNAL_HOSTS:
+        return "external", cleaned
+    return "live", cleaned
+
+
+_SCANNED: tuple | None = None
+
+
+def scan_build_instructions():
+    """(findings, mode), scanned once per process — three tests read it."""
+    global _SCANNED
+    if _SCANNED is None:
+        paths, mode = tracked_text_files()
+        _SCANNED = (build_instruction_hosts(paths), mode, len(paths))
+    return _SCANNED
+
+
+def build_instruction_hosts(paths):
+    """[(path, lineno, raw, bucket, cleaned)] for every assignment found."""
+    found = []
+    for p in paths:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "HTTPS_HOST" not in text and "HTTPS_SNI" not in text:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for m in _ASSIGN_RE.finditer(line):
+                raw = m.group(1)
+                bucket, cleaned = classify_host_value(raw)
+                found.append((p, lineno, raw, bucket, cleaned))
+    return found
 
 
 def dnsmasq_overrides(script: Path) -> set[str]:
@@ -321,6 +519,81 @@ def test_dnsmasq_overrides_cover_every_cert_name() -> None:
             f"carries {sorted(names)}; {missing} would not resolve on the "
             "rig. The cert names and the DNS overrides must move together."
         )
+
+
+def test_build_instruction_hosts_are_safe() -> None:
+    """No written-down build instruction may name a resolvable host.
+
+    A README line or a module docstring is something a human copies into a
+    shell. The shipped-default and minted-cert checks above cannot see one,
+    which is exactly how three SNI-override instructions naming the old
+    `.bar` identity outlived the rename of the certificate they refer to.
+    """
+    found, mode, n_files = scan_build_instructions()
+    assert n_files, f"found no tracked text files to scan ({mode})"
+
+    bad = [(p, n, raw, bucket) for p, n, raw, bucket, _ in found
+           if bucket in ("live", "unrecognised")]
+    assert bad == [], (
+        "build instructions name hostnames that are not safe to type:\n"
+        + "\n".join(
+            f"  {p.relative_to(REPO)}:{n}  HTTPS_*={raw}  [{bucket}]"
+            for p, n, raw, bucket in bad
+        )
+        + "\n\nA local-listener instruction must name the test certificate's "
+          "identity, which\nlives under a reserved TLD — otherwise the PRG it "
+          "builds presents a name the\ncert does not carry and "
+          "tools/uci/_sni_precondition.py rejects it before the\ndevice is "
+          "touched. If the host really is a real public server the project "
+          "means\nto fetch from, add it to EXTERNAL_HOSTS in this file with a "
+          f"comment saying why.\n{_RFC_CITE}"
+    )
+
+
+def test_build_instruction_scan_is_not_vacuous() -> None:
+    """The scan above must actually be finding instructions.
+
+    Its assertion is "nothing bad was found", which a regex that quietly
+    stopped matching would also satisfy. Pin a floor on what it sees, and
+    pin the one value we know must be there: the shipped default.
+    """
+    found, mode, _n_files = scan_build_instructions()
+    literals = [(p, n, cleaned) for p, n, _raw, bucket, cleaned in found
+                if bucket in ("reserved", "ip", "external", "live")]
+    files = {p for p, _n, _c in literals}
+    assert len(literals) >= _MIN_LITERAL_VALUES and len(files) >= _MIN_FILES_WITH_LITERALS, (
+        f"the HTTPS_HOST=/HTTPS_SNI= scan ({mode}) found only "
+        f"{len(literals)} literal value(s) in {len(files)} file(s), below the "
+        f"floor of {_MIN_LITERAL_VALUES} in {_MIN_FILES_WITH_LITERALS}. Either "
+        "the instructions were removed (lower the floor deliberately) or "
+        "_ASSIGN_RE has stopped matching how they are written, in which case "
+        "test_build_instruction_hosts_are_safe is now green for the wrong "
+        "reason."
+    )
+    default = makefile_default_https_host()
+    assert any(c.lower() == default.lower() for _p, _n, c in literals), (
+        f"the scan did not see the Makefile's own `HTTPS_HOST ?= {default}` "
+        "line, which it must reach if it reaches anything."
+    )
+
+
+def test_build_instruction_classifier() -> None:
+    """The classifier itself, including the mistakes it exists to catch."""
+    for live in ("www.foo.bar", "foo.bar", "foo.baz", "example.com",
+                 "listener.local", "evil.co.uk"):
+        assert classify_host_value(live)[0] == "live", live
+        # ...and still live once prose punctuation is wrapped around it.
+        assert classify_host_value(f"`{live}`,")[0] == "live", live
+    for ok in ("www.foo.invalid", "foo.invalid", "host.test", "x.example",
+               "localhost", "*.foo.invalid"):
+        assert classify_host_value(ok)[0] == "reserved", ok
+    for ip in ("10.43.23.99", "10.0.65.1", "192.168.1.81"):
+        assert classify_host_value(ip)[0] == "ip", ip
+    for ext in ("github.com", "en.wikipedia.org"):
+        assert classify_host_value(ext)[0] == "external", ext
+    for placeholder in ("<host>", "<name>", "{sni}", "...", "$(HOST)", "",
+                        '"', "%s"):
+        assert classify_host_value(placeholder)[0] == "placeholder", placeholder
 
 
 def test_reserved_tld_predicate_rejects_live_gtlds() -> None:

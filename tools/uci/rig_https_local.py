@@ -6,7 +6,7 @@ the UCI backend on a real Ultimate 64 Elite.
 BUILD REQUIREMENT (issue #141): the PRG must present a name the test cert
 carries, so build it with an SNI override:
 
-    make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.bar
+    make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.invalid
 
 The C64 dials this host's dotted-quad IP — it must, the firmware needs an
 address — but src/x509_name.s (v0.4.2+) validates the certificate's SAN
@@ -1365,11 +1365,12 @@ def main() -> int:
     # DeviceLock time, fight C64_SKIP_BUILD, and `make HTTPS_SNI=...` without
     # a clean is itself the mixed-link trap this check exists to catch.
     #
-    # SAFETY: `.bar` is a live gTLD. Only the *presented* name changes; the
-    # host DMA'd into http_host_ptr below stays the listener's IP. DMA'ing
-    # www.foo.bar as the connect host would hand it to the UCI firmware's
-    # resolver and send the C64 to a stranger's address on any LAN that
-    # resolves it. Also note http_build_request composes `Host:` from
+    # SAFETY: only the *presented* name changes; the host DMA'd into
+    # http_host_ptr below stays the listener's IP. DMA'ing a hostname as the
+    # connect host would hand it to the UCI firmware's resolver and send the
+    # C64 wherever that answers — which is why the test identity lives under
+    # `.invalid` and why its predecessor `www.foo.bar` (a live `.bar` gTLD)
+    # was a hazard here. Also note http_build_request composes `Host:` from
     # http_host_ptr independently of tls_hostname (src/http.s), so the
     # server-side request matcher still sees `Host: <listener IP>` — do not
     # "fix" _check_server_result to expect the SNI name.

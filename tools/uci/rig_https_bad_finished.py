@@ -69,7 +69,7 @@ Build requirement
 Like every local-listener rig, this one needs an SNI override or the client
 aborts at Certificate long before Finished (issue #141):
 
-    make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.bar
+    make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.invalid
 
 main() asserts that offline, before DeviceLock. It matters more here than
 elsewhere: an unnoticed abort at Certificate is precisely the "fixture that
