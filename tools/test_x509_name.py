@@ -6,23 +6,41 @@ cert_buf, point cert_data_ptr at it, set tls_hostname, JSR, read the carry.
 
 The vector set is deliberately NEGATIVE-HEAVY. An all-positive set passes
 against a routine stubbed to `clc; rts` and therefore proves nothing — the
-same trap recorded as finding F7 in tools/test_ecdsa_kat_oracle.py. Nine of
-the fourteen vectors below expect a REJECT, including the four wildcard
-over-match cases that are the classic way name checking goes wrong.
+same trap recorded as finding F7 in tools/test_ecdsa_kat_oracle.py. More
+than half the vectors expect a REJECT, including the four wildcard
+over-match cases that are the classic way name checking goes wrong, and
+main() refuses to run a set that has no negative vector at all.
 
-One vector is a REAL certificate — tools/https_e2e/certs/server.pem, the one
-the bundled listener serves — parsed from its own DER rather than synthesised
-here. A parser that only ever sees certificates written by its own test is
-not being tested against reality.
+Composition: 6 vectors from a REAL certificate (tools/https_e2e/certs/
+server.pem, the one the bundled listener serves), 6 from live CA-issued
+leaves fetched over the network, and 11 synthesised here. A parser that
+only ever sees certificates written by its own test is not being tested
+against reality, so the first twelve are the ones that matter, and of them
+only the real-certificate six need no network — which is why they are
+MANDATORY: the certificate is minted on demand and a failure to produce it
+stops the suite (real_cert_der(), issue #167).
+
+**No total is asserted anywhere, and none should be.** 23 with a network,
+17 under `X509_NAME_OFFLINE=1`: that is a fact about the machine, not about
+the code, and pinning it would be the same defect one level up. What IS
+enforced is that every vector the suite set out to build was built — see
+the intent-vs-built check in main(). Beware the totals when reading older
+logs, too: the real-certificate six and the live six have the same
+3-accept/3-reject shape, so "17 vectors, 8 accept / 9 reject" has two
+possible causes — no network, or (before #167) no certificate. The header
+line now reports how many vectors came from the real certificate, which
+tells the two apart.
 
     make BACKEND=uci && C64_SKIP_BUILD=1 python3 tools/test_x509_name.py
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import os
-import subprocess
 import sys
 import time
+from pathlib import Path
 
 from c64_test_harness import (
     Labels, ViceInstanceManager, read_bytes, write_bytes, goto, wait_for_text,
@@ -39,7 +57,11 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools", "package", "listener"))
 from gen_certs import DEFAULT_SANS as CERT_SANS  # noqa: E402
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
-REAL_CERT = os.path.join(PROJECT_ROOT, "tools", "https_e2e", "certs", "server.pem")
+# Marks the vectors built from the listener's own certificate. They are
+# minted on demand (real_cert_der), so unlike the live-leaf vectors they
+# need no network and have no excuse to be absent: fewer of them than
+# real_cert_rows() declares is a FAILURE, not a smaller run.
+REAL_VECTOR_PREFIX = "real cert / "
 
 CARRY_TRAMPOLINE = 0x033C
 CARRY_RESULT_ADDR = 0x0352
@@ -110,39 +132,137 @@ def live_leaf(host: str):
         return None
 
 
-def real_cert_der() -> bytes | None:
-    try:
-        out = subprocess.run(["openssl", "x509", "-in", REAL_CERT, "-outform", "der"],
-                             capture_output=True, check=True)
-        return out.stdout
-    except Exception:
+class RealCertUnavailable(RuntimeError):
+    """The bundled listener's certificate could not be produced.
+
+    Carries the ACTUAL cause. Its predecessor was a bare
+    ``except Exception: return None`` that reported "openssl unavailable"
+    for every failure mode — including the only one that ever fired, which
+    is that server.pem is gitignored and a fresh checkout therefore has no
+    such file (issue #167). Three causes, one message, and the message
+    named the one thing that was not wrong.
+    """
+
+
+def _der_tlv_len(der: bytes) -> int | None:
+    """Total encoded length of the DER TLV at the head of *der*, else None."""
+    if len(der) < 2:
         return None
+    n, off = der[1], 2
+    if n & 0x80:
+        k = n & 0x7F
+        if k == 0 or len(der) < 2 + k:
+            return None
+        n = int.from_bytes(der[2:2 + k], "big")
+        off += k
+    return off + n
+
+
+def real_cert_der() -> bytes:
+    """DER of the certificate the bundled listener serves, minting if absent.
+
+    ``tools/https_e2e/certs/server.pem`` is generated, never committed
+    (.gitignore ``tools/https_e2e/certs/*``), so "no such file" is the
+    NORMAL state of a fresh checkout rather than an error. ``ensure_certs``
+    mints it here — idempotent, stdlib-only, and the same generator the
+    listener and the other in-tree suites use — which removes the failure
+    mode instead of reporting it: the six vectors below now run everywhere
+    rather than being skipped everywhere.
+
+    openssl is deliberately no longer consulted. It was never needed — a PEM
+    is base64-armoured DER, and gen_certs.san_dns_names already walks one
+    with the stdlib — and it is not a documented dependency of this repo
+    (PR #96 went the other way, removing `cryptography` from the cert path).
+    Keeping it would only preserve a way for a missing tool to drop vectors.
+
+    Raises RealCertUnavailable naming which of the three causes that CAN
+    still fire did: generation failed, the file is absent/unreadable anyway,
+    or what is on disk is not a certificate.
+    """
+    e2e = os.path.join(PROJECT_ROOT, "tools", "https_e2e")
+    if e2e not in sys.path:
+        sys.path.insert(0, e2e)
+    from ensure_certs import ensure_certs  # noqa: PLC0415
+
+    try:
+        cert_path, _key = ensure_certs("p256")
+    except SystemExit as exc:            # ensure_certs' own one-line diagnosis
+        raise RealCertUnavailable(                # its text already says what
+            f"{exc} (generator: "                 # went wrong; do not restate
+            f"tools/package/listener/gen_certs.py)") from exc
+    except Exception as exc:             # noqa: BLE001
+        raise RealCertUnavailable(
+            f"generating the test certificate raised "
+            f"{type(exc).__name__}: {exc}") from exc
+
+    try:
+        pem = Path(cert_path).read_text()
+    except OSError as exc:
+        raise RealCertUnavailable(
+            f"{cert_path} is unreadable after generation ({exc.strerror}) — "
+            f"re-mint with `python3 tools/https_e2e/ensure_certs.py --force`"
+        ) from exc
+
+    try:
+        der = base64.b64decode(
+            "".join(ln for ln in pem.splitlines() if "-----" not in ln),
+            validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RealCertUnavailable(
+            f"{cert_path} is not PEM ({exc}) — re-mint with "
+            f"`python3 tools/https_e2e/ensure_certs.py --force`") from exc
+
+    # base64 decodes almost anything, so prove the result is one DER SEQUENCE
+    # filling the file before handing it to the C64 as a certificate.
+    if der[:1] != b"\x30" or _der_tlv_len(der) != len(der):
+        raise RealCertUnavailable(
+            f"{cert_path} decodes to {len(der)} B that are not a single DER "
+            f"SEQUENCE — re-mint with "
+            f"`python3 tools/https_e2e/ensure_certs.py --force`")
+    return der
 
 
 # --- vectors -----------------------------------------------------------------
-# (name, cert bytes-or-None-for-real, hostname, expected carry)
+
+def real_cert_rows():
+    """(host, expected carry, why) for every vector built from the real cert.
+
+    Declared as data, and separately from the certificate itself, so main()
+    can compare vectors BUILT against vectors INTENDED without either count
+    being written down as a literal anywhere. Do not replace this with a
+    number: the suite's total is environment-dependent (the live-leaf
+    vectors come and go with the network) and an asserted total would pass
+    or fail on the state of the machine rather than on the code.
+
+    The names are derived from the cert's own SAN entries rather than
+    spelled out, so renaming the test identity cannot leave these vectors
+    testing a name the listener no longer serves — they would still all
+    PASS, having quietly stopped exercising the real certificate at all.
+    CERT_SANS is the bare name + its `www.` prefix; that shape is what makes
+    the last two rows meaningful, and tools/test_reserved_test_host.py pins
+    it.
+    """
+    bare, www = sorted(CERT_SANS, key=len)
+    return [
+        (www,            0, "matches the 2nd SAN entry of the real listener cert"),
+        (bare,           0, "matches the 1st SAN entry"),
+        (www.upper(),    0, "DNS names are case-insensitive (RFC 4343)"),
+        ("evil.example", 1, "REJECT: name not in the cert"),
+        (www[:-1],       1, "REJECT: prefix of a SAN entry must not match"),
+        (www + "x",      1, "REJECT: SAN entry is a prefix of the host"),
+    ]
+
+
+# (name, cert DER, hostname, expected carry, why)
 def build_vectors():
     v = []
+    # Unconditional: real_cert_der() mints the certificate if it is absent
+    # and RAISES otherwise, so these vectors either run or stop the suite.
+    # They used to be wrapped in `if real:` with an else-branch that printed
+    # a note and carried on — the silent drop of issue #167.
     real = real_cert_der()
-    if real:
-        # Derived from the cert's own SAN entries rather than spelled out, so
-        # renaming the test identity cannot leave these vectors testing a name
-        # the listener no longer serves — they would still all PASS, having
-        # quietly stopped exercising the real certificate at all. CERT_SANS is
-        # the bare name + its `www.` prefix; that shape is what makes the last
-        # two vectors meaningful, and tools/test_reserved_test_host.py pins it.
-        bare, www = sorted(CERT_SANS, key=len)
-        for host, want, why in [
-            (www,          0, "matches the 2nd SAN entry of the real listener cert"),
-            (bare,         0, "matches the 1st SAN entry"),
-            (www.upper(),  0, "DNS names are case-insensitive (RFC 4343)"),
-            ("evil.example", 1, "REJECT: name not in the cert"),
-            (www[:-1],     1, "REJECT: prefix of a SAN entry must not match"),
-            (www + "x",    1, "REJECT: SAN entry is a prefix of the host"),
-        ]:
-            v.append((f"real cert / {host}", real, host, want, why))
-    else:
-        print("  NOTE: openssl unavailable — real-certificate vectors skipped")
+    for host, want, why in real_cert_rows():
+        v.append((REAL_VECTOR_PREFIX + host, real, host, want, why))
 
     for cert_names, host, want, why in [
         (["example.org"],   "example.org",     0, "exact single name"),
@@ -231,13 +351,45 @@ def main() -> int:
             return 2
     cert_cap = labels.address("cert_buf_size")
 
-    vectors = build_vectors()
+    # Intent, not a constant: how many real-certificate vectors this file
+    # declares. Compared against how many were actually built, below.
+    want_real = len(real_cert_rows())
+
+    try:
+        vectors = build_vectors()
+    except RealCertUnavailable as exc:
+        # An involuntary skip is a failure (the standard adopted in #158).
+        # These are the only vectors in the suite that parse a certificate a
+        # TLS listener actually produced — everything else is DER this file
+        # wrote itself — so dropping them and exiting 0, which is what this
+        # suite did before #167, reports "name checking is fine" having
+        # never seen a real certificate.
+        print(f"CANNOT RUN: {exc}", file=sys.stderr)
+        print(f"  The {want_real} real-certificate vectors did not run and no other "
+              f"vector\n  covers what they cover; this run certifies nothing about real\n"
+              f"  certificates. Counted as a failure, not a skip.", file=sys.stderr)
+        return 2
+
+    # Every vector the suite set out to build must have been built. This is
+    # deliberately a comparison against the declared set rather than against
+    # a number: what must not happen is a vector disappearing between
+    # declaration and execution, whatever the totals happen to be today.
+    n_real = sum(1 for x in vectors if x[0].startswith(REAL_VECTOR_PREFIX))
+    if n_real != want_real:
+        print(f"FATAL: {n_real} of the {want_real} declared real-certificate "
+              f"vectors were built — the fixture path dropped vectors without "
+              f"raising. Fix the vector set; a run of the remainder would be "
+              f"green for a reason unrelated to what it measured.",
+              file=sys.stderr)
+        return 2
+
     n_neg = sum(1 for x in vectors if x[3] == 1)
     if n_neg == 0:
         print("FATAL: no negative vectors — this set cannot fail against a stub.",
               file=sys.stderr)
         return 2
     print(f"  {len(vectors)} vectors ({len(vectors)-n_neg} accept / {n_neg} reject), "
+          f"{n_real} of them from the listener's real certificate, "
           f"cert_buf capacity {cert_cap} B")
 
     config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
