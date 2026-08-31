@@ -619,7 +619,15 @@ def _require(fn, *args):
     except Unavailable as exc:
         if os.environ.get(OPT_OUT_ENV) != "1":
             raise
-        reason = ("EXPLICIT SKIP (%s=1): %s" % (OPT_OUT_ENV, exc))
+        # The reason carries the vacuity warning itself, because under
+        # pytest this string is the ONLY channel: `-ra` (pinned in
+        # pytest.ini addopts) prints it and nothing else. An opt-out that
+        # reads as a bare "skipped" would be #165 again with a flag on it.
+        reason = ("EXPLICIT SKIP (%s=1 is set in this environment): %s "
+                  "0 of %d checks and 0 assertions ran; this exit-0 "
+                  "certifies NOTHING about the DATA_ACC accept protocol "
+                  "(#144 item 1). Unset %s to make it a failure again."
+                  % (OPT_OUT_ENV, exc, len(TESTS), OPT_OUT_ENV))
         # Only hand the skip to pytest when pytest is actually driving; the
         # standalone runner has its own reporting and must not see Skipped.
         pytest = sys.modules.get("pytest")
