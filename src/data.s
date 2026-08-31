@@ -268,10 +268,18 @@ tls_rec_type:           .res 1
 tls_rec_len:            .res 2
 
 ; W1 partial: tls_rec_buf (548 B) lives in BSS_TAIL — a separate BSS
-; segment that the UCI cfg routes to the NET_BSS_TAIL region (the
-; reclaimed tail of NET_CODE). Keeps the largest single c64-https BSS
-; entry out of the CRYPTO_HOT overflow path. ip65 cfg aliases
-; BSS_TAIL to BSS so the relocation is invisible there.
+; segment that BOTH cfgs route to CRYPTO_COLD_SHADOW ($A000-$BFFF, RAM
+; under the BASIC ROM). BSS_TAIL packs first there, so tls_rec_buf sits
+; at $A000; check build/c64-https.map rather than this comment if it
+; matters. Keeps the largest single c64-https BSS entry out of the
+; CRYPTO_HOT overflow path.
+;
+; It does NOT land in the NET_BSS_TAIL region ($3B66-$41FF under UCI) —
+; that region carries the deframer/viewer BSS plus the sibling's
+; LIB_NISTCURVES_P256_BSS — and ip65 does not alias BSS_TAIL to BSS;
+; it declares the same CRYPTO_COLD_SHADOW routing of its own. Both
+; claims stood here until 2026-08-31 and were the origin of the same
+; error restated in CLAUDE.md (fixed separately, #156).
 .segment "BSS_TAIL"
 tls_rec_buf:            .res 548
 .segment "BSS"

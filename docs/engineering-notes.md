@@ -886,7 +886,64 @@ The W1 streaming deframer (`src/tls_deframe.s`) handles the real 11-14
 record flights (Certificate spanning ~6 records; CV+Finished sharing the
 tail); the W2 streaming consumer stages the leaf into a UCI-only 2048 B
 `cert_buf` (`CERT_BUF_SIZE`, so wikipedia's 1636 B leaf fits); the
-sibling library verifies real CA-issued chains. Target is a build knob:
+sibling library verifies real CA-issued chains.
+
+**Deframer error codes** (`DF_ERR_*`, defined at the top of
+`src/tls_deframe.s`, last value latched in `df_last_err`):
+
+    $01 DF_ERR_HDR_LEN       24-bit length high byte non-zero
+    $02 DF_ERR_TOO_BIG       spanning non-Certificate message > carry cap
+    $03 DF_ERR_DISPATCH      message handler returned C=1
+    $04 DF_ERR_TYPE          unknown handshake message type
+    $05 DF_ERR_CERT_FMT      streamed Certificate malformed / no usable key
+    $06 DF_ERR_CERT_TOO_BIG  leaf certificate exceeds cert_buf
+    $07 DF_ERR_SEQ           not the message tls_state requires (#152)
+
+`$07` is the newest and the only one with a mirror outside this file.
+Issue #152: `tls_connect` walks the encrypted flight with four
+unconditional `jsr tls_recv_encrypted` calls, and both dispatchers used to
+switch on the message-type byte alone — so a server that completed the
+unauthenticated CH/SH exchange could send four EncryptedExtensions
+messages under the handshake write key and nothing else. Four dispatches
+satisfied the four calls, the client derived traffic keys, set
+`TLS_STATE_CONNECTED` and reported success, having seen no Certificate, no
+CertificateVerify and no server Finished — which also skips the #135
+server-name check, a tail call off `x509_extract_pubkey`'s success exit.
+
+The gate reuses `tls_state`, which `tls_connect` already writes immediately
+before each receive, as the "which message is due" marker, rather than
+adding a parallel `tls_hs_expected` byte: one variable cannot drift out of
+step with itself, and it costs no bytes in `tls13.s`, which lands in the
+segment with the least ip65 headroom. Both dispatch sites expand the SAME
+macro (`TLS_HS_SEQ_CHECK`, `src/tls_hs_seq.inc`) — the UCI streaming arm at
+`@hdr_complete` in `src/tls_deframe.s` and the ip65 `.else` arm of
+`tls_recv_encrypted` in `src/tls13.s` — because the identical defect lived
+in both. The rejection happens before the transcript fold, before any route
+and before any handler.
+
+One RFC 8446-legal message is turned away: the optional CertificateRequest
+of §4.3.2. This client never sends `post_handshake_auth` and cannot produce
+a client Certificate, so such a handshake could not complete here anyway;
+it was already refused one step later as `DF_ERR_TYPE`. NewSessionTicket is
+post-handshake and cannot legally precede the server Finished. Accepting-
+and-skipping either would mean re-entering the deframer pump from inside
+dispatch plus a "seen one already" latch to bound a malicious server
+streaming them forever — real code, in the tightest segment, to keep alive
+a handshake that dies one message later regardless.
+
+The four-entry table is indexed by `tls_state` with a compile-time bias, so
+`src/tls_hs_seq.inc` carries `.assert`s that
+`TLS_STATE_ENCRYPTED_EXT..TLS_STATE_FINISHED` stay contiguous with
+`TLS_STATE_CONNECTED` immediately above: inserting a state in that run of
+equates would otherwise silently read the wrong table entry. The two range
+tests in the macro are load-bearing rather than defensive, and are not
+caught by simply presenting a message in an out-of-window state — the
+neighbouring bytes are unlikely to equal the type under test, so the reject
+still happens, by code layout rather than by logic. `tools/test_hs_sequence.py`
+therefore READS the bytes adjacent to `tls_hs_allowed` (exported for exactly
+this) and uses those values as the message type, so removing either bound
+turns the reject into an accept. Mutation-checked: widening the upper bound,
+and deleting both bounds, are each detected. Target is a build knob:
 `make HTTPS_HOST=<host> HTTPS_PATH=<path>` (+ `HTTPS_BODY_TO_REU=1` and
 the `src/viewer.s` viewer for the wikipedia flow). Rigs:
 `tools/uci/rig_https_live.py`, `rig_https_wiki.py`.
@@ -2499,18 +2556,42 @@ the TLS state machine. For a quick sanity check after a build:
   - `tools/test_tls_handshake.py`  — full handshake state machine
   - `tools/test_http.py`           — HTTP request/response build + parse
   - `tools/test_x509.py`           — X.509 parser
-  - `tools/test_x509_name.py` — server name validation (#135). 23 vectors,
-                                **9 of them rejects**, including the four
+  - `tools/test_x509_name.py` — server name validation (#135). **17
+                                vectors as it actually runs, 9 of them
+                                rejects** (re-counted 2026-08-31; the "23"
+                                that stood here counted six vectors that
+                                never execute — see below). Three are the
                                 wildcard over-matches that are how name
-                                checking classically goes wrong (`*.example.org`
-                                vs `example.org` and vs `a.b.example.org`,
-                                `*.com` vs `example.com`, prefix/suffix
-                                near-misses). Six vectors are REAL production
-                                leaves fetched live (wikipedia / github /
-                                lwn), each accepted for its own host and
-                                rejected for a wrong one — a parser exercised
-                                only against certificates its own test wrote
-                                is not evidence about the ones it will meet.
+                                checking classically goes wrong
+                                (`*.example.org` vs `example.org` and vs
+                                `a.b.example.org`, `*.com` vs
+                                `example.com`); two are SAN-shape rejects
+                                (rfc822Name under tag `0x81`, and no SAN
+                                extension at all). Six vectors are REAL
+                                production leaves fetched live (wikipedia /
+                                github / lwn), each accepted for its own
+                                host and rejected for a wrong one — a
+                                parser exercised only against certificates
+                                its own test wrote is not evidence about the
+                                ones it will meet. `X509_NAME_OFFLINE=1`
+                                drops those six, leaving 11.
+
+                                The six it does NOT run are the
+                                `tools/https_e2e/certs/server.pem` vectors
+                                (the suffix/prefix near-misses `www.foo.ba`
+                                and `www.foo.barx` among them). That cert is
+                                gitignored listener output, minted on demand
+                                by `ensure_certs.py` and absent from a fresh
+                                clone, so `real_cert_der()` returns None —
+                                and the suite prints `openssl unavailable`
+                                for it even when openssl is on PATH, which
+                                is how the miscount survived. The printed
+                                total is therefore not coverage of the
+                                real-cert path. Fixing the suite (mint or
+                                skip explicitly, and report the true reason)
+                                is tracked separately; this entry only
+                                records what it does today.
+
                                 Skips with a loud message on ip65, where the
                                 feature is compiled out.
   - `tools/test_p384_overlay_hazard.py` — a P-384 certificate must NOT
@@ -2556,9 +2637,10 @@ The boundary is now pinned rather than accidental:
     U64E/C64U hardware — `tools/uci/README.md`). #111 renamed `tests/`;
     its follow-up renamed `tools/uci/`, whose six scripts had the
     identical shape
-  - `pytest.ini` pins `testpaths` to the three genuinely pure-logic
-    modules and keeps collection out of `libs/`, `ip65/`, `tests/` and
-    `tools/uci/`
+  - `pytest.ini` pins `testpaths` to the genuinely pure-logic modules —
+    the list in `pytest.ini` is the enumeration, deliberately not
+    restated here or in CLAUDE.md, because it grows — and keeps
+    collection out of `libs/`, `ip65/`, `tests/` and `tools/uci/`
   - root `conftest.py` prints what the run does and does not cover, in
     both the header and the summary — no skips, because a vague skip
     reads like coverage
@@ -2572,11 +2654,15 @@ guard pins both. The rename is what holds from an arbitrary working
 directory, since `testpaths` only applies at the rootdir; the config
 entry is what stops a root-level run descending there at all.
 
-Bare `pytest` at the repo root is now **31 passed** (exit 0), and
-`pytest tests/` still exits 5, now with an explanation. Because
+Bare `pytest` at the repo root is now green (exit 0), and `pytest tests/`
+and `pytest tools/uci/` both still exit 5, now with an explanation. Because
 `testpaths` is rootdir-only, `pytest` from a subdirectory collects that
-subdirectory: from `tools/` it is 31 passed + 74 fixture errors, exit 1 —
-loud and correct, since those modules cannot run under pytest at all.
+subdirectory: from `tools/` it is the same passes plus a wall of fixture
+errors, exit 1 — loud and correct, since those modules cannot run under
+pytest at all. The pass and error totals are deliberately not quoted: they
+move with `testpaths` (which grows) and with the build state, and they had
+rotted twice within a day of each other by 2026-08-30. The `25 passed, 75
+errors` above is a dated pre-fix measurement and stays as one.
 
 ### Negative-path coverage — the server Finished
 

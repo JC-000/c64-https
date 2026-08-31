@@ -439,19 +439,22 @@ holds no matter which directory pytest is invoked from; `norecursedirs`
 is what keeps a root-level run out of them. Both halves are pinned by the
 guard.
 
-`pytest.ini` therefore pins `testpaths` to the three modules that really
-are pure-logic and pytest-runnable, and `conftest.py` prints the scope of
-the run in both the header and the summary. A bare `pytest` at the repo
-root reports **31 passed** (exit 0), and says in the same breath that this
-is not a statement about the C64 suites or the rig scripts. `pytest tests/`
-and `pytest tools/uci/` both exit 5, "no tests ran", with an explanation
-naming the right README.
+`pytest.ini` therefore pins `testpaths` to the modules that really are
+pure-logic and pytest-runnable — that list is the enumeration, so read it
+in `pytest.ini` rather than trusting a count here — and `conftest.py`
+prints the scope of the run in both the header and the summary. A bare
+`pytest` at the repo root is green (exit 0), and says in the same breath
+that this is not a statement about the C64 suites or the rig scripts.
+`pytest tests/` and `pytest tools/uci/` both exit 5, "no tests ran", with
+an explanation naming the right README.
 
 `testpaths` applies only when pytest is invoked from the rootdir, so from
-a subdirectory you get that subdirectory instead — measured from `tools/`:
-31 passed, 74 `fixture 'transport' not found` errors, exit 1. That is the
-honest signal (pytest genuinely cannot run those modules) and it is loud,
-which is the opposite of the problem being fixed here.
+a subdirectory you get that subdirectory instead — from `tools/`, the same
+passes plus a wall of `fixture 'transport' not found` errors, exit 1. That
+is the honest signal (pytest genuinely cannot run those modules) and it is
+loud, which is the opposite of the problem being fixed here. No total is
+quoted in either paragraph on purpose: it moves with `testpaths` and with
+the build state, and the numbers that used to stand here were stale.
 
 `tools/test_pytest_boundary.py` fails if the boundary drifts in any
 direction — a pure-logic module missing from `testpaths`, a listed module
