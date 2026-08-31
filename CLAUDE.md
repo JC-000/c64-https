@@ -29,9 +29,20 @@ Fresh clone (ip65 backend; UCI needs none of the ip65 steps):
     sha256 `cf1a5ff7…`, deterministic). Plain `make` builds it, but it
     cannot build the ip65 `.lib` archives — skip `make ip65-libs` and the
     link dies with `ld65: Input file '../ip65/ip65/ip65_tcp.lib' not found`.
-  - **Do not build ip65 in a nested git worktree.** ca65 resolves `.incbin`
-    against the CWD too, and `../../../` from a worktree three levels under
-    the repo silently assembles the **parent checkout's** blob.
+  - **A nested git worktree needs `git submodule update --init --recursive`
+    before it can link ip65** — a fresh worktree has no submodule working
+    trees, so the link dies by name. It fails LOUDLY; that is the whole
+    rule now. The old reason for this bullet is retired: `.incbin` no
+    longer carries a CWD-relative path. `src/net/ip65/ip65_blob.s` is a
+    bare `.incbin "ip65-c64.bin"` resolved through
+    `--bin-include-dir $(abspath $(IP65_BUILD))` in the Makefile (#116), so
+    a worktree three levels down assembles **its own** blob, not the parent
+    checkout's. Re-proven 2026-08-31 in that exact geometry: flipping one
+    byte of the worktree's blob moved the PRG hash, and restoring it moved
+    it back.
+  - To test blob provenance, **flip a byte** — never move the blob aside.
+    `make` regenerates it deterministically, reproducing the baseline hash,
+    which reads exactly like a live trap. That false positive has been hit.
   - **`libs/nistcurves` must be >= v0.11.2** (`CONTRACT_ZP_DEFINES`,
     knob-staleness guard). A stale checkout is caught in ~0.05 s by a
     source probe in `tools/integration/build_nistcurves_p256.sh` (#124);
@@ -613,17 +624,25 @@ vacuously (zero checks = fail; any `SKIP_*` = `PARTIAL VERIFICATION`).
 
   tools/test_entropy.py, test_hkdf.py, test_chained_hmac.py,
   test_keyschedule_steps.py, test_tls_handshake.py, test_http.py,
-  test_x509.py, test_x509_name.py (**17 vectors, 9 rejects as it actually
-  runs**: 11 synthetic + 6 against live CA leaves fetched from wikipedia /
-  github / lwn, which `X509_NAME_OFFLINE=1` drops. It defines 6 more
-  against `tools/https_e2e/certs/server.pem`, which never run — that cert
-  is gitignored listener output, absent from a fresh clone — and the suite
-  misreports their absence as "openssl unavailable" even with openssl on
-  PATH. Do not read the printed total as coverage of the real-cert path;
-  **`return 0` on a non-uci build — the whole suite exits green having
-  verified nothing**; the exemplars to copy are `test_x509.py` (missing
-  labels counted as failures) and `test_finished_verify.py` (missing label
-  = FATAL)), test_p384_overlay_hazard.py (fails under
+  test_x509.py, test_x509_name.py (**its vector count is conditional —
+  never quote one without the condition.** 11 synthetic vectors always run
+  (5 accept / 6 reject); +6 against live CA leaves fetched from wikipedia /
+  github / lwn, which `X509_NAME_OFFLINE=1` or being offline drops; +6
+  against `tools/https_e2e/certs/server.pem`, which a fresh clone does not
+  have — it is gitignored listener output, minted on demand by
+  `tools/https_e2e/ensure_certs.py`. So **17 / 9 on a fresh clone with
+  network, 23 / 12 once the certs exist**, 11 / 6 with neither (all three
+  measured 2026-08-31). The trap: both optional sets have the *same*
+  3-accept/3-reject shape, so 17 / 9 is produced two different ways —
+  fresh clone + network, and certs-present + `X509_NAME_OFFLINE=1` — and
+  the printed total tells you neither which sets ran nor whether the
+  real-cert path was covered. Read the per-vector lines. The suite also
+  reports a missing *cert* as "openssl unavailable" even with openssl on
+  PATH, which is how an earlier miscount survived. On a non-uci build it
+  exits **2** with a CANNOT RUN message, not 0 — that is the behaviour to
+  copy, along with `test_x509.py` (missing labels counted as failures) and
+  `test_finished_verify.py` (missing label = FATAL)),
+  test_p384_overlay_hazard.py (fails under
   ENABLE_P384_VERIFY=1 by design; needs a well-formed DER sig to reach the
   swap), test_finished_verify.py (18 cases), test_ecdsa_kat_oracle.py
   (6 vectors incl. 3 negative), test_tls_deframer.py, test_x25519.py.

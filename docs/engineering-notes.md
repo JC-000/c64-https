@@ -2558,44 +2558,77 @@ the TLS state machine. For a quick sanity check after a build:
   - `tools/test_tls_handshake.py`  — full handshake state machine
   - `tools/test_http.py`           — HTTP request/response build + parse
   - `tools/test_x509.py`           — X.509 parser
-  - `tools/test_x509_name.py` — server name validation (#135). **17
-                                vectors as it actually runs, 9 of them
-                                rejects** (re-counted 2026-08-31; the "23"
-                                that stood here counted six vectors that
-                                never execute — see below). Three are the
-                                wildcard over-matches that are how name
-                                checking classically goes wrong
-                                (`*.example.org` vs `example.org` and vs
-                                `a.b.example.org`, `*.com` vs
-                                `example.com`); two are SAN-shape rejects
-                                (rfc822Name under tag `0x81`, and no SAN
-                                extension at all). Six vectors are REAL
-                                production leaves fetched live (wikipedia /
-                                github / lwn), each accepted for its own
-                                host and rejected for a wrong one — a
-                                parser exercised only against certificates
-                                its own test wrote is not evidence about the
-                                ones it will meet. `X509_NAME_OFFLINE=1`
-                                drops those six, leaving 11.
+  - `tools/test_x509_name.py` — server name validation (#135). **The
+                                vector count is CONDITIONAL. Neither "17"
+                                nor "23" is the number; both have stood
+                                here, and each was right about a different
+                                tree.** The suite is one mandatory set plus
+                                two optional ones:
 
-                                The six it does NOT run are the
-                                `tools/https_e2e/certs/server.pem` vectors
-                                (the suffix/prefix near-misses `www.foo.ba`
-                                and `www.foo.barx` among them). That cert is
-                                gitignored listener output, minted on demand
-                                by `ensure_certs.py` and absent from a fresh
-                                clone, so `real_cert_der()` returns None —
-                                and the suite prints `openssl unavailable`
-                                for it even when openssl is on PATH, which
-                                is how the miscount survived. The printed
-                                total is therefore not coverage of the
-                                real-cert path. Fixing the suite (mint or
-                                skip explicitly, and report the true reason)
-                                is tracked separately; this entry only
-                                records what it does today.
+                                  11  synthetic, always (5 accept / 6
+                                      reject). Three rejects are the
+                                      wildcard over-matches that are how
+                                      name checking classically goes wrong
+                                      (`*.example.org` vs `example.org` and
+                                      vs `a.b.example.org`, `*.com` vs
+                                      `example.com`); two are SAN-shape
+                                      rejects (rfc822Name under tag `0x81`,
+                                      and no SAN extension at all).
+                                  +6  LIVE production leaves fetched over
+                                      the network (wikipedia / github /
+                                      lwn), each accepted for its own host
+                                      and rejected for a wrong one — a
+                                      parser exercised only against
+                                      certificates its own test wrote is
+                                      not evidence about the ones it will
+                                      meet. Dropped by
+                                      `X509_NAME_OFFLINE=1`, or silently by
+                                      any host being unreachable.
+                                  +6  against
+                                      `tools/https_e2e/certs/server.pem`,
+                                      the local listener's own leaf.
+                                      Gitignored output, minted on demand
+                                      by `tools/https_e2e/ensure_certs.py`,
+                                      so a FRESH CLONE HAS NONE and
+                                      `real_cert_der()` returns None.
 
-                                Skips with a loud message on ip65, where the
-                                feature is compiled out.
+                                Measured all three ways 2026-08-31:
+                                **17 / 9** on a fresh clone with network,
+                                **23 / 12** once the certs have been
+                                generated, **11 / 6** with neither.
+
+                                **Why a bare count is useless here**: the
+                                live set and the real-cert set have the
+                                SAME 3-accept/3-reject shape, so 17 / 9 is
+                                produced by two entirely disjoint vector
+                                sets — fresh clone + network, and
+                                certs-present + `X509_NAME_OFFLINE=1`.
+                                Reading the header total tells you neither
+                                which sets ran nor whether the real-cert
+                                path was covered. Read the per-vector
+                                lines. Compounding it, the suite reports a
+                                missing *cert* as `openssl unavailable`
+                                even with openssl on PATH — it cannot tell
+                                the two failure modes apart — which is how
+                                an earlier miscount survived. Fixing that
+                                report (mint or skip explicitly, and give
+                                the true reason) is tracked separately.
+
+                                The real-cert near-misses are not spelled
+                                out in the suite: since #164 they are
+                                derived from the cert's own SAN entries
+                                (`gen_certs.DEFAULT_SANS`), so renaming the
+                                test identity cannot leave them testing a
+                                name the listener no longer serves. With
+                                today's `www.foo.invalid` that yields
+                                `www.foo.invali` (prefix of a SAN) and
+                                `www.foo.invalidx` (SAN is a prefix of the
+                                host). Cite the derivation, not the
+                                literals — the literals moved once already.
+
+                                On a non-uci build it exits **2** with a
+                                loud CANNOT RUN, having run nothing; the
+                                feature is compiled out there.
   - `tools/test_p384_overlay_hazard.py` — a P-384 certificate must NOT
                                      corrupt resident code. Asserts the safe
                                      behaviour, so a failure IS the finding.
