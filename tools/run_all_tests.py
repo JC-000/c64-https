@@ -142,9 +142,12 @@ def run_test_suite(name, transport, labels, seed):
             # the routine over DMA with no deframer in the loop, so the
             # comparison reads a stale pointer. The computed verify_data is
             # byte-correct, so it is the rig's contract with the streaming
-            # build that is broken, not the crypto. build() below produces
-            # the ip65 (non-streaming) PRG this suite was written against,
-            # where it passes; filed separately.
+            # build that is broken, not the crypto. Measured both ways at
+            # this commit: 18/18 on ip65, 16/18 on uci -- and build() below
+            # produces the ip65 (non-streaming) PRG, so dispatching it here
+            # is safe. Tracked under issue #161, whose first item is the
+            # same tls_hs_ptr defect seen from the other side (the 16
+            # negatives passing vacuously on UCI).
             from test_finished_verify import run_tests as finished_run
             passed, failed = finished_run(transport, labels)
 
