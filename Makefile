@@ -529,10 +529,12 @@ build/net/ip65/ip65_blob.o: $(IP65_BIN)
 # build/flags.stamp — the whole build-flag set, as a tracked dependency.
 #
 # make tracks source mtimes, not the command line, so `make BACKEND=uci` on a
-# tree assembled as ip65 rebuilds nothing and links whatever objects are
-# lying around. `make clean` after any flag change is the documented remedy
-# (CLAUDE.md, "Build"), and it is a rule that only has to be forgotten once:
-# the result is not an error but a MIXED LINK, with exit status 0.
+# tree assembled as ip65 rebuilt nothing and linked whatever objects were
+# lying around. `make clean` after any flag change WAS the documented remedy,
+# and it was a rule that only had to be forgotten once: the result is not an
+# error but a MIXED LINK, with exit status 0. (That is the world this block
+# replaced. CLAUDE.md and README.md now document the stamp instead, and no
+# longer tell you to `make clean` after a flag change.)
 #
 # Measured 2026-08-30, from a UCI onchip tree with no `make clean`:
 #

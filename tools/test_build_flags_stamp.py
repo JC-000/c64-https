@@ -19,9 +19,10 @@ name greps out of the image, exit status is 0. Only a diff against a
 properly cleaned build exposes it, and it cost a full false negative on
 issue #141.
 
-`make clean` after any flag change is the documented rule (CLAUDE.md,
-"Build"), but a rule that lives only in prose is a rule that gets
-forgotten once. build/flags.stamp makes it mechanical: the whole
+`make clean` after any flag change WAS the documented rule, but a rule
+that lives only in prose is a rule that gets forgotten once.
+build/flags.stamp makes it mechanical, and the docs now describe the
+stamp instead of prescribing `make clean`: the whole
 ca65/ld65 command line is written to a stamp file and content-compared
 during Makefile PARSE, before make builds its file database, and any
 change deletes the objects and the PRG. Absence, not a timestamp

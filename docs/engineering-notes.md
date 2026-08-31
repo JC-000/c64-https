@@ -145,12 +145,51 @@ Targets:
                           blob on demand and then reuses it, so this
                           target is only for forcing a rebuild.
 
-**`make clean` when you change `BACKEND=` or any flag.** make tracks
-source timestamps, not the command line, so an object built for the
-other backend counts as up to date. This is not only about `-D` flags:
-`BACKEND=` also selects the `-I src/net/$(BACKEND)` include path, and
-`src/tls13.s` pulls `net_tuning.inc` from there. Both failure modes were
-observed in one worktree on 2026-08-13:
+**`make clean` after a flag change — RETIRED by #159. The measurements
+below are why it existed, and are kept for that reason.**
+
+A flag change no longer needs `make clean`. `build/flags.stamp` holds the
+fully expanded `CA65FLAGS`/`LD65FLAGS` (and `BACKEND` on a line of its
+own), is content-compared at Makefile **parse** time, and on any change
+deletes every object and the PRG — absence, not an mtime, which is what
+GNU Make 3.81's 1-second resolution cannot defeat. `BACKEND=` is covered
+twice over: `LD65FLAGS` carries `$(CFG)` and `CA65FLAGS` carries
+`-I src/net/$(BACKEND)`.
+
+Re-verified 2026-08-31, the direct experiment: from a clean ip65 tree
+(`4e6afc18…`), `make BACKEND=uci USE_NISTCURVES_ONCHIP=1` with **no**
+`make clean` produced `d5ebc7fa…` — byte-identical to the cleaned oracle.
+`tools/test_build_flags_stamp.py` pins it in seven cases, including
+`test_backend_flip_removes_the_other_backends_prg` and the inverse (an
+unchanged flag set must still rebuild nothing).
+
+**Two caveats survive**, which is why this entry is not simply deleted:
+
+  - **The compare runs at parse time, so it fires under `make -n`, `-q`
+    and `-t` as well** (#174). A dry run with different flags is not
+    side-effect-free: measured 2026-08-31, `make -n BACKEND=ip65 …`
+    against a built UCI tree removed all 24 objects and the PRG, and
+    being a dry run it built nothing to replace them. The next real build
+    is a full one.
+  - **The target strings are outside the stamp, deliberately.**
+    `HTTPS_HOST`/`HTTPS_PATH`/`HTTPS_SNI` values travel in the generated
+    `build/https_host.inc`, which invalidates `boot.o` + `http.o` + the
+    PRG rather than the whole tree — #128's retargeting ergonomic. That
+    set covers both consumers of those strings today; a third consumer
+    would have to be added to it, and the failure mode would be a mixed
+    link, not an error.
+
+What has **not** changed: neither exit code nor file size distinguishes a
+good build from a bad one, so if a build matters, check the PRG's sha256.
+That rule is independent of the stamp and is the one to keep.
+
+The original incident follows, because it is what the mechanism was built
+against. At the time `make clean` was the only remedy: make tracks source
+timestamps, not the command line, so an object built for the other backend
+counted as up to date. This was never only about `-D` flags — `BACKEND=`
+also selects the `-I src/net/$(BACKEND)` include path, and `src/tls13.s`
+pulls `net_tuning.inc` from there. Both failure modes were observed in one
+worktree on 2026-08-13:
 
   - **Mixed link.** An ip65 PRG built from a UCI-compiled `tls13.o`
     carries drain budget 1x16 instead of 8x250 — issue #73's regression,
@@ -164,9 +203,9 @@ observed in one worktree on 2026-08-13:
     exits 0 having left the *other backend's* PRG in place — a
     62,977 B UCI image where an ip65 build was asked for.
 
-So neither exit code nor file size distinguishes a good build from a bad
-one here. After any flag or `BACKEND` change, `make clean`; if a build
-matters, check the **PRG's** sha256.
+So neither exit code nor file size distinguished a good build from a bad
+one. `flags.stamp` closes both of those modes at the source; the sha256
+habit they taught is the part worth keeping, and still applies.
 
 Specifically the PRG's, not an object's: **ca65 stamps the build's
 wall-clock time into every `.o` header**, so two clean builds of
@@ -233,7 +272,8 @@ Note that master itself was never broken: a fresh clone at `9114ff7` plus
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65).
-                          Changing it requires `make clean` — see above.
+                          Changing it no longer requires `make clean`:
+                          `build/flags.stamp` covers it — see above.
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
                           `libs/x25519@v0.11.2` sibling. **Currently
                           links under NEITHER backend: ip65 overflows
@@ -319,9 +359,12 @@ Variables:
                           a generated `build/https_host.inc` because
                           ca65's `-D` is numeric-only; the generator is
                           content-compared **at Makefile parse time**, and
-                          on a change it deletes `boot.o` AND the PRG, so no
-                          `make clean` is needed for THIS flag — including
-                          back-to-back inside one second. The
+                          on a change it deletes `boot.o`, `http.o` AND the
+                          PRG, so no `make clean` is needed for THIS flag —
+                          including back-to-back inside one second.
+                          (`http.o` joined that list with #159: `http.s`
+                          reads `HTTPS_SNI_OVERRIDE`, and leaving it stale
+                          was the #141 false negative.) The
                           "link step keeps the repo-wide same-second caveat"
                           that used to be recorded here was **issue #128**,
                           not a fact of life; see the entry below. Hosts >63
@@ -359,8 +402,13 @@ hostname:
          point. Verified 3/3 on the same-second switch, in both directions,
          and a no-op `make` still relinks nothing.
 
-     The same-second caveat still stands for `BACKEND=` and every other flag,
-     which have no equivalent hook. `make clean` remains the remedy there.
+     That was written when `https_host.inc` was the only such hook, and it
+     used to end: "the same-second caveat still stands for `BACKEND=` and
+     every other flag, which have no equivalent hook." **No longer true.**
+     #159 generalised exactly this mechanism to the whole flag set as
+     `build/flags.stamp` — same parse-time compare, same delete-don't-touch
+     invalidation, wider net. See the flag-change entry near the top of this
+     file. `make clean` is no longer the remedy for a flag change.
 
 **Both verified on hardware, 2026-08-22, U64E 601A96 @ 48 MHz comb, at
 master `305051c`.** The banner reads, from real screen RAM:

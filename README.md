@@ -283,17 +283,26 @@ make clean                    # remove build artifacts
 make package                  # the three release products into dist/
 ```
 
-**Run `make clean` whenever you change `BACKEND=` or any flag.** make
-tracks source timestamps, not the command line, and `BACKEND=` selects
-an include path (`-I src/net/$(BACKEND)`) rather than a `-D` define, so
-an object built for the other backend counts as up to date. Both failure
-modes are silent and exit 0: a mixed link that is the correct size but
-carries the wrong backend's tuning constants, or no relink at all,
-leaving the other backend's PRG in `build/`. Neither the exit code nor
-the file size distinguishes them — compare the **PRG's** sha256 if a
-build matters. (Object hashes cannot serve: ca65 stamps build time into
-every `.o`, so no two builds agree; ld65 does not propagate it, which is
-what makes the PRG deterministic.)
+**A flag change no longer needs `make clean` (#159).** make tracks source
+timestamps rather than the command line, so switching `BACKEND=` or a
+profile flag used to leave the previous build's objects in place — silently,
+at exit 0, as either a mixed link or no relink at all. `build/flags.stamp`
+now closes that: it holds the fully expanded ca65/ld65 command lines, is
+compared when the Makefile is *parsed*, and on any change deletes every
+object and the PRG before make builds its file database.
+
+Two things to know anyway:
+
+- The compare runs at parse time, so `make -n` with different flags is
+  **not** side-effect-free — it deletes the objects without rebuilding them.
+- `make clean` is still the right move if you want to be certain of a tree
+  for any other reason, and it costs about a second.
+
+And the habit the old rule taught is still the one that matters: **neither
+the exit code nor the file size proves a build — compare the PRG's sha256.**
+Object hashes cannot serve, because ca65 stamps build time into every `.o`
+so no two builds agree; ld65 does not propagate it, which is what makes the
+PRG deterministic.
 
 ### ip65 Build (ip65 backend only)
 
