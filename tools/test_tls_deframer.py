@@ -831,8 +831,11 @@ def main() -> int:
     else:
         # UCI by default: the deframer is TLS_STREAM_DEFRAME, ON only under
         # BACKEND=uci (ip65 has no headroom — its deframer scenarios xfail by
-        # design). make clean first: make tracks timestamps, not the command
-        # line, so a backend switch without clean produces a mixed link.
+        # design). The `make clean` is no longer about the flags (#159 closed
+        # that), but it is still what rebuilds build/lib/*.a, which
+        # build/flags.stamp does not reach: this invocation passes no profile
+        # flag, so SIBLING_LIB_ARCHIVES is build/lib/nistcurves-p256.a either
+        # way and a backend flip does not move it.
         backend = os.environ.get("DEFRAMER_BUILD_BACKEND", "uci")
         print(f"\n=== Building (BACKEND={backend}) ===")
         subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)

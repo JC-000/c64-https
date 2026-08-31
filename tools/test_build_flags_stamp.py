@@ -140,8 +140,9 @@ def _clean_build_sha(*flags):
 def test_flag_change_without_clean_matches_a_clean_build():
     """The 2026-08-30 incident: HTTPS_SNI= on a tree built without it.
 
-    `make clean` is the documented remedy and it is absent here on
-    purpose — the whole point is what happens when someone forgets it.
+    `make clean` WAS the documented remedy, and it is absent here on
+    purpose — the whole point is what happens when someone forgets it,
+    which since #159 build/flags.stamp has to handle unaided.
     """
     missing = _toolchain_missing()
     if missing:

@@ -149,9 +149,9 @@ grep '^variant=' "$BUILD_INFO" | while read -r rec; do
     printf '  %-28s %8s  make %s\n' "$prg" "$bytes" "$args"
 done
 echo
-echo "  Every variant is built after a 'make clean' — BACKEND= selects an include"
-echo "  path that make's dependency graph cannot see, so an incremental build can"
-echo "  silently produce a mixed image at exactly the right size."
+echo "  Each variant is built on its own, from a clean tree, against the submodule"
+echo "  pins listed above. What identifies the one you have is its sha256 in the"
+echo "  checksum list at the end of this file — check your download against it."
 echo
 echo "------------------------------------------------------------------------------"
 echo " DISK IMAGES (.d64)"
