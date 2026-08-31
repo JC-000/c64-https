@@ -77,7 +77,20 @@ REQUIRED_LABELS = [
     "cert_buf", "cert_buf_len", "cert_buf_size",
     "ecdsa_pubkey_x", "ecdsa_pubkey_y", "ecdsa_curve_id",
     "tls_state",
+    "tls_hostname", "tls_hostname_len",
 ]
+
+# The name every Certificate this rig mints is issued FOR, and the name the
+# rig tells the client it asked for. ONE constant on purpose (issue #161):
+# it is written into the certificate's SAN and into tls_hostname, so the two
+# cannot drift into "the cert says one thing, the client wants another" —
+# which is indistinguishable, at the DF_ERR_CERT_FMT the deframer returns,
+# from the certificate being malformed.
+#
+# `.invalid` is reserved by RFC 2606 s2 / RFC 6761 s6.4 and can never
+# resolve; see tools/test_reserved_test_host.py for why every name this
+# project writes down lives under a reserved TLD.
+CERT_HOST = "deframe.foo.invalid"
 
 # Handshake message types
 HS_EE = 8
@@ -158,10 +171,19 @@ def chunks(data: bytes, n: int):
 
 
 def generate_p256_cert():
-    """Self-signed ECDSA P-256 cert (same recipe as test_x509.py)."""
+    """Self-signed ECDSA P-256 cert with a SAN naming CERT_HOST.
+
+    The SAN is not cosmetic. Under BACKEND=uci (X509_VERIFY_NAME) the
+    public-key extraction tail-calls x509_verify_hostname, whose carry IS
+    the Certificate handler's result, and that routine rejects a leaf with
+    no subjectAltName exactly as a browser does. A CN-only fixture — what
+    this helper minted before issue #161 — is refused by name validation
+    long before any deframer behaviour is observed, and the refusal arrives
+    as the same DF_ERR_CERT_FMT a malformed message would produce.
+    """
     key = ec.generate_private_key(ec.SECP256R1())
     subject = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com"),
+        x509.NameAttribute(NameOID.COMMON_NAME, CERT_HOST),
     ])
     cert = (x509.CertificateBuilder()
             .subject_name(subject)
@@ -171,6 +193,9 @@ def generate_p256_cert():
             .not_valid_before(datetime.datetime.now(datetime.UTC))
             .not_valid_after(datetime.datetime.now(datetime.UTC)
                              + datetime.timedelta(days=365))
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName(CERT_HOST)]),
+                critical=False)
             .sign(key, hashes.SHA256()))
     der = cert.public_bytes(serialization.Encoding.DER)
     nums = key.public_key().public_numbers()
@@ -298,9 +323,42 @@ class Rig:
 # Cases
 # ---------------------------------------------------------------------------
 
+def install_hostname(transport, labels, host: str = CERT_HOST) -> None:
+    """Populate tls_hostname / tls_hostname_len — a precondition, not a knob.
+
+    http_get writes these at runtime for both the menu path and the DMA
+    trampoline the hardware rigs use; this rig calls neither, so before
+    issue #161 they were zero. src/x509_name.s opens with::
+
+        lda tls_hostname_len            ; nothing to validate against
+        bne :+
+        sec
+        rts
+
+    so every Certificate was rejected before a single SAN byte was read.
+    The W2 acceptance cases then failed for a reason that has nothing to do
+    with the deframer, and — worse — the W2 *rejection* cases passed
+    without their guards ever running: deleting the
+    certificate_request_context zero-check from src/tls_deframe.s left
+    "non-zero request context rejected (streamed)" green (issue #161,
+    mutation M-B).
+
+    64 bytes is the tls_hostname buffer (src/tls_handshake.s); the whole
+    buffer is written so a longer name from an earlier run cannot leave a
+    tail behind.
+    """
+    raw = host.encode("ascii")
+    assert len(raw) < 64, "tls_hostname is 64 bytes (src/tls_handshake.s)"
+    write_bytes(transport, labels["tls_hostname"], raw.ljust(64, b"\x00"))
+    write_bytes(transport, labels["tls_hostname_len"], bytes([len(raw)]))
+
+
 def run_cases(transport, labels):
     rig = Rig(transport, labels)
     passed = failed = 0
+
+    # Precondition, established once for every case below (issue #161).
+    install_hostname(transport, labels)
     fed_ok = []                 # messages whose bytes should be in transcript
 
     def check(name, cond, detail=""):

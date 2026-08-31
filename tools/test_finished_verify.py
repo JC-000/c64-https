@@ -94,6 +94,7 @@ VERBOSE = False
 
 REQUIRED_LABELS = [
     "tls_verify_finished",
+    "tls_hs_ptr_reset",
     "tls_verify_data",
     "tls_s_hs_secret",
     "tls_transcript",
@@ -102,10 +103,11 @@ REQUIRED_LABELS = [
 
 # Cassette buffer. $033C-$03FB is free once BASIC has booted. The harness's
 # own jsr() trampoline lives at $0334 (5 bytes) and run_subroutine's U64
-# trampoline at $0360 (14 bytes) with flags at $03F0/$03F1 — $0340 and $034C
-# collide with none of them.
+# trampoline at $0360 (14 bytes) with flags at $03F0/$03F1 — $0340 and $0350
+# collide with none of them. The stub is 13 bytes ($0340-$034C), so the
+# latch sits at $0350.
 CARRY_STUB_ADDR = 0x0340
-CARRY_RESULT_ADDR = 0x034C
+CARRY_RESULT_ADDR = 0x0350
 
 
 # ---------------------------------------------------------------------------
@@ -197,22 +199,51 @@ def build_cases(secret: bytes, transcript: bytes):
 # C64 plumbing
 # ---------------------------------------------------------------------------
 
-def install_carry_stub(transport, target_addr: int) -> None:
+def install_carry_stub(transport, target_addr: int,
+                       hs_ptr_reset_addr: int) -> None:
     """Install a stub that calls *target_addr* and latches the carry flag.
 
-        JSR target      20 lo hi
-        LDA #$00        A9 00
-        ROL A           2A        ; carry -> bit 0
-        STA result      8D lo hi
-        RTS             60
+        JSR tls_hs_ptr_reset    20 lo hi  ; establish the (tls_hs_ptr)+4 input
+        JSR target              20 lo hi
+        LDA #$00                A9 00
+        ROL A                   2A        ; carry -> bit 0
+        STA result              8D lo hi
+        RTS                     60
 
     Reading the P register back over the monitor is unreliable across
     backends; latching the flag into RAM from 6502 code is not. The stub is
     written once and reused for every case.
+
+    The leading ``jsr tls_hs_ptr_reset`` is load-bearing, not decoration
+    (issue #161). ``tls_verify_finished`` reads the received verify_data
+    through ``(tls_hs_ptr)+4``, and it resets that pointer itself only on
+    a NON-streaming build::
+
+        src/tls_keyschedule.s   tls_verify_finished:
+                                .ifndef TLS_STREAM_DEFRAME
+                                        jsr tls_hs_ptr_reset
+                                .endif
+
+    Under ``TLS_STREAM_DEFRAME`` (BACKEND=uci — the backend that ships to
+    hardware) the deframer owns ``tls_hs_ptr`` and sets it per message
+    before dispatch, so the reset is compiled out. This rig has no
+    deframer in the loop: without the call below the routine compares 32
+    bytes at whatever address the pointer happened to hold, which is not
+    where the rig wrote its vector. Every negative case then "rejects"
+    for a reason that has nothing to do with the vector — 16/18 green
+    while measuring nothing, and a mutation that compares only byte 0 of
+    the verify_data passes unnoticed (issue #161, mutation M-C).
+
+    Calling the repo's own ``tls_hs_ptr_reset`` rather than poking $3E/$3F
+    from Python keeps one copy of the fact: if the base ever moves, the
+    rig follows it.
     """
     lo, hi = target_addr & 0xFF, (target_addr >> 8) & 0xFF
+    plo, phi = hs_ptr_reset_addr & 0xFF, (hs_ptr_reset_addr >> 8) & 0xFF
     rlo, rhi = CARRY_RESULT_ADDR & 0xFF, (CARRY_RESULT_ADDR >> 8) & 0xFF
-    stub = bytes([0x20, lo, hi, 0xA9, 0x00, 0x2A, 0x8D, rlo, rhi, 0x60])
+    stub = bytes([0x20, plo, phi,
+                  0x20, lo, hi,
+                  0xA9, 0x00, 0x2A, 0x8D, rlo, rhi, 0x60])
     write_bytes(transport, CARRY_STUB_ADDR, stub)
     readback = read_bytes(transport, CARRY_STUB_ADDR, len(stub))
     if readback != stub:
@@ -253,7 +284,8 @@ def call_verify_finished(transport, labels, secret: bytes, transcript: bytes,
 def run_tests(transport, labels) -> tuple[int, int]:
     passed = failed = 0
 
-    install_carry_stub(transport, labels["tls_verify_finished"])
+    install_carry_stub(transport, labels["tls_verify_finished"],
+                       labels["tls_hs_ptr_reset"])
 
     for set_name, secret, transcript in VECTOR_SETS:
         print(f"\n--- Vector set {set_name} ---")

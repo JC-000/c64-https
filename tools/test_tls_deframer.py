@@ -181,6 +181,7 @@ REQUIRED_LABELS = [
     "cert_buf",
     "cert_buf_size",
     "sqtab_init",
+    "tls_hostname", "tls_hostname_len",
 ]
 
 RTS = 0x60
@@ -256,6 +257,36 @@ def chunk_bytes(stream: bytes, sizes: list[int]) -> list[bytes]:
 # ---------------------------------------------------------------------------
 # C64 plumbing
 # ---------------------------------------------------------------------------
+
+def install_hostname(transport, labels, host: str) -> None:
+    """Populate tls_hostname / tls_hostname_len — a precondition (issue #161).
+
+    ``http_get`` writes these at runtime; this rig never calls it, so they
+    were zero. Under BACKEND=uci (X509_VERIFY_NAME) that makes
+    ``src/x509_name.s`` reject EVERY leaf at its first instruction::
+
+        lda tls_hostname_len            ; nothing to validate against
+        bne :+
+        sec
+        rts
+
+    and because that routine is the tail call of ``x509_extract_pubkey``,
+    its carry is the Certificate handler's result: every Certificate in
+    every scenario below was refused. The suite did not notice, because its
+    oracle was the extracted pubkey and the folded transcript, both of which
+    are already correct at the moment the name check fires. ``carries`` was
+    documented as "diagnostic only". So 11/12 scenarios were green on a
+    build where the Certificate path failed outright — see
+    ``check_flight_outcome`` for the other half of the fix.
+
+    *host* is derived from the fixture certificate's own SAN, never spelled
+    here: if the cert identity is renamed, this follows it.
+    """
+    raw = host.encode("ascii")
+    assert len(raw) < 64, "tls_hostname is 64 bytes (src/tls_handshake.s)"
+    write_bytes(transport, labels["tls_hostname"], raw.ljust(64, b"\x00"))
+    write_bytes(transport, labels["tls_hostname_len"], bytes([len(raw)]))
+
 
 def prime_ring(transport, labels, record_bytes: bytes) -> None:
     """Load encrypted records into the TCP receive ring and set head/tail."""
@@ -604,6 +635,36 @@ def run_scenario(transport, labels, sc):
 
     problems = []
 
+    # Did the client ACCEPT the flight, or did it abort? Before issue #161
+    # nothing here asked: `carries` was collected and thrown away, so a
+    # build that rejected every Certificate scored the same as one that
+    # accepted them. That is what let the empty-tls_hostname reject hide,
+    # and it also hides any defect in the deframer's post-leaf path (the
+    # entry/extension walk and the message-end checks all run AFTER the
+    # pubkey is extracted and the transcript is folded — mutation M-D).
+    #
+    # tls_recv_encrypted returns C=1 on error; drive_flight stops on the
+    # first one. An accept scenario must show none, and must have completed
+    # its messages; a reject scenario must show one.
+    n_ok = sum(1 for c in carries if c == 0)
+    if sc.expect_pubkey is not None:
+        if 1 in carries:
+            problems.append(
+                f"flight ABORTED (tls_recv_encrypted returned C=1 after "
+                f"{n_ok} successful call(s)) — the client refused this "
+                f"Certificate; carries={carries}"
+            )
+        elif n_ok < sc.n_msgs:
+            problems.append(
+                f"flight incomplete: {n_ok} message(s) received, expected "
+                f"{sc.n_msgs}; carries={carries}"
+            )
+    if sc.expect_overflow_safe and 1 not in carries:
+        problems.append(
+            f"oversized-leaf flight was NOT rejected (no C=1 return); "
+            f"carries={carries}"
+        )
+
     if sc.expect_pubkey is not None:
         gx, gy = read_pubkey(transport, labels)
         ex, ey = sc.expect_pubkey
@@ -648,9 +709,13 @@ def run_scenario(transport, labels, sc):
     return (not problems), detail
 
 
-def run_tests(transport, labels, cert_der, pubkey_xy, wiki_leaf=None):
+def run_tests(transport, labels, cert_der, pubkey_xy, cert_host,
+              wiki_leaf=None):
     print("\n  Initializing sqtab (Poly1305 multiply table)...")
     jsr(transport, labels["sqtab_init"], timeout=60.0)
+
+    install_hostname(transport, labels, cert_host)
+    print(f"  tls_hostname = {cert_host!r} (from the fixture cert's SAN)")
 
     # Neutralize the NIC pump: every byte comes from the primed ring.
     write_bytes(transport, labels["net_poll"], [RTS])
@@ -683,8 +748,16 @@ def run_tests(transport, labels, cert_der, pubkey_xy, wiki_leaf=None):
 # ---------------------------------------------------------------------------
 
 def load_cert_fixture():
-    """Return (cert_der, (pubkey_x, pubkey_y)) from the repo P-256 test cert."""
-    from cryptography.x509 import load_pem_x509_certificate
+    """Return (cert_der, (pubkey_x, pubkey_y), san_names) for the P-256 cert.
+
+    The SAN dNSNames are read back out of the emitted certificate, not
+    copied from a source literal — the same discipline
+    tools/test_reserved_test_host.py applies. They become tls_hostname, so
+    the name the client says it asked for and the name the certificate
+    carries are one fact with one copy (issue #161).
+    """
+    from cryptography.x509 import load_pem_x509_certificate, DNSName
+    from cryptography.x509.oid import ExtensionOID
     from cryptography.hazmat.primitives import serialization
 
     sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools", "https_e2e"))
@@ -695,10 +768,18 @@ def load_cert_fixture():
     cert = load_pem_x509_certificate(pem)
     der = cert.public_bytes(serialization.Encoding.DER)
     nums = cert.public_key().public_numbers()
-    return der, (nums.x.to_bytes(32, "big"), nums.y.to_bytes(32, "big"))
+    san = cert.extensions.get_extension_for_oid(
+        ExtensionOID.SUBJECT_ALTERNATIVE_NAME).value
+    names = san.get_values_for_type(DNSName)
+    if not names:
+        raise RuntimeError(
+            f"{cert_path} carries no SAN dNSName; a build with "
+            f"X509_VERIFY_NAME rejects such a leaf outright")
+    return (der, (nums.x.to_bytes(32, "big"), nums.y.to_bytes(32, "big")),
+            names)
 
 
-def build_wiki_leaf(target: int = 1636):
+def build_wiki_leaf(sans, target: int = 1636):
     """Mint a real, parseable ~1636 B P-256 leaf (en.wikipedia.org's size).
 
     Uses the padded-cert generator from tools/https_e2e/chain_certs.py
@@ -709,6 +790,12 @@ def build_wiki_leaf(target: int = 1636):
     else about the scenario stays deterministic. Sizing converges in a
     couple of passes (the ECDSA signature length wobbles by ±2 B, which
     is irrelevant to the gate — anything in (1536, 2048] exercises it).
+
+    *sans* is carried into the certificate's subjectAltName. This leaf is
+    used AS A LEAF, so on a build with X509_VERIFY_NAME a SAN-less version
+    is rejected before the deframer's behaviour can be observed — the
+    wiki-sized scenarios were passing on a rejected certificate (issue
+    #161). Pass the same names install_hostname() writes.
     """
     from cryptography.x509 import load_der_x509_certificate
 
@@ -716,12 +803,12 @@ def build_wiki_leaf(target: int = 1636):
     from chain_certs import build_padded_intermediate  # noqa: PLC0415
 
     pad = 1200
-    der = build_padded_intermediate("C64 Wiki-Sized Leaf", pad)
+    der = build_padded_intermediate("C64 Wiki-Sized Leaf", pad, sans=sans)
     for _ in range(4):
         if len(der) == target:
             break
         pad += target - len(der)
-        der = build_padded_intermediate("C64 Wiki-Sized Leaf", pad)
+        der = build_padded_intermediate("C64 Wiki-Sized Leaf", pad, sans=sans)
     if not (1536 < len(der) <= 2048):
         raise RuntimeError(f"wiki leaf sizing failed: {len(der)} B")
     nums = load_der_x509_certificate(der).public_key().public_numbers()
@@ -771,10 +858,11 @@ def main() -> int:
     CERT_BUF_MAX = labels.address("cert_buf_size")
     print(f"  cert_buf capacity: {CERT_BUF_MAX} B (labels.txt cert_buf_size)")
 
-    cert_der, pubkey_xy = load_cert_fixture()
+    cert_der, pubkey_xy, san_names = load_cert_fixture()
+    cert_host = san_names[-1]
     print(f"  Test cert: {len(cert_der)} B DER, "
-          f"pubkey x={pubkey_xy[0][:6].hex()}...")
-    wiki_leaf = build_wiki_leaf()
+          f"pubkey x={pubkey_xy[0][:6].hex()}..., SAN {san_names}")
+    wiki_leaf = build_wiki_leaf(san_names)
     print(f"  Wiki-sized leaf: {len(wiki_leaf[0])} B DER "
           f"({'fits' if len(wiki_leaf[0]) <= CERT_BUF_MAX else 'over cap'})")
 
@@ -796,7 +884,7 @@ def main() -> int:
         print("\n=== Deframer scenarios ===")
         try:
             pp, pf, dp, df = run_tests(transport, labels, cert_der,
-                                       pubkey_xy, wiki_leaf)
+                                       pubkey_xy, cert_host, wiki_leaf)
         finally:
             mgr.release(inst)
 

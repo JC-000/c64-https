@@ -710,10 +710,24 @@ tls_compute_finished:
 ; Input: tls_s_hs_secret = server handshake traffic secret
 ;        tls_transcript = transcript hash up to (but not including) Finished
 ;        (tls_hs_ptr)+4 = received verify_data (32 bytes, after 4-byte HS
-;        header).  The pointer is reset to tls_rec_buf at entry (see
-;        tls_hs_ptr_reset) so direct callers — tools/test_finished_verify.py
-;        drives this routine over DMA with no dispatcher in the loop —
-;        keep the historical tls_rec_buf+4 contract unchanged.
+;        header).
+;
+;        WHO SETS tls_hs_ptr, and why it is not always us (issue #161).
+;        On a NON-streaming build this routine calls tls_hs_ptr_reset at
+;        entry, so the historical "message starts at tls_rec_buf" contract
+;        holds for free.  Under TLS_STREAM_DEFRAME (BACKEND=uci — the
+;        backend that ships to hardware) that reset is compiled out: the
+;        deframer owns tls_hs_ptr and points it at the message before
+;        dispatch, in-place or into df_carry_buf, and re-resetting it here
+;        would read the wrong 32 bytes.
+;
+;        A DIRECT caller with no deframer in the loop must therefore
+;        establish tls_hs_ptr ITSELF — jsr tls_hs_ptr_reset first is
+;        enough, and is what tools/test_finished_verify.py's carry stub
+;        does.  It is not optional under uci: without it the compare runs
+;        against whatever the pointer last held, every vector "fails to
+;        match", and a negative-case suite goes green while measuring
+;        nothing (the 16-vacuous-negatives half of #161).
 ; Output: C=0 if match (server Finished is valid)
 ;         C=1 if mismatch (verification failed)
 ;

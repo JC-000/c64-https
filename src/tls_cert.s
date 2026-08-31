@@ -77,11 +77,14 @@
 ; tls_hs_ptr_reset - point tls_hs_ptr at tls_rec_buf
 ;
 ; The pre-deframer contract: every handshake message starts at
-; tls_rec_buf[0].  Handlers call this at entry so that direct callers
-; (tools/test_tls_p384_negotiation.py, tools/test_finished_verify.py —
-; both drive handlers over DMA with no dispatcher in the loop) keep
-; working unchanged.  Lives in CRYPTO_CODE, not TLS_CODE: the NET_CODE
-; region that hosts TLS_CODE under UCI has ~8 bytes of slack.
+; tls_rec_buf[0].  Handlers call this at entry ONLY on a non-streaming
+; build (.ifndef TLS_STREAM_DEFRAME); under BACKEND=uci the deframer owns
+; tls_hs_ptr and the resets are compiled out.  A direct caller that drives
+; a handler over DMA with no dispatcher in the loop must therefore call
+; this itself rather than assume the handler did — see issue #161, and
+; tools/test_finished_verify.py's carry stub, which jsr's here first.
+; Lives in CRYPTO_CODE, not TLS_CODE: the NET_CODE region that hosts
+; TLS_CODE under UCI has ~8 bytes of slack.
 ; Clobbers: A
 ; =============================================================================
         .segment "CRYPTO_CODE"
