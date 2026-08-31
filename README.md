@@ -173,6 +173,16 @@ more ECDSA verifies at ~16-30 s each, and a root store means kilobytes of
 resident keys — not an oversight. Treat the transport as confidential against
 passive observers, not authenticated against active ones.
 
+Confidentiality against passive observers is the property this client keeps
+after conceding authentication, so it is worth saying what upholds it. Since
+v0.4.3 the X25519 shared secret is rejected when it comes out all zero, as
+RFC 8446 §7.4.2 and RFC 7748 §6.1 require. Before that check existed, a
+server (or an attacker who rewrote one ServerHello in passing) could send a
+low-order `key_share` and force every handshake and traffic key to be a
+function of the two *plaintext* hello messages — which would have made a
+recorded session decryptable by anyone who saw it, without staying on the
+path. See issue #153 and `tools/test_ecdh_zero_check.py`.
+
 ### Zero Page Time-Sharing (ip65 backend)
 
 Under the ip65 backend, the crypto modules and ip65 overlap on zero page $02-$1B. Rather than relocating ip65's ZP (which would cost performance in the networking hot path), we time-share: save crypto ZP before calling ip65, restore after. Crypto and networking never run simultaneously. The UCI backend uses absolute addressing throughout and needs no ZP swap.

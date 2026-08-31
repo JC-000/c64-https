@@ -25,7 +25,12 @@ deliberate — see "Why not pytest" below.
 
 Files with a leading underscore are helper modules, not entry points:
 `_device_lock_helper.py`, `_memory_policy.py`, `_reu_preflight.py`,
-`_ecdsa_vectors.py`, `_analyze_ecdsa_trace.py`.
+`_sni_precondition.py`, `_ecdsa_vectors.py`, `_analyze_ecdsa_trace.py`.
+`_sni_precondition.py` is pure logic and carries its own checks:
+
+```sh
+python3 tools/uci/_sni_precondition.py --selftest
+```
 
 Three of the rigs delegate rather than duplicate: `rig_https_print_body.py`
 and `rig_https_local_p384.py` both import `rig_https_local` and override a
@@ -38,6 +43,26 @@ respectively), so a change to the shared flow lands in all three.
 U64_HOST=10.43.23.81 python3 tools/uci/boot_check.py
 U64_HOST=10.43.23.81 python3 tools/uci/rig_https_local.py
 ```
+
+The three rigs that talk to a **local** TLS listener — `rig_https_local.py`,
+its two wrappers, and `rig_https_bad_finished.py` — need a PRG built with an
+SNI override (issue #141):
+
+```sh
+make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.bar
+```
+
+The C64 dials the dev host's dotted-quad IP, because the firmware needs an
+address; but `src/x509_name.s` (v0.4.2+) checks the certificate's SAN
+dNSName entries against `tls_hostname`, and an IP literal matches no
+dNSName, so the client correctly rejects the handshake at Certificate
+(`tls_state=$FF`, `tls_last_state=$04`). `HTTPS_SNI=` presents the cert's
+name while leaving the connect host alone. The `make clean` is load-bearing:
+`HTTPS_SNI=` adds `-D HTTPS_SNI_OVERRIDE=1`, which make cannot see, so a
+stale `http.o` yields a *mixed link* that embeds the name but never runs the
+override — a build that fails identically to no SNI at all. Each of those
+rigs checks both halves offline, before `DeviceLock`, so a wrong PRG costs
+no device time.
 
 `U64_HOST` selects the device (default `192.168.1.81`). Everything goes
 through the `c64-test-harness` package's `DeviceLock` plus

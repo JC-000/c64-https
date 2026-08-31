@@ -64,6 +64,17 @@ a client that wrongly *accepts* the corrupted Finished stays in lockstep and
 sails on to HTTP 200. A broken client therefore fails fast and unambiguously
 instead of hanging until the sentinel timeout.
 
+Build requirement
+-----------------
+Like every local-listener rig, this one needs an SNI override or the client
+aborts at Certificate long before Finished (issue #141):
+
+    make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_SNI=www.foo.bar
+
+main() asserts that offline, before DeviceLock. It matters more here than
+elsewhere: an unnoticed abort at Certificate is precisely the "fixture that
+produced a broken certificate" this rig's oracle is designed to exclude.
+
 Environment
 -----------
   U64_HOST              U64E / C64U address (default 192.168.1.81)
@@ -107,6 +118,7 @@ from _memory_policy import (  # noqa: E402
     build_policy_and_arbiter_with_overlay_carveout,
 )
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
+from _sni_precondition import enforce_sni_precondition  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "https_e2e"))
@@ -459,6 +471,29 @@ def main() -> int:
 
     cert_path, key_path = _ensure_certs_p256()
     test_host_ip = _detect_local_ip(HOST)
+
+    # --- issue #141: the PRG must present a name the cert names ---
+    # evil_listener serves the same repo cert as the other local rigs, and
+    # the C64 dials this host's dotted-quad IP, which no SAN dNSName can
+    # match: without an HTTPS_SNI override the client aborts at Certificate
+    # (tls_last_state=$04) and never reaches the Finished comparison this
+    # rig exists to exercise. Both modes then fail — and this is the rig
+    # whose own docstring warns that "a test that only checked 'handshake
+    # failed' would pass for a fixture that produced a broken certificate",
+    # so an unnoticed name-check abort is exactly the vacuous pass it is
+    # built to rule out. Checked offline, before the DeviceLock below.
+    #
+    # SAFETY: only the presented name changes. host_bytes below stays
+    # test_host_ip — `.bar` is a live gTLD and DMA'ing it as the connect
+    # host would send the C64 to a stranger's address.
+    sni_problem = enforce_sni_precondition(
+        labels, PRG_PATH, cert_path, test_host_ip,
+        backend=os.environ.get("BACKEND", "uci"),
+    )
+    if sni_problem is not None:
+        print(f"ERROR: {sni_problem}", file=sys.stderr)
+        return 2
+
     srv = _try_bind(test_host_ip, HTTPS_PORT)
     if srv is None:
         print(f"ERROR: could not bind {test_host_ip}:{HTTPS_PORT}",

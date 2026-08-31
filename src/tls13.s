@@ -28,6 +28,8 @@
 .include "constants.inc"
 ; Backend-sensitive loop budgets (resolved via -I src/net/$(BACKEND)).
 .include "net_tuning.inc"
+; Handshake message sequence gate, shared with src/tls_deframe.s (issue #152).
+.include "tls_hs_seq.inc"
 
 ; --- Public exports ---
 .export tls_connect
@@ -508,9 +510,12 @@ tls_recv_server_hello:
         dey
         bne @sh_drain_outer
 
-        ; compute ECDH shared secret now that tls_server_pubkey is populated
+        ; Compute ECDH shared secret now that tls_server_pubkey is populated.
+        ; C=1 means the server's key_share drove the shared secret to all
+        ; zeros (RFC 8446 §7.4.2 / RFC 7748 §6.1) — abort, see the comment in
+        ; src/tls_ecdh.s. This used to be an unconditional `clc`.
         jsr tls_ecdh_compute_shared
-        clc
+        bcs @sh_error
 
         ; update transcript with ServerHello
         lda #<tls_rec_buf
@@ -680,7 +685,16 @@ tls_recv_encrypted:
         jsr print_string
 
         ; dispatch based on handshake type (first byte of tls_rec_buf)
+        ;
+        ; Issue #152: the type must first be the one the current tls_state
+        ; requires. tls_connect issues four unconditional receives and each
+        ; returns C=0 on ANY dispatched message, so without this gate four
+        ; EncryptedExtensions satisfy the whole flight and the client
+        ; "completes" a handshake in which no certificate was ever presented.
+        ; Identical gate to df_dispatch's (same macro) — the defect was in
+        ; both arms.
         lda tls_rec_buf
+        TLS_HS_SEQ_CHECK @enc_error
         cmp #TLS_HS_ENCRYPTED_EXT
         beq @enc_dispatched             ; accept, nothing to extract for MVP
         cmp #TLS_HS_CERTIFICATE
@@ -730,6 +744,10 @@ tls_recv_encrypted:
 @enc_error:
         sec
         rts
+
+        ; Expected-type table read by the TLS_HS_SEQ_CHECK above (issue
+        ; #152). Unreachable as code — it sits behind the rts.
+        TLS_HS_SEQ_TABLE
 
 .endif  ; TLS_STREAM_DEFRAME
 
