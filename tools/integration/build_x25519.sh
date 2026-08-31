@@ -269,6 +269,9 @@ cat > "$STAGING/data_x25519_bss_raw.s" <<'BSS_EOF'
 .export x25_scalar, x25_u, x25_result, x25_x1
 .export mul_cached_a, mul_src2_buf
 .export mul_dma_lo, mul_dma_hi, mul_dma_carry
+.export x25519_reu_fault
+.export x25519_reu_settle_cnt   ; REU_SETTLE slow path: cross-TU internal
+.export x25519_reu_settle_smp   ; REU_SETTLE slow path: cross-TU internal
 
 .segment "X25519_BSS"
 
@@ -327,6 +330,25 @@ x25_x1:         .res 32, 0
 ; the padding gap before mul_dma_lo at the next page boundary.
 mul_cached_a:   .res 1, 0
 mul_src2_buf:   .res 35, 0          ; 32 + 1 phantom + 2 over-read pad
+
+; --- SPEC 8.2 REU post-execute settle state (sibling v0.12.0+) ---
+;
+; The sibling declares these three bytes in its own src/data.s, which
+; this file replaces wholesale, so they have to be restated here or the
+; link fails on three unresolved externals from x25519_init.s.
+;
+; x25519_reu_fault is the sticky fault channel (public, documented in
+; libs/x25519/src/x25519.inc); the other two are the REU_SETTLE slow
+; path's counter and last status sample -- cross-TU internal, exported
+; only for linkage, never referenced by c64-https.
+;
+; Zero-init is correct for all three: the sibling initialises the fault
+; byte at reu_mul_init / reu_probe entry, and the slow path writes its
+; two bytes before reading them. None is alignment-sensitive (single
+; bytes addressed absolutely), so they sit in the unaligned gap here.
+x25519_reu_fault:        .res 1, 0
+x25519_reu_settle_cnt:   .res 1, 0
+x25519_reu_settle_smp:   .res 1, 0
 
 ; --- REU DMA target buffers, page-aligned for abs,Y without penalty ---
         .align 256
