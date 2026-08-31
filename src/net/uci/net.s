@@ -259,7 +259,7 @@ net_poll:
         ; two `uci_read_resp_bytes` calls would require re-patching the
         ; SMC dst. Loop style matches uci_read_resp_bytes — tight-poll
         ; DATA_AV and read UCI_RESP_DATA; the firmware FIFO auto-advances
-        ; on read (Phase 2 finding), so NO per-byte NEXT_DATA.
+        ; on read (Phase 2 finding), so NO per-byte DATA_ACC.
         uci_fence             ; give firmware time to stage response
         ldy #$00
 @hdr_loop:
