@@ -48,8 +48,17 @@ Usage:
                 verdict, so it always exits non-zero and can never report
                 OVERALL: PASS — read the per-step output, not the tally.
 
+Exit codes (tools/_skip_policy.py, issue #178):
+    0 PASS
+    1 FAIL (a vector ran and failed)
+    2 COULD NOT RUN -- a requested prerequisite is missing (e.g. --u64 with
+      no U64_HOST) or no vector produced a verdict.  Set C64_ALLOW_SKIP=1 to
+      accept such a run as exit 0.  Not passing --u64 at all is a VOLUNTARY
+      skip and still exits 0.
+
 Environment:
     C64_SKIP_BUILD=1            Reuse existing build artifacts (skip make).
+    C64_ALLOW_SKIP=1            Accept a could-not-run as exit 0 (prints why).
     U64_HOST=<ip>               Ultimate 64 host (default 192.168.1.81).
     P384_KAT_VICE_TIMEOUT_S     Per-VERIFY-step timeout under VICE
                                 (default 1800 s = 30 min).
@@ -77,6 +86,12 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from _skip_policy import cannot_run  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PRG_PATH = PROJECT_ROOT / "build" / "c64-https.prg"
@@ -788,6 +803,19 @@ def main() -> int:
     print(f"=== test_ecdsa_p384_kat.py (P-384 dual-overlay KAT) ===")
     os.chdir(str(PROJECT_ROOT))
 
+    # --u64 is the caller asking for hardware.  Without U64_HOST the hardware
+    # lane cannot run at all, and the tally below would otherwise add 0/0 to
+    # the VICE result and print OVERALL: PASS (issue #178).  Refuse up front,
+    # before the multi-hour VICE lane, rather than at the verdict.
+    if run_u64 and not os.environ.get("U64_HOST"):
+        return cannot_run(
+            "--u64 requested but U64_HOST is not set in the environment",
+            executed=0,
+            total=1,
+            certifies="the P-384 verify path on real hardware",
+            opt_out_env="C64_ALLOW_SKIP",
+        )
+
     # Check the upstream test vector file exists.
     if not NIST_VECTORS_PATH.exists():
         print(f"FATAL: vector file not found: {NIST_VECTORS_PATH}")
@@ -838,7 +866,16 @@ def main() -> int:
     if run_u64:
         print(f"\n=== U64 backend (real hardware) ===")
         if not os.environ.get("U64_HOST"):
-            print("  SKIP: --u64 requested but U64_HOST not set in env")
+            # Unreachable: the early gate in main() already refused.  Kept as
+            # a backstop, and it must NOT leave a 0/0 lane -- that is exactly
+            # what the tally used to read as OVERALL: PASS (issue #178).
+            return cannot_run(
+                "--u64 requested but U64_HOST is not set in the environment",
+                executed=v_pass + v_fail,
+                total=v_pass + v_fail + len(vectors),
+                certifies="the P-384 verify path on real hardware",
+                opt_out_env="C64_ALLOW_SKIP",
+            )
         else:
             try:
                 u_pass, u_fail, u_details = _run_backend(
@@ -861,6 +898,16 @@ def main() -> int:
     print(f"{'=' * 60}")
 
     total_fail = v_fail + u_fail
+    # NOTE: there is deliberately no `total_run == 0` vacuity guard here.
+    # One was written and removed: _build_vector_list() never returns an
+    # empty list (1 vector for the smoke default, 4 for --full) and
+    # _run_backend() puts every vector into `passed` or `failed`, including
+    # under --sha-only, whose short-circuit in _run_one_vector() returns an
+    # "error" dict and is therefore counted as a failure.  So the guard could
+    # not fire under any flag combination.  A check that matches nothing is
+    # the same vacuous-green shape issue #178 exists to close, so it does not
+    # belong in #178's own implementation.  If a vector FILTER is ever added,
+    # add the guard back beside it -- where it can actually fire.
     overall = "PASS" if total_fail == 0 else "FAIL"
     print(f"OVERALL: {overall}")
     if sha_only:

@@ -34,7 +34,13 @@ approved, the OS silently blocks the TLS listener from the feth network
 and the C64 dies at TCP CONNECT with nothing on the wire. The listener
 self-probe below detects this and says so.
 
-Exit codes: 0 PASS / 0 SKIP (printed) / 1 FAIL.
+Exit codes (tools/_skip_policy.py, issue #178):
+    0 PASS, or NOT APPLICABLE on a non-macOS host (tests/rig_phase3_https.py
+      owns that coverage on Linux) -- a named verdict, never a bare skip.
+    1 FAIL (a check ran and failed)
+    2 COULD NOT RUN -- the rig is not up, or it is contended, so nothing was
+      verified.  C64_ALLOW_SKIP=1 accepts a rig-NOT-READY run as exit 0; it
+      does NOT cover contention, and does not cover a failed build.
 """
 
 from __future__ import annotations
@@ -51,6 +57,10 @@ for p in (_TOOLS, "/Users/someone/Documents/c64-test-harness/src"):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+# needs _TOOLS on sys.path, hence the placement below the block above
+from _skip_policy import cannot_run, not_applicable  # noqa: E402
+
+_CERTIFIES = "the TLS 1.3 handshake + GET over emulated RR-Net on macOS"
 from c64_test_harness.backends.vice_binary import BinaryViceTransport  # noqa: E402
 from c64_test_harness import Labels, read_bytes  # noqa: E402
 from https_e2e import (  # noqa: E402
@@ -88,12 +98,39 @@ PROGRESS_NEEDLES = (
 )
 
 
-def _rig_check() -> list[str]:
-    """Return a list of missing-prerequisite messages (empty = rig OK)."""
-    problems = []
-    if sys.platform != "darwin":
-        problems.append("not macOS (use tests/rig_phase3_https.py on Linux)")
-        return problems
+def _platform_supported() -> bool:
+    """True if this host can run the feth/pcap rig at all.
+
+    Module-level and parameterless on purpose: a test can replace THIS to
+    exercise both branches, instead of patching `sys.platform` globally.
+    """
+    return sys.platform == "darwin"
+
+
+def _rig_check() -> "tuple[list[str], list[str]]":
+    """Return (problems, contention) for a macOS host.  Both empty = rig OK.
+
+    Two lists because the remedies differ in kind, and issue #178's rule is
+    that the remedy decides the verdict:
+
+      problems   -- something is not installed or not set up.  Remedy: run
+                    `sudo bash tools/rig-up-macos.sh`, build the VICE.  An
+                    involuntary skip, exit 2, opt-out-able by a lane that
+                    knowingly has no rig.
+      contention -- the rig exists but another process holds it.  Remedy:
+                    wait, or kill YOUR stale instance.  Also exit 2, but
+                    deliberately NOT opt-out-able: a lane that silences
+                    contention goes green every time it collides, which is
+                    the exact vacuous-pass this policy exists to stop, and
+                    unlike a missing tool it is transient, so silencing it
+                    hides a condition that would have cleared on its own.
+
+    The platform question is asked by the CALLER, before this runs -- a
+    non-Darwin host is a voluntary skip owned by tests/rig_phase3_https.py,
+    not a problem with this rig.
+    """
+    problems: list[str] = []
+    contention: list[str] = []
     if not os.path.exists(VICE_BIN):
         problems.append(
             f"{VICE_BIN} missing — build it per c64-test-harness#144 "
@@ -113,13 +150,31 @@ def _rig_check() -> list[str]:
     # eats/garbles ARP and TCP meant for this run. Other x64sc processes
     # NOT on feth0 (other projects' fleets on this shared bench) are
     # fine — never kill those.
-    r = subprocess.run(["pgrep", "-fl", "ethernetioif feth0"],
-                       capture_output=True, text=True)
-    if r.stdout.strip():
-        problems.append(
+    # Match the BINARY first, then that process's argv.  `pgrep -fl
+    # "ethernetioif feth0"` matched the full command line of EVERY process
+    # against an unanchored pattern, so anything merely containing that text
+    # matched too: a grep for it, an editor opened on this file, a driver
+    # script passing it as an argument.  A false positive is unrecoverable
+    # here, because contention is deliberately not opt-out-able -- so the
+    # detector has to be narrow.  `pgrep -x x64sc` matches only processes
+    # whose executable name is exactly x64sc; the argv check then confirms it
+    # is the one on feth0.
+    attached: list[str] = []
+    r = subprocess.run(["pgrep", "-x", "x64sc"], capture_output=True, text=True)
+    for pid in r.stdout.split():
+        if not pid.isdigit():
+            continue
+        ps = subprocess.run(["ps", "-o", "command=", "-p", pid],
+                            capture_output=True, text=True)
+        cmd = " ".join(ps.stdout.split())
+        if "ethernetioif" in cmd and "feth0" in cmd:
+            attached.append(f"pid {pid}: {cmd}")
+    if attached:
+        contention.append(
             "another VICE is already attached to feth0 (duplicate-MAC "
-            f"conflict):\n    {r.stdout.strip()}\n    kill YOUR stale "
-            "instance (do not touch other projects' x64sc processes)")
+            "conflict):\n    " + "\n    ".join(attached)
+            + "\n    kill YOUR stale instance (do not touch other projects' "
+              "x64sc processes)")
     try:
         pid = int(open("/tmp/c64-rig-dnsmasq.pid").read().strip())
         os.kill(pid, 0)
@@ -127,7 +182,7 @@ def _rig_check() -> list[str]:
         pass  # EPERM = process exists (it's root-owned) — rig is up
     except (OSError, ValueError):
         problems.append("rig dnsmasq not running (pid file stale/absent)")
-    return problems
+    return problems, contention
 
 
 def _build_prg() -> None:
@@ -141,7 +196,18 @@ def _build_prg() -> None:
     if r.returncode != 0:
         print(r.stdout[-2000:])
         print(r.stderr[-2000:])
-        raise SystemExit("build failed")
+        # A failed build is exit 2 (could not run), not exit 1 (a check ran
+        # and failed) -- the same verdict the other four rigs give, and never
+        # opted out of.  SystemExit("build failed") used to exit 1 here, which
+        # made a broken build indistinguishable from a real handshake failure.
+        raise SystemExit(cannot_run(
+            "the PRG could not be built -- `make` failed; this is a broken "
+            "build, not a missing prerequisite",
+            executed=0,
+            total=1,
+            certifies=_CERTIFIES,
+            opt_out_env=None,
+        ))
 
 
 def _launch_vice() -> subprocess.Popen:
@@ -223,13 +289,51 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, _sigterm)
 
-    problems = _rig_check()
+    # Platform FIRST, and it is a VOLUNTARY skip: a Linux host can never run
+    # the feth/pcap rig, and tests/rig_phase3_https.py owns that coverage
+    # there.  Exit 2 would be a red nobody on that platform could clear
+    # (issue #178).
+    if not _platform_supported():
+        return not_applicable(
+            f"this rig is macOS-only (feth pair + /dev/bpf pcap); this host "
+            f"is {sys.platform} -- tests/rig_phase3_https.py owns this "
+            f"coverage on Linux",
+            certifies=_CERTIFIES,
+        )
+
+    problems, contention = _rig_check()
+
+    # PROBLEMS FIRST.  Contention on a rig that does not exist is a
+    # meaningless statement: with no VICE binary, no feth1 and no dnsmasq,
+    # "another VICE holds feth0" is the wrong headline and demotes the real
+    # cause to a parenthetical.  Worse, contention is deliberately not
+    # opt-out-able, so evaluating it first left a CI lane that legitimately
+    # has no rig -- and correctly set C64_ALLOW_SKIP=1 -- red with no
+    # recourse.  An involuntary skip is a FAILURE, but this one is the kind
+    # an operator can opt out of (issue #178).
     if problems:
-        print("SKIP: rig not ready:")
-        for p in problems:
-            print(f"  - {p}")
-        print("  fix: (re)run `sudo bash tools/rig-up-macos.sh`")
-        return 0
+        return cannot_run(
+            "rig not ready:\n    - " + "\n    - ".join(problems)
+            + "\n    fix: (re)run `sudo bash tools/rig-up-macos.sh`",
+            executed=0,
+            total=1,
+            certifies=_CERTIFIES,
+            opt_out_env="C64_ALLOW_SKIP",
+        )
+
+    # Only once the rig is otherwise complete does contention mean anything.
+    # Its own category: the rig is here, someone else has it.  Exit 2 like any
+    # could-not-run, but with NO opt-out -- see _rig_check().
+    if contention:
+        return cannot_run(
+            "rig is contended:\n    - " + "\n    - ".join(contention)
+            + "\n    fix: wait for the other run, or kill YOUR stale "
+              "instance",
+            executed=0,
+            total=1,
+            certifies=_CERTIFIES,
+            opt_out_env=None,
+        )
 
     if os.environ.get("C64_SKIP_BUILD") != "1":
         _build_prg()

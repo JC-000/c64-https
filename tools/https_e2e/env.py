@@ -12,6 +12,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 
@@ -25,8 +26,32 @@ TAP0 = "tap-c64-0"
 TAP1 = "tap-c64-1"
 
 
+def platform_supported() -> bool:
+    """True if this host can run the br-c64 bridge rig at all.
+
+    Asked BEFORE check_prerequisites(), and deliberately NOT folded into
+    it: that function returns a flat list of strings, and "ip not on PATH"
+    means "apt install iproute2" on Linux but "this OS has no iproute2 and
+    never will" on Darwin.  No partition of the list can tell those apart,
+    because the platform question has to be answered first.
+
+    The rig needs Linux netfilter (the setup script's iptables rules), the
+    iproute2 `ip` command, and /proc/net/udp -- which _port_open_udp()
+    below reads directly.  A wrong platform is a VOLUNTARY skip owned by
+    tests/rig_vice_https_macos.py; a missing tool ON Linux is installable
+    and stays an involuntary one.  See issue #178.
+    """
+    return sys.platform.startswith("linux")
+
+
 def check_prerequisites() -> list[str]:
-    """Return a list of missing prereqs. Empty list means all OK."""
+    """Return a list of missing prereqs. Empty list means all OK.
+
+    Contract unchanged (issue #178 added platform_supported() beside it
+    rather than partitioning this list): the five tool checks and the sudo
+    probe below all describe things that are INSTALLABLE on the rig's
+    target platform.  Callers ask platform_supported() first.
+    """
     missing: list[str] = []
     for tool in ("x64sc", "dnsmasq", "sudo", "ip", "iptables"):
         if shutil.which(tool) is None:
