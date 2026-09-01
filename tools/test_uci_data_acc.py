@@ -50,18 +50,38 @@ about anything the firmware does above the register layer, or about the
 other two defects in #144.  A hardware run is what closes those; see the
 PR for the exact one.
 
+WHAT A MISSING UCI BUILD MEANS (issue #165)
+
+This module reads whatever PRG happens to be sitting in ``build/``.  On a
+``BACKEND=ip65`` build — or a stale tree — the ``uci_*`` labels are absent
+and none of the three checks can run.  That is an **involuntary** skip: the
+suite did not choose it, the environment forced it, and it certifies
+nothing.  Per the rule adopted in #158 (audit commit ``7497e48``) an
+involuntary skip is a **failure**, exit 2, never a silent 0 — otherwise a
+runner reads "green" for a run in which the DATA_ACC semantics pinned by
+#144 were never exercised.
+
+A *voluntary* skip stays available and stays distinguishable: set
+``C64_UCI_TESTS_OPTIONAL=1`` to declare "I know this is not a UCI build and
+I am choosing not to test it".  That prints what did not run and exits 0.
+
 Runs standalone or under pytest::
 
     python3 tools/test_uci_data_acc.py
     pytest tools/test_uci_data_acc.py
 """
 
+import os
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PRG = REPO / "build" / "c64-https.prg"
 LABELS = REPO / "build" / "labels.txt"
+
+# The one deliberate, announced way to skip this suite.  Anything else that
+# stops it running is a failure (#165).
+OPT_OUT_ENV = "C64_UCI_TESTS_OPTIONAL"
 
 # The status line the firmware is imagined to have written.  Deliberately
 # NOT a "00,..." or "02,..." line: uci_drain_status filters those two as
@@ -561,7 +581,59 @@ class CPU:
 # ---------------------------------------------------------------------------
 
 class Unavailable(Exception):
-    """No UCI-backend build to test against."""
+    """No UCI-backend build to test against — an INVOLUNTARY skip.
+
+    Never caught into a pass.  ``_require`` re-raises it (so pytest records
+    an error and standalone ``main`` counts it) unless the operator has
+    opted out explicitly via ``C64_UCI_TESTS_OPTIONAL=1``.
+    """
+
+
+class VoluntarySkip(Exception):
+    """The operator declared this run deliberately untested (opt-out env)."""
+
+
+# Every assertion this module runs goes through _check, so the count it
+# reports is measured, not declared.  A run that says "0 assertions" cannot
+# also say "passed".
+ASSERTIONS_RUN = 0
+
+
+def _check(condition, message):
+    """assert, but counted."""
+    global ASSERTIONS_RUN
+    ASSERTIONS_RUN += 1
+    if not condition:
+        raise AssertionError(message)
+
+
+def _require(fn, *args):
+    """Run a fixture builder; turn Unavailable into the right outcome.
+
+    Default (involuntary): re-raise, so the check fails loudly and names the
+    wrong-backend reason.  With ``C64_UCI_TESTS_OPTIONAL=1``: a voluntary,
+    announced skip.
+    """
+    try:
+        return fn(*args)
+    except Unavailable as exc:
+        if os.environ.get(OPT_OUT_ENV) != "1":
+            raise
+        # The reason carries the vacuity warning itself, because under
+        # pytest this string is the ONLY channel: `-ra` (pinned in
+        # pytest.ini addopts) prints it and nothing else. An opt-out that
+        # reads as a bare "skipped" would be #165 again with a flag on it.
+        reason = ("EXPLICIT SKIP (%s=1 is set in this environment): %s "
+                  "0 of %d checks and 0 assertions ran; this exit-0 "
+                  "certifies NOTHING about the DATA_ACC accept protocol "
+                  "(#144 item 1). Unset %s to make it a failure again."
+                  % (OPT_OUT_ENV, exc, len(TESTS), OPT_OUT_ENV))
+        # Only hand the skip to pytest when pytest is actually driving; the
+        # standalone runner has its own reporting and must not see Skipped.
+        pytest = sys.modules.get("pytest")
+        if pytest is None:
+            raise VoluntarySkip(reason)
+        pytest.skip(reason, allow_module_level=False)
 
 
 def _labels():
@@ -584,8 +656,9 @@ def _machine(response, status):
         raise Unavailable("build/c64-https.prg is missing — build first with "
                           "`make BACKEND=uci USE_NISTCURVES_ONCHIP=1`")
     labels = _labels()
-    for needed in ("uci_drain_resp", "uci_drain_status", "uci_status_buf",
-                   "uci_status_len", "uci_status_seen", "uci_status_force"):
+    for needed in ("uci_drain_resp", "uci_drain_status", "uci_ack",
+                   "uci_status_buf", "uci_status_len", "uci_status_seen",
+                   "uci_status_force"):
         if needed not in labels:
             raise Unavailable(
                 "%s is not in build/labels.txt — this is not a BACKEND=uci "
@@ -625,44 +698,40 @@ def test_drain_resp_leaves_the_status_line_readable():
     stops one byte in AND the status queue the firmware wrote is gone
     before uci_drain_status ever looks at it.
     """
-    try:
-        cpu, mem, uci, labels = _machine(RESP_LEFTOVER, STATUS_LINE)
-    except Unavailable as exc:
-        _skip(str(exc))
-        return
+    cpu, mem, uci, labels = _require(_machine, RESP_LEFTOVER, STATUS_LINE)
 
     carry = cpu.call(labels["uci_drain_resp"])
-    assert carry is False, "uci_drain_resp reported a timeout (C=1)"
+    _check(carry is False, "uci_drain_resp reported a timeout (C=1)")
 
-    assert uci.accepts == 0, (
+    _check(uci.accepts == 0, (
         "uci_drain_resp wrote DATA_ACC ($02 -> $DF1C) %d time(s). DATA_ACC "
         "is the end-of-transfer accept, not a FIFO advance: it resets the "
         "response AND status queues, so the drain stops early and the "
         "status line is destroyed before uci_drain_status reads it "
-        "(issue #144 item 1)." % uci.accepts)
+        "(issue #144 item 1)." % uci.accepts))
 
-    assert uci.response_fully_drained, (
+    _check(uci.response_fully_drained, (
         "uci_drain_resp consumed %d of %d response bytes — DATA_AV dropped "
         "under it because something ended the data phase"
-        % (uci.resp_ptr, len(RESP_LEFTOVER)))
+        % (uci.resp_ptr, len(RESP_LEFTOVER))))
 
-    assert uci.status_untouched, (
+    _check(uci.status_untouched, (
         "uci_drain_resp consumed %d status byte(s); the status queue is "
-        "uci_drain_status's to read" % uci.stat_ptr)
+        "uci_drain_status's to read" % uci.stat_ptr))
 
     # And the payoff: the firmware's own line survives into the capture.
     carry = cpu.call(labels["uci_drain_status"])
-    assert carry is False, "uci_drain_status reported a timeout (C=1)"
+    _check(carry is False, "uci_drain_status reported a timeout (C=1)")
 
     seen = mem.read(labels["uci_status_seen"])
-    assert seen == len(STATUS_LINE), (
+    _check(seen == len(STATUS_LINE), (
         "uci_drain_status saw %d of %d status bytes after uci_drain_resp "
         "ran; this is the truncated capture #147 fixed, reintroduced one "
-        "routine upstream" % (seen, len(STATUS_LINE)))
+        "routine upstream" % (seen, len(STATUS_LINE))))
 
     captured = _captured_status(mem, labels)
-    assert captured == STATUS_LINE, (
-        "captured status line %r != %r" % (captured, STATUS_LINE))
+    _check(captured == STATUS_LINE, (
+        "captured status line %r != %r" % (captured, STATUS_LINE)))
 
 
 def test_drain_status_capture_control():
@@ -671,17 +740,19 @@ def test_drain_status_capture_control():
     Isolates the assertion above.  If this one ever fails too, the fault
     is in uci_drain_status or in this harness, not in the accept.
     """
-    try:
-        cpu, mem, uci, labels = _machine(b"", STATUS_LINE)
-    except Unavailable as exc:
-        _skip(str(exc))
-        return
+    cpu, mem, uci, labels = _require(_machine, b"", STATUS_LINE)
 
-    assert cpu.call(labels["uci_drain_resp"]) is False
-    assert cpu.call(labels["uci_drain_status"]) is False
+    _check(cpu.call(labels["uci_drain_resp"]) is False,
+           "uci_drain_resp reported a timeout (C=1) with an empty queue")
+    _check(cpu.call(labels["uci_drain_status"]) is False,
+           "uci_drain_status reported a timeout (C=1)")
 
-    assert mem.read(labels["uci_status_seen"]) == len(STATUS_LINE)
-    assert _captured_status(mem, labels) == STATUS_LINE
+    _check(mem.read(labels["uci_status_seen"]) == len(STATUS_LINE),
+           "uci_drain_status saw %d of %d status bytes"
+           % (mem.read(labels["uci_status_seen"]), len(STATUS_LINE)))
+    _check(_captured_status(mem, labels) == STATUS_LINE,
+           "captured status line %r != %r"
+           % (_captured_status(mem, labels), STATUS_LINE))
 
 
 def test_accept_still_ends_the_transfer():
@@ -692,33 +763,17 @@ def test_accept_still_ends_the_transfer():
     silently dropped (#144 item 2).  Every drain site in net.s runs
     drain_resp -> drain_status -> uci_ack; this pins the third step.
     """
-    try:
-        cpu, mem, uci, labels = _machine(RESP_LEFTOVER, STATUS_LINE)
-    except Unavailable as exc:
-        _skip(str(exc))
-        return
-    if "uci_ack" not in labels:
-        _skip("uci_ack is not in build/labels.txt")
-        return
+    cpu, mem, uci, labels = _require(_machine, RESP_LEFTOVER, STATUS_LINE)
 
     cpu.call(labels["uci_ack"])
-    assert uci.accepts == 1, (
-        "uci_ack wrote DATA_ACC %d times, expected exactly 1" % uci.accepts)
-    assert uci.data_phase is False, "the transfer was not ended"
+    _check(uci.accepts == 1, (
+        "uci_ack wrote DATA_ACC %d times, expected exactly 1" % uci.accepts))
+    _check(uci.data_phase is False, "the transfer was not ended")
 
 
 # ---------------------------------------------------------------------------
 # Dual-mode runner (the repo declares no pytest dependency)
 # ---------------------------------------------------------------------------
-
-def _skip(reason):
-    try:
-        import pytest
-    except ImportError:
-        print("SKIP: %s" % reason)
-        return
-    pytest.skip(reason, allow_module_level=False)
-
 
 TESTS = (
     test_drain_resp_leaves_the_status_line_readable,
@@ -726,31 +781,80 @@ TESTS = (
     test_accept_still_ends_the_transfer,
 )
 
+# Exit codes, matching the convention #158 established across the suites:
+#   0  everything that was supposed to run, ran and passed
+#   1  a check failed
+#   2  the suite could not run at all (involuntary skip)
+EXIT_OK, EXIT_FAILED, EXIT_CANNOT_RUN = 0, 1, 2
+
+
+def _cannot_run(reason):
+    print("CANNOT RUN: %s" % reason)
+    print("  0 of %d checks executed; %d assertions ran. This run certifies "
+          "nothing about the\n  DATA_ACC accept protocol (#144 item 1)."
+          % (len(TESTS), ASSERTIONS_RUN))
+    print("  Set %s=1 to make skipping it a deliberate, exit-0 choice."
+          % OPT_OUT_ENV)
+    return EXIT_CANNOT_RUN
+
 
 def main():
     if not PRG.is_file() or not LABELS.is_file():
-        print("ERROR: no build to test. Run:")
-        print("  make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1")
-        return 2
+        if os.environ.get(OPT_OUT_ENV) == "1":
+            print("EXPLICIT SKIP (%s=1): no build in build/; "
+                  "test_uci_data_acc.py did NOT run." % OPT_OUT_ENV)
+            print("  0 of %d checks executed; this exit 0 certifies nothing."
+                  % len(TESTS))
+            return EXIT_OK
+        return _cannot_run(
+            "no build to test. Run `make clean && make BACKEND=uci "
+            "USE_NISTCURVES_ONCHIP=1`")
+
     failures = 0
+    executed = 0
+    skipped = []
     for fn in TESTS:
         try:
             fn()
+        except VoluntarySkip as exc:
+            skipped.append((fn.__name__, str(exc)))
+            print("SKIP %s: %s" % (fn.__name__, exc))
+        except Unavailable as exc:
+            # Involuntary: the wrong build is present. Not a pass, and not a
+            # partial result either — abandon the run and say why (#165).
+            return _cannot_run(str(exc))
         except AssertionError as exc:
             failures += 1
+            executed += 1
             print("FAIL %s\n     %s" % (fn.__name__, exc))
-        except Unavailable as exc:
-            print("SKIP %s: %s" % (fn.__name__, exc))
         except CPUError as exc:
             failures += 1
+            executed += 1
             print("FAIL %s (interpreter): %s" % (fn.__name__, exc))
         else:
+            executed += 1
             print("PASS %s" % fn.__name__)
+
+    if skipped:
+        print("\nEXPLICIT SKIP (%s=1): %d of %d checks did NOT run; this run "
+              "certifies\nnothing about them." % (OPT_OUT_ENV, len(skipped),
+                                                  len(TESTS)))
+        if executed == 0:
+            print("  0 assertions executed.")
+            return EXIT_OK
+
     if failures:
-        print("\n%d/%d checks failed" % (failures, len(TESTS)))
-        return 1
-    print("\nall %d checks passed" % len(TESTS))
-    return 0
+        print("\n%d/%d checks failed (%d assertions executed)"
+              % (failures, executed, ASSERTIONS_RUN))
+        return EXIT_FAILED
+
+    # A run with nothing in it is never a pass.
+    if executed == 0 or ASSERTIONS_RUN == 0:
+        return _cannot_run("no check executed and no assertion ran")
+
+    print("\nall %d checks passed (%d assertions executed)"
+          % (executed, ASSERTIONS_RUN))
+    return EXIT_OK
 
 
 if __name__ == "__main__":
