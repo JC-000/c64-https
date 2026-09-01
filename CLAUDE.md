@@ -647,9 +647,20 @@ vacuously (zero checks = fail; any `SKIP_*` = `PARTIAL VERIFICATION`).
   swap), test_finished_verify.py (18 cases), test_ecdsa_kat_oracle.py
   (6 vectors incl. 3 negative), test_tls_deframer.py, test_x25519.py.
 
-`tools/run_all_tests.py` dispatches 11 suites and omits
-`test_finished_verify` and `test_chained_hmac`; there is no single
-"all pass" runner. **`pytest` is not the runner**: suites take
+`tools/run_all_tests.py` is the aggregate runner, and **its suite list
+lives in `SUITE_ORDER` in that file, not here** — the sentence that used
+to stand in this spot named two omissions when there were four, both
+security suites among them (#169). Pinned rather than restated: every
+`tools/test_*.py` with a module-level `run_tests()` is either in
+`SUITE_ORDER` or in the same file's commented `UNDISPATCHED_SUITES`, and
+`tools/test_runner_coverage.py` asserts that by AST (5 checks, no build,
+no VICE). It is still not an "all pass" runner — a suite that is a
+standalone `main()` with no `run_tests()` cannot be dispatched as written
+and the guard does not reach it (`grep -n '^def run_tests' tools/test_*.py`
+separates the two); run those individually. `hs_sequence` needs
+`tls_deframe_pump`, so it is an accounted SKIP unless you run the runner
+as `BACKEND=uci python3 tools/run_all_tests.py`. **`pytest` is not the
+runner**: suites take
 `(transport, labels, seed)` positionally. `pytest.ini` pins `testpaths` to
 the pure-logic modules — **that list is the enumeration; read it there, not
 here** — and `tools/test_pytest_boundary.py` proves it is exactly the set
