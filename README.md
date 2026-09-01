@@ -283,17 +283,26 @@ make clean                    # remove build artifacts
 make package                  # the three release products into dist/
 ```
 
-**Run `make clean` whenever you change `BACKEND=` or any flag.** make
-tracks source timestamps, not the command line, and `BACKEND=` selects
-an include path (`-I src/net/$(BACKEND)`) rather than a `-D` define, so
-an object built for the other backend counts as up to date. Both failure
-modes are silent and exit 0: a mixed link that is the correct size but
-carries the wrong backend's tuning constants, or no relink at all,
-leaving the other backend's PRG in `build/`. Neither the exit code nor
-the file size distinguishes them — compare the **PRG's** sha256 if a
-build matters. (Object hashes cannot serve: ca65 stamps build time into
-every `.o`, so no two builds agree; ld65 does not propagate it, which is
-what makes the PRG deterministic.)
+**A flag change no longer needs `make clean` (#159).** make tracks source
+timestamps rather than the command line, so switching `BACKEND=` or a
+profile flag used to leave the previous build's objects in place — silently,
+at exit 0, as either a mixed link or no relink at all. `build/flags.stamp`
+now closes that: it holds the fully expanded ca65/ld65 command lines, is
+compared when the Makefile is *parsed*, and on any change deletes every
+object and the PRG before make builds its file database.
+
+Two things to know anyway:
+
+- The compare runs at parse time, so `make -n` with different flags is
+  **not** side-effect-free — it deletes the objects without rebuilding them.
+- `make clean` is still the right move if you want to be certain of a tree
+  for any other reason, and it costs about a second.
+
+And the habit the old rule taught is still the one that matters: **neither
+the exit code nor the file size proves a build — compare the PRG's sha256.**
+Object hashes cannot serve, because ca65 stamps build time into every `.o`
+so no two builds agree; ld65 does not propagate it, which is what makes the
+PRG deterministic.
 
 ### ip65 Build (ip65 backend only)
 
@@ -313,12 +322,20 @@ build is deterministic: 6,951 B, sha256 `cf1a5ff7809af4e4655e385b378b936054f4104
 `make clean` does not remove it, which is why the step is normally
 invisible. The UCI backend does not use the blob at all.
 
-One measurement trap, since it has already produced a wrong conclusion once:
-ca65 also resolves `.incbin` relative to the current directory, and
-`../../../` from a repo root escapes three levels up — which is exactly the
-depth of a git worktree under `.claude/worktrees/<name>/`. Such a worktree
-with no blob of its own silently assembles the parent checkout's blob and
-appears to build fine. Check blob behaviour in a real clone, not a worktree.
+You can build ip65 from a nested git worktree. The trap this paragraph used
+to describe — ca65 resolving `.incbin` against the current directory, so
+`../../../` from a worktree three levels down silently assembled the parent
+checkout's blob — was closed by issue #116, which replaced the operand: it is
+now a bare `.incbin "ip65-c64.bin"` resolved through
+`--bin-include-dir $(abspath ip65-build)`, with no `../` left to resolve.
+Re-verified in that exact geometry on 2026-08-31.
+
+What a fresh worktree does need first is `git submodule update --init
+--recursive`; without the submodule working trees the ip65 link fails loudly
+by name. And if you ever want to check which blob a build actually read,
+**flip a byte of it** — do not move it aside, because `make` will simply
+rebuild it to the same deterministic hash, which looks exactly like the trap
+it is supposed to detect.
 
 ## Project Status
 
@@ -439,19 +456,22 @@ holds no matter which directory pytest is invoked from; `norecursedirs`
 is what keeps a root-level run out of them. Both halves are pinned by the
 guard.
 
-`pytest.ini` therefore pins `testpaths` to the three modules that really
-are pure-logic and pytest-runnable, and `conftest.py` prints the scope of
-the run in both the header and the summary. A bare `pytest` at the repo
-root reports **31 passed** (exit 0), and says in the same breath that this
-is not a statement about the C64 suites or the rig scripts. `pytest tests/`
-and `pytest tools/uci/` both exit 5, "no tests ran", with an explanation
-naming the right README.
+`pytest.ini` therefore pins `testpaths` to the modules that really are
+pure-logic and pytest-runnable — that list is the enumeration, so read it
+in `pytest.ini` rather than trusting a count here — and `conftest.py`
+prints the scope of the run in both the header and the summary. A bare
+`pytest` at the repo root is green (exit 0), and says in the same breath
+that this is not a statement about the C64 suites or the rig scripts.
+`pytest tests/` and `pytest tools/uci/` both exit 5, "no tests ran", with
+an explanation naming the right README.
 
 `testpaths` applies only when pytest is invoked from the rootdir, so from
-a subdirectory you get that subdirectory instead — measured from `tools/`:
-31 passed, 74 `fixture 'transport' not found` errors, exit 1. That is the
-honest signal (pytest genuinely cannot run those modules) and it is loud,
-which is the opposite of the problem being fixed here.
+a subdirectory you get that subdirectory instead — from `tools/`, the same
+passes plus a wall of `fixture 'transport' not found` errors, exit 1. That
+is the honest signal (pytest genuinely cannot run those modules) and it is
+loud, which is the opposite of the problem being fixed here. No total is
+quoted in either paragraph on purpose: it moves with `testpaths` and with
+the build state, and the numbers that used to stand here were stale.
 
 `tools/test_pytest_boundary.py` fails if the boundary drifts in any
 direction — a pure-logic module missing from `testpaths`, a listed module

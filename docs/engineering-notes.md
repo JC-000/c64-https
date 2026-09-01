@@ -41,8 +41,8 @@ keeping, because both of the previous descriptions in this file were
 wrong and the second one was wrong in a way that would have re-broken
 fresh clones.
 
-`$(IP65_BIN)` has always been a real prerequisite of the PRG
-(`Makefile:263`) with a real rule (`Makefile:477`). But
+`$(IP65_BIN)` has always been a real prerequisite of the PRG (it is in
+`PRG_DEPS`) with a real rule (`$(IP65_BIN):` in the Makefile). But
 `src/net/ip65/ip65_blob.s` pulls the image in with a ca65 `.incbin`,
 which make's dependency graph cannot see, so nothing ordered the blob
 rule *before* the object that consumes it. From a clean `build/` make
@@ -53,9 +53,14 @@ assembled `ip65_blob.o` first and died:
     make: *** [build/net/ip65/ip65_blob.o] Error 1
 
 That is issue #89's fresh-clone failure. It is now fixed at the source
-rather than documented around — `Makefile:341` states the missing edge:
+rather than documented around — the Makefile states the missing edge:
 
     build/net/ip65/ip65_blob.o: $(IP65_BIN)
+
+(The transcript above is as captured. The operand has since changed —
+#116 made it a bare `ip65-c64.bin`, see the worktree entry below — so
+today's message names that instead. The ordering defect it illustrates
+is independent of the spelling.)
 
 **Proven from a genuinely fresh clone**, 2026-08-15: `git clone` into a
 scratch dir, `git submodule update --init --recursive`, `make ip65-libs`,
@@ -74,18 +79,45 @@ archives — the submodule ships sources, not binaries. Skip
 So: `make ip65-libs` once per clone, then plain `make`. `make ip65-blob`
 exists only to force a rebuild.
 
-**Trap — do not measure this in a nested git worktree.** ca65 does not
-resolve `.incbin` relative to the including source file, whatever the
-comment in `ip65_blob.s` says; it also tries the path relative to the
-*current directory*, and `../../../` from a repo root escapes three
-levels up. A worktree under `<repo>/.claude/worktrees/<name>/` is
-exactly three levels down, so with its own blob missing it silently
-assembles the **parent checkout's** `ip65-build/ip65-c64.bin` and the
-build appears to succeed. Reproduced deliberately in a scratch tree:
-`x/y/z/src/net/ip65/ip65_blob.s` with no `x/y/z/ip65-build/` assembles
-fine against a blob planted at the top. This is how an earlier revision
-of this section came to claim, with a measurement behind it, that a
-fresh clone needs no blob step. Verify blob behaviour in a real clone.
+**Worktree trap — RETIRED by #116; the rule that survives it is
+different.** Recorded in full because this section asserted the old rule
+for months, and it had been copied into CLAUDE.md, README.md and a test
+comment before it was caught:
+
+The historical hazard was real. ca65 tries a relative `.incbin` operand
+against the **current directory first**, falling back to the including
+source file's directory only on a miss. `ip65_blob.s` used to spell its
+operand `../../../ip65-build/ip65-c64.bin`; from the repo root the two
+interpretations coincide, but a worktree under
+`<repo>/.claude/worktrees/<name>/` is exactly three levels down, so
+`../../../` climbed out into the **parent checkout** and the build
+appeared to succeed against the wrong bytes. That is how an earlier
+revision of this section came to claim, with a measurement behind it,
+that a fresh clone needs no blob step.
+
+**#116 removed the operand, not just the symptom.** `ip65_blob.s:61` is
+now a bare `.incbin "ip65-c64.bin"`, resolved through
+`--bin-include-dir $(abspath $(IP65_BUILD))` (`Makefile:74`). There is
+no `../` left to resolve, and an absent blob now FAILS the assemble
+instead of quietly resolving elsewhere. Re-proven 2026-08-31 in real
+worktree geometry, three levels down: byte-flipping the worktree's own
+blob moved the ip65 PRG hash (`4e6afc18…` → `67d68df1…`) and restoring
+it moved the hash back — so the link reads the worktree's copy. The
+ca65 mechanism above is unchanged and still worth knowing; what changed
+is that nothing in this repo depends on it any more.
+
+**What still bites a fresh worktree** is the submodules: a new worktree
+has no `ip65/` or `libs/` working tree, so an ip65 link dies by name.
+`git submodule update --init --recursive` clears it. That failure is
+LOUD, which is the whole difference — the retired trap was silent.
+
+**Testing blob provenance: flip a byte, never move the blob aside.**
+`make` regenerates a missing blob deterministically, reproducing
+`cf1a5ff7…` exactly, which reads as "my planted blob was ignored" —
+i.e. exactly like a live trap. That false positive was hit and
+diagnosed on 2026-08-31; the byte-flip has no such failure mode,
+because the rule (`$(IP65_BIN)`) does not fire on a file that is
+present and newer than its prerequisites.
 
 `make clean` only removes `build/`, so once built the blob survives and is
 never rebuilt; that persistence, not a committed file, is why the rebuild
@@ -113,12 +145,51 @@ Targets:
                           blob on demand and then reuses it, so this
                           target is only for forcing a rebuild.
 
-**`make clean` when you change `BACKEND=` or any flag.** make tracks
-source timestamps, not the command line, so an object built for the
-other backend counts as up to date. This is not only about `-D` flags:
-`BACKEND=` also selects the `-I src/net/$(BACKEND)` include path, and
-`src/tls13.s` pulls `net_tuning.inc` from there. Both failure modes were
-observed in one worktree on 2026-08-13:
+**`make clean` after a flag change — RETIRED by #159. The measurements
+below are why it existed, and are kept for that reason.**
+
+A flag change no longer needs `make clean`. `build/flags.stamp` holds the
+fully expanded `CA65FLAGS`/`LD65FLAGS` (and `BACKEND` on a line of its
+own), is content-compared at Makefile **parse** time, and on any change
+deletes every object and the PRG — absence, not an mtime, which is what
+GNU Make 3.81's 1-second resolution cannot defeat. `BACKEND=` is covered
+twice over: `LD65FLAGS` carries `$(CFG)` and `CA65FLAGS` carries
+`-I src/net/$(BACKEND)`.
+
+Re-verified 2026-08-31, the direct experiment: from a clean ip65 tree
+(`4e6afc18…`), `make BACKEND=uci USE_NISTCURVES_ONCHIP=1` with **no**
+`make clean` produced `d5ebc7fa…` — byte-identical to the cleaned oracle.
+`tools/test_build_flags_stamp.py` pins it in seven cases, including
+`test_backend_flip_removes_the_other_backends_prg` and the inverse (an
+unchanged flag set must still rebuild nothing).
+
+**Two caveats survive**, which is why this entry is not simply deleted:
+
+  - **The compare runs at parse time, so it fires under `make -n`, `-q`
+    and `-t` as well** (#174). A dry run with different flags is not
+    side-effect-free: measured 2026-08-31, `make -n BACKEND=ip65 …`
+    against a built UCI tree removed all 24 objects and the PRG, and
+    being a dry run it built nothing to replace them. The next real build
+    is a full one.
+  - **The target strings are outside the stamp, deliberately.**
+    `HTTPS_HOST`/`HTTPS_PATH`/`HTTPS_SNI` values travel in the generated
+    `build/https_host.inc`, which invalidates `boot.o` + `http.o` + the
+    PRG rather than the whole tree — #128's retargeting ergonomic. That
+    set covers both consumers of those strings today; a third consumer
+    would have to be added to it, and the failure mode would be a mixed
+    link, not an error.
+
+What has **not** changed: neither exit code nor file size distinguishes a
+good build from a bad one, so if a build matters, check the PRG's sha256.
+That rule is independent of the stamp and is the one to keep.
+
+The original incident follows, because it is what the mechanism was built
+against. At the time `make clean` was the only remedy: make tracks source
+timestamps, not the command line, so an object built for the other backend
+counted as up to date. This was never only about `-D` flags — `BACKEND=`
+also selects the `-I src/net/$(BACKEND)` include path, and `src/tls13.s`
+pulls `net_tuning.inc` from there. Both failure modes were observed in one
+worktree on 2026-08-13:
 
   - **Mixed link.** An ip65 PRG built from a UCI-compiled `tls13.o`
     carries drain budget 1x16 instead of 8x250 — issue #73's regression,
@@ -132,9 +203,9 @@ observed in one worktree on 2026-08-13:
     exits 0 having left the *other backend's* PRG in place — a
     62,977 B UCI image where an ip65 build was asked for.
 
-So neither exit code nor file size distinguishes a good build from a bad
-one here. After any flag or `BACKEND` change, `make clean`; if a build
-matters, check the **PRG's** sha256.
+So neither exit code nor file size distinguished a good build from a bad
+one. `flags.stamp` closes both of those modes at the source; the sha256
+habit they taught is the part worth keeping, and still applies.
 
 Specifically the PRG's, not an object's: **ca65 stamps the build's
 wall-clock time into every `.o` header**, so two clean builds of
@@ -161,7 +232,10 @@ found`. The fix is `make ip65-libs`. (An earlier revision suggested
 path; there is no committed blob — `git ls-files ip65-build/` returns
 only `ip65.cfg` and `ip65_stub.s` — so on a real fresh clone there is
 nothing to touch. See the blob discussion above for the ordering fix
-that made the `.incbin` half of this go away.)
+(#89, the `build/net/ip65/ip65_blob.o: $(IP65_BIN)` edge) that made the
+`.incbin` half of this go away — that is the make-cannot-see-through-
+`.incbin` problem, not the separate worktree/provenance one #116
+closed.)
 
 **Stale-submodule gotcha (#124) — now caught before the build, not during
 it.** A `libs/nistcurves` working checkout older than the gitlink used to
@@ -198,7 +272,8 @@ Note that master itself was never broken: a fresh clone at `9114ff7` plus
 Variables:
   - `BACKEND=ip65|uci`  — select networking backend cfg
                           (`cfg/c64-https-$(BACKEND).cfg`; default ip65).
-                          Changing it requires `make clean` — see above.
+                          Changing it no longer requires `make clean`:
+                          `build/flags.stamp` covers it — see above.
   - `USE_X25519_SIBLING=1` — swap the in-tree X25519 for the
                           `libs/x25519@v0.11.2` sibling. **Currently
                           links under NEITHER backend: ip65 overflows
@@ -288,9 +363,12 @@ Variables:
                           a generated `build/https_host.inc` because
                           ca65's `-D` is numeric-only; the generator is
                           content-compared **at Makefile parse time**, and
-                          on a change it deletes `boot.o` AND the PRG, so no
-                          `make clean` is needed for THIS flag — including
-                          back-to-back inside one second. The
+                          on a change it deletes `boot.o`, `http.o` AND the
+                          PRG, so no `make clean` is needed for THIS flag —
+                          including back-to-back inside one second.
+                          (`http.o` joined that list with #159: `http.s`
+                          reads `HTTPS_SNI_OVERRIDE`, and leaving it stale
+                          was the #141 false negative.) The
                           "link step keeps the repo-wide same-second caveat"
                           that used to be recorded here was **issue #128**,
                           not a fact of life; see the entry below. Hosts >63
@@ -331,8 +409,13 @@ separately.)
          point. Verified 3/3 on the same-second switch, in both directions,
          and a no-op `make` still relinks nothing.
 
-     The same-second caveat still stands for `BACKEND=` and every other flag,
-     which have no equivalent hook. `make clean` remains the remedy there.
+     That was written when `https_host.inc` was the only such hook, and it
+     used to end: "the same-second caveat still stands for `BACKEND=` and
+     every other flag, which have no equivalent hook." **No longer true.**
+     #159 generalised exactly this mechanism to the whole flag set as
+     `build/flags.stamp` — same parse-time compare, same delete-don't-touch
+     invalidation, wider net. See the flag-change entry near the top of this
+     file. `make clean` is no longer the remedy for a flag change.
 
 **Both verified on hardware, 2026-08-22, U64E 601A96 @ 48 MHz comb, at
 master `305051c`.** The banner reads, from real screen RAM:
@@ -893,10 +976,69 @@ The W1 streaming deframer (`src/tls_deframe.s`) handles the real 11-14
 record flights (Certificate spanning ~6 records; CV+Finished sharing the
 tail); the W2 streaming consumer stages the leaf into a UCI-only 2048 B
 `cert_buf` (`CERT_BUF_SIZE`, so wikipedia's 1636 B leaf fits); the
-sibling library verifies real CA-issued chains. Target is a build knob:
+sibling library verifies real CA-issued chains.
+
+Target is a build knob:
 `make HTTPS_HOST=<host> HTTPS_PATH=<path>` (+ `HTTPS_BODY_TO_REU=1` and
 the `src/viewer.s` viewer for the wikipedia flow). Rigs:
 `tools/uci/rig_https_live.py`, `rig_https_wiki.py`.
+
+**Deframer error codes** (`DF_ERR_*`, defined at the top of
+`src/tls_deframe.s`, last value latched in `df_last_err`):
+
+    $01 DF_ERR_HDR_LEN       24-bit length high byte non-zero
+    $02 DF_ERR_TOO_BIG       spanning non-Certificate message > carry cap
+    $03 DF_ERR_DISPATCH      message handler returned C=1
+    $04 DF_ERR_TYPE          unknown handshake message type
+    $05 DF_ERR_CERT_FMT      streamed Certificate malformed / no usable key
+    $06 DF_ERR_CERT_TOO_BIG  leaf certificate exceeds cert_buf
+    $07 DF_ERR_SEQ           not the message tls_state requires (#152)
+
+`$07` is the newest and the only one with a mirror outside this file.
+Issue #152: `tls_connect` walks the encrypted flight with four
+unconditional `jsr tls_recv_encrypted` calls, and both dispatchers used to
+switch on the message-type byte alone — so a server that completed the
+unauthenticated CH/SH exchange could send four EncryptedExtensions
+messages under the handshake write key and nothing else. Four dispatches
+satisfied the four calls, the client derived traffic keys, set
+`TLS_STATE_CONNECTED` and reported success, having seen no Certificate, no
+CertificateVerify and no server Finished — which also skips the #135
+server-name check, a tail call off `x509_extract_pubkey`'s success exit.
+
+The gate reuses `tls_state`, which `tls_connect` already writes immediately
+before each receive, as the "which message is due" marker, rather than
+adding a parallel `tls_hs_expected` byte: one variable cannot drift out of
+step with itself, and it costs no bytes in `tls13.s`, which lands in the
+segment with the least ip65 headroom. Both dispatch sites expand the SAME
+macro (`TLS_HS_SEQ_CHECK`, `src/tls_hs_seq.inc`) — the UCI streaming arm at
+`@hdr_complete` in `src/tls_deframe.s` and the ip65 `.else` arm of
+`tls_recv_encrypted` in `src/tls13.s` — because the identical defect lived
+in both. The rejection happens before the transcript fold, before any route
+and before any handler.
+
+One RFC 8446-legal message is turned away: the optional CertificateRequest
+of §4.3.2. This client never sends `post_handshake_auth` and cannot produce
+a client Certificate, so such a handshake could not complete here anyway;
+it was already refused one step later as `DF_ERR_TYPE`. NewSessionTicket is
+post-handshake and cannot legally precede the server Finished. Accepting-
+and-skipping either would mean re-entering the deframer pump from inside
+dispatch plus a "seen one already" latch to bound a malicious server
+streaming them forever — real code, in the tightest segment, to keep alive
+a handshake that dies one message later regardless.
+
+The four-entry table is indexed by `tls_state` with a compile-time bias, so
+`src/tls_hs_seq.inc` carries `.assert`s that
+`TLS_STATE_ENCRYPTED_EXT..TLS_STATE_FINISHED` stay contiguous with
+`TLS_STATE_CONNECTED` immediately above: inserting a state in that run of
+equates would otherwise silently read the wrong table entry. The two range
+tests in the macro are load-bearing rather than defensive, and are not
+caught by simply presenting a message in an out-of-window state — the
+neighbouring bytes are unlikely to equal the type under test, so the reject
+still happens, by code layout rather than by logic. `tools/test_hs_sequence.py`
+therefore READS the bytes adjacent to `tls_hs_allowed` (exported for exactly
+this) and uses those values as the message type, so removing either bound
+turns the reject into an accept. Mutation-checked: widening the upper bound,
+and deleting both bounds, are each detected.
 
 Three bugs the local-listener path never exposed, all fixed:
   - **512-content records** (what MFL-honoring servers send) hit a latent
@@ -2506,20 +2648,77 @@ the TLS state machine. For a quick sanity check after a build:
   - `tools/test_tls_handshake.py`  — full handshake state machine
   - `tools/test_http.py`           — HTTP request/response build + parse
   - `tools/test_x509.py`           — X.509 parser
-  - `tools/test_x509_name.py` — server name validation (#135). 23 vectors,
-                                **9 of them rejects**, including the four
-                                wildcard over-matches that are how name
-                                checking classically goes wrong (`*.example.org`
-                                vs `example.org` and vs `a.b.example.org`,
-                                `*.com` vs `example.com`, prefix/suffix
-                                near-misses). Six vectors are REAL production
-                                leaves fetched live (wikipedia / github /
-                                lwn), each accepted for its own host and
-                                rejected for a wrong one — a parser exercised
-                                only against certificates its own test wrote
-                                is not evidence about the ones it will meet.
-                                Skips with a loud message on ip65, where the
-                                feature is compiled out.
+  - `tools/test_x509_name.py` — server name validation (#135). **The
+                                vector count is CONDITIONAL. Neither "17"
+                                nor "23" is the number; both have stood
+                                here, and each was right about a different
+                                tree.** The suite is one mandatory set plus
+                                two optional ones:
+
+                                  11  synthetic, always (5 accept / 6
+                                      reject). Three rejects are the
+                                      wildcard over-matches that are how
+                                      name checking classically goes wrong
+                                      (`*.example.org` vs `example.org` and
+                                      vs `a.b.example.org`, `*.com` vs
+                                      `example.com`); two are SAN-shape
+                                      rejects (rfc822Name under tag `0x81`,
+                                      and no SAN extension at all).
+                                  +6  LIVE production leaves fetched over
+                                      the network (wikipedia / github /
+                                      lwn), each accepted for its own host
+                                      and rejected for a wrong one — a
+                                      parser exercised only against
+                                      certificates its own test wrote is
+                                      not evidence about the ones it will
+                                      meet. Dropped by
+                                      `X509_NAME_OFFLINE=1`, or silently by
+                                      any host being unreachable.
+                                  +6  against
+                                      `tools/https_e2e/certs/server.pem`,
+                                      the local listener's own leaf.
+                                      Gitignored output, minted on demand
+                                      by `tools/https_e2e/ensure_certs.py`,
+                                      so a FRESH CLONE HAS NONE and
+                                      `real_cert_der()` returns None.
+
+                                Measured all three ways 2026-08-31:
+                                **17 / 9** on a fresh clone with network,
+                                **23 / 12** once the certs have been
+                                generated, **11 / 6** with neither.
+
+                                **Why a bare count is useless here**: the
+                                live set and the real-cert set have the
+                                SAME 3-accept/3-reject shape, so 17 / 9 is
+                                produced by two entirely disjoint vector
+                                sets — fresh clone + network, and
+                                certs-present + `X509_NAME_OFFLINE=1`.
+                                Reading the header total tells you neither
+                                which sets ran nor whether the real-cert
+                                path was covered. Read the per-vector
+                                lines. Compounding it, the suite reports a
+                                missing *cert* as `openssl unavailable`
+                                even with openssl on PATH — it cannot tell
+                                the two failure modes apart — which is how
+                                an earlier miscount survived. Fixing that
+                                report (mint or skip explicitly, and give
+                                the true reason) is tracked separately.
+
+                                The real-cert near-misses are not spelled
+                                out in the suite: since #164 they are
+                                derived from the cert's own SAN entries
+                                (`gen_certs.DEFAULT_SANS`), so renaming the
+                                test identity cannot leave them testing a
+                                name the listener no longer serves. With
+                                today's `www.foo.invalid` that yields
+                                `www.foo.invali` (prefix of a SAN) and
+                                `www.foo.invalidx` (SAN is a prefix of the
+                                host). Cite the derivation, not the
+                                literals — the literals moved once already.
+
+                                On a non-uci build it exits **2** with a
+                                loud CANNOT RUN, having run nothing; the
+                                feature is compiled out there.
   - `tools/test_p384_overlay_hazard.py` — a P-384 certificate must NOT
                                      corrupt resident code. Asserts the safe
                                      behaviour, so a failure IS the finding.
@@ -2563,9 +2762,10 @@ The boundary is now pinned rather than accidental:
     U64E/C64U hardware — `tools/uci/README.md`). #111 renamed `tests/`;
     its follow-up renamed `tools/uci/`, whose six scripts had the
     identical shape
-  - `pytest.ini` pins `testpaths` to the three genuinely pure-logic
-    modules and keeps collection out of `libs/`, `ip65/`, `tests/` and
-    `tools/uci/`
+  - `pytest.ini` pins `testpaths` to the genuinely pure-logic modules —
+    the list in `pytest.ini` is the enumeration, deliberately not
+    restated here or in CLAUDE.md, because it grows — and keeps
+    collection out of `libs/`, `ip65/`, `tests/` and `tools/uci/`
   - root `conftest.py` prints what the run does and does not cover, in
     both the header and the summary — no skips, because a vague skip
     reads like coverage
@@ -2579,11 +2779,15 @@ guard pins both. The rename is what holds from an arbitrary working
 directory, since `testpaths` only applies at the rootdir; the config
 entry is what stops a root-level run descending there at all.
 
-Bare `pytest` at the repo root is now **31 passed** (exit 0), and
-`pytest tests/` still exits 5, now with an explanation. Because
+Bare `pytest` at the repo root is now green (exit 0), and `pytest tests/`
+and `pytest tools/uci/` both still exit 5, now with an explanation. Because
 `testpaths` is rootdir-only, `pytest` from a subdirectory collects that
-subdirectory: from `tools/` it is 31 passed + 74 fixture errors, exit 1 —
-loud and correct, since those modules cannot run under pytest at all.
+subdirectory: from `tools/` it is the same passes plus a wall of fixture
+errors, exit 1 — loud and correct, since those modules cannot run under
+pytest at all. The pass and error totals are deliberately not quoted: they
+move with `testpaths` (which grows) and with the build state, and they had
+rotted twice within a day of each other by 2026-08-30. The `25 passed, 75
+errors` above is a dated pre-fix measurement and stays as one.
 
 ### Negative-path coverage — the server Finished
 

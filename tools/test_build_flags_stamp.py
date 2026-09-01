@@ -22,9 +22,10 @@ name greps out of the image, exit status is 0. Only a diff against a
 properly cleaned build exposes it, and it cost a full false negative on
 issue #141.
 
-`make clean` after any flag change is the documented rule (CLAUDE.md,
-"Build"), but a rule that lives only in prose is a rule that gets
-forgotten once. build/flags.stamp makes it mechanical: the whole
+`make clean` after any flag change WAS the documented rule, but a rule
+that lives only in prose is a rule that gets forgotten once.
+build/flags.stamp makes it mechanical, and the docs now describe the
+stamp instead of prescribing `make clean`: the whole
 ca65/ld65 command line is written to a stamp file and content-compared
 during Makefile PARSE, before make builds its file database, and any
 change deletes the objects and the PRG. Absence, not a timestamp
@@ -61,9 +62,15 @@ REPO = Path(__file__).resolve().parent.parent
 # What a build reads. `libs` carries the sibling submodules the archive
 # wrappers assemble from; `ip65`/`ip65-build` are symlinked for
 # completeness but never assembled, because every case here is
-# BACKEND=uci — ca65 resolves `.incbin` against the current directory, so
-# an ip65 link from anywhere but a real checkout root is not to be
-# trusted (CLAUDE.md, "Build"). The BACKEND=ip65 case below never links.
+# BACKEND=uci and an ip65 link would cost a blob build this suite has no
+# use for. The BACKEND=ip65 case below never links.
+#
+# It used to say an ip65 link outside a real checkout root "is not to be
+# trusted" because ca65 resolves `.incbin` against the current directory.
+# That reason is retired (#116): the operand is a bare `ip65-c64.bin`
+# resolved through `--bin-include-dir $(abspath ip65-build)`, which under
+# this farm points at the symlinked `ip65-build`. Not linking ip65 here
+# is a cost choice now, not a correctness one.
 FARM_LINKS = ("src", "cfg", "tools", "libs", "ip65", "ip65-build", "Makefile")
 
 # The reference profile for every case: UCI, onchip. Fastest to build, and
@@ -218,9 +225,11 @@ def test_backend_flip_removes_the_other_backends_prg():
     happens during parse, so it is visible here with `make -n`: no recipe
     runs, yet the stale PRG and objects must already be gone.
 
-    This case deliberately does not LINK ip65: ca65 resolves `.incbin`
-    against the current directory, so an ip65 build outside a real
-    checkout root is untrustworthy (CLAUDE.md, "Build").
+    This case deliberately does not LINK ip65 — `make -n` is enough to
+    show the parse-time invalidation, and a real ip65 link would drag in
+    a blob build. (It is not a correctness restriction: the `.incbin`
+    CWD hazard that used to be cited here was retired by #116. See
+    FARM_LINKS above.)
     """
     missing = _toolchain_missing()
     if missing:

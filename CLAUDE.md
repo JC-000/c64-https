@@ -29,37 +29,53 @@ Fresh clone (ip65 backend; UCI needs none of the ip65 steps):
     sha256 `cf1a5ff7…`, deterministic). Plain `make` builds it, but it
     cannot build the ip65 `.lib` archives — skip `make ip65-libs` and the
     link dies with `ld65: Input file '../ip65/ip65/ip65_tcp.lib' not found`.
-  - **Do not build ip65 in a nested git worktree.** ca65 resolves `.incbin`
-    against the CWD too, and `../../../` from a worktree three levels under
-    the repo silently assembles the **parent checkout's** blob.
+  - **A nested git worktree needs `git submodule update --init --recursive`
+    before it can link ip65** — a fresh worktree has no submodule working
+    trees, so the link dies by name. It fails LOUDLY; that is the whole
+    rule now. The old reason for this bullet is retired: `.incbin` no
+    longer carries a CWD-relative path. `src/net/ip65/ip65_blob.s` is a
+    bare `.incbin "ip65-c64.bin"` resolved through
+    `--bin-include-dir $(abspath $(IP65_BUILD))` in the Makefile (#116), so
+    a worktree three levels down assembles **its own** blob, not the parent
+    checkout's. Re-proven 2026-08-31 in that exact geometry: flipping one
+    byte of the worktree's blob moved the PRG hash, and restoring it moved
+    it back.
+  - To test blob provenance, **flip a byte** — never move the blob aside.
+    `make` regenerates it deterministically, reproducing the baseline hash,
+    which reads exactly like a live trap. That false positive has been hit.
   - **`libs/nistcurves` must be >= v0.11.2** (`CONTRACT_ZP_DEFINES`,
     knob-staleness guard). A stale checkout is caught in ~0.05 s by a
     source probe in `tools/integration/build_nistcurves_p256.sh` (#124);
     `tools/check_upstream_pins.py --worktree` reports checkout-vs-gitlink.
 
-**`make clean` after changing `BACKEND=` or any flag.** make tracks source
-mtimes, not the command line, and `BACKEND=` also selects the
-`-I src/net/$(BACKEND)` include path (`net_tuning.inc`). Two silent failure
-modes: a mixed link (ip65 PRG with UCI drain budget, same size, different
-hash) and no link at all (macOS GNU Make 3.81 has 1-second mtime resolution,
-so a same-second rebuild leaves the *other* backend's PRG in place, exit 0).
-Neither exit code nor file size proves a build; **compare the PRG's sha256**.
-`.o` hashes are never evidence — ca65 stamps build time into every object;
-ld65 does not propagate it, so the PRG is deterministic.
+**A flag change no longer needs `make clean` (#159).** make tracks source
+mtimes, not the command line, so this used to be a discipline you only had
+to forget once. It is now an enforced invariant: `build/flags.stamp` holds
+the fully expanded `CA65FLAGS`/`LD65FLAGS` (`LD65FLAGS` carries `$(CFG)`, so
+`BACKEND=` and the profile cfg variants ride along), is content-compared
+**at Makefile parse time**, and on any change deletes every `.o` and the
+PRG. Absence, not an mtime — which is what macOS GNU Make 3.81's 1-second
+resolution cannot defeat. Both silent failure modes the old rule guarded
+against are closed, and `tools/test_build_flags_stamp.py` pins each against
+a `make clean` oracle: the mixed link (`HTTPS_SNI=` invalidating `boot.o`
+but not `http.o`, which cost a false negative on #141) and no link at all
+(a same-second backend flip leaving the *other* backend's PRG in place at
+exit 0). Because the stamp holds the expanded command lines rather than a
+list of knob names, a new flag is covered the day it is added. The suite
+also pins the inverse — an unchanged flag set must still rebuild nothing.
 
-The one exception is `HTTPS_HOST`/`HTTPS_PATH`: a generated
-`build/https_host.inc` is content-compared **at Makefile parse time** and
-invalidates `boot.o` + the PRG, so no `make clean` is needed for those (#128).
-**`HTTPS_SNI` is NOT exempt — it needs `make clean`.** Its string rides the
-same include, but a non-empty value also adds `-D HTTPS_SNI_OVERRIDE=1`, read
-by `src/http.s` (the `http_get` prologue that writes `tls_hostname`) as well
-as `boot.s`. The compare deletes only `boot.o`, so `http.o` keeps the
-non-override code and you get a mixed link that embeds the SNI string but
-never runs the override — indistinguishable from not passing the flag. The
-PRG hash changes and the name greps out of the image (it is also `boot.s`'s
-default host), so only a diff against a cleaned build catches it. The general
-flag rule wins over this exception; `HTTPS_PORT` and `HTTPS_BODY_TO_REU` are
-pure `-D` flags outside the compare and were never exempt.
+The target *strings* `HTTPS_HOST`/`HTTPS_PATH`/`HTTPS_SNI` keep their own
+narrower stamp, the generated `build/https_host.inc` (#128): it invalidates
+`boot.o` + `http.o` only, so retargeting stays cheap. Only the strings are
+outside `flags.stamp`; a non-empty `HTTPS_SNI` still moves `CA65FLAGS` (it
+adds `-D HTTPS_SNI_OVERRIDE=1`), so the override's presence is stamped even
+though the name in it is not.
+
+Still true, and still how you prove a build: `.o` hashes are never evidence
+— ca65 stamps build time into every object; ld65 does not propagate it, so
+the PRG is deterministic and **its sha256 is the check**. One consequence
+of the stamp: `CA65FLAGS` carries two `$(abspath ...)` `.incbin` roots, so
+moving a checkout forces exactly one rebuild.
 
 Also: `$(PRG)`'s recipe `rm -f`s the target first, because ld65 writes
 nothing on a memory-area overflow and every rig loads the PRG by path — an
@@ -73,15 +89,21 @@ Targets: `make` (PRG + `build/labels.txt` + `build/c64-https.dbg`),
 `make package-verify`.
 
 Variables:
-  - `BACKEND=ip65|uci` — selects `cfg/c64-https-$(BACKEND).cfg` and
-    `src/net/$(BACKEND)/`. Default ip65.
+  - `BACKEND=ip65|uci` — selects `cfg/c64-https-$(BACKEND).cfg`,
+    `src/net/$(BACKEND)/`, and the `-I src/net/$(BACKEND)` include path
+    that resolves `net_tuning.inc`. Default ip65.
   - `USE_NISTCURVES_ONCHIP=1` — libs/nistcurves FP_ONCHIP_MUL profile: no
-    REU row-fetch DMA, wins above ~18-22 MHz. Uses
-    `cfg/c64-https-$(BACKEND)-onchip.cfg`. `$(error)`-guarded against
-    `USE_X25519_SIBLING` and the overlay-embed flags.
+    REU row-fetch DMA, wins above ~18-22 MHz. Keeps the **base**
+    `cfg/c64-https-$(BACKEND).cfg` — it only adds a `-D` and swaps the
+    archive. `$(error)`-guarded against `USE_X25519_SIBLING` and the
+    overlay-embed flags.
   - `USE_NISTCURVES_ONCHIP_COMB=1` — implies ONCHIP; Lim-Lee comb + boot
     precompute into REU bank 2 (**needs an REU**; ~45 s boot at 48 MHz,
     ~36 min at 1 MHz — rigs need `C64_INIT_WAIT`). Fastest above ~5-7 MHz.
+    This is the **only** flag that retargets `$(CFG)`, to
+    `cfg/c64-https-$(BACKEND)-onchip.cfg` — which exists for uci only, so
+    there is no ip65 comb build. Confirm from the `ld65 -C` line, not from
+    the profile name.
   - `USE_X25519_SIBLING=1` — links under **neither** backend today (see
     Known issues). Off by default, ships in nothing.
   - `EMBED_P256_OVERLAY=1` — **retired, `$(error)`-guarded (#118)**: the
@@ -345,6 +367,18 @@ Single suite: `TLS_CHACHA20_POLY1305_SHA256`, so the transcript hash is
 always SHA-256. The eleven bugs fixed getting here are listed in
 engineering-notes ("Summary of recent fixes").
 
+That arrow order is **enforced, not assumed** (#152). Both dispatchers
+expand `TLS_HS_SEQ_CHECK` from `src/tls_hs_seq.inc` — the UCI streaming arm
+at `@hdr_complete` in `src/tls_deframe.s` and the ip65 arm in `src/tls13.s`
+— so they cannot diverge; the macro derives the one legal message type from
+`tls_state` (no parallel "expected" byte to drift), and rejects before the
+transcript fold. The deframer error codes are `DF_ERR_*` at the top of
+`src/tls_deframe.s`, reported in `df_last_err`; the sequence rejection is
+**`DF_ERR_SEQ = $07`**. A CertificateRequest is the only RFC 8446-legal
+message the gate turns away (this client cannot answer one, so it was
+already refused a step later, as `DF_ERR_TYPE = $04`). Test:
+`tools/test_hs_sequence.py`.
+
 ## Known issues
 
   - **`USE_X25519_SIBLING=1` links under neither backend.** ip65:
@@ -590,11 +624,25 @@ vacuously (zero checks = fail; any `SKIP_*` = `PARTIAL VERIFICATION`).
 
   tools/test_entropy.py, test_hkdf.py, test_chained_hmac.py,
   test_keyschedule_steps.py, test_tls_handshake.py, test_http.py,
-  test_x509.py, test_x509_name.py (23 vectors, 9 rejects, 6 real leaves;
-  **`return 0` on a non-uci build — the whole suite exits green having
-  verified nothing**; the exemplars to copy are `test_x509.py` (missing
-  labels counted as failures) and `test_finished_verify.py` (missing label
-  = FATAL)), test_p384_overlay_hazard.py (fails under
+  test_x509.py, test_x509_name.py (**its vector count is conditional —
+  never quote one without the condition.** 11 synthetic vectors always run
+  (5 accept / 6 reject); +6 against live CA leaves fetched from wikipedia /
+  github / lwn, which `X509_NAME_OFFLINE=1` or being offline drops; +6
+  against `tools/https_e2e/certs/server.pem`, which a fresh clone does not
+  have — it is gitignored listener output, minted on demand by
+  `tools/https_e2e/ensure_certs.py`. So **17 / 9 on a fresh clone with
+  network, 23 / 12 once the certs exist**, 11 / 6 with neither (all three
+  measured 2026-08-31). The trap: both optional sets have the *same*
+  3-accept/3-reject shape, so 17 / 9 is produced two different ways —
+  fresh clone + network, and certs-present + `X509_NAME_OFFLINE=1` — and
+  the printed total tells you neither which sets ran nor whether the
+  real-cert path was covered. Read the per-vector lines. The suite also
+  reports a missing *cert* as "openssl unavailable" even with openssl on
+  PATH, which is how an earlier miscount survived. On a non-uci build it
+  exits **2** with a CANNOT RUN message, not 0 — that is the behaviour to
+  copy, along with `test_x509.py` (missing labels counted as failures) and
+  `test_finished_verify.py` (missing label = FATAL)),
+  test_p384_overlay_hazard.py (fails under
   ENABLE_P384_VERIFY=1 by design; needs a well-formed DER sig to reach the
   swap), test_finished_verify.py (18 cases), test_ecdsa_kat_oracle.py
   (6 vectors incl. 3 negative), test_tls_deframer.py, test_x25519.py.
@@ -603,9 +651,13 @@ vacuously (zero checks = fail; any `SKIP_*` = `PARTIAL VERIFICATION`).
 `test_finished_verify` and `test_chained_hmac`; there is no single
 "all pass" runner. **`pytest` is not the runner**: suites take
 `(transport, labels, seed)` positionally. `pytest.ini` pins `testpaths` to
-the three pure-logic modules; both rig dirs (`tests/`, `tools/uci/`) are
-`rig_*.py` and in `norecursedirs`; `tools/test_pytest_boundary.py` guards
-both directions. Bare `pytest` at root: 31 passed.
+the pure-logic modules — **that list is the enumeration; read it there, not
+here** — and `tools/test_pytest_boundary.py` proves it is exactly the set
+pytest can run, in both directions. Both rig dirs (`tests/`, `tools/uci/`)
+are `rig_*.py` and in `norecursedirs`, and each exits 5 on its own. A bare
+`pytest` at the root is green; the total is not quotable, because it tracks
+`testpaths` *and* the build state (`test_uci_data_acc.py` skips its cases
+without a UCI PRG in `build/`). Run it rather than citing a number.
 
 Negative-path coverage exists because an audit found the Finished-mismatch
 abort had no test: `test_finished_verify.py` (VICE, carry-latching stub)
