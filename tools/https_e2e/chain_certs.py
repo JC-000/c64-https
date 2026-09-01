@@ -88,11 +88,21 @@ def _gen_certs():
     return gen_certs
 
 
-def build_padded_intermediate(cn: str, pad_bytes: int) -> bytes:
+def build_padded_intermediate(cn: str, pad_bytes: int,
+                              sans: list[str] | None = None) -> bytes:
     """Mint one self-signed throwaway P-256 cert of ~(420 + pad_bytes) B.
 
     Returns the DER. The key is generated and discarded — these certs are
     padding, not signers of anything.
+
+    *sans* adds a subjectAltName extension carrying those dNSNames. The
+    padding intermediates of ``ensure_chain_certs`` want none (nothing
+    validates a name on them, and the C64 discards every entry after the
+    leaf), so it defaults to None and their bytes are unchanged. It exists
+    for callers that mint a cert to be used AS A LEAF against a build with
+    X509_VERIFY_NAME — ``tools/test_tls_deframer.py``'s wiki-sized leaf.
+    Such a cert needs a SAN or src/x509_name.s rejects it outright, exactly
+    as a browser rejects a SAN-less certificate (issue #161).
     """
     g = _gen_certs()
     crv = g.CURVES["p256"]
@@ -113,10 +123,18 @@ def build_padded_intermediate(cn: str, pad_bytes: int) -> bytes:
         g._seq(g._oid(g.OID_EC_PUBLIC_KEY), g._oid(g.OID_PRIME256V1)),
         g._bitstring(pub_point),
     )
-    # One non-critical private-OID extension carrying opaque padding.
-    extensions = g._explicit(3, g._seq(
-        g._seq(g._oid(_PAD_OID), g._octetstring(b"\x5a" * pad_bytes)),
-    ))
+    # One non-critical private-OID extension carrying opaque padding,
+    # optionally preceded by a subjectAltName (see the docstring).
+    ext_list = []
+    if sans:
+        # GeneralNames: dNSName is [2] IMPLICIT IA5String, i.e. tag 0x82 —
+        # same encoding gen_certs uses for the listener leaf.
+        san_value = g._seq(*[g._tlv(0x82, h.encode("ascii")) for h in sans])
+        ext_list.append(
+            g._seq(g._oid(g.OID_SUBJECT_ALT_NAME), g._octetstring(san_value)))
+    ext_list.append(
+        g._seq(g._oid(_PAD_OID), g._octetstring(b"\x5a" * pad_bytes)))
+    extensions = g._explicit(3, g._seq(*ext_list))
     tbs = g._seq(
         g._explicit(0, g._int(2)),
         g._int(secrets.randbits(159) | 1),
