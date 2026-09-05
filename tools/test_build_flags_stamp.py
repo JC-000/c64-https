@@ -80,6 +80,45 @@ UCI = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP=1")
 PRG = "build/c64-https.prg"
 STAMP = "build/flags.stamp"
 
+# Invocations that must NOT mutate the tree. The bare short forms are the
+# ones #174 reported; the COMBINED forms are what keep the guard from being
+# "simplified" back into that bug.
+#
+# `make -n --no-print-directory` is the discriminating case, and it is the
+# only one. GNU make 3.81 renders it as `MAKEFLAGS=[ --no-print-directory -n]`
+# — the letters are LAST, and they carry a leading dash — so the two
+# obvious-looking guards split exactly here:
+#
+#   $(firstword $(MAKEFLAGS))                    -> [--no-print-directory]
+#       finds an `n` and a `t` in the long option's NAME. Right verdict here,
+#       wrong reason; and on `make --no-print-directory` alone (no `-n`) the
+#       same reasoning calls a REAL build a dry run, skips the invalidation,
+#       and ships a mixed link. That is the direction
+#       test_an_unrelated_option_does_not_suppress_invalidation pins.
+#
+#   $(filter-out -%,$(firstword $(MAKEFLAGS)))   -> []
+#       drops the letters entirely because they are dash-prefixed, so a real
+#       build runs and DELETES THE TREE. This is #174 verbatim, and without
+#       the row below it passes every other test in this file — measured, by
+#       mutating the Makefile to that form: 9/9 green while
+#       `make -n --no-print-directory BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1`
+#       left 0 objects and no PRG at exit 0.
+#
+# So the bare forms alone cannot tell a correct guard from a destructive one.
+# Neither long option here is exotic: `--no-print-directory` contains both an
+# `n` and a `t`, `--warn-undefined-variables` an `n`, and either can arrive
+# from the environment, a parent make, or an IDE.
+DRY_RUN_INVOCATIONS = (
+    ("-n",),
+    ("-q",),
+    ("-t",),
+    ("-npq",),                              # what shell completion runs
+    ("-n", "--no-print-directory"),         # the discriminating case
+    ("--no-print-directory", "-n"),         # same, option order swapped
+    ("-t", "--no-print-directory"),
+    ("-q", "--warn-undefined-variables"),
+)
+
 
 def _toolchain_missing():
     for tool in ("ca65", "ld65"):
@@ -271,9 +310,14 @@ def test_dry_run_options_do_not_touch_the_tree():
         makes a LATER real build skip an invalidation it needed — the exact
         mixed link this file exists to prevent.
 
-    `-q` matters as much as `-n`: `$(firstword $(MAKEFLAGS))` is `q` there,
-    and `make -npq` (what shell completion runs to enumerate targets) is
-    `qpn`, so a guard that tests only for `n` misses both.
+    `-q` matters as much as `-n`, and `make -npq` (what shell completion runs
+    to enumerate targets) is a third spelling — so a guard that tests only
+    for `n` misses both. The COMBINED short+long invocations in
+    DRY_RUN_INVOCATIONS matter for a different reason: they are the only
+    rows that distinguish a correct guard from one that reads the letters
+    out of a long option's name, and without them a plausible
+    "simplification" of the Makefile restores #174 with this file fully
+    green. See the comment on that table.
     """
     missing = _toolchain_missing()
     if missing:
@@ -287,24 +331,25 @@ def test_dry_run_options_do_not_touch_the_tree():
         stamp = farm.path(STAMP).read_text()
         assert objs, "the baseline build produced no objects — vacuous"
 
-        for opt in ("-n", "-q", "-t", "-npq"):
-            farm.make(*comb, opts=[opt], check=False)
+        for opts in DRY_RUN_INVOCATIONS:
+            shown = " ".join(opts)
+            farm.make(*comb, opts=list(opts), check=False)
             assert farm.exists(PRG), (
-                f"`make {opt}` with a changed flag set DELETED {PRG}. A dry "
+                f"`make {shown}` with a changed flag set DELETED {PRG}. A dry "
                 "run must not mutate the tree: -n/-q/-t answer 'what would "
                 "this do?' and are the idiom shell completion uses."
             )
             assert farm.sha() == prg_sha, (
-                f"`make {opt}` rewrote {PRG}"
+                f"`make {shown}` rewrote {PRG}"
             )
             surviving = farm.mtimes()
             lost = sorted(set(objs) - set(surviving))
             assert not lost, (
-                f"`make {opt}` with a changed flag set deleted "
+                f"`make {shown}` with a changed flag set deleted "
                 f"{len(lost)} object(s), e.g. {lost[:3]}"
             )
             assert farm.path(STAMP).read_text() == stamp, (
-                f"`make {opt}` rewrote {STAMP} to a flag set that was never "
+                f"`make {shown}` rewrote {STAMP} to a flag set that was never "
                 "built. The next real build with the ORIGINAL flags would "
                 "then see a matching stamp and skip the invalidation it "
                 "needs — a mixed link produced by a dry run."
