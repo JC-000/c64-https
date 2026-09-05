@@ -34,11 +34,21 @@ release walks you through the choice:
 | `c64-https-uci-comb` | Ultimate 64 / C64 Ultimate at turbo, REU **on** | fastest — 1.73x quicker verify (16.4 s vs 28.4 s, U64E at 48 MHz). Builds a 16 KB table into REU bank 2 at each boot first: ~34 s at 64 MHz, ~45 s at 48 MHz. |
 
 Every image is built for **one** host, baked in at build time (`make
-HTTPS_HOST=...`). The packaging scripts do not override it, so the released
-images carry the Makefile default `www.foo.invalid` — an RFC 2606 / RFC 6761
-reserved name that deliberately cannot resolve on the public internet. Point
-it at the bundled test listener via your local DNS, or rebuild with your own
-`HTTPS_HOST=`. New in v0.4.2: the two **UCI** images
+HTTPS_HOST=...`). The packaging scripts never override it, so an image carries
+whatever the Makefile default was when it was built — and **that default
+changed after v0.4.2 was tagged**:
+
+- **v0.4.2's images carry `www.foo.bar`.** `.bar` is a delegated gTLD, so that
+  is a name a third party can register. It is NXDOMAIN today, but combine it
+  with the missing checks below and an unmodified v0.4.2 image would dial an
+  attacker-controlled host on its first GET if anyone ever registered it. This
+  is why it was renamed.
+- **Master's default is `www.foo.invalid`** — RFC 2606 / RFC 6761 reserved,
+  never delegated, so it cannot resolve at all. That rename (`cdf02b4`) is
+  **not in any release yet**.
+
+Either way, point the name at the bundled test listener via your local DNS, or
+rebuild with your own `HTTPS_HOST=`. New in v0.4.2: the two **UCI** images
 check the server's certificate actually names the host they asked for.
 `ip65-onchip` does not — the check is 491 B and that layout's largest free
 block is 56 B (issue #135). Read ["What this client does NOT
@@ -186,7 +196,8 @@ when it comes out all zero, as RFC 8446 §7.4.2 and RFC 7748 §6.1 require.
 (The fix is commit `47ab00c`; `git tag --contains 47ab00c` is empty, so
 **v0.4.2 — the current release — does not have it**. Build from master if you
 want it. An earlier draft of this section credited it to a "v0.4.3" that does
-not exist.) Before that check existed, a
+not exist. Issue #195 tracks which security fixes are master-only, and what
+if anything to do about the released images.) Before that check existed, a
 server (or an attacker who rewrote one ServerHello in passing) could send a
 low-order `key_share` and force every handshake and traffic key to be a
 function of the two *plaintext* hello messages — which would have made a
