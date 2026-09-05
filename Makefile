@@ -836,9 +836,12 @@ run: $(PRG)
 clean:
 	rm -rf build
 
-# Release packaging: build all four PRG variants (both backends x both crypto
-# profiles), put each on its own D64 plus a per-backend D64, generate the
-# single-file test listener, and write dist/MANIFEST.txt.
+# Release packaging: build the three shipped PRG variants (PACKAGE_VARIANTS in
+# tools/package/_common.sh, which is the matrix -- do not restate it here),
+# put each on its own D64, generate the single-file test listener, and write
+# dist/MANIFEST.txt.  There are deliberately NO per-backend combo disks: the
+# three-product lineup does not fit on a 664-block .d64, so one would have had
+# to silently omit a product (tools/package/build_d64.sh:98).
 #
 # The scripts run `make clean` between flag combinations themselves, so
 # `package` deliberately depends on no build artifact — and re-running it after
