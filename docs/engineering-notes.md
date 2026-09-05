@@ -853,8 +853,10 @@ went straight to these scripts never crossed it.
 
 **REU preflight (issue #97).** Every script here that exercises the
 crypto path — `rig_https_local.py` (and its `rig_https_print_body.py`
-/ `rig_https_local_p384.py` wrappers), `rig_https_bad_finished.py`,
-`bench_ecdsa_u64e.py` — calls `preflight_reu()` from
+/ `rig_https_local_p384.py` wrappers, which inherit the call by
+importing it), `rig_https_live.py`, `rig_https_wiki.py`,
+`rig_https_bad_finished.py`, `bench_ecdsa_u64e.py` — calls
+`preflight_reu()` from
 `tools/uci/_reu_preflight.py` under the DeviceLock, right after
 `enable_uci` and before the reset. A REU-profile build meeting a device
 with `RAM Expansion Unit: Disabled` now exits **4** in ~2 s with both

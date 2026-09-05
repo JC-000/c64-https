@@ -558,8 +558,10 @@ make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1
 ```
 
 Every script that exercises the crypto path (`rig_https_local.py`,
-`rig_https_bad_finished.py`, `rig_https_print_body.py`,
-`rig_https_local_p384.py`, `bench_ecdsa_u64e.py`) now **preflights this in one
+`rig_https_live.py`, `rig_https_wiki.py`, `rig_https_bad_finished.py`,
+`bench_ecdsa_u64e.py`, and the `rig_https_print_body.py` /
+`rig_https_local_p384.py` wrappers, which inherit it by importing
+`rig_https_local`) now **preflights this in one
 REST call and exits 4 in seconds** if a REU-profile build meets a device with no
 REU. It **also exits 4 when it cannot read the setting at all** — the read
 raised, the response had a shape it does not recognise, or the value came back
