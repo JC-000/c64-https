@@ -64,6 +64,14 @@ exit 0). Because the stamp holds the expanded command lines rather than a
 list of knob names, a new flag is covered the day it is added. The suite
 also pins the inverse — an unchanged flag set must still rebuild nothing.
 
+Parse time includes a dry run, so `make -n` used to delete the tree while
+answering "what would this build?". **`-n`/`-q`/`-t` are now exempt
+(#174)**: they still run the compare and `$(warning)` what a real build
+would delete, but they write nothing — not the stamp, not the objects.
+`-q` and the `make -npq` completion idiom matter as much as `-n`; the
+guard reads `$(firstword $(MAKEFLAGS))`, which is where GNU make puts the
+single-letter options. Real builds are byte-for-byte unchanged.
+
 The target *strings* `HTTPS_HOST`/`HTTPS_PATH`/`HTTPS_SNI` keep their own
 narrower stamp, the generated `build/https_host.inc` (#128): it invalidates
 `boot.o` + `http.o` only, so retargeting stays cheap. Only the strings are

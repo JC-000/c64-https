@@ -104,8 +104,8 @@ class Farm:
     def __exit__(self, *exc):
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def make(self, *flags, dry_run=False, check=True):
-        cmd = ["make"] + (["-n"] if dry_run else []) + list(flags)
+    def make(self, *flags, dry_run=False, opts=(), check=True):
+        cmd = ["make"] + (["-n"] if dry_run else []) + list(opts) + list(flags)
         proc = subprocess.run(cmd, cwd=self.dir, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if check:
@@ -222,14 +222,16 @@ def test_backend_flip_removes_the_other_backends_prg():
     macOS GNU Make 3.81 compares mtimes at 1-second resolution, so a
     same-second backend flip could leave the OTHER backend's PRG on disk
     and exit 0 — and every rig loads that path by name. The invalidation
-    happens during parse, so it is visible here with `make -n`: no recipe
-    runs, yet the stale PRG and objects must already be gone.
+    happens during parse, so the stale PRG and objects are gone before
+    make has even built its file database.
 
-    This case deliberately does not LINK ip65 — `make -n` is enough to
-    show the parse-time invalidation, and a real ip65 link would drag in
-    a blob build. (It is not a correctness restriction: the `.incbin`
-    CWD hazard that used to be cited here was retired by #116. See
-    FARM_LINKS above.)
+    This case deliberately does not LINK ip65 — a real ip65 link would
+    drag in a blob build this suite has no use for. The goal is
+    `build/flags.stamp`, which the parse-time block has already written
+    by the time make looks at it, so the invocation is a REAL build (no
+    `-n`) that assembles nothing and links nothing. It used to be spelled
+    `make -n BACKEND=ip65`, which relied on a dry run mutating the tree —
+    the defect fixed in #174.
     """
     missing = _toolchain_missing()
     if missing:
@@ -238,15 +240,82 @@ def test_backend_flip_removes_the_other_backends_prg():
     with Farm() as farm:
         farm.make(*UCI)
         assert farm.exists(PRG)
-        farm.make("BACKEND=ip65", dry_run=True, check=False)
+        farm.make("BACKEND=ip65", STAMP, check=False)
         assert not farm.exists(PRG), (
-            "a BACKEND flip left the UCI PRG in place. A dry run performs no "
-            "link, so whatever `make BACKEND=ip65` did next, "
+            "a BACKEND flip left the UCI PRG in place. This invocation "
+            "performs no link, so whatever `make BACKEND=ip65` did next, "
             "build/c64-https.prg was a UCI image that rigs load by path."
         )
         assert not farm.exists("build/tls13.o"), (
             "a BACKEND flip left UCI-flavoured objects in place; the next "
             "ip65 link would have reused them (mixed link)."
+        )
+
+
+def test_dry_run_options_do_not_touch_the_tree():
+    """Issue #174: `make -n`, `-q` and `-t` are contractually side-effect-free.
+
+    The stamp's compare/invalidate lives in a `$(shell …)` evaluated while
+    make PARSES the makefile — before the dependency graph exists, and
+    therefore before `-n` can suppress anything. `-n` suppresses *recipes*;
+    it does not suppress `$(shell)`. So asking "what would this build?" with
+    a flag set that differs from build/flags.stamp used to delete every
+    object and the PRG, exit 0, and print nothing about it. One `make -n`
+    destroyed a working tree during a supervised session on 2026-08-31.
+
+    Two things must survive a dry run, and the second is the subtle one:
+
+      * the objects and the PRG (the deletion), and
+      * build/flags.stamp itself (the `mv`). A dry run that rewrites the
+        stamp leaves it asserting a flag set that was never built, which
+        makes a LATER real build skip an invalidation it needed — the exact
+        mixed link this file exists to prevent.
+
+    `-q` matters as much as `-n`: `$(firstword $(MAKEFLAGS))` is `q` there,
+    and `make -npq` (what shell completion runs to enumerate targets) is
+    `qpn`, so a guard that tests only for `n` misses both.
+    """
+    missing = _toolchain_missing()
+    if missing:
+        print(f"SKIP: {missing} not on PATH")
+        return
+    comb = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1")
+    with Farm() as farm:
+        farm.make(*UCI)
+        prg_sha = farm.sha()
+        objs = farm.mtimes()
+        stamp = farm.path(STAMP).read_text()
+        assert objs, "the baseline build produced no objects — vacuous"
+
+        for opt in ("-n", "-q", "-t", "-npq"):
+            farm.make(*comb, opts=[opt], check=False)
+            assert farm.exists(PRG), (
+                f"`make {opt}` with a changed flag set DELETED {PRG}. A dry "
+                "run must not mutate the tree: -n/-q/-t answer 'what would "
+                "this do?' and are the idiom shell completion uses."
+            )
+            assert farm.sha() == prg_sha, (
+                f"`make {opt}` rewrote {PRG}"
+            )
+            surviving = farm.mtimes()
+            lost = sorted(set(objs) - set(surviving))
+            assert not lost, (
+                f"`make {opt}` with a changed flag set deleted "
+                f"{len(lost)} object(s), e.g. {lost[:3]}"
+            )
+            assert farm.path(STAMP).read_text() == stamp, (
+                f"`make {opt}` rewrote {STAMP} to a flag set that was never "
+                "built. The next real build with the ORIGINAL flags would "
+                "then see a matching stamp and skip the invalidation it "
+                "needs — a mixed link produced by a dry run."
+            )
+
+        # And the tree is still genuinely usable: a real rebuild of the
+        # baseline flags must be a no-op, not a full rebuild.
+        proc = farm.make(*UCI)
+        assert farm.mtimes() == objs, (
+            "after the dry runs, a real rebuild of the SAME flags "
+            "re-assembled objects:\n" + proc.stdout
         )
 
 
