@@ -264,7 +264,13 @@ def preflight_reu(
     :param labels_path: ``build/labels.txt`` from the current link.
     :param stream: where to print progress (default ``sys.stdout``).
     :returns: the detected profile, ``"onchip"`` or ``"reu"``.
-    :raises ReuPreflightError: REU-profile build, REU reported Disabled.
+    :raises ReuPreflightError: on a REU-profile build, for any of three
+        outcomes — the device reported the REU **Disabled**; the read
+        **raised**; or the read returned nothing usable (an unrecognised
+        response shape, or an empty value). The last two are failures and
+        not warnings on purpose: see the fail-closed note in the body and
+        in the module docstring. Never raised for an on-chip build, which
+        makes no device call, nor when ``C64_SKIP_REU_PREFLIGHT`` is set.
     """
     out = stream if stream is not None else sys.stdout
 
@@ -307,14 +313,18 @@ def preflight_reu(
             )
         ) from exc
 
-    if enabled is None:
-        raise ReuPreflightError(
-            _unreadable_message(
-                "the harness returned a shape this check does not "
-                "recognise (no readable value in the response)",
-                reason,
-            )
+    if enabled is None or not enabled.strip():
+        # Empty is grouped with unrecognised, not with "Disabled". An empty
+        # enum value teaches us nothing about the device, and the two
+        # messages send the operator to different machines — the Disabled
+        # text sends them to the settings menu for a fact not in evidence.
+        detail = (
+            "the value came back empty"
+            if enabled is not None else
+            "the harness returned a shape this check does not "
+            "recognise (no readable value in the response)"
         )
+        raise ReuPreflightError(_unreadable_message(detail, reason))
 
     if enabled.strip().lower() != "enabled":
         raise ReuPreflightError(_failure_message(enabled, reason))
@@ -361,21 +371,30 @@ def _unreadable_message(detail: str, reason: str) -> str:
         "not a\n"
         "verified one, so the run stops here where it costs seconds.\n"
         "\n"
-        "Likely causes:\n"
+        "Likely causes, most common first:\n"
         "\n"
-        "  1. c64-test-harness changed the shape of its config accessors. "
+        "  1. The device is unreachable, or REST is refusing. Check it with\n"
+        "     tools/uci/boot_check.py before concluding anything. If REST "
+        "refuses\n"
+        "     instantly while ping still answers, that is the writemem "
+        "exhaustion\n"
+        "     wedge (GideonZ/1541ultimate#686) — tools/uci/_temp_gc.py. Run "
+        "the\n"
+        "     diagnostic ladder; do NOT jump to 'firmware corruption', which "
+        "is a\n"
+        "     verdict this project has reached wrongly and repeatedly.\n"
+        "\n"
+        "  2. c64-test-harness changed the shape of its config accessors. "
         "This repo\n"
         "     imports it from a shared editable venv, so a merge in that "
         "repo lands\n"
-        "     here immediately (issue #179 was exactly that: their PR #226 "
-        "made\n"
-        "     get_config_item return the item map). Check\n"
+        "     here immediately with no commit on our side (issue #179 was "
+        "exactly\n"
+        "     that: their PR #226 made get_config_item return the item map). "
+        "Check\n"
         "     Ultimate64Client.get_config_value / get_config_item against\n"
         "     tools/uci/_reu_preflight.py, and file it in c64-test-harness "
         "first.\n"
-        "\n"
-        "  2. The device is unreachable or wedged — try tools/uci/"
-        "boot_check.py.\n"
         "\n"
         "  3. The firmware does not expose this config item under this name.\n"
         "\n"

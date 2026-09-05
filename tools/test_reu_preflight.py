@@ -256,6 +256,74 @@ def test_onchip_build_makes_no_device_call() -> None:
     assert "no REU required" in out
 
 
+def test_empty_current_is_unreadable_not_disabled() -> None:
+    """An empty ``current`` is an inconclusive read, not a disabled REU.
+
+    Both outcomes stop the run, so this is only about which of the two
+    messages the operator gets — and they point at different machines. The
+    "Disabled" text sends them to the device's settings menu; here the
+    device said nothing intelligible, and nothing has been learned about
+    whether the REU is there.
+    """
+    client = FakeClient(item={"current": "", "values": ["", "Enabled"]})
+    exc = _assert_raises_preflight(client, what="empty current")
+    assert "could not read" in str(exc), (
+        "an empty value was reported as a disabled REU. It is an "
+        f"unreadable one — nothing was learned about the device:\n{exc}"
+    )
+
+
+def test_standalone_runner_reports_a_converted_exception() -> None:
+    """The standalone runner must survive a non-AssertionError and go on.
+
+    The house pattern (test_pytest_boundary.py, test_runner_coverage.py)
+    catches only AssertionError, and for those two it is right: they are
+    pure AST inspection and nothing else can be raised. It does not
+    transfer here. The code under test deliberately converts *any*
+    exception into ReuPreflightError, which is exactly how the fake
+    client's "you must not call me" AssertionError comes back — so a
+    regression in the on-chip guard reaches the runner wearing a
+    ReuPreflightError, escapes the except, and aborts the run partway with
+    the remaining tests unrun and a REU PREFLIGHT FAILED banner on screen
+    that reads as "your device has no REU".
+
+    Measured on a mutant with the on-chip early return removed: 6 ok
+    lines, then a traceback, three tests never run.
+    """
+    ran = []
+
+    def passing():
+        ran.append("passing")
+
+    def converted():
+        ran.append("converted")
+        try:
+            raise AssertionError("no device call for an onchip build")
+        except AssertionError as exc:
+            raise pf.ReuPreflightError("REU PREFLIGHT FAILED\n...banner...") from exc
+
+    buf = io.StringIO()
+    stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        rc = _main(tests={"test_a_converted": converted,
+                          "test_b_passing": passing})
+    finally:
+        sys.stdout = stdout
+    out = buf.getvalue()
+
+    assert ran == ["converted", "passing"], (
+        f"the runner stopped at the first non-AssertionError; ran {ran!r}. "
+        "Every later test is then silently unrun."
+    )
+    assert rc == 1, f"a raising test must fail the run; rc={rc}"
+    assert "test_b_passing" in out, f"later tests were not reported:\n{out}"
+    assert "no device call for an onchip build" in out, (
+        "the runner reported the converted ReuPreflightError without the "
+        f"AssertionError that caused it, which is the whole diagnosis:\n{out}"
+    )
+
+
 def test_skip_env_still_bypasses() -> None:
     """C64_SKIP_REU_PREFLIGHT=1 is the documented escape hatch."""
     client = FakeClient(item=AssertionError("skipped preflight must not call out"))
@@ -264,16 +332,57 @@ def test_skip_env_still_bypasses() -> None:
     assert client.calls == []
 
 
-def _main() -> int:
+def _first_assertion_cause(exc):
+    """The first AssertionError in *exc*'s cause/context chain, if any.
+
+    The fake client signals "you must not have called me" by raising
+    AssertionError. ``preflight_reu`` converts any exception into a
+    ReuPreflightError whose banner is about a missing REU, so the sentence
+    that actually diagnoses the regression is buried in ``__cause__``.
+    Dig it back out and lead with it.
+    """
+    seen = set()
+    cur = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, AssertionError):
+            return cur
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+def _main(tests=None) -> int:
+    """Run the checks without pytest. *tests* is a {name: callable} map.
+
+    Unlike this repo's other standalone guards (test_pytest_boundary.py,
+    test_runner_coverage.py), this one must catch more than AssertionError.
+    Those two are pure AST inspection and can raise nothing else; the code
+    under test *here* deliberately converts any exception into
+    ReuPreflightError. Catching only AssertionError let a regression in the
+    on-chip guard abort the whole run partway — measured on a mutant with
+    the early return removed: six ok lines, a traceback, three tests never
+    run, and a "REU PREFLIGHT FAILED" banner on screen that reads as a
+    device problem rather than a test failure. An unrun test is not a
+    passing one, so every case gets its own line either way.
+    """
+    if tests is None:
+        tests = {n: f for n, f in globals().items()
+                 if n.startswith("test_") and callable(f)}
     failures = 0
-    for name, fn in sorted(globals().items()):
-        if not name.startswith("test_") or not callable(fn):
-            continue
+    for name, fn in sorted(tests.items()):
         try:
             fn()
         except AssertionError as exc:
             failures += 1
             print(f"FAIL {name}: {exc}")
+        except Exception as exc:      # noqa: BLE001 — a raise is a result
+            failures += 1
+            cause = _first_assertion_cause(exc)
+            summary = str(exc).strip().splitlines()
+            summary = summary[0] if summary else ""
+            print(f"ERROR {name}: {type(exc).__name__}: {summary}")
+            if cause is not None:
+                print(f"       caused by AssertionError: {cause}")
         else:
             print(f"ok   {name}")
     print("FAILED" if failures else "PASS")

@@ -858,7 +858,9 @@ crypto path — `rig_https_local.py` (and its `rig_https_print_body.py`
 `tools/uci/_reu_preflight.py` under the DeviceLock, right after
 `enable_uci` and before the reset. A REU-profile build meeting a device
 with `RAM Expansion Unit: Disabled` now exits **4** in ~2 s with both
-remedies named, instead of spinning ~44 min at `KEYS ENC1 RX`. The
+remedies named, instead of spinning ~44 min at `KEYS ENC1 RX`. Since #179
+it exits 4 on an *unreadable* setting as well — a raise, an unrecognised
+response shape, or an empty value (see the next paragraph). The
 profile is read from `build/labels.txt` — onchip markers are checked as
 a **union** (`LIB_NISTCURVES_REU_BANKS_USED == 0`, `gen_mul_row`,
 `fe_gen_mul_row`, `sqtab_reserved`) so renaming one upstream cannot
@@ -871,6 +873,82 @@ error for a mystery on someone else's branch. `C64_SKIP_REU_PREFLIGHT=1`
 bypasses. Scripts that never touch the REU (`boot_check`, `phase2`,
 `phase3_tcp_echo`, `rig_http_local`, `rig_http_live`) are deliberately
 not guarded.
+
+**The preflight failed open for a while, and nothing here changed to
+cause it (#179).** `c64-test-harness` is installed **editable** from a
+sibling working tree (`~/.local/share/c64-test-harness/venv` →
+`~/Documents/c64-test-harness`), so a merge in that repo alters this
+repo's behaviour with no commit on our side. Their PR #226 (their issue
+#214) changed `Ultimate64Client.get_config_item` from returning the REST
+envelope `{category: {item: ...}}` to returning the item's own map
+`{"current": ..., "values": [...], "default": ...}`. Our
+`_extract_config_value` did `resp.get(category, resp).get(item)`: against
+the item map neither key exists, so it returned `None`, the preflight
+printed `WARNING — unrecognised shape (...); continuing unchecked`, and
+the run carried on with #97's guard silently absent. Reproduced against
+the real installed `Ultimate64Client` with only `_get_json` stubbed —
+master returned `'reu'` and warned.
+
+Two things came out of that, and the second is the general one.
+
+The narrow fix reads every shape: `_read_config_value` prefers
+`get_config_value` (new in #226 — it returns `current` and resolves names
+the way the firmware does), and falls back to `get_config_item` +
+`_extract_config_value` on an older harness, which is load-bearing rather
+than decorative because `get_config_value` did not exist before #226.
+`_extract_config_value` tests for a top-level `"current"` before the
+category descent; that is unambiguous, since a REST envelope is keyed by
+category name. Either direction of the harness landing now works.
+
+The general one: **an unreadable probe is not a result.** The old code
+called itself advisory and warned. It is not advisory — it is the only
+thing between a REU-less device and 44 minutes of apparent lockup, and a
+WARNING at minute one of a 45-minute run is not read by anyone. It now
+raises. Failing closed was checked against the paths that must stay open
+first: the on-chip profile makes no device call at all (so the
+configuration we recommend to REU-less users is untouched),
+`C64_SKIP_REU_PREFLIGHT=1` still bypasses everything, and all five
+callers already `except ReuPreflightError` → `return 4`.
+
+An **empty** `current` is grouped with "unreadable", not with "Disabled".
+Both stop the run, so this is only about which message the operator gets,
+and they point at different machines: the Disabled text sends someone to
+the device's settings menu for a fact not in evidence.
+
+`tools/test_reu_preflight.py` pins both halves with a faked client (no
+VICE, no hardware, ~10 ms): item map and legacy envelope both read,
+`get_config_value` preferred when present, raise/unparseable/empty all
+fail closed, on-chip and skip paths still touch nothing. Against the
+pre-fix code 6 of its 10 checks failed; the 4 that passed either side are
+the must-not-break guards, which is what made the other 6 evidence.
+
+Two residual risks, both inherited rather than introduced, neither
+closable without a device: whether #226's item map matches real firmware
+on the wire (its shape came from the harness's own live-verified
+docstrings), and whether any firmware returns a non-empty `errors` array
+on a *successful* single-item GET — post-#226 that raises, which now
+aborts the run here. No instance is recorded in the harness tree.
+
+Two traps worth keeping. First, **`boot_check.py` does not call
+`preflight_reu`** (see the deliberate exclusion above), so it cannot
+exercise this path — the cheapest hardware check that does is a
+crypto-path rig on a REU-enabled device, or leaving
+`C64_SKIP_REU_PREFLIGHT` unset against a deliberately disabled REU.
+Second, the standalone `python3 tools/test_reu_preflight.py` runner had
+to break this repo's house pattern of catching only `AssertionError`
+(`test_pytest_boundary.py`, `test_runner_coverage.py`). Those two are
+pure AST inspection and can raise nothing else. This suite is the first
+whose code under test *converts* arbitrary exceptions: the fake client's
+"you must not have called me" `AssertionError` comes back wrapped in a
+`ReuPreflightError`, escapes an `AssertionError`-only handler, and aborts
+the run. Measured on a mutant with the on-chip early return removed: six
+`ok` lines, a traceback, three tests never run — and the most prominent
+text on screen was the `REU PREFLIGHT FAILED` banner, which reads as "your
+device has no REU" rather than "the on-chip guard regressed". The runner
+now catches `Exception`, digs the causing `AssertionError` out of the
+`__cause__` chain, and prints one `ERROR` line per case; the same mutant
+now reports 11 ok + 1 ERROR naming the real cause. pytest handled this
+correctly all along, which is the argument for it being the primary path.
 
 The scripts:
 
