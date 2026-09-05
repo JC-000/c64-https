@@ -432,10 +432,7 @@ def test_an_unrelated_option_does_not_suppress_invalidation():
         exactly the `make clean` image — the end-to-end statement, and the
         one that catches a guard that merely warns without acting.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     # Cheap probe: real build, links nothing (the goal is already up to
     # date once the parse-time block has written it), two common long
     # options plus one that shares no letters with n/q/t.
