@@ -319,6 +319,83 @@ def test_dry_run_options_do_not_touch_the_tree():
         )
 
 
+def test_an_unrelated_option_does_not_suppress_invalidation():
+    """The other half of #174, and the one that bit: a REAL build must invalidate.
+
+    The dry-run guard has to answer "is this -n/-q/-t?" and it has exactly
+    two ways to be wrong. The destructive direction (a dry run that deletes)
+    is what #174 reported and what the test above pins. THIS pins the
+    dangerous direction: a real build misread as a dry run skips the
+    invalidation, and the result is precisely the mixed link build/flags.stamp
+    exists to prevent — same PRG size, different hash, exit 0, no diagnostic.
+
+    The trap is that `$(firstword $(MAKEFLAGS))` is NOT reliably the
+    single-letter option bundle. GNU make 3.81 puts long options in their own
+    words, and the letters can land LAST and dash-prefixed:
+
+        make                           MAKEFLAGS=[]
+        make -n                        MAKEFLAGS=[n]
+        make --no-print-directory      MAKEFLAGS=[ --no-print-directory]
+        make -n --no-print-directory   MAKEFLAGS=[ --no-print-directory -n]
+
+    `--no-print-directory` contains an `n` AND a `t`, and
+    `--warn-undefined-variables` contains an `n` — so a guard that searches
+    the first word classifies both as dry runs and lets a real build through
+    with no invalidation. Neither option is exotic; either can also arrive
+    from the environment, a parent make, or an IDE.
+
+    Two probes, in increasing cost:
+
+      * a real invocation with an extra option word must still delete the
+        other backend's objects and PRG at parse time, and
+      * a real profile flip with an extra option word must still produce
+        exactly the `make clean` image — the end-to-end statement, and the
+        one that catches a guard that merely warns without acting.
+    """
+    missing = _toolchain_missing()
+    if missing:
+        print(f"SKIP: {missing} not on PATH")
+        return
+    # Cheap probe: real build, links nothing (the goal is already up to
+    # date once the parse-time block has written it), two common long
+    # options plus one that shares no letters with n/q/t.
+    for opt in ("--no-print-directory", "--warn-undefined-variables", "--silent"):
+        with Farm() as farm:
+            farm.make(*UCI)
+            assert farm.exists(PRG)
+            farm.make(opt, "BACKEND=ip65", STAMP, check=False)
+            assert not farm.exists(PRG), (
+                f"`make {opt} BACKEND=ip65` did NOT invalidate. It is a real "
+                "build, not a dry run, so the parse-time block must have "
+                "deleted the UCI PRG — every rig loads that path by name."
+            )
+            assert not farm.exists("build/tls13.o"), (
+                f"`make {opt} BACKEND=ip65` left UCI-flavoured objects in "
+                "place; the next ip65 link would reuse them (mixed link)."
+            )
+
+    # The end-to-end statement, on the option that carries both an `n` and
+    # a `t`: the image a real build produces must not depend on whether an
+    # unrelated option was typed.
+    comb = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1")
+    oracle = _clean_build_sha(*comb)
+    with Farm() as farm:
+        farm.make(*UCI)
+        onchip = farm.sha()
+        farm.make("--no-print-directory", *comb)
+        flipped = farm.sha()
+    assert onchip != oracle, "comb and onchip images are identical — vacuous"
+    assert flipped == oracle, (
+        "MIXED LINK: `make --no-print-directory` with changed flags produced\n"
+        f"  {flipped}\nbut a clean build of the same flags produces\n"
+        f"  {oracle}\n"
+        "An unrelated long option was misread as -n/-q/-t, so the parse-time "
+        "invalidation never ran and the link reused the previous profile's "
+        "objects. Same size, different hash, exit 0 — the failure mode "
+        "CLAUDE.md says only a sha256 catches."
+    )
+
+
 def test_unchanged_flags_rebuild_nothing():
     """The inverse property: the stamp must not make every build a rebuild."""
     missing = _toolchain_missing()

@@ -68,9 +68,17 @@ Parse time includes a dry run, so `make -n` used to delete the tree while
 answering "what would this build?". **`-n`/`-q`/`-t` are now exempt
 (#174)**: they still run the compare and `$(warning)` what a real build
 would delete, but they write nothing — not the stamp, not the objects.
-`-q` and the `make -npq` completion idiom matter as much as `-n`; the
-guard reads `$(firstword $(MAKEFLAGS))`, which is where GNU make puts the
-single-letter options. Real builds are byte-for-byte unchanged.
+`-q` and the `make -npq` completion idiom matter as much as `-n`. The
+guard has to find the single-letter options in `MAKEFLAGS`, and
+`$(firstword ...)` is **not** where they are: a long option arrives as
+its own `--word` and pushes the letters elsewhere, so
+`make -n --no-print-directory` reads `[ --no-print-directory -n]` — last,
+and dash-prefixed. Worse, `--no-print-directory` itself contains an `n`
+and a `t`, so searching the first word calls a *real* build a dry run and
+skips an invalidation it needed. The guard therefore takes every word
+that is neither `--`-prefixed nor a `VAR=value` assignment and strips one
+leading dash; the option matrix behind that is in the Makefile comment
+and pinned by two tests. Real builds are byte-for-byte unchanged.
 
 The target *strings* `HTTPS_HOST`/`HTTPS_PATH`/`HTTPS_SNI` keep their own
 narrower stamp, the generated `build/https_host.inc` (#128): it invalidates

@@ -604,25 +604,49 @@ FLAGS_STAMP := build/flags.stamp
 # working tree on 2026-08-31, and `make -npq` is what shell tab-completion runs
 # to enumerate targets.
 #
-# GNU make collects the single-letter options into the FIRST word of
-# MAKEFLAGS, with no leading dash. Measured on GNU Make 3.81 (macOS):
+# Finding the single-letter options is the whole difficulty, and the obvious
+# answer is WRONG. `$(firstword $(MAKEFLAGS))` holds the letter bundle only
+# when no long option is present; long options arrive as their own `--word`s
+# and push the letters elsewhere. Measured on GNU Make 3.81 (macOS):
 #
-#     make           ->  []          make -q        ->  [q]
-#     make -n        ->  [n]         make -t        ->  [t]
-#     make --dry-run ->  [n]         make -npq      ->  [qpn]
-#     make -s -n     ->  [sn]        make BACKEND=uci HTTPS_HOST=en.host.invalid -> []
+#     make                              ->  []
+#     make -n                           ->  [n]
+#     make -q                           ->  [q]
+#     make -t                           ->  [t]
+#     make --dry-run                    ->  [n]
+#     make -npq                         ->  [qpn]
+#     make -s -n                        ->  [sn]
+#     make BACKEND=uci HTTPS_HOST=en.host.invalid  ->  []
+#     make --no-print-directory         ->  [ --no-print-directory]
+#     make --warn-undefined-variables   ->  [ --warn-undefined-variables]
+#     make -n --no-print-directory      ->  [ --no-print-directory -n]
+#     make --no-print-directory --warn-undefined-variables
+#                                       ->  [ --warn-undefined-variables - --no-print-directory]
 #
-# Only the first word: later words carry command-line variable ASSIGNMENTS
-# (GNU make 4.x appends them after a `--`), and a host value such as
-# `en.host.invalid` contains an `n`. The `=` test below is belt-and-braces for
-# the same reason.
+# Two things the last four rows kill. `--no-print-directory` contains an `n`
+# AND a `t`; `--warn-undefined-variables` contains an `n` — so searching the
+# first word calls a REAL build a dry run, skips the invalidation, and the
+# link reuses the previous profile's objects. That is the mixed link this
+# whole mechanism exists to prevent, produced by the guard meant to protect
+# it, and it is worse than the bug in #174: same PRG size, different hash,
+# exit 0. And the letters are not first, nor undashed, when a long option is
+# present, so `$(filter-out -%,$(firstword ...))` is not a fix either — it
+# re-opens #174 on `make -n --no-print-directory`. Both were measured, both
+# directions.
+#
+# So: take every word that is neither `--`-prefixed nor a `VAR=value`
+# assignment (make 4.x appends those after a `--`), and strip one leading
+# dash. A stray bare `-` word, as in the last row above, patsubsts to the
+# empty string and drops out. 52/52 correct across the option matrix in
+# tools/test_build_flags_stamp.py's two guard tests.
+#
 # Testing for `n` alone is not enough — `make -q` is equally destructive and
-# equally a dry run.
-MAKE_OPT_LETTERS := $(firstword $(MAKEFLAGS))
-MAKE_DRY_RUN := $(if $(findstring =,$(MAKE_OPT_LETTERS)),,$(strip \
+# equally a dry run, and `-t` is the third.
+MAKE_OPT_LETTERS := $(patsubst -%,%,$(filter-out --% %=%,$(MAKEFLAGS)))
+MAKE_DRY_RUN := $(strip \
     $(findstring n,$(MAKE_OPT_LETTERS)) \
     $(findstring q,$(MAKE_OPT_LETTERS)) \
-    $(findstring t,$(MAKE_OPT_LETTERS))))
+    $(findstring t,$(MAKE_OPT_LETTERS)))
 
 # Under a dry run each block below still runs its COMPARE — it just reports
 # instead of acting, so `make -n` stays an honest answer to "what would a build
