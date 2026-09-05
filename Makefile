@@ -326,7 +326,8 @@ USE_OVERLAY_P256_EMBED ?= $(EMBED_P256_OVERLAY)
 # Issue #118: the W3 P-256 overlay embed cannot be built and, if it could,
 # would corrupt the running image. Fail here rather than three rules later
 # with an error that names a library segment (c64-lib-contract §6.3: a knob
-# naming an axis selects it or fails loudly). Two independent reasons,
+# naming an axis selects it or fails loudly; §6.3 was retired at contract
+# v1.0.0 and resolves at tag v0.17.1). Two independent reasons,
 # both measured at libs/nistcurves v0.11.2:
 #   1. LIB_NISTCURVES_P256_CODE is 8,324 B; OVERLAY_REGION is 7,680 B.
 #      The 644 B shortfall survived every pin from v0.7.0 to v0.11.2, so

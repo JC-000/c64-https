@@ -130,9 +130,11 @@ namespaced per §13.2: ip65 `$40-$7F`, UCI `$80-$BF`.
 
 §13 was retired at contract v1.0.0 (a network backend is source in its
 consumer's own tree, so it never crossed a library boundary); the §13.x
-numbers above resolve at tag `v0.17.1`
-(`git show v0.17.1:SPEC.md`). Nothing moved: the contract is prose here,
-never a build input, and `src/net_abi.inc` is the normative source.
+numbers above resolve at tag `v0.17.1`, in a c64-lib-contract checkout.
+No §13 assert has a contract-derived counterparty — the contract is prose
+here, never a build input — so `src/net_abi.inc` is the normative source.
+The §13.2 error-code allocation table moved rather than vanishing: it is
+now `c64-wireguard/src/net_abi.inc`, canonical for both family ranges.
 
 ### TLS 1.3 Cipher Suite
 

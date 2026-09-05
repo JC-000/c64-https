@@ -7,9 +7,29 @@
 ; so each code names the adapter entry point that failed rather than a
 ; driver-level cause; ip65's own `ip65_error` byte is not surfaced.
 ;
-; The allocation is recorded in SPEC §13.2's table. Allocate a new code
-; THERE first, then here — the range is shared with every ip65-family
-; backend in the fleet.
+; **WHERE TO ALLOCATE A NEW CODE — this changed.** SPEC §13.2 was retired
+; at c64-lib-contract v1.0.0 (text permanent at tag v0.17.1), so the
+; instruction that stood here — "allocate in the §13.2 table first" — no
+; longer resolves. The registry moved, it did not vanish:
+; **`c64-wireguard/src/net_abi.inc`** now carries the reconstituted table
+; and declares itself canonical. Allocate THERE first, then here. A
+; published value is never reassigned.
+;
+; The range above $45 is NOT free. Codes owned by c64-wireguard's ip65
+; backend, listed so nobody here mints over them (this repo emits none):
+;
+;   $46  NET_ERR_IP65_UDP_LISTEN   theirs; udp_add_listener refused the bind
+;   $47  NET_ERR_IP65_UDP_SEND     theirs, RESERVED and never emitted — they
+;                                  export the equate + asserts so it cannot
+;                                  be quietly reused (wg#120)
+;   $48  NET_ERR_IP65_WAIT_TIMEOUT theirs, minted AFTER the retirement (wg#120)
+;   $49  NET_ERR_IP65_UDP_UNBIND   theirs, minted AFTER the retirement (wg#120)
+;
+; That range is why this matters: wg#120's FIRST commit minted $40-$44 by
+; picking free-looking bytes, and $41-$45 were already ours — a second live
+; collision, caught in review three weeks after the $88 one. Remapped before
+; merge. Comments only, deliberately: an equate here would imply we emit
+; them. Their registry is the authority, not this snapshot (#184).
 
 .ifndef IP65_ERRORS_INC_INCLUDED
 IP65_ERRORS_INC_INCLUDED = 1

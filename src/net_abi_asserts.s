@@ -1,7 +1,7 @@
 ; src/net_abi_asserts.s — c64-lib-contract SPEC §13.8 consumer intake asserts.
 ;
 ; CITATION ANCHOR: §13 was retired at contract v1.0.0; its §13.x numbers
-; resolve at tag `v0.17.1` only (`git show v0.17.1:SPEC.md`). The asserts
+; resolve at tag `v0.17.1` only, in a c64-lib-contract checkout. The asserts
 ; below are unaffected — every symbol they touch is defined in this repo
 ; (NET_BACKEND_FAMILIES from src/net/<backend>/net_manifest.s, NET_FAMILY_*
 ; from src/net/net_families.inc, TCP_RECV_MASK from src/constants.inc) and

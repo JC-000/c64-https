@@ -22,6 +22,10 @@
 
 .include "constants.inc"
 .include "ip65_symbols.inc"
+; CITATION ANCHOR: §13 was retired at c64-lib-contract v1.0.0; its numbers
+; resolve at tag v0.17.1 only (in a c64-lib-contract checkout). The error
+; allocation table moved to `c64-wireguard/src/net_abi.inc` — allocate there
+; first. See src/net_abi.inc for the full anchor.
 .include "ip65_errors.inc"      ; NET_ERR_IP65_* ($40-$7F, SPEC §13.2)
 .include "net_states.inc"       ; NET_TCP_* (SPEC §13.1)
 

@@ -17,7 +17,8 @@
 
 .segment "NET_CODE"
 
-; Span labels for the §13.7 footprint assert in net_manifest.s.
+; Span labels for the §13.7 footprint assert in net_manifest.s. (§13 retired
+; at contract v1.0.0; §13.x resolves at tag v0.17.1 — see src/net_abi.inc.)
 .export ip65_blob_start, ip65_blob_end
 ip65_blob_start:
 

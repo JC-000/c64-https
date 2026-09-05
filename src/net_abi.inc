@@ -6,11 +6,17 @@
 ; CITATION ANCHOR. §13 was RETIRED at contract v1.0.0 (2026-09-03), on the
 ; grounds that a network backend is source in its consumer's own tree and so
 ; never crossed a library boundary. Every §13.x number in this file resolves
-; at tag `v0.17.1` and nowhere else: `git show v0.17.1:SPEC.md`. Nothing
-; moved — the contract was never a build input here, and every name below is
-; defined, exported and asserted inside this repo — so THIS FILE is the
-; normative source now, not a restatement of one. Change the surface here
-; first; there is no upstream to align with.
+; at tag `v0.17.1` and nowhere else: `show v0.17.1:SPEC.md`, run in a
+; c64-lib-contract checkout — that repo is not a submodule here, so the
+; command fails from this tree.
+;
+; No §13 assert has a contract-derived counterparty (§13 defined no numeric
+; value we import), so no contract release can break a build. THIS FILE is
+; the normative source for the surface now, not a restatement of one; change
+; it here first. The ONE thing that did not stay home is the §13.2 error-code
+; allocation table, which spanned two consumers: it now lives in
+; `c64-wireguard/src/net_abi.inc`, which declares itself canonical for both
+; family ranges. Allocate a new net_last_error code THERE first (#184).
 ;
 ; Every consumer TU that touches the network `.include`s it, and every symbol
 ; below is `.import`ed — so a backend that stops exporting one fails the

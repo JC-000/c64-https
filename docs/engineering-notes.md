@@ -3245,7 +3245,7 @@ find the accepted length by bisection, not hard-code it.
 
 The contract released **v1.0.0** on 2026-09-03, cutting SPEC.md from 40,737
 words (v0.17.1) to 5,154 and retiring **§9, §12, §13, §14, §15** plus
-**§6.3, §6.6, §6.7**. **v1.1.0** followed 50 minutes later (§7: the ABI
+**§6.3, §6.6, §6.7**. **v1.1.0** followed 67 minutes later (§7: the ABI
 counter turns on what the code does, not on whether the export list
 changed), settling upstream issue #167 — which was open at v1.0.0 and is
 now CLOSED. No shipped counter changed as a result.
@@ -3266,15 +3266,19 @@ checked directly. Three independent lines of evidence:
    `grep -rn 'c64-lib-contract'` over `Makefile` and `tools/` returns
    comments only. No `make` rule reads SPEC.md, so no contract release can
    reach a build.
-2. **Every §13 assert compares two values from this repo.** In
+2. **No §13 assert has a contract-derived counterparty.** In
    `src/net_abi_asserts.s`, `NET_BACKEND_FAMILIES` is exported by
    `src/net/<backend>/net_manifest.s`, `NET_FAMILY_*` come from
-   `src/net/net_families.inc`, `TCP_RECV_MASK` from `src/constants.inc`.
-   In `src/net/ip65/net_manifest.s`, `LIB_NET_IP65_BLOB_SIZE/BASE` are
-   compared against labels around our own `.incbin`. This is the structural
-   difference from the §5/§8.0 asserts in `src/lib_contract_asserts.s`,
-   which do compare our values against the sibling archive's exported
-   manifest — those have an external counterparty; the §13 ones do not.
+   `src/net/net_families.inc`, `TCP_RECV_MASK` from `src/constants.inc` —
+   all local. `src/net/ip65/net_manifest.s` is the one that is *not* purely
+   local, and the first version of this entry overstated it: the labels
+   `ip65_blob_start`/`_end` are ours, but their DIFFERENCE is the size of
+   the ip65 submodule's built artifact, so bumping that submodule is exactly
+   what fires the assert. The counterparty there is the blob, not the
+   contract. §13 defined no numeric value we import, which is the claim that
+   actually matters and is the one to make. Contrast the §5/§8.0 asserts in
+   `src/lib_contract_asserts.s`, which do compare our values against the
+   sibling archive's exported manifest.
 3. **Both profiles still link green at master + these doc edits.** UCI
    default `7c79a4e00a19685de7540970247c759a5e1cc7e13a88b12bf8b8234fcc013c14`,
    UCI comb `c423476011e1928f5955e4773c3cf28c4876dcf76e70be9de40c2f4522f8bf72`,
@@ -3282,19 +3286,47 @@ checked directly. Three independent lines of evidence:
    — identical before and after, which is the proof that this change is
    comment-only.
 
-**The one real loss is §13.2's cross-consumer error-code allocation
-table.** That table existed because the range rule alone had already
-failed: c64-wireguard allocated `$88 UCI_ERR_LONG_READ` while c64-https had
-long emitted `$88 UCI_ERR_NO_SOCKET`, a head-on collision in which neither
-side violated §13.2 as written. Our `$8B UCI_ERR_BAD_READ_HDR` was the
-first code allocated under the resulting allocate-here-first rule. With §13
-retired the table is frozen at v0.17.1 and has no successor registry: the
-`$80-$BF` UCI namespace is still one namespace shared with c64-wireguard,
-and nothing — no build, no test, on either side — would catch a second
-collision. Upstream's two-prong rule genuinely excludes it (both adapters
-are consumer-owned source), so this is not a defect in the retirement; it
-is a coordination duty that has moved from a document to the two lanes.
-Filed as #184.
+**§13.2's cross-consumer error-code allocation table is the one thing that
+did not stay home — and the first version of this entry got it wrong.** It
+said the table "is frozen at v0.17.1 and has no successor registry". That is
+false, and adversarial review against the peer repo is what caught it.
+`c64-wireguard/src/net_abi.inc`, on their master post-v1.0.0, carries a
+reconstituted table that names the retirement explicitly and self-declares:
+"net_last_error REGISTRY — canonical for this repository … Only ownership
+moved: this file is now the registry." It lists every code in both family
+ranges, ours included.
+
+It also records a **second** collision, which the table caught: wg#120's
+first commit minted `$40-$44` for their ip65 channel by picking free-looking
+bytes, and `$41-$45` were already ours — "a live collision, in review, three
+weeks after the `$88` incident". Remapped before merge. So the mechanism
+demonstrably works, twice, and the correct action for us is to MIRROR their
+registry, not to propose building one.
+
+**The real hazard, which the first version missed entirely, is in our own
+headers.** `src/net/uci/uci_errors.inc` recorded only `$8A` as
+c64-wireguard's. Their registry also owns `$8C UCI_ERR_SEND_TOO_LONG`, `$8D
+UCI_ERR_OPEN_REFUSED`, `$8E UCI_ERR_CMD_UNKNOWN` (wg#112) and `$8F
+UCI_ERR_SHORT_READ` (wg#130); `src/net/ip65/ip65_errors.inc` recorded
+`$41-$45` and nothing above, while they own `$46`, `$47` (reserved, never
+emitted), `$48` and `$49`. `$8C`/`$8D`/`$46`/`$47` were allocated in the
+retired table and we simply never copied them down; `$8E`/`$8F`/`$48`/`$49`
+post-date the retirement. Both headers also carried a dead imperative —
+"allocate a new code in SPEC §13.2's table THERE first" — pointing at a
+section that no longer exists.
+
+Compose those and you get the `$88` incident again, exactly: someone reads
+`uci_errors.inc`, sees `$8C` free and no registry named, and mints it. The
+information needed to avoid that was sitting in the peer repo the whole
+time. Both headers now list the codes their neighbour owns (as comments, not
+equates — an equate would imply we emit them) and point at
+`c64-wireguard/src/net_abi.inc` as the place to allocate.
+
+What remains genuinely open is narrower than the first version claimed: the
+two repos hold *independent copies* of the registry and of `NET_FAMILY_*`,
+and nothing on either side checks that they agree. Upstream's two-prong rule
+correctly excludes this from the contract (both adapters are consumer-owned
+source), so it is not a defect in the retirement. Filed as #184.
 
 ### The re-anchoring decision
 
@@ -3314,14 +3346,30 @@ exactly that, and costs nothing per citation.
 Against (b): the §13.x numbers are the audit trail to the reasoning behind
 the surface's shape — most of which was learned expensively (the `$88`
 collision, the `$FFFF` sentinel both fleet adapters misfiled, `net_print_ip`
-being consumer UI). RETIRED.md preserves that text permanently and says so
-explicitly: "a citation to a retired section is a citation to `v0.17.1` …
-Rewriting them would be churn with no reader benefit." Deleting the numbers
-would discard recoverable rationale to save nothing.
+being consumer UI). RETIRED.md preserves that text permanently, so deleting
+the numbers would discard recoverable rationale to save nothing.
 
-Scope note: the anchor applies **only to retired sections**. §1–§8, §10 and
-§11 survive with their numbers intact and must keep resolving against the
-current SPEC — anchoring those to v0.17.1 would freeze live citations.
+**Upstream does not endorse this work, and should not be cited as if it
+did.** RETIRED.md's plain reading argues against it: "a citation to a
+retired section is a citation to `v0.17.1` … Rewriting them would be churn
+with no reader benefit." The distinction that an *added anchor* is not a
+*rewritten citation* is defensible, but it is ours, not theirs. The
+independent justification stands on its own: upstream was reasoning about a
+reader who knows the section was retired, and our citations did not say so —
+an unqualified "SPEC §13" points into a live document where §13 is a silent
+numbering gap. That is the reader benefit RETIRED.md did not consider.
+
+Scope note: the anchor applies **only to retired sections**, and the split
+runs *through* §6 rather than between chapters — §6.1, §6.2, §6.4 and §6.5
+survive while **§6.3, §6.6 and §6.7 are retired** (confirmed by diffing the
+SPEC headings at v0.17.1 against v1.1.0, not by reading chapter numbers).
+The first version of this entry said "§1-§8, §10 and §11 survive", which is
+wrong, and that error is what made the first anchoring pass skip
+`src/contract_footprint_asserts.s` — a TU *named for* the retired §6.6 and
+citing it seven times — along with the §6.3 citations in the Makefile and in
+`build_nistcurves_p256.sh`. Everything else in §1-§8, §10 and §11 does
+survive and must keep resolving against the current SPEC; anchoring those to
+v0.17.1 would freeze live citations.
 
 ### Two §8.2 items checked in the same pass
 
@@ -3352,10 +3400,15 @@ through `CONTRACT_DEFINES` (`-D SHARED_SQTAB_INIT -D SHARED_REU_MUL_INIT -D
 SHARED_REU_MUL_FETCH -D SHARED_CT_MUL_8X8 -D LIB_NO_BARE_EXPORTS=1 …`), the
 manifest attests it (`LIB_NISTCURVES_SHARED_PRIMITIVES = 0`), and no ar65
 surgery happens — which is what §6.1 wants. Under the restated clause we
-are conformant on the load-bearing half (import-never-stub: no second
-canonical definition exists — `reu_mul_tables_init` appears nowhere in
-`build/labels.txt`), and the library's init import is dropped as
-unreferenced, the case v0.9.2 explicitly blessed. `reu_fetch_mul_row` *is*
+are conformant on the load-bearing half of import-never-stub: no second
+canonical definition exists, and `reu_mul_tables_init` appears nowhere in
+`build/labels.txt`. The mechanism is simpler than "an import dropped as
+unreferenced" (the first version of this entry said that, and there is no
+import to drop): `libs/nistcurves/src/reu_mul_init.s:52` wraps the entire
+file body — imports, `.export reu_mul_init`, `.export reu_mul_tables_init`
+and the alias at line 76 — in `.ifndef SHARED_REU_MUL_INIT`, so a deferred
+build emits an object that exports nothing and imports nothing.
+`reu_fetch_mul_row` *is*
 referenced, is imported, and `src/boot.s` exports it (except under
 `USE_NISTCURVES_ONCHIP`, where the rebuilt `mul_8x8_onchip.o` exports it and
 ours yields).

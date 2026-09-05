@@ -7,41 +7,37 @@
 # (libs/nistcurves v0.5.0), the upstream library publishes
 # `make lib-p256-verify` / `make lib-p256-verify-onchip` build targets that
 # produce minimal-subset archives carrying exactly the symbols needed for
-# variable-base P-256 verify. This script delegates the heavy lifting to
-# `make -C libs/nistcurves`, then performs adjustments before placing the
-# result at the location the top-level Makefile expects:
+# variable-base P-256 verify. This script delegates the whole build to
+# `make -C libs/nistcurves` and then places the archive where the top-level
+# Makefile expects it. **It performs no adjustments: nothing is staged,
+# rebuilt, dropped or re-archived.** The archive we link is byte-for-byte
+# the one upstream's make produced — see section 2 of the body, which is the
+# authority on this. That is what makes SPEC §6.1's "no ar65 member surgery,
+# no copying intermediates around" true by construction.
 #
-#   1. Rebuild the archive's `zp_config*.o` member with c64-https's ZP-slot
-#      overrides (the upstream defaults collide with c64-https's canonical map
-#      on three slots: zp_ptr2, fp_mul_i, fp_mul_j). The library's zp_config.s
-#      `.ifndef`-guards every slot, so an override-built version replaces the
-#      upstream default cleanly. The member name is DISCOVERED from the
-#      archive, not hardcoded — upstream v0.9.0 gave each archive its own
-#      per-variant object (`zp_config_p256verify.o`), and a hardcoded name
-#      would drop the overrides silently. Post-checked with od65.
+# This header used to describe a three-step surgery — rebuild the archive's
+# `zp_config*.o` member, drop `mul_8x8[_onchip].o` and `data_shared.o`, re-add
+# a rebuilt `mul_8x8_onchip.o`. Every step of it is GONE (introduced bb38c31,
+# retired 8e2194c); the description outlived the code and was still being read
+# as current in 2026-09. What replaced it:
 #
-#   2. Drop `mul_8x8[_onchip].o` (REU profile) and `data_shared.o` (both
-#      profiles) from the archive. c64-https's in-tree
-#      `src/crypto/poly1305.s` and `src/data.s` already export the same
-#      symbols (mul_8x8, sqtab_init, poly_prod_lo/hi, mul_cached_a,
-#      mul_src2_buf, mul_dma_lo/hi). Including the library's copies would
-#      cause ld65 duplicate-symbol errors.
+#   1. Consumer configuration is REQUESTED, not imposed. `CONTRACT_DEFINES`
+#      carries the SPEC §8.0 APP_OWNED deferral switches plus §6.5 bare-name
+#      suppression; `CONTRACT_ZP_DEFINES` carries the three ZP-slot overrides
+#      (nistcurves_zp_ptr2, fp_mul_i, fp_mul_j). SPEC §6.2 requires the two
+#      to be separate variables — a globally delivered slot override collides
+#      with every `.importzp` site. The library gates its own copies of the
+#      shared primitives out; its §6.4 manifest then ATTESTS the deferral,
+#      which is what makes the §8.0 asserts in src/lib_contract_asserts.s
+#      mean something.
+#   2. The overrides are VERIFIED afterwards, with od65, against the emitted
+#      object — member names are discovered from the archive, never hardcoded
+#      (upstream v0.9.0 made them per-variant, and a hardcoded `zp_config.o`
+#      would drop the overrides silently, with no link error).
+#   3. Nothing else. `cp "$UPSTREAM_ARCHIVE" "$ARCHIVE"`.
 #
-#   3. ONCHIP PROFILE ONLY (issue #69 / v0.5.0): re-add a REBUILT
-#      `mul_8x8_onchip.o`, assembled with the SPEC §8.1/§8.3 consumer-shared
-#      defines:
-#        -D FP_ONCHIP_MUL=1        row-gen loop og_common/og_src_ld kept
-#        -D SHARED_CT_MUL_8X8=1    canonical ct_mul_8x8 + poly_prod +
-#                                  smc_* SUPPLIED BY src/crypto/poly1305.s
-#        -D SHARED_SQTAB_INIT=1    sqtab_init SUPPLIED BY poly1305.s
-#        -D LIB_SHARED_SQTAB_BASE=$BC00
-#                                  sqtab_lo/hi become absolute equates at
-#                                  the address data.s's placeholder reserves
-#                                  (post-link check in the Makefile verifies)
-#      The resulting object provides og_common / og_src_ld (imported by
-#      fp256_onchip.o's gen_mul_row stubs) + the sqtab equates +
-#      reu_fetch_mul_row (boot.s gates its duplicate export under
-#      USE_NISTCURVES_ONCHIP).
+# §6.1 survives at contract v1.0.0. §6.6 and §6.3, cited further down, do
+# NOT — they were retired there and resolve at tag v0.17.1 only.
 #
 # Usage:  build_nistcurves_p256.sh [reu|onchip]     (default: reu)
 #
@@ -67,8 +63,9 @@ if [ "$PROFILE" = "onchip-comb" ]; then
     # narrowed comb archive existed. That was SPEC §6.1 non-conformant
     # (an edited member set is outside every §5/§8.0 manifest claim the
     # archive ships) and it is why src/contract_footprint_asserts.s had
-    # to exclude this profile from the §6.6 assert: the surviving
-    # manifest described the pre-surgery set, 27,000 B against a
+    # to exclude this profile from the §6.6 assert (§6.6 itself was
+    # retired at contract v1.0.0; it resolves at tag v0.17.1): the surviving
+        # manifest described the pre-surgery set, 27,000 B against a
     # 16,384 B region.
     #
     # libs/nistcurves v0.11.0 added `lib-p256-comb-onchip` in response
@@ -251,8 +248,11 @@ grep -q 'CONTRACT_ZP_DEFINES' "$LIB_DIR/Makefile" \
 # --- 1. Build upstream's verify archive ---
 # Upstream's Makefile builds every module with the same recipe (no per-file
 # CA65FLAGS hook), so we cannot pass -D overrides via `make CA65=...` here.
-# We build upstream with its defaults, then rebuild the TUs that need
-# consumer overrides (zp_config.o always; mul_8x8_onchip.o under onchip).
+# We ask upstream's make for the configuration we need and link what it
+# produces, unmodified. (This paragraph used to say we rebuild the TUs that
+# need consumer overrides — zp_config.o always, mul_8x8_onchip.o under
+# onchip. We do not, and have not since 8e2194c; section 2 below is the
+# authority.)
 # SPEC §6.2: request the §8.0 APP_OWNED shape and §6.5 bare-name
 # suppression through CONTRACT_DEFINES, rather than building upstream's
 # defaults and then deleting the members that collide. §6.1 bans that

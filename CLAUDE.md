@@ -173,8 +173,11 @@ fixed buffers in crypto BSS.
     in `make` reads it, so a contract release can never break a build.
     Always cite a **tag** (newest: v1.1.0). v1.0.0 cut the SPEC by 7/8 and
     retired §9, §12, §13, §14, §15, §6.3, §6.6, §6.7: those resolve only
-    at **v0.17.1** (`git show v0.17.1:SPEC.md`), survivors keep their
-    numbers against the current SPEC. §8.0 APP_OWNED shape is requested
+    at **v0.17.1** (`show v0.17.1:SPEC.md` **in a c64-lib-contract
+    checkout** — it is not a submodule here, so the command fails from this
+    tree), survivors keep their numbers against the current SPEC. Note
+    §6.1/§6.2/§6.4/§6.5 survive while §6.3/§6.6/§6.7 do not — §6 is split.
+    §8.0 APP_OWNED shape is requested
     via `CONTRACT_DEFINES` — no archive member is edited (§6.1) — and the
     manifest attests it, so the asserts in `src/lib_contract_asserts.s`
     are live. §13 (network ABI) **is** adopted (#70, merged #142); see
@@ -201,12 +204,12 @@ bank 2; banks 6-7 reserved for the P-384 overlay experiment.
 Switching backend = a different cfg + different `src/net/<backend>/*.o`.
 
 **`src/net_abi.inc` is the build-enforced boundary** (c64-lib-contract
-SPEC §13, issue #70). **§13 was retired at contract v1.0.0 and every §13.x
-number in this section resolves at tag `v0.17.1`, nowhere else.** Nothing
-moved and nothing broke: every name, bit and code below is defined,
-exported and asserted inside this repo — the contract was never a build
-input — so `src/net_abi.inc` is now the normative source, not a copy of
-one. `boot.s`, `http.s`, `tls_record_io.s` and `tls13.s`
+SPEC §13, issue #70). **§13 was retired at contract v1.0.0; every §13.x
+number in this section resolves at tag `v0.17.1`, nowhere else.** No §13
+assert has a contract-derived counterparty, so no contract release can
+break a build — but the error codes below are asserted NOWHERE, and that
+is the live hazard (see the allocation note). `src/net_abi.inc` is the
+normative source now. `boot.s`, `http.s`, `tls_record_io.s` and `tls13.s`
 `.include` it and import no `net_*` symbol directly, so a backend that
 drops a symbol fails the link by name on both backends. Surface:
 
@@ -233,11 +236,10 @@ drops a symbol fails the link by name on both backends. Surface:
     `net_poll` caps the copy at the request and never emits `$8A`; a header
     above the request that is NOT `$FFFF` leaves `$8B UCI_ERR_BAD_READ_HDR`
     (C=0, stream continues) — the stream-family counterpart of `$8A`.
-    `$8B` was allocated in SPEC §13.2's table, the cross-consumer registry
-    that made `$88`'s head-on collision with c64-wireguard visible. **That
-    table is frozen at v0.17.1 and has no successor**, so a new UCI code
-    now needs an explicit agreement with c64-wireguard before it is
-    emitted — the range alone never prevented the collision (#184).
+    **SPEC §13.2's allocation table moved, it did not vanish**: allocate a
+    new code in `c64-wireguard/src/net_abi.inc`, which declares itself
+    canonical for both ranges, then here. It owns `$8C-$8F` and `$46-$49`,
+    which our two error headers used to present as free (#184).
   - Gone, per §13.1: `net_tcp_set_recv_cb` (stub), `net_recv_ready`,
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
     is now `print_local_ip` in `boot.s`, one copy for both backends.
@@ -686,10 +688,8 @@ are `rig_*.py` and in `norecursedirs`, and each exits 5 on its own. A bare
 `pytest` at the root is green; the total is not quotable, because it tracks
 `testpaths` *and* the build state. Run it rather than citing a number, and
 **build `BACKEND=uci` first**: `test_uci_data_acc.py` does not *skip*
-without a UCI PRG in `build/`, it **fails** 3 of its cases with
-`Unavailable: uci_drain_resp is not in build/labels.txt` (measured
-2026-09-05 against an ip65 PRG; 55 passed with a UCI one). That is the
-involuntary-skip gap of #178, not a regression.
+without a UCI PRG in `build/`, it **fails** 3 cases (#178's gap, not a
+regression).
 
 Negative-path coverage exists because an audit found the Finished-mismatch
 abort had no test: `test_finished_verify.py` (VICE, carry-latching stub)

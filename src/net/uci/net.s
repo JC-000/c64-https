@@ -15,8 +15,11 @@
 ; extensions declared there: net_recv_byte (the drain entry) and
 ; net_banner_str (the backend-specific banner line boot.s prints).
 ; Error codes live in uci_errors.inc, in the §13.2 UCI range $80-$BF,
-; which is ONE namespace shared with c64-wireguard — allocate in SPEC
-; §13.2's table first.
+; which is ONE namespace shared with c64-wireguard. §13 was retired at
+; c64-lib-contract v1.0.0 (its numbers resolve at tag v0.17.1 only, in a
+; c64-lib-contract checkout) and the allocation table moved to
+; `c64-wireguard/src/net_abi.inc` — allocate THERE first, then in
+; uci_errors.inc, which lists the codes they own. See src/net_abi.inc.
 
 .include "uci_regs.inc"
 .include "uci_errors.inc"

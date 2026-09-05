@@ -302,6 +302,8 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; §13 was RETIRED at contract v1.0.0 (2026-09-03) — a network backend is
 ; source in its consumer's own tree, so it never crossed a library boundary.
 ; Its numbers resolve at tag `v0.17.1` only. No assert moved or weakened:
-; unlike the §5/§8.0 asserts above, which compare OUR values against the
-; sibling archive's exported manifest, every §13 assert compares two values
-; from this repo. See src/net_abi.inc for the full anchor.
+; NO §13 assert has a contract-derived counterparty, whereas the §5/§8.0
+; asserts above DO compare our values against the sibling archive's exported
+; manifest. (§13's ip65 blob-footprint assert is not purely local either —
+; its counterparty is the .incbin'd submodule artifact — but that is a
+; submodule bump, not a contract release.) See src/net_abi.inc.
