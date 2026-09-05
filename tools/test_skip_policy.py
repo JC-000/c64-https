@@ -20,7 +20,9 @@ The two things worth guarding here, both of which have a history:
 
 import io
 import os
+import subprocess
 import sys
+import textwrap
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
@@ -306,6 +308,83 @@ def test_require_hands_a_skip_to_pytest_when_pytest_is_driving():
         # otherwise change how every later test in the file behaves.
         if not was_loaded:
             sys.modules.pop("pytest", None)
+
+
+# ---------------------------------------------------------------------------
+# 4. The standalone runner honours the 0/1/2 contract.
+#
+# Driven as a SUBPROCESS, because the exit code is the whole contract and
+# pytest never collects _standalone() at all.  The target is
+# tools/test_rig_skip_contract.py rather than this module: it is the one with
+# a genuine could-not-run lane (six tests need the sibling c64_test_harness
+# checkout), and driving it from here cannot recurse -- that module has no
+# spawner of its own.
+# ---------------------------------------------------------------------------
+
+_RIG_CONTRACT = os.path.join(_HERE, "test_rig_skip_contract.py")
+
+# Run a script with c64_test_harness made unimportable, so the six
+# https_e2e-dependent tests take the require() path.  A meta_path finder,
+# not a PYTHONPATH trick: the sibling is pip-installed, so there is no path
+# entry to remove.
+_BLOCK_AND_RUN = textwrap.dedent("""
+    import runpy, sys
+    class _Block:
+        def find_spec(self, name, path=None, target=None):
+            if name == "c64_test_harness" or name.startswith("c64_test_harness."):
+                raise ImportError("blocked by tools/test_skip_policy.py")
+            return None
+    sys.meta_path.insert(0, _Block())
+    sys.argv = [sys.argv[1]]
+    runpy.run_path(sys.argv[0], run_name="__main__")
+""")
+
+
+def _run_blocked(script, **env_over):
+    env = dict(os.environ)
+    for k, v in env_over.items():
+        if v is None:
+            env.pop(k, None)
+        else:
+            env[k] = v
+    return subprocess.run([sys.executable, "-c", _BLOCK_AND_RUN, script],
+                          capture_output=True, text=True, timeout=180,
+                          cwd=os.path.dirname(_HERE), env=env)
+
+
+def test_standalone_runner_returns_two_for_could_not_run():
+    """"Could not run" must not be reported as 1, which means "a check failed".
+
+    Nothing collects _standalone(), so this is the only thing standing
+    between the 0/1/2 split and a future edit collapsing it back to
+    `return 1 if failed else 0` -- in a PR whose thesis is that a helper
+    with no call-site test is just another convention to miss.
+    """
+    proc = _run_blocked(_RIG_CONTRACT, C64_ALLOW_SKIP=None)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == EXIT_CANNOT_RUN, (
+        f"a missing prerequisite must be {EXIT_CANNOT_RUN}, not "
+        f"{proc.returncode}\n{out}")
+    assert "CANNOT RUN" in out, out
+    assert "COULD NOT RUN" in out, out          # the vacuity string survives
+    assert "passed" in out, "the summary line must still be printed\n" + out
+
+
+def test_standalone_runner_returns_zero_when_the_opt_out_is_honoured():
+    """The opt-out lane, which is where defect D1 crashed the whole runner.
+
+    Before the sys.modules fix this exact invocation died with an uncaught
+    pytest Skipped: exit 1, no summary, and the four tests that did not need
+    the sibling checkout never ran.
+    """
+    proc = _run_blocked(_RIG_CONTRACT, C64_ALLOW_SKIP="1")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == EXIT_PASS, (
+        f"an honoured opt-out must be {EXIT_PASS}, got {proc.returncode}\n{out}")
+    assert "Traceback" not in out, "the opt-out must not raise\n" + out
+    assert "skipped by explicit opt-out" in out, out
+    # The tests that did NOT need the sibling checkout must still have run.
+    assert "PASS  test_macos_rig" in out, out
 
 
 def _standalone() -> int:

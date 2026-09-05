@@ -52,6 +52,7 @@ SHAPE only.
 import ast
 import io
 import os
+import subprocess
 import sys
 from contextlib import redirect_stdout
 
@@ -126,6 +127,8 @@ BRIDGE_RIGS = (
 )
 
 MACOS_RIG = os.path.join(_TESTS, "rig_vice_https_macos.py")
+
+P384_KAT = os.path.join(_HERE, "test_ecdsa_p384_kat.py")
 
 # The one bridge rig whose voluntary skip really does cost coverage: the
 # macOS rig drives the emulated-RR-Net path over TLS, so plaintext HTTP has
@@ -349,6 +352,43 @@ def test_the_interlock_flag_unset_is_contention_and_stays_exit_two():
 # ---------------------------------------------------------------------------
 # tests/rig_vice_https_macos.py -- source inspection only (see module docstring).
 # ---------------------------------------------------------------------------
+
+def test_the_u64_gate_is_not_opt_out_able_because_it_precedes_the_vice_lane():
+    """--u64 with no U64_HOST must be exit 2 even under C64_ALLOW_SKIP=1.
+
+    This gate is the one place in this PR where honouring the opt-out would
+    make an exit code WEAKER than master's, and the reason is scope rather
+    than arithmetic.  On master, `--u64` with U64_HOST unset still ran the
+    entire VICE lane and returned `0 if total_fail == 0 else 1`, so a failing
+    emulator vector reported 1.  The gate added here fires BEFORE
+    _build_prg() and before any VICE work, so an honoured opt-out returns 0
+    with nothing run at all.
+
+    C64_ALLOW_SKIP answers "this lane has no hardware" -- which is exactly
+    the operator who would set it here -- yet it would silence the EMULATOR
+    half, which needs no hardware.  The remedy costs nothing and needs no
+    variable: set U64_HOST, or drop --u64.  Pinned as a subprocess because
+    the exit CODE is the whole contract.
+
+    Cheap by construction: the gate returns before the vector file check,
+    before _build_prg(), and before VICE, and the module imports nothing but
+    stdlib and _skip_policy -- so this runs in well under a second and
+    touches no hardware.
+    """
+    env = dict(os.environ)
+    env.pop("U64_HOST", None)
+    env["C64_ALLOW_SKIP"] = "1"
+    proc = subprocess.run([sys.executable, P384_KAT, "--u64"],
+                          capture_output=True, text=True, cwd=_REPO, env=env,
+                          timeout=120)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 2, (
+        f"--u64 with no U64_HOST must be exit 2 even opted out, got "
+        f"{proc.returncode}\n{out}")
+    assert "COULD NOT RUN" in out, out
+    # ...and it must not advertise a hatch it does not honour.
+    assert "opt-out honoured" not in out, out
+
 
 def test_phase2_does_not_claim_a_counterpart_it_does_not_have():
     """rig_phase2_http.py must not tell an operator its coverage is covered.

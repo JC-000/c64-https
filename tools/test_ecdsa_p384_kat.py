@@ -51,14 +51,17 @@ Usage:
 Exit codes (tools/_skip_policy.py, issue #178):
     0 PASS
     1 FAIL (a vector ran and failed)
-    2 COULD NOT RUN -- a requested prerequisite is missing (e.g. --u64 with
-      no U64_HOST) or no vector produced a verdict.  Set C64_ALLOW_SKIP=1 to
-      accept such a run as exit 0.  Not passing --u64 at all is a VOLUNTARY
-      skip and still exits 0.
+    2 COULD NOT RUN -- --u64 was requested with no U64_HOST, so nothing ran.
+      NOT opt-out-able: honouring C64_ALLOW_SKIP here would fire before the
+      VICE lane and silence the emulator half too, which needs no hardware.
+      The remedy is free: set U64_HOST, or drop --u64 and get the VICE lane
+      on its own.  Not passing --u64 at all is a VOLUNTARY skip, exits 0,
+      and is how you say "this lane has no hardware".
 
 Environment:
     C64_SKIP_BUILD=1            Reuse existing build artifacts (skip make).
-    C64_ALLOW_SKIP=1            Accept a could-not-run as exit 0 (prints why).
+    C64_ALLOW_SKIP=1            Honoured by the rig lane; NOT by the --u64
+                                gate above (see its comment in main()).
     U64_HOST=<ip>               Ultimate 64 host (default 192.168.1.81).
     P384_KAT_VICE_TIMEOUT_S     Per-VERIFY-step timeout under VICE
                                 (default 1800 s = 30 min).
@@ -807,13 +810,30 @@ def main() -> int:
     # lane cannot run at all, and the tally below would otherwise add 0/0 to
     # the VICE result and print OVERALL: PASS (issue #178).  Refuse up front,
     # before the multi-hour VICE lane, rather than at the verdict.
+    #
+    # NO OPT-OUT, and this gate is the reason the rule needs stating: the
+    # opt-out here would be scoped WRONG.  C64_ALLOW_SKIP answers "this lane
+    # has no hardware", but firing before the VICE lane means honouring it
+    # also silences the EMULATOR half -- which needs no hardware and could
+    # have run.  Measured against master: `--u64` with U64_HOST unset ran the
+    # whole VICE lane and returned 1 on a failing vector; with the opt-out
+    # honoured here that became exit 0, so an operator who set
+    # C64_ALLOW_SKIP=1 for the honest reason (no U64E on this lane) would
+    # never learn the emulator-only half had regressed.
+    #
+    # The remedy costs nothing and needs no environment variable: set
+    # U64_HOST, or drop --u64 and get the VICE lane on its own.  "This lane
+    # has no hardware" is spelled by NOT PASSING --u64; asking for hardware
+    # and not supplying it is a malformed invocation, not a coverage gap to
+    # be acknowledged.
     if run_u64 and not os.environ.get("U64_HOST"):
         return cannot_run(
-            "--u64 requested but U64_HOST is not set in the environment",
+            "--u64 requested but U64_HOST is not set in the environment"
+            " -- drop --u64 to run the VICE lane alone",
             executed=0,
             total=1,
             certifies="the P-384 verify path on real hardware",
-            opt_out_env="C64_ALLOW_SKIP",
+            opt_out_env=None,
         )
 
     # Check the upstream test vector file exists.
@@ -869,12 +889,17 @@ def main() -> int:
             # Unreachable: the early gate in main() already refused.  Kept as
             # a backstop, and it must NOT leave a 0/0 lane -- that is exactly
             # what the tally used to read as OVERALL: PASS (issue #178).
+            # Same no-opt-out rule as that gate, and for the same reason:
+            # one file must not answer the same question two ways, or a
+            # later reader "fixes" the inconsistency in whichever direction
+            # they happen to notice first.
             return cannot_run(
-                "--u64 requested but U64_HOST is not set in the environment",
+                "--u64 requested but U64_HOST is not set in the environment"
+                " -- drop --u64 to run the VICE lane alone",
                 executed=v_pass + v_fail,
                 total=v_pass + v_fail + len(vectors),
                 certifies="the P-384 verify path on real hardware",
-                opt_out_env="C64_ALLOW_SKIP",
+                opt_out_env=None,
             )
         else:
             try:

@@ -127,6 +127,15 @@ class VoluntarySkip(Exception):
 
     A caller that does not catch it still does not run the test body, so the
     fail-closed property is unchanged; only the reporting differs.
+
+    CONSUMERS: being an ``Exception`` makes this SWALLOWABLE BY DESIGN, so a
+    broad ``except Exception`` will catch it and label it whatever that
+    handler labels things.  Name it explicitly, BEFORE the bare
+    ``except Exception``, as both runners in this repo do.  The direction of
+    the hazard is the safe one -- a swallowed voluntary skip reports as a
+    FAILURE, never as a pass -- which is why it is worth one line of warning
+    rather than a BaseException, the choice that caused the bug this class
+    exists to fix.
     """
 
 
