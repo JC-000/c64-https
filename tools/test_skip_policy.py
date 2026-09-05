@@ -317,8 +317,26 @@ def test_require_hands_a_skip_to_pytest_when_pytest_is_driving():
 # pytest never collects _standalone() at all.  The target is
 # tools/test_rig_skip_contract.py rather than this module: it is the one with
 # a genuine could-not-run lane (six tests need the sibling c64_test_harness
-# checkout), and driving it from here cannot recurse -- that module has no
-# spawner of its own.
+# checkout).
+#
+# SPAWN DEPTH IS 2, AND BOUNDED BY INSPECTION ONLY -- there is no guard in the
+# code, so read this before adding a third link.  The full chain is:
+#
+#   pytest
+#     -> test_rig_skip_contract.py   (this file spawns it, below)
+#          -> test_ecdsa_p384_kat.py (its test_the_u64_gate_* spawns THAT,
+#                                     and _standalone() runs every test_*,
+#                                     so the link really does fire here)
+#
+# It terminates because the P-384 KAT spawns nothing, and it is cheap: the
+# whole nested run measures ~0.07 s, because the KAT's gate returns before
+# _build_prg() and before any VICE work.  Timeouts nest correctly -- 180 s on
+# the outer call here, 120 s on the inner one there.
+#
+# An earlier version of this comment claimed the target "has no spawner of its
+# own".  That was true when it was written and false in the same commit, which
+# is the whole reason the chain is spelled out rather than asserted: a third
+# link would have to be added deliberately, in sight of this.
 # ---------------------------------------------------------------------------
 
 _RIG_CONTRACT = os.path.join(_HERE, "test_rig_skip_contract.py")
