@@ -374,6 +374,19 @@ def test_the_u64_gate_is_not_opt_out_able_because_it_precedes_the_vice_lane():
     before _build_prg(), and before VICE, and the module imports nothing but
     stdlib and _skip_policy -- so this runs in well under a second and
     touches no hardware.
+
+    THIS SPAWN IS THE SECOND LINK IN A TWO-DEEP CHAIN, and the depth is
+    bounded by inspection, not by a guard:
+
+        pytest -> test_rig_skip_contract.py -> test_ecdsa_p384_kat.py
+
+    tools/test_skip_policy.py spawns THIS module (its section 4 drives
+    _standalone() as a subprocess), _standalone() runs every test_*, so this
+    case runs nested and really does spawn the KAT.  The KAT is a leaf only
+    because its gate returns before _build_prg(), which would otherwise run
+    `make clean` and two `make` invocations inside the 120 s timeout below.
+    Read the chain comment in tools/test_skip_policy.py before adding a third
+    link, or before moving that gate.
     """
     env = dict(os.environ)
     env.pop("U64_HOST", None)

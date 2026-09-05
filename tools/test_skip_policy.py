@@ -328,10 +328,22 @@ def test_require_hands_a_skip_to_pytest_when_pytest_is_driving():
 #                                     and _standalone() runs every test_*,
 #                                     so the link really does fire here)
 #
-# It terminates because the P-384 KAT spawns nothing, and it is cheap: the
-# whole nested run measures ~0.07 s, because the KAT's gate returns before
-# _build_prg() and before any VICE work.  Timeouts nest correctly -- 180 s on
-# the outer call here, 120 s on the inner one there.
+# It terminates, and it is cheap, for the SAME reason -- and that reason is a
+# cross-dependency worth naming, because it is not local to either file.
+#
+# The KAT is not a leaf in general: _build_prg() runs `make clean` and two
+# `make BACKEND=uci` invocations (test_ecdsa_p384_kat.py:646-665).  What makes
+# it a leaf HERE is that its --u64-with-no-U64_HOST gate returns BEFORE
+# _build_prg(), so nothing further is spawned and the whole nested run
+# measures ~0.07 s.  Timeouts nest correctly -- 180 s on the outer call here,
+# 120 s on the inner one there.
+#
+# So THE COST BOUND OF THIS TEST RESTS ON WHERE THAT GATE SITS.  Moving it
+# below _build_prg() -- the alternative fix considered and rejected when the
+# gate was made non-opt-out-able -- would start a full `make clean && make`
+# inside that 120 s inner timeout.  Anyone reconsidering the gate's placement
+# is also deciding this, and there is nothing at the gate that would say so;
+# hence the note here and the pointer at the spawn site itself.
 #
 # An earlier version of this comment claimed the target "has no spawner of its
 # own".  That was true when it was written and false in the same commit, which
