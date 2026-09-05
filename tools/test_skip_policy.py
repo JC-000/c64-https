@@ -28,8 +28,10 @@ if _HERE not in sys.path:
 
 from _skip_policy import (  # noqa: E402
     EXIT_CANNOT_RUN,
+    EXIT_FAIL,
     EXIT_PASS,
     SkipPolicyError,
+    VoluntarySkip,
     cannot_run,
     not_applicable,
     reason_text,
@@ -212,31 +214,137 @@ def test_require_is_silent_when_the_prerequisite_holds():
 
 
 def test_require_still_raises_when_the_opt_out_is_zero():
+    """=0 must FAIL, and must not be able to pass by SKIPPING either.
+
+    The obvious spelling of this test -- `except SkipPolicyError: pass` --
+    is vacuous against the exact defect it guards.  If _opted_out() ever
+    reverts to bare truthiness, `bool("0")` is true, require() takes the
+    opt-out branch, calls pytest.skip(), and pytest records this case as
+    SKIPPED at exit 0.  The guard converts itself into a green skip under
+    precisely the mutation it exists to catch -- the vacuous-skip shape
+    #178 exists to kill, inside #178's own implementation.
+    Measured: under that mutant this case was `1 skipped`, not a failure.
+
+    So the catch is BaseException-wide.  pytest.outcomes.Skipped derives
+    from BaseException, not Exception, which is what let it slip past.
+    """
     with _Env("0"):
         try:
             require(False, "ca65 not on PATH", executed=0, total=7,
                     certifies="the build-flag stamp", opt_out_env=ENV)
         except SkipPolicyError:
             pass
+        except BaseException as exc:  # noqa: BLE001 - a Skipped here IS the bug
+            raise AssertionError(
+                f"=0 must fail, not skip or otherwise escape: {exc!r}") from None
         else:
             raise AssertionError("=0 must not suppress the failure")
 
 
+def test_require_does_not_hand_a_skip_to_a_non_pytest_runner():
+    """The opt-out must stay catchable by whoever is actually driving.
+
+    require() asks sys.modules, not `import pytest`: pytest being INSTALLED
+    says nothing about pytest DRIVING, and pytest.skip() raises a
+    BaseException that a standalone runner's `except Exception` cannot
+    catch.  Before this was fixed, `C64_ALLOW_SKIP=1 python3
+    tools/test_rig_skip_contract.py` died mid-suite at exit 1 with no
+    summary and four runnable tests never run -- an opt-out that reports
+    as "a check ran and failed".
+
+    Simulated by hiding pytest from sys.modules for the duration; the real
+    lane is any run of these modules as a script.
+    """
+    saved = sys.modules.pop("pytest", None)
+    try:
+        with _Env("1"):
+            try:
+                require(False, "ca65 not on PATH", executed=0, total=7,
+                        certifies="the build-flag stamp", opt_out_env=ENV)
+            except VoluntarySkip as exc:
+                assert isinstance(exc, Exception), "must be catchable as Exception"
+                assert "certifies NOTHING" in str(exc), str(exc)
+            except BaseException as exc:  # noqa: BLE001
+                raise AssertionError(
+                    f"opt-out outside pytest must raise VoluntarySkip, got "
+                    f"{exc!r}") from None
+            else:
+                raise AssertionError(
+                    "opt-out must not RETURN outside pytest -- the caller would "
+                    "run the body as if the prerequisite held")
+    finally:
+        if saved is not None:
+            sys.modules["pytest"] = saved
+
+
+def test_require_hands_a_skip_to_pytest_when_pytest_is_driving():
+    """The other half: with pytest driving, it is still a pytest skip.
+
+    Pinned so the sys.modules fix cannot be "simplified" into never
+    skipping at all, which would make the documented escape hatch a lie.
+    """
+    was_loaded = "pytest" in sys.modules
+    import pytest  # noqa: PLC0415 - this test is about pytest specifically
+
+    try:
+        with _Env("1"):
+            try:
+                require(False, "ca65 not on PATH", executed=0, total=7,
+                        certifies="the build-flag stamp", opt_out_env=ENV)
+            except VoluntarySkip as exc:
+                raise AssertionError(
+                    f"pytest is driving; the opt-out must be a pytest skip: "
+                    f"{exc!r}") from None
+            except BaseException as exc:  # noqa: BLE001
+                assert type(exc).__name__ == "Skipped", repr(exc)
+                assert isinstance(exc, pytest.skip.Exception), repr(exc)
+            else:
+                raise AssertionError("the opt-out must not RETURN under pytest")
+    finally:
+        # Do not leave pytest in sys.modules for a standalone run that did
+        # not have it there: require() reads sys.modules, so this test would
+        # otherwise change how every later test in the file behaves.
+        if not was_loaded:
+            sys.modules.pop("pytest", None)
+
+
 def _standalone() -> int:
-    """Run every test_* in this module without pytest."""
+    """Run every test_* in this module without pytest.
+
+    Honours the module's own 0/1/2 contract rather than collapsing "could
+    not run" onto 1: a SkipPolicyError is exactly the involuntary skip this
+    policy calls a 2, and reporting it as 1 ("a check ran and failed") is
+    the confusion the exit codes exist to prevent.
+    """
     tests = [(n, o) for n, o in sorted(globals().items())
              if n.startswith("test_") and callable(o)]
     assert tests, "FATAL: no tests found -- a matcher that matches nothing"
-    failed = 0
+    failed = cannot = skipped = 0
     for name, fn in tests:
         try:
             fn()
             print(f"  PASS  {name}")
+        except VoluntarySkip as exc:
+            skipped += 1
+            print(f"  SKIP  {name}: {exc}")
+        except SkipPolicyError as exc:
+            cannot += 1
+            print(f"  CANNOT RUN  {name}: {exc}")
         except Exception as exc:  # noqa: BLE001
             failed += 1
             print(f"  FAIL  {name}: {exc!r}")
-    print(f"\n{len(tests) - failed}/{len(tests)} passed")
-    return 1 if failed else 0
+    passed = len(tests) - failed - cannot - skipped
+    tail = ""
+    if cannot:
+        tail += f", {cannot} COULD NOT RUN"
+    if skipped:
+        tail += f", {skipped} skipped by explicit opt-out"
+    print(f"\n{passed}/{len(tests)} passed{tail}")
+    if failed:
+        return EXIT_FAIL
+    if cannot:
+        return EXIT_CANNOT_RUN
+    return EXIT_PASS
 
 
 if __name__ == "__main__":

@@ -49,6 +49,7 @@ four bridge rigs are pinned BEHAVIOURALLY here; the macOS rig is pinned by
 SHAPE only.
 """
 
+import ast
 import io
 import os
 import sys
@@ -61,7 +62,14 @@ for _p in (_HERE, _TESTS):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from _skip_policy import require  # noqa: E402
+from _skip_policy import (  # noqa: E402
+    EXIT_CANNOT_RUN,
+    EXIT_FAIL,
+    EXIT_PASS,
+    SkipPolicyError,
+    VoluntarySkip,
+    require,
+)
 
 # tools/https_e2e is NOT imported at module level.  Its __init__ re-exports
 # from .vice_on_bridge, which imports c64_test_harness from a sibling
@@ -118,6 +126,11 @@ BRIDGE_RIGS = (
 )
 
 MACOS_RIG = os.path.join(_TESTS, "rig_vice_https_macos.py")
+
+# The one bridge rig whose voluntary skip really does cost coverage: the
+# macOS rig drives the emulated-RR-Net path over TLS, so plaintext HTTP has
+# no counterpart there.  Named here so the claim is asserted, not folklore.
+PLAINTEXT_ONLY_RIG = os.path.join(_TESTS, "rig_phase2_http.py")
 
 
 class Tripwire(AssertionError):
@@ -300,21 +313,73 @@ def test_bridge_rigs_route_a_broken_build_to_two_without_an_opt_out():
         assert rc == 2, f"{name}: broken build must be 2 even opted out, got {rc}\n{out}"
 
 
-def test_the_opt_in_rig_treats_an_unset_flag_as_not_applicable():
-    """VICE_HTTPS_OK_TO_RUN unset is the operator declining: exit 0."""
+def test_the_interlock_flag_unset_is_contention_and_stays_exit_two():
+    """VICE_HTTPS_OK_TO_RUN unset must NOT be laundered into a pass.
+
+    This is the one gate where #178's own first draft got the taxonomy
+    backwards: it read an unset flag as "the operator declined an opt-in
+    rig" and returned 0, silently loosening the exit 2 this rig had on
+    master.  Unset is the DEFAULT state, so it cannot tell a considered
+    decline from a forgotten flag -- and the flag asserts "the UCI HTTPS
+    listener has stopped", which is a contention claim.  Contention is the
+    category with no opt-out at all.
+
+    Pinned behaviourally, and pinned as NOT opt-out-able, so neither half
+    can be quietly reverted.
+    """
     mod = _import_rig("rig_phase3_https_1mhz")
     with _Patched(_https_e2e(), platform_supported=lambda: True,
                   check_prerequisites=_tripwire("check_prerequisites")).env(
             VICE_HTTPS_OK_TO_RUN=None):
         rc, out = _run_main(mod)
-    assert rc == 0, f"unset opt-in flag must be exit 0, got {rc}\n{out}"
-    assert "NOT APPLICABLE" in out, out
+    assert rc == 2, f"unset interlock must be exit 2, got {rc}\n{out}"
+    assert "COULD NOT RUN" in out, out
+    assert "NOT APPLICABLE" not in out, out
     assert "VICE_HTTPS_OK_TO_RUN" in out, out
+
+    # ...and no environment variable may rescue it, unlike the
+    # missing-prerequisite lane three lines further down the rig.
+    with _Patched(_https_e2e(), platform_supported=lambda: True,
+                  check_prerequisites=_tripwire("check_prerequisites")).env(
+            VICE_HTTPS_OK_TO_RUN=None, C64_ALLOW_SKIP="1"):
+        rc, out = _run_main(mod)
+    assert rc == 2, f"contention must not be opt-out-able, got {rc}\n{out}"
 
 
 # ---------------------------------------------------------------------------
 # tests/rig_vice_https_macos.py -- source inspection only (see module docstring).
 # ---------------------------------------------------------------------------
+
+def test_phase2_does_not_claim_a_counterpart_it_does_not_have():
+    """rig_phase2_http.py must not tell an operator its coverage is covered.
+
+    The file used to contradict itself inside 40 lines: its module docstring
+    said "tests/rig_vice_https_macos.py owns the coverage", while its own
+    _COUNTERPART string -- the one that actually reaches the operator at
+    runtime -- said that rig drives TLS, "so plaintext HTTP specifically has
+    no macOS rig".  The docstring is what a reader hits first.
+
+    This matters past tidiness: the voluntary-skip verdict is justified by
+    "another rig owns the coverage, nothing is lost", and for this one rig
+    that is false.  Exit 0 is still right (there is no remedy on macOS) but
+    the reason has to be the true one, or the exit code quietly overstates
+    what was verified -- the same defect class this module exists to catch.
+    """
+    with open(PLAINTEXT_ONLY_RIG, "r", encoding="utf-8") as fh:
+        src = fh.read()
+
+    # The runtime string is the anchor: assert it says what we think, so
+    # this test cannot pass because the string was silently reworded.
+    assert "no macOS rig" in src, (
+        "rig_phase2_http.py must state that plaintext HTTP has no macOS "
+        "counterpart; the anchor string is gone")
+
+    doc = ast.get_docstring(ast.parse(src)) or ""
+    assert doc, "rig_phase2_http.py lost its module docstring"
+    assert "owns the coverage" not in doc, (
+        "rig_phase2_http.py's docstring claims another rig owns its "
+        "coverage, which its own _COUNTERPART denies:\n" + doc)
+
 
 def _macos_source():
     with open(MACOS_RIG, "r", encoding="utf-8") as fh:
@@ -374,19 +439,42 @@ def test_macos_rig_build_failure_exits_two():
 
 
 def _standalone() -> int:
+    """Run every test_* in this module without pytest.
+
+    Honours the 0/1/2 contract of the module under test rather than
+    collapsing "could not run" onto 1.  The six https_e2e tests raise
+    SkipPolicyError when the sibling harness checkout is absent -- that is a
+    coverage hole (exit 2), not a failed check (exit 1).
+    """
     tests = [(n, o) for n, o in sorted(globals().items())
              if n.startswith("test_") and callable(o)]
     assert tests, "FATAL: no tests found -- a matcher that matches nothing"
-    failed = 0
+    failed = cannot = skipped = 0
     for name, fn in tests:
         try:
             fn()
             print(f"  PASS  {name}")
+        except VoluntarySkip as exc:
+            skipped += 1
+            print(f"  SKIP  {name}: {exc}")
+        except SkipPolicyError as exc:
+            cannot += 1
+            print(f"  CANNOT RUN  {name}: {exc}")
         except Exception as exc:  # noqa: BLE001
             failed += 1
             print(f"  FAIL  {name}: {exc!r}")
-    print(f"\n{len(tests) - failed}/{len(tests)} passed")
-    return 1 if failed else 0
+    passed = len(tests) - failed - cannot - skipped
+    tail = ""
+    if cannot:
+        tail += f", {cannot} COULD NOT RUN"
+    if skipped:
+        tail += f", {skipped} skipped by explicit opt-out"
+    print(f"\n{passed}/{len(tests)} passed{tail}")
+    if failed:
+        return EXIT_FAIL
+    if cannot:
+        return EXIT_CANNOT_RUN
+    return EXIT_PASS
 
 
 if __name__ == "__main__":

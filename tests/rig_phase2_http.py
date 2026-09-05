@@ -12,9 +12,14 @@ Run:
 Exit codes (tools/_skip_policy.py, issue #178):
     0 -- PASS
     1 -- FAIL (a check ran and failed)
-    0 -- NOT APPLICABLE: this rig is Linux-only, and on any other host
-         tests/rig_vice_https_macos.py owns the coverage.  A named verdict,
-         never a bare skip.
+    0 -- NOT APPLICABLE: this rig is Linux-only.  A named verdict, never a
+         bare skip -- and, uniquely among the four bridge rigs, a verdict
+         that DOES cost coverage: tests/rig_vice_https_macos.py is the
+         macOS counterpart for the emulated-RR-Net path, but it drives it
+         over TLS, so plaintext HTTP specifically has no macOS rig.  Exit 0
+         anyway because there is no remedy on this platform (see
+         _wrong_platform), not because nothing is lost.  Say so out loud
+         rather than let the exit code imply otherwise.
     2 -- COULD NOT RUN (a prerequisite is missing ON LINUX, or the build is
          broken -- nothing was verified).  Set C64_ALLOW_SKIP=1 to accept a
          prerequisite-missing run as exit 0; a FAILED BUILD is never opted
@@ -77,8 +82,14 @@ def _wrong_platform() -> int:
 
     The load-bearing question is what the remedy is.  "install iproute2" is
     an involuntary skip and stays exit 2 -- but on a non-Linux host there is
-    no remedy at all, and another rig owns the coverage, so nothing is lost
-    and exit 2 would be a red nobody can ever clear.
+    no remedy at all, so exit 2 would be a red nobody can ever clear.
+
+    Note what this rig does NOT get to say, and what its three siblings do:
+    that another rig owns the coverage.  For DHCP and for HTTPS the macOS
+    rig genuinely re-runs the same path; for PLAINTEXT HTTP over emulated
+    RR-Net it does not, so this verdict really does lose coverage on macOS.
+    That is disclosed here and in _COUNTERPART rather than smoothed over --
+    a voluntary skip may be quiet, but it may not misdescribe what it costs.
     """
     return not_applicable(
         f"this rig is Linux-only (br-c64 bridge + netfilter + /proc/net/udp); "

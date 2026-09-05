@@ -22,17 +22,16 @@ Run (after the UCI test has fully stopped):
 
 Exit codes (tools/_skip_policy.py, issue #178):
     0 -- PASS
-    0 -- NOT APPLICABLE, as a named verdict rather than a bare skip, in two
-         cases: this rig is Linux-only, and on any other host
-         tests/rig_vice_https_macos.py owns the coverage; or
-         VICE_HTTPS_OK_TO_RUN is unset, which is the operator declining an
-         opt-in rig.  Neither loses coverage.
+    0 -- NOT APPLICABLE, as a named verdict rather than a bare skip: this
+         rig is Linux-only, and on any other host
+         tests/rig_vice_https_macos.py owns the coverage.
     1 -- FAIL (a check ran and failed)
     2 -- COULD NOT RUN (a prerequisite is missing ON LINUX, the build is
-         broken, or port 443 is held by another run -- nothing was
-         verified).  Set C64_ALLOW_SKIP=1 to accept a prerequisite-missing
-         run as exit 0; a FAILED BUILD and CONTENTION are never opted out
-         of.
+         broken, or the rig is interlocked -- VICE_HTTPS_OK_TO_RUN unset,
+         or port 443 held by another run.  Nothing was verified).  Set
+         C64_ALLOW_SKIP=1 to accept a prerequisite-missing run as exit 0;
+         a FAILED BUILD and CONTENTION are never opted out of, and the
+         pre-flight gate is contention.
 """
 
 from __future__ import annotations
@@ -611,18 +610,29 @@ def main() -> int:
     # --- Pre-flight gate (must run BEFORE BridgeEnv, which mutates host
     # netfilter via sudo). Refuses if the UCI HTTPS listener is still up.
     #
-    # An unset opt-in flag is the operator DECLINING to run this rig: a
-    # voluntary skip, exit 0 with a named verdict.  It is not a coverage
-    # hole -- nothing was lost and nothing is broken (issue #178).
+    # This flag is a CONTENTION INTERLOCK, not a taste setting, so an unset
+    # flag stays exit 2 exactly as it was before #178 -- the verdict is now
+    # a named block instead of a bare print, and that is the whole change.
+    #
+    # An earlier draft called it "the operator declining an opt-in rig" and
+    # routed it to not_applicable() (exit 0).  That was wrong in this repo's
+    # own terms.  UNSET IS THE DEFAULT STATE: it cannot distinguish "I
+    # considered this and declined" from "I forgot", so exit 0 hands a green
+    # run to someone who verified nothing -- the class #178 exists to close,
+    # committed by #178's own implementation.  What the flag actually
+    # asserts is "the UCI HTTPS listener has fully stopped", which is a
+    # contention claim, and contention is the one category this policy gives
+    # no opt-out at all -- see the port-443 check immediately below, which is
+    # the same interlock measured directly rather than asserted.
     if os.environ.get("VICE_HTTPS_OK_TO_RUN") != "1":
-        return not_applicable(
-            "VICE_HTTPS_OK_TO_RUN is not set -- this rig is opt-in because it\n"
-            "    collides with the UCI HTTPS listener (which binds 443/4433 on\n"
-            "    the LAN interface); the U64E test may still be running.\n"
+        return _cannot_run(
+            "VICE_HTTPS_OK_TO_RUN is not set -- this rig is interlocked because\n"
+            "    it collides with the UCI HTTPS listener (which binds 443/4433\n"
+            "    on the LAN interface); the U64E test may still be running.\n"
             "    To run it, wait for that to finish, then:\n"
             "      sudo env VICE_HTTPS_OK_TO_RUN=1 PYTHONPATH=tools \\\n"
             "          python3 tests/rig_phase3_https_1mhz.py",
-            certifies=_CERTIFIES,
+            opt_out=False,
         )
 
     # A held port is CONTENTION, the third category: the rig exists, someone

@@ -48,6 +48,10 @@ warning INTO the reason string rather than printing it alongside, and
 that, an exit-0 opt-out reads as a bare ``3 skipped`` and the warning is
 gone.
 
+``require()`` decides that by asking whether pytest is DRIVING
+(``sys.modules``), never whether it is importable: outside pytest it raises
+``VoluntarySkip``, which a standalone runner can actually catch.
+
 Usage (script lane)::
 
     from _skip_policy import cannot_run, not_applicable
@@ -90,6 +94,7 @@ __all__ = [
     "EXIT_FAIL",
     "EXIT_CANNOT_RUN",
     "SkipPolicyError",
+    "VoluntarySkip",
     "reason_text",
     "cannot_run",
     "not_applicable",
@@ -106,6 +111,22 @@ class SkipPolicyError(AssertionError):
 
     Subclasses AssertionError so pytest renders it as a plain failure and so
     a caller that only catches AssertionError still catches it.
+    """
+
+
+class VoluntarySkip(Exception):
+    """Raised by require() when the opt-out is honoured and pytest is NOT driving.
+
+    Deliberately an ``Exception`` and not a ``pytest.outcomes.Skipped``.
+    ``Skipped`` derives from ``BaseException``, so a standalone runner's
+    ``except Exception`` cannot catch it: the process dies mid-suite, prints
+    no summary, runs none of the remaining tests, and exits 1 -- which under
+    this module's own contract means "a check ran and failed".  Raising a
+    plain Exception instead keeps the escape hatch catchable by the lane that
+    is actually running.
+
+    A caller that does not catch it still does not run the test body, so the
+    fail-closed property is unchanged; only the reporting differs.
     """
 
 
@@ -251,9 +272,17 @@ def require(
     full ``reason_text()`` -- pytest records a FAILURE, and the reason string
     is self-contained because module stdout does not survive.
 
-    If ``opt_out_env`` is set to exactly "1" it calls ``pytest.skip()``
-    with the same self-contained string instead, so the ``-ra`` summary still
-    carries the vacuity warning rather than a bare "skipped".
+    If ``opt_out_env`` is set to exactly "1" the escape hatch opens, and how
+    it is reported depends on who is DRIVING, not on what is installed:
+
+      * pytest driving  -- ``pytest.skip()`` with the same self-contained
+        string, so the ``-ra`` summary still carries the vacuity warning
+        rather than a bare "skipped".
+      * anything else   -- :class:`VoluntarySkip`, which a plain
+        ``except Exception`` can catch.  See that class for why handing a
+        ``Skipped`` to a non-pytest runner is a bug, not a shortcut.
+
+    Either way the test body does not run.
     """
     if condition:
         return
@@ -265,16 +294,21 @@ def require(
         opt_out_env=opt_out_env,
     )
     if _opted_out(opt_out_env):
-        try:
-            import pytest  # noqa: PLC0415 - optional, only needed on this branch
-        except ImportError:
-            # No pytest, so there is no skip to record -- and returning would
-            # be the worst answer available: the caller would carry on into a
-            # test body whose prerequisite is missing, which is the vacuous
-            # pass this module exists to prevent.  Fail closed instead.
-            raise SkipPolicyError(
-                f"{text} [{opt_out_env}=1 is set, but pytest is not installed, "
-                "so the skip cannot be recorded; failing closed rather than "
-                "running the body as if the prerequisite held]")
+        # Hand the skip to pytest ONLY when pytest is actually DRIVING this
+        # run -- `sys.modules`, not `import`.  `import pytest` succeeds
+        # whenever pytest is merely INSTALLED, which on a developer machine
+        # is always, and `pytest.skip()` raises `pytest.outcomes.Skipped`,
+        # a BaseException.  A standalone runner's `except Exception` cannot
+        # catch that, so the whole suite died mid-run at exit 1 with no
+        # summary and the remaining tests never executed.
+        #
+        # tools/test_uci_data_acc.py's hand-rolled copy of this policy
+        # already had this right, with the same `sys.modules.get("pytest")`
+        # and the same reason: "the standalone runner has its own reporting
+        # and must not see Skipped".  This helper exists to supersede that
+        # copy, so it has to be at least as correct as the thing it replaces.
+        pytest = sys.modules.get("pytest")
+        if pytest is None:
+            raise VoluntarySkip(f"{text} [{opt_out_env}=1 set]")
         pytest.skip(f"{text} [{opt_out_env}=1 set]")
     raise SkipPolicyError(text)
