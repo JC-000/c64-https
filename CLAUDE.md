@@ -169,11 +169,16 @@ fixed buffers in crypto BSS.
     `nistcurves_zp_ptr2=$3D` (verify in `build/labels.txt`). All defined
     locally (`src/constants.inc`, `src/crypto/shared/zp_canon.inc`); no
     `.importzp` anywhere.
-  - c64-lib-contract: pin the **tag** (v0.10.3 is newest tag and newest
-    SPEC; note 0.10.1 has no tag). §8.0 APP_OWNED shape is requested via
-    `CONTRACT_DEFINES` — no archive member is edited (§6.1) — and the
+  - c64-lib-contract is a **prose dependency, not a submodule** — nothing
+    in `make` reads it, so a contract release can never break a build.
+    Always cite a **tag** (newest: v1.1.0). v1.0.0 cut the SPEC by 7/8 and
+    retired §9, §12, §13, §14, §15, §6.3, §6.6, §6.7: those resolve only
+    at **v0.17.1** (`git show v0.17.1:SPEC.md`), survivors keep their
+    numbers against the current SPEC. §8.0 APP_OWNED shape is requested
+    via `CONTRACT_DEFINES` — no archive member is edited (§6.1) — and the
     manifest attests it, so the asserts in `src/lib_contract_asserts.s`
-    are live. §13 (network ABI) is not adopted yet (issue #70).
+    are live. §13 (network ABI) **is** adopted (#70, merged #142); see
+    Networking backend ABI for what its retirement did and did not change.
 
 **P-384 is PARKED, and deliberately gated.** The wire path used to be fully
 live while the overlay image was a stub: a P-384 certificate made
@@ -196,7 +201,12 @@ bank 2; banks 6-7 reserved for the P-384 overlay experiment.
 Switching backend = a different cfg + different `src/net/<backend>/*.o`.
 
 **`src/net_abi.inc` is the build-enforced boundary** (c64-lib-contract
-SPEC §13, issue #70). `boot.s`, `http.s`, `tls_record_io.s` and `tls13.s`
+SPEC §13, issue #70). **§13 was retired at contract v1.0.0 and every §13.x
+number in this section resolves at tag `v0.17.1`, nowhere else.** Nothing
+moved and nothing broke: every name, bit and code below is defined,
+exported and asserted inside this repo — the contract was never a build
+input — so `src/net_abi.inc` is now the normative source, not a copy of
+one. `boot.s`, `http.s`, `tls_record_io.s` and `tls13.s`
 `.include` it and import no `net_*` symbol directly, so a backend that
 drops a symbol fails the link by name on both backends. Surface:
 
@@ -222,8 +232,12 @@ drops a symbol fails the link by name on both backends. Surface:
     over-claim test — both fleet adapters misfiled it independently (#140).
     `net_poll` caps the copy at the request and never emits `$8A`; a header
     above the request that is NOT `$FFFF` leaves `$8B UCI_ERR_BAD_READ_HDR`
-    (C=0, stream continues) — the stream-family counterpart of `$8A`. Allocate new codes
-    in SPEC §13.2's table first — `$8B` was the first one allocated that way.
+    (C=0, stream continues) — the stream-family counterpart of `$8A`.
+    `$8B` was allocated in SPEC §13.2's table, the cross-consumer registry
+    that made `$88`'s head-on collision with c64-wireguard visible. **That
+    table is frozen at v0.17.1 and has no successor**, so a new UCI code
+    now needs an explicit agreement with c64-wireguard before it is
+    emitted — the range alone never prevented the collision (#184).
   - Gone, per §13.1: `net_tcp_set_recv_cb` (stub), `net_recv_ready`,
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
     is now `print_local_ip` in `boot.s`, one copy for both backends.
@@ -386,8 +400,11 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     4,212 B slot). UCI: by 1,280 B since `CERT_BUF_BSS` moved into
     `CRYPTO_OVERLAY` for wikipedia (accepted casualty). The earlier
     `Duplicate external identifier: 'reu_mul_tables_init'` collision is
-    handled by dropping `reu_mul_init.o` in the nistcurves wrapper — it is
-    APP_OWNED here. Flag stays off; the in-tree X25519 is correct (RFC 7748
+    handled by **deferral through `CONTRACT_DEFINES`** (`-D
+    SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH`), not by dropping
+    `reu_mul_init.o` — the wrapper does no member surgery at all any more
+    (§6.1), it `cp`s the upstream archive. `reu_mul` is APP_OWNED here.
+    Flag stays off; the in-tree X25519 is correct (RFC 7748
     vector 2 passes) and ships.
   - **P-384 build is broken**, one link deeper than before: the `ar65`
     member-name bug was ours (fixed), and the chain now stops at
@@ -667,8 +684,12 @@ here** — and `tools/test_pytest_boundary.py` proves it is exactly the set
 pytest can run, in both directions. Both rig dirs (`tests/`, `tools/uci/`)
 are `rig_*.py` and in `norecursedirs`, and each exits 5 on its own. A bare
 `pytest` at the root is green; the total is not quotable, because it tracks
-`testpaths` *and* the build state (`test_uci_data_acc.py` skips its cases
-without a UCI PRG in `build/`). Run it rather than citing a number.
+`testpaths` *and* the build state. Run it rather than citing a number, and
+**build `BACKEND=uci` first**: `test_uci_data_acc.py` does not *skip*
+without a UCI PRG in `build/`, it **fails** 3 of its cases with
+`Unavailable: uci_drain_resp is not in build/labels.txt` (measured
+2026-09-05 against an ip65 PRG; 55 passed with a UCI one). That is the
+involuntary-skip gap of #178, not a regression.
 
 Negative-path coverage exists because an audit found the Finished-mismatch
 abort had no test: `test_finished_verify.py` (VICE, carry-latching stub)

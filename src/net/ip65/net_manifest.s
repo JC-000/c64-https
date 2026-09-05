@@ -1,5 +1,9 @@
 ; src/net/ip65/net_manifest.s — c64-lib-contract SPEC §13.0 / §13.7 manifest
 ; for the ip65/RR-Net backend. Emits no bytes: equates only.
+;
+; CITATION ANCHOR: §13 retired at contract v1.0.0; §13.x resolves at tag
+; `v0.17.1` only. The asserts below are self-hosted (both sides of each
+; comparison come from this repo) and are unaffected. See src/net_abi.inc.
 
 .include "net_families.inc"
 

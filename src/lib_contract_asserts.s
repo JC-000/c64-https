@@ -298,3 +298,10 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; =====================================================================
 ; Lives in src/net_abi_asserts.s (issue #70): the §13.0 family asserts
 ; plus the §13.3 ring-mask check that used to sit here.
+;
+; §13 was RETIRED at contract v1.0.0 (2026-09-03) — a network backend is
+; source in its consumer's own tree, so it never crossed a library boundary.
+; Its numbers resolve at tag `v0.17.1` only. No assert moved or weakened:
+; unlike the §5/§8.0 asserts above, which compare OUR values against the
+; sibling archive's exported manifest, every §13 assert compares two values
+; from this repo. See src/net_abi.inc for the full anchor.

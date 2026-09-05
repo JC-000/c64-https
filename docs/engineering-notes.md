@@ -3240,3 +3240,133 @@ but every byte read carries a fence (~5.45 ms at 1 MHz), so it is a
 measured follow-up, not a free change — and any test around it should
 find the accepted length by bisection, not hard-code it.
 
+
+## c64-lib-contract v1.0.0 — §13 retired, and what it did not change (2026-09-05)
+
+The contract released **v1.0.0** on 2026-09-03, cutting SPEC.md from 40,737
+words (v0.17.1) to 5,154 and retiring **§9, §12, §13, §14, §15** plus
+**§6.3, §6.6, §6.7**. **v1.1.0** followed 50 minutes later (§7: the ABI
+counter turns on what the code does, not on whether the export list
+changed), settling upstream issue #167 — which was open at v1.0.0 and is
+now CLOSED. No shipped counter changed as a result.
+
+§13 was the network backend ABI, which we adopted deliberately (#70, merged
+as #142) and cite throughout. Upstream's rationale: a network backend is
+source in its consumer's own tree, so a backend and its consumer are never
+two independently built artifacts; the names live only in the consumers'
+own `net_*.inc` headers.
+
+### The "migration: none" claim, checked rather than assumed
+
+Upstream's claim is about *libraries*. We are a *consumer*, so it was
+checked directly. Three independent lines of evidence:
+
+1. **c64-lib-contract is not a submodule and never was** (`.gitmodules`
+   lists `ip65`, `libs/nistcurves`, `libs/x25519` and nothing else).
+   `grep -rn 'c64-lib-contract'` over `Makefile` and `tools/` returns
+   comments only. No `make` rule reads SPEC.md, so no contract release can
+   reach a build.
+2. **Every §13 assert compares two values from this repo.** In
+   `src/net_abi_asserts.s`, `NET_BACKEND_FAMILIES` is exported by
+   `src/net/<backend>/net_manifest.s`, `NET_FAMILY_*` come from
+   `src/net/net_families.inc`, `TCP_RECV_MASK` from `src/constants.inc`.
+   In `src/net/ip65/net_manifest.s`, `LIB_NET_IP65_BLOB_SIZE/BASE` are
+   compared against labels around our own `.incbin`. This is the structural
+   difference from the §5/§8.0 asserts in `src/lib_contract_asserts.s`,
+   which do compare our values against the sibling archive's exported
+   manifest — those have an external counterparty; the §13 ones do not.
+3. **Both profiles still link green at master + these doc edits.** UCI
+   default `7c79a4e00a19685de7540970247c759a5e1cc7e13a88b12bf8b8234fcc013c14`,
+   UCI comb `c423476011e1928f5955e4773c3cf28c4876dcf76e70be9de40c2f4522f8bf72`,
+   ip65 default `d780f719fac82e07bba9d30db804e853ddea3409e99d6477f118c006ad4eff9a`
+   — identical before and after, which is the proof that this change is
+   comment-only.
+
+**The one real loss is §13.2's cross-consumer error-code allocation
+table.** That table existed because the range rule alone had already
+failed: c64-wireguard allocated `$88 UCI_ERR_LONG_READ` while c64-https had
+long emitted `$88 UCI_ERR_NO_SOCKET`, a head-on collision in which neither
+side violated §13.2 as written. Our `$8B UCI_ERR_BAD_READ_HDR` was the
+first code allocated under the resulting allocate-here-first rule. With §13
+retired the table is frozen at v0.17.1 and has no successor registry: the
+`$80-$BF` UCI namespace is still one namespace shared with c64-wireguard,
+and nothing — no build, no test, on either side — would catch a second
+collision. Upstream's two-prong rule genuinely excludes it (both adapters
+are consumer-owned source), so this is not a defect in the retirement; it
+is a coordination duty that has moved from a document to the two lanes.
+Filed as #184.
+
+### The re-anchoring decision
+
+Two candidates were considered: (a) keep the §-numbers and anchor them to
+`v0.17.1`, or (b) drop the §-numbers and let `src/net_abi.inc` be
+self-describing. **(a) was chosen**, applied once per file rather than once
+per citation.
+
+The project's triage rule is *would this second copy change if the first
+did?* Applied here it cuts for (a): `v0.17.1` is an immutable tag, so a
+citation to it is a pointer, not a copy, and cannot drift. What *was*
+drifting is the unqualified word "SPEC" — those citations pointed into a
+living document where §13 is now a numbering gap, so a reader following one
+today finds nothing and gets no error. One anchor line per file fixes
+exactly that, and costs nothing per citation.
+
+Against (b): the §13.x numbers are the audit trail to the reasoning behind
+the surface's shape — most of which was learned expensively (the `$88`
+collision, the `$FFFF` sentinel both fleet adapters misfiled, `net_print_ip`
+being consumer UI). RETIRED.md preserves that text permanently and says so
+explicitly: "a citation to a retired section is a citation to `v0.17.1` …
+Rewriting them would be churn with no reader benefit." Deleting the numbers
+would discard recoverable rationale to save nothing.
+
+Scope note: the anchor applies **only to retired sections**. §1–§8, §10 and
+§11 survive with their numbers intact and must keep resolving against the
+current SPEC — anchoring those to v0.17.1 would freeze live citations.
+
+### Two §8.2 items checked in the same pass
+
+**The `LIB_SHARED_REU_MUL_BANK < 31` tightening is a non-event here, and
+the reason is stronger than "our banks are small".** We hold **no copy of
+the §8.2 placement snippet at all** — `grep -rn 'LIB_SHARED_REU_MUL' src/
+tools/ cfg/ Makefile` finds only a comment in `src/lib_contract_asserts.s`
+recording that we import none of the three consumer-input equates; we own
+our REU layout in `src/crypto/shared/reu_layout.inc` and pass no bank
+override to either sibling. So there is nothing to tighten. Measured at the
+v0.11.2 pin from `build/labels.txt`, both profiles: default
+`LIB_NISTCURVES_SHARED_REU_MUL_BANK = 0`, `_OFFSET = 0`, `_BANKS_USED =
+$03`; comb `LIB_NISTCURVES_REU_BANK_MUL = 0`, `REU_BANK_COMB = 2`,
+`REU_BANKS_USED = $04`. Both bounds accept every one of those identically.
+Residual, worth knowing: our own live assert `(LIB_NISTCURVES_REU_BANKS_USED
+& $C0) = 0` (banks 6–7 reserved for P-384) reads the same 32-bit mask and
+would therefore pass falsely against a bank ≥ 32 in exactly the way the old
+`< $FE` bound did. No configuration in this tree can reach one, because we
+pass no bank override — but if we ever start passing one, that assert needs
+a companion bound on the bank number itself.
+
+**`reu_mul_tables_init` as the canonical init entry: conformant, and the
+premise behind the question is stale.** The wrapper no longer drops
+`reu_mul_init.o`, or any other member: `build_nistcurves_p256.sh` ends with
+`cp "$UPSTREAM_ARCHIVE" "$ARCHIVE"` and the comment "steps 4 and 5 retired:
+no member drops, no glue TU, no re-archive". The deferral is requested
+through `CONTRACT_DEFINES` (`-D SHARED_SQTAB_INIT -D SHARED_REU_MUL_INIT -D
+SHARED_REU_MUL_FETCH -D SHARED_CT_MUL_8X8 -D LIB_NO_BARE_EXPORTS=1 …`), the
+manifest attests it (`LIB_NISTCURVES_SHARED_PRIMITIVES = 0`), and no ar65
+surgery happens — which is what §6.1 wants. Under the restated clause we
+are conformant on the load-bearing half (import-never-stub: no second
+canonical definition exists — `reu_mul_tables_init` appears nowhere in
+`build/labels.txt`), and the library's init import is dropped as
+unreferenced, the case v0.9.2 explicitly blessed. `reu_fetch_mul_row` *is*
+referenced, is imported, and `src/boot.s` exports it (except under
+`USE_NISTCURVES_ONCHIP`, where the rebuilt `mul_8x8_onchip.o` exports it and
+ours yields).
+
+The one gap is cosmetic-until-it-isn't: as the §8.2 provider we export
+`reu_mul_init`, not the canonical `reu_mul_tables_init`. Nothing references
+the canonical name today, so nothing fails. If a future library variant ever
+does reference it — x25519 does exactly this under `SQR_DMA_K > 0`, invoking
+a private adjacent-cache init *after* `reu_mul_tables_init` returns — our
+link fails **loudly** with an unresolved external, not silently. The fix if
+that day comes is two lines in `src/boot.s` (a `reu_mul_tables_init:` label
+at the existing entry plus its `.export`), costs zero PRG bytes, and is
+deliberately not done pre-emptively: an unused export is a claim we would
+then have to keep true.

@@ -1,5 +1,12 @@
 ; src/net_abi_asserts.s — c64-lib-contract SPEC §13.8 consumer intake asserts.
 ;
+; CITATION ANCHOR: §13 was retired at contract v1.0.0; its §13.x numbers
+; resolve at tag `v0.17.1` only (`git show v0.17.1:SPEC.md`). The asserts
+; below are unaffected — every symbol they touch is defined in this repo
+; (NET_BACKEND_FAMILIES from src/net/<backend>/net_manifest.s, NET_FAMILY_*
+; from src/net/net_families.inc, TCP_RECV_MASK from src/constants.inc) and
+; the contract has never been a build input. See src/net_abi.inc.
+;
 ; Assembled into every build, both backends, every profile; emits no bytes.
 ; Companion to src/lib_contract_asserts.s (§1/§3/§5/§8), which carried the
 ; §13.3 ring-mask check before this TU existed — it now lives here with the
