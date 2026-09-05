@@ -182,8 +182,8 @@ done
 # single broken variant left the operator with no artifacts AND no written
 # record of what broke. Partial is the common case during a library bump (one
 # profile's archive trips a link assert while the other is fine), and the
-# useful outcome there is "here are the three that work, here is the error for
-# the fourth" — the release still cannot be cut, but the blocker is legible
+# useful outcome there is "here are the ones that work, here is the error for
+# the one that did not" — the release still cannot be cut, but the blocker is legible
 # and the good artifacts are testable. The non-zero status is what stops
 # anyone mistaking a partial run for a complete one.
 built=$(( ${#PACKAGE_VARIANTS[@]} - failed ))

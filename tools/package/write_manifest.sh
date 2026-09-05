@@ -162,11 +162,10 @@ echo
 echo "      LOAD\"*\",8,1"
 echo "      RUN"
 echo
-echo "  There are deliberately no combined images. A .d64 has 664 free blocks and"
-echo "  each UCI PRG is 248, so the three-product lineup (744 blocks) cannot fit on"
-echo "  one disk and a per-backend image would have had to silently omit a product."
-echo "  Shipping one variant per disk means the label is the whole contents: what"
-echo "  you downloaded is what boots."
+echo "  There are deliberately no combined images. Shipping one variant per disk"
+echo "  means the label is the whole contents, so no image can quietly leave a"
+echo "  product out: what you downloaded is what boots. A disk holding all three"
+echo "  could not fit in any case - 248 + 248 + 186 = 682 blocks against 664."
 echo
 if [ -f "$D64_LIST" ]; then
     while IFS= read -r ln; do
