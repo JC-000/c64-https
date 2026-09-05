@@ -65,7 +65,7 @@ if [ "$PROFILE" = "onchip-comb" ]; then
     # archive ships) and it is why src/contract_footprint_asserts.s had
     # to exclude this profile from the §6.6 assert (§6.6 itself was
     # retired at contract v1.0.0; it resolves at tag v0.17.1): the surviving
-        # manifest described the pre-surgery set, 27,000 B against a
+    # manifest described the pre-surgery set, 27,000 B against a
     # 16,384 B region.
     #
     # libs/nistcurves v0.11.0 added `lib-p256-comb-onchip` in response

@@ -3309,11 +3309,31 @@ c64-wireguard's. Their registry also owns `$8C UCI_ERR_SEND_TOO_LONG`, `$8D
 UCI_ERR_OPEN_REFUSED`, `$8E UCI_ERR_CMD_UNKNOWN` (wg#112) and `$8F
 UCI_ERR_SHORT_READ` (wg#130); `src/net/ip65/ip65_errors.inc` recorded
 `$41-$45` and nothing above, while they own `$46`, `$47` (reserved, never
-emitted), `$48` and `$49`. `$8C`/`$8D`/`$46`/`$47` were allocated in the
-retired table and we simply never copied them down; `$8E`/`$8F`/`$48`/`$49`
-post-date the retirement. Both headers also carried a dead imperative —
-"allocate a new code in SPEC §13.2's table THERE first" — pointing at a
-section that no longer exists.
+emitted), `$48` and `$49`. Both headers also carried a dead imperative —
+"allocate a new code THERE first, then here" — pointing at a section that
+no longer exists.
+
+**Provenance, measured against wireguard's history rather than assumed** —
+the first version of this entry said "`$8E`/`$8F`/`$48`/`$49` post-date the
+retirement", and `$8E` does not:
+
+    2026-08-31  v0.17.1 tagged — the §13.2 table's last revision
+    2026-09-03  15:04Z  wg#112 merges, minting $8E   (a82a48a)
+    2026-09-03  19:23Z  v1.0.0 tagged, §13 retired
+    2026-09-03  19:45Z  wg#120 lands $48 / $49
+    2026-09-04  20:45Z  wg#128 lands $8F
+
+`$8C`/`$8D`/`$46`/`$47` were allocated in the retired table (v0.17.1 §13.2)
+and we simply never copied them down. `$8E` was minted **4h18m before the
+retirement** — after v0.17.1 froze the table, while §13.2 was still the live
+rule, and outside it. Only `$48`/`$49`/`$8F` post-date the retirement.
+
+The accurate version is the stronger argument, which is why getting it
+wrong mattered: the table was already being bypassed while it was still
+normative, so "the registry lapsed when §13 was retired" understates it.
+And a provenance annotation that does not survive a check against the
+neighbour's history invites a reader to discount the whole transcribed
+list, including the eight rows that are right.
 
 Compose those and you get the `$88` incident again, exactly: someone reads
 `uci_errors.inc`, sees `$8C` free and no registry named, and mints it. The

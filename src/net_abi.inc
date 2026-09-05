@@ -6,9 +6,8 @@
 ; CITATION ANCHOR. §13 was RETIRED at contract v1.0.0 (2026-09-03), on the
 ; grounds that a network backend is source in its consumer's own tree and so
 ; never crossed a library boundary. Every §13.x number in this file resolves
-; at tag `v0.17.1` and nowhere else: `show v0.17.1:SPEC.md`, run in a
-; c64-lib-contract checkout — that repo is not a submodule here, so the
-; command fails from this tree.
+; at tag `v0.17.1` and nowhere else, in a c64-lib-contract checkout — that
+; repo is not a submodule here, so the tag does not resolve from this tree.
 ;
 ; No §13 assert has a contract-derived counterparty (§13 defined no numeric
 ; value we import), so no contract release can break a build. THIS FILE is

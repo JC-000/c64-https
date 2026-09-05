@@ -173,9 +173,8 @@ fixed buffers in crypto BSS.
     in `make` reads it, so a contract release can never break a build.
     Always cite a **tag** (newest: v1.1.0). v1.0.0 cut the SPEC by 7/8 and
     retired §9, §12, §13, §14, §15, §6.3, §6.6, §6.7: those resolve only
-    at **v0.17.1** (`show v0.17.1:SPEC.md` **in a c64-lib-contract
-    checkout** — it is not a submodule here, so the command fails from this
-    tree), survivors keep their numbers against the current SPEC. Note
+    at **v0.17.1**, in a c64-lib-contract checkout (it is not a submodule
+    here); survivors keep their numbers against the current SPEC. Note
     §6.1/§6.2/§6.4/§6.5 survive while §6.3/§6.6/§6.7 do not — §6 is split.
     §8.0 APP_OWNED shape is requested
     via `CONTRACT_DEFINES` — no archive member is edited (§6.1) — and the

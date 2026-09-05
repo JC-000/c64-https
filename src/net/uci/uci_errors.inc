@@ -23,13 +23,25 @@
 ;   $8C  UCI_ERR_SEND_TOO_LONG  theirs; net_udp_send_len over NET_UDP_SEND_MAX
 ;   $8D  UCI_ERR_OPEN_REFUSED   theirs; firmware refused the open, with a
 ;                               named refusal on the $DF1F STATUS channel
-;   $8E  UCI_ERR_CMD_UNKNOWN    theirs, minted AFTER the retirement (wg#112)
-;   $8F  UCI_ERR_SHORT_READ     theirs, minted AFTER the retirement (wg#130)
+;   $8E  UCI_ERR_CMD_UNKNOWN    theirs; minted 2026-09-03 (wg#112), i.e.
+;                               after v0.17.1 froze the §13.2 table and
+;                               ~4 h BEFORE §13 was retired — outside the
+;                               table while the table was still the rule
+;   $8F  UCI_ERR_SHORT_READ     theirs, minted after the retirement (wg#130)
 ;
 ; $8C/$8D were allocated in the retired table and this file never recorded
-; them; $8E/$8F post-date it entirely. Comments only, deliberately — an
-; equate here would imply we emit them. Re-read their registry before
-; allocating; this list is a snapshot, not the authority (#184).
+; them. Comments only, deliberately — an equate here would imply we emit
+; them. Re-read their registry before allocating; this list is a snapshot,
+; not the authority (#184).
+;
+; One inconsistency, called out rather than hidden: $8A below IS a real
+; equate, and is likewise reserved-never-emitted. It predates this block and
+; stays — a published value is never reassigned, and removing the equate
+; would break nothing but would lose the name. c64-wireguard goes further
+; for their reserved $47, protecting it with .export plus asserts
+; (their src/net/ip65/net.s), which is the more durable shape. If a code
+; here ever needs that strength, copy their form; the comment list above is
+; for codes we neither emit nor name.
 
 .include "net_states.inc"       ; NET_TCP_* (SPEC §13.1) — the primary names
 

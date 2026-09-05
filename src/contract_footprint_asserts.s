@@ -15,8 +15,8 @@
 ; CITATION ANCHOR: **§6.6 was RETIRED at contract v1.0.0**, along with §6.3
 ; and §6.7 — it was a RECOMMENDED snippet the consumer writes in its own
 ; tree, so deleting it deleted a suggestion. Every §6.6 citation in this file
-; resolves at tag v0.17.1 (`show v0.17.1:SPEC.md` in a c64-lib-contract
-; checkout) and nowhere else. Nothing here changed or weakened: the asserts
+; resolves at tag v0.17.1, in a c64-lib-contract checkout, and nowhere
+; else. Nothing here changed or weakened: the asserts
 ; below compare our region sizes against the sibling archive's exported
 ; §6.4 manifest, which survives, and the contract has never been a build
 ; input. Keep the checks — RETIRED.md's own guidance is that a library
