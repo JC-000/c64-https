@@ -307,6 +307,17 @@ uppercases); at 48 MHz the handshake scrolls the screen, so read it
 immediately. Crypto-path rigs call `preflight_reu()` (#97): a REU-profile
 build on a REU-disabled device exits 4 in ~2 s instead of spinning ~44 min;
 it never writes device config. `C64_SKIP_REU_PREFLIGHT=1` bypasses.
+**It fails closed (#179)**: a REU setting that cannot be *read* — harness
+error, or a response shape it does not recognise — exits 4 as well, where
+it used to print a WARNING and carry on. That mattered because
+`c64-test-harness` is installed **editable** from a sibling working tree,
+so a merge there changes this repo's behaviour with no commit here: their
+PR #226 made `get_config_item` return the item map instead of the REST
+envelope and the guard went quietly missing. `_read_config_value` now
+prefers `get_config_value` and reads both shapes, and
+`tools/test_reu_preflight.py` pins both halves with a faked client (no
+hardware, milliseconds). Audit any new `get_config_*` call the same way —
+the shared venv means their merge is our regression.
 
 ### Device gotchas (read before diagnosing a "wedge")
 

@@ -34,6 +34,13 @@ holds, before the long run:
 * REU-profile builds read ``C64 and Cartridge Settings / RAM Expansion
   Unit``. Enabled: one line of output, carry on. Disabled: raise
   :class:`ReuPreflightError` immediately, naming both remedies.
+* **Anything else is also a failure** — a read that raises, or a
+  response shape this file cannot parse, raises
+  :class:`ReuPreflightError` too (issue #179). It warned and continued
+  until c64-test-harness PR #226 changed ``get_config_item``'s return
+  shape under us, through the shared editable venv, and the guard went
+  quietly missing on a live path. An unverified device is not a
+  verified one. ``C64_SKIP_REU_PREFLIGHT=1`` is the way past it.
 
 What it deliberately does NOT do
 --------------------------------
@@ -179,19 +186,37 @@ def detect_crypto_profile(labels_path: Path | str) -> tuple[str, str]:
 
 
 def _extract_config_value(resp: Any, category: str, item: str) -> str | None:
-    """Dig a scalar out of a U64 REST config response, defensively.
+    """Dig a scalar out of a U64 config read, defensively.
 
-    Two shapes are live on the devices we test against::
+    Three shapes have to be read, and which one arrives is decided by the
+    *harness version installed in the shared editable venv*, not by
+    anything in this repo (issue #179)::
 
+        # c64-test-harness >= PR #226 — get_config_item returns the item map
+        {"current": "Enabled", "values": ["Disabled", "Enabled"], ...}
+
+        # < #226 — get_config_item returned the raw REST envelope, with the
+        # item either a bare scalar or its own map, depending on firmware
         {"C64 and Cartridge Settings": {"RAM Expansion Unit": "Enabled"}}
         {"C64 and Cartridge Settings":
             {"RAM Expansion Unit": {"current": "Enabled", "presets": [...]}}}
 
-    Returns ``None`` on anything unrecognised rather than guessing —
-    an inconclusive read must not be reported as "Disabled".
+    The item map is tested for first and is unambiguous: a REST envelope is
+    keyed by category name, so a top-level ``"current"`` can only be an item
+    map. Reading both means a harness bump in either direction cannot break
+    this guard.
+
+    Returns ``None`` on anything unrecognised rather than guessing — an
+    inconclusive read must not be reported as "Disabled", nor as "Enabled".
+    :func:`preflight_reu` turns that ``None`` into a failure; see the
+    fail-closed note there.
     """
     if not isinstance(resp, dict):
         return None
+    # Item map (harness >= #226). Checked before the category descent.
+    if "current" in resp:
+        value = resp["current"]
+        return None if value is None else str(value)
     inner = resp.get(category, resp)
     if not isinstance(inner, dict):
         return None
@@ -201,6 +226,27 @@ def _extract_config_value(resp: Any, category: str, item: str) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _read_config_value(client: Any, category: str, item: str) -> str | None:
+    """Read one config item's live value, across harness versions.
+
+    ``Ultimate64Client.get_config_value`` arrived with harness PR #226 and
+    returns the item's ``current`` directly, resolving category and item
+    names the way the firmware does and raising rather than guessing. Prefer
+    it; fall back to ``get_config_item`` + :func:`_extract_config_value` on
+    an older harness, which is also the path that reads the legacy envelope.
+
+    Exceptions propagate: an unreadable value is the caller's problem to
+    fail on, not something to paper over here.
+    """
+    getter = getattr(client, "get_config_value", None)
+    if callable(getter):
+        value = getter(category, item)
+        return None if value is None else str(value)
+    return _extract_config_value(
+        client.get_config_item(category, item), category, item
+    )
 
 
 def preflight_reu(
@@ -238,37 +284,45 @@ def preflight_reu(
         )
         return profile
 
+    # Fail CLOSED from here down (issue #179). This used to warn and carry
+    # on, on the theory that the probe was advisory. It is not: it is the
+    # only thing standing between a REU-less device and 44 minutes of what
+    # looks like a lockup, and a WARNING line scrolling past at minute one
+    # of a 45-minute run is not something anyone reads. An unreadable value
+    # is an unverified device, and an unverified device is a failure with a
+    # named override — which costs seconds — not a result.
+    #
+    # This is also what makes the guard survive the harness moving under it.
+    # c64-test-harness is installed editable from a sibling working tree, so
+    # its PR #226 changed get_config_item's return shape here with no commit
+    # in this repo; the old code answered that by warning and continuing.
+    # _read_config_value now reads both shapes, and if a future change
+    # defeats it as well, the run stops instead of pretending.
     try:
-        resp = client.get_config_item(CAT_CART, ITEM_REU_ENABLED)
-        enabled = _extract_config_value(resp, CAT_CART, ITEM_REU_ENABLED)
-    except Exception as exc:  # noqa: BLE001 — probe is advisory
-        print(
-            f"REU preflight: WARNING — could not read '{ITEM_REU_ENABLED}' "
-            f"({exc.__class__.__name__}: {exc}); continuing unchecked",
-            file=out,
-            flush=True,
-        )
-        return profile
+        enabled = _read_config_value(client, CAT_CART, ITEM_REU_ENABLED)
+    except Exception as exc:  # noqa: BLE001 — any read failure is a failure
+        raise ReuPreflightError(
+            _unreadable_message(
+                f"{exc.__class__.__name__}: {exc}", reason
+            )
+        ) from exc
 
     if enabled is None:
-        print(
-            f"REU preflight: WARNING — '{ITEM_REU_ENABLED}' returned an "
-            f"unrecognised shape ({resp!r}); continuing unchecked",
-            file=out,
-            flush=True,
+        raise ReuPreflightError(
+            _unreadable_message(
+                "the harness returned a shape this check does not "
+                "recognise (no readable value in the response)",
+                reason,
+            )
         )
-        return profile
 
     if enabled.strip().lower() != "enabled":
         raise ReuPreflightError(_failure_message(enabled, reason))
 
-    size = None
+    # The size is decoration on the pass line, so it stays best-effort:
+    # nothing is decided by it, and there is nothing to fail closed about.
     try:
-        size = _extract_config_value(
-            client.get_config_item(CAT_CART, ITEM_REU_SIZE),
-            CAT_CART,
-            ITEM_REU_SIZE,
-        )
+        size = _read_config_value(client, CAT_CART, ITEM_REU_SIZE)
     except Exception:  # noqa: BLE001 — cosmetic only
         size = None
     size_note = f", {size}" if size else ""
@@ -279,6 +333,63 @@ def preflight_reu(
         flush=True,
     )
     return profile
+
+
+def _unreadable_message(detail: str, reason: str) -> str:
+    """Compose the failure text for a REU state we could not read at all.
+
+    Distinct from :func:`_failure_message`, which reports a device that
+    answered "Disabled". Here the device's answer is unknown, so the text
+    must not accuse it of anything — it says what could not be read, why
+    that is fatal rather than advisory, and how to proceed anyway.
+    """
+    return (
+        "\n"
+        "REU PREFLIGHT FAILED — could not read the device's REU setting, and "
+        "this\n"
+        "build needs an REU.\n"
+        "\n"
+        f"  wanted: {CAT_CART} / {ITEM_REU_ENABLED}\n"
+        f"  got   : {detail}\n"
+        f"  build : REU profile ({reason})\n"
+        "\n"
+        "This is not treated as a warning. A REU-profile image on a device "
+        "with no\n"
+        "REU does not fail — it derives the wrong X25519 secret and spins "
+        "~44 min on\n"
+        "a screen ending 'KEYS ENC1 RX' (issue #97). An unverified device is "
+        "not a\n"
+        "verified one, so the run stops here where it costs seconds.\n"
+        "\n"
+        "Likely causes:\n"
+        "\n"
+        "  1. c64-test-harness changed the shape of its config accessors. "
+        "This repo\n"
+        "     imports it from a shared editable venv, so a merge in that "
+        "repo lands\n"
+        "     here immediately (issue #179 was exactly that: their PR #226 "
+        "made\n"
+        "     get_config_item return the item map). Check\n"
+        "     Ultimate64Client.get_config_value / get_config_item against\n"
+        "     tools/uci/_reu_preflight.py, and file it in c64-test-harness "
+        "first.\n"
+        "\n"
+        "  2. The device is unreachable or wedged — try tools/uci/"
+        "boot_check.py.\n"
+        "\n"
+        "  3. The firmware does not expose this config item under this name.\n"
+        "\n"
+        "To proceed without the check, having satisfied yourself the REU is "
+        "there:\n"
+        "\n"
+        f"       {SKIP_ENV}=1 <your command>\n"
+        "\n"
+        "     Or build the on-chip profile, which needs no REU and skips "
+        "this\n"
+        "     check entirely:\n"
+        "       make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1\n"
+        "\n"
+    )
 
 
 def _failure_message(observed: str, reason: str) -> str:
