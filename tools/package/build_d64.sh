@@ -4,20 +4,19 @@
 #
 # Produces, from the PRGs build_prgs.sh left in dist/:
 #
-#   c64-https-<key>.d64        one per variant, one PRG each (4 images)
-#   c64-https-<backend>.d64    one per backend, both of that backend's
-#                              profiles on one disk (2 images)
+#   c64-https-<key>.d64        one per variant, one PRG each, one image per
+#                              product in PACKAGE_VARIANTS (_common.sh is the
+#                              matrix -- do not restate the count here).
 #
-# WHY NOT ONE DISK WITH ALL FOUR: it does not fit, and that is arithmetic, not
-# preference. A .d64 holds 664 free blocks = 168,656 usable bytes; the four
-# PRGs total ~220 KB (2 x 62,977 UCI + 2 x 47,105 ip65). Each backend's pair
-# does fit (UCI ~496 blocks, ip65 ~371), so the per-backend disk is the largest
-# useful bundle. The per-variant singles are the "I know what I want, give me
-# one disk" case and are what the release notes point at.
+# WHY NO COMBO DISKS: they existed, and were retired; the reasoning that
+# retired them is at the "No per-backend combo images" block near the bottom
+# of this file, which is where it belongs because that is where the code that
+# does not emit them lives. In short, it is arithmetic and not preference: a
+# .d64 holds 664 free blocks and the UCI set alone is 3 x 248 = 744, so a
+# combo image could not hold the lineup even if we wanted one.
 #
-# Every image is bootable with LOAD"*",8,1 (the wanted PRG is the first file on
-# the single-variant disks). File names are shared between the single and the
-# per-backend disk so a user only ever learns one name.
+# Every image is bootable with LOAD"*",8,1 -- there is only one PRG on each,
+# so the label is the whole contents.
 #
 # Usage:  tools/package/build_d64.sh     [C1541=... to override the tool]
 # =============================================================================
