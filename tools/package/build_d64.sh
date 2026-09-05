@@ -25,6 +25,21 @@
 # Every image is bootable with LOAD"*",8,1 -- there is only one PRG on each,
 # so the label is the whole contents.
 #
+# THE RULE THAT KEEPS THIS FILE HONEST, since six sites in this tree broke it
+# in one session: DELEGATE A SINGLE-OWNER FACT RATHER THAN RESTATING IT, and
+# where it must be restated -- history, incident records -- PUT IT IN THE PAST
+# TENSE AND NAME THE CONDITION THAT MADE IT TRUE.
+#
+# Stated that way because the tempting shorter version ("restated numbers go
+# stale, delegated ones do not") is false, and this tree falsifies it twice
+# over. _common.sh:18 and verify_release.py:135 both RESTATE 3 x 248 = 744
+# and are both still accurate -- they say the lineup REACHED three variants,
+# so the sentence stays true after the lineup moved. Meanwhile the four sites
+# that started this whole sweep (write_manifest.sh, build_prgs.sh's TRAP 1,
+# test_build_flags_stamp.py, test_tls_deframer.py) went stale restating a
+# RATIONALE with no number in them at all. Tense is what saved the survivors;
+# single ownership, not arithmetic, is what sank the casualties.
+#
 # Usage:  tools/package/build_d64.sh     [C1541=... to override the tool]
 # =============================================================================
 set -euo pipefail
@@ -98,8 +113,9 @@ for line in "${PACKAGE_VARIANTS[@]}"; do
     # Disk label is the variant key: <=16 PETSCII chars, and it makes the
     # directory header self-identifying when several near-identical disks are
     # sitting in a downloads folder. (No count here on purpose -- it is
-    # len(PACKAGE_VARIANTS), and spelling it out is what left four stale
-    # copies of "four" around this tree.)
+    # len(PACKAGE_VARIANTS). Four copies of the word "four" went stale in
+    # this tree by spelling it out; see the header for the rule that
+    # actually covers them.)
     make_disk "$DIST/c64-https-$key.d64" "$key" "01" "$DIST/$prg" "$name"
 done
 
