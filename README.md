@@ -34,11 +34,14 @@ release walks you through the choice:
 | `c64-https-uci-comb` | Ultimate 64 / C64 Ultimate at turbo, REU **on** | fastest — 1.73x quicker verify (16.4 s vs 28.4 s, U64E at 48 MHz). Builds a 16 KB table into REU bank 2 at each boot first: ~34 s at 64 MHz, ~45 s at 48 MHz. |
 
 Every image is built for **one** host, baked in at build time (`make
-HTTPS_HOST=...`); the released images target the bundled test listener, so
-point them at that unless you rebuild. New in v0.4.2: the two **UCI** images
+HTTPS_HOST=...`). The packaging scripts do not override it, so the released
+images carry the Makefile default `www.foo.invalid` — an RFC 2606 / RFC 6761
+reserved name that deliberately cannot resolve on the public internet. Point
+it at the bundled test listener via your local DNS, or rebuild with your own
+`HTTPS_HOST=`. New in v0.4.2: the two **UCI** images
 check the server's certificate actually names the host they asked for.
-`ip65-onchip` does not — the check is 491 B and that layout has 170 B free
-(issue #135). Read ["What this client does NOT
+`ip65-onchip` does not — the check is 491 B and that layout's largest free
+block is 56 B (issue #135). Read ["What this client does NOT
 authenticate"](#what-this-client-does-not-authenticate) before relying on
 either: there is still no certificate chain validation on any image, so this
 is not server authentication.
@@ -131,12 +134,13 @@ namespaced per §13.2: ip65 `$40-$7F`, UCI `$80-$BF`.
 ### TLS 1.3 Cipher Suite
 
 **TLS_CHACHA20_POLY1305_SHA256** (0x1303) — the only suite the
-ClientHello offers (`src/tls_handshake.s:85`), and the ServerHello echo
-is checked against it (`:380`). There is no AES anywhere in `src/crypto/`.
+ClientHello offers, and the ServerHello echo is checked against it
+(both in `src/tls_handshake.s`; grep for `cipher_suite`). There is no AES
+anywhere in `src/crypto/`.
 
 - **AEAD:** ChaCha20-Poly1305 — in-tree `src/crypto/{chacha20,poly1305,aead}.s`, originally from [c64-wireguard](https://github.com/JC-000/c64-wireguard)
 - **Hash:** SHA-256 — in-tree `src/crypto/sha256.s`, originally from [c64-aes256-ecdsa](https://github.com/JC-000/c64-aes256-ecdsa)
-- **Key exchange:** ECDHE with X25519 only — `supported_groups` and `key_share` carry the single group 0x001D (`src/tls_handshake.s:204`); in-tree `src/crypto/{x25519,fe25519}.s`
+- **Key exchange:** ECDHE with X25519 only — `supported_groups` and `key_share` carry the single group 0x001D (`src/tls_handshake.s`, grep `group = x25519`); in-tree `src/crypto/{x25519,fe25519}.s`
 - **Certificate signatures:** ECDSA P-256 (`ecdsa_secp256r1_sha256`, 0x0403) from the [c64-nist-curves](https://github.com/JC-000/c64-nist-curves) submodule at `libs/nistcurves`, via the thin dispatcher `src/crypto/ecdsa_verify.s`. P-384 (0x0503) is **no longer advertised** and is rejected — parked as roadmap work, see Known Issues.
 - **Key derivation:** HKDF-SHA256, built from HMAC-SHA256 (`src/hkdf.s`)
 - **PRNG:** HMAC-DRBG seeded from SID voice 3 noise + CIA timer entropy (`src/entropy.s`, `src/crypto/hmac_drbg.s`)
@@ -147,13 +151,15 @@ Worth stating plainly, because "TLS 1.3 / HTTPS client" reasonably implies
 otherwise, and nothing here said it before:
 
 - **No certificate chain validation.** There is no trust store, no root CAs,
-  no issuer check — `src/der_decode.s:271` skips the issuer field outright.
+  no issuer check — `src/der_decode.s` skips the issuer field outright
+  (grep `Skip SEQUENCE issuer`).
 - **Server name validation exists, but only on the UCI images** (`uci-onchip`,
   `uci-comb`). Since v0.4.2 they check the certificate's subjectAltName
   `dNSName` entries against the host you built for, case-insensitively, with
   leftmost-label wildcards, rejecting a certificate that carries no SAN.
-  `ip65-onchip` does **not** — the routine is 491 B and that layout's largest
-  free block is 170 B. See issue #135.
+  `ip65-onchip` does **not** — the routine is 491 B (`X509_NAME_CODE` in the
+  map) and that layout's largest free block is 56 B. See the free-space table
+  under Memory Map, and issue #135.
 
 What the client *does* prove is that the peer holds the private key for the
 leaf certificate it presented (the CertificateVerify signature is genuinely
@@ -174,9 +180,13 @@ resident keys — not an oversight. Treat the transport as confidential against
 passive observers, not authenticated against active ones.
 
 Confidentiality against passive observers is the property this client keeps
-after conceding authentication, so it is worth saying what upholds it. Since
-v0.4.3 the X25519 shared secret is rejected when it comes out all zero, as
-RFC 8446 §7.4.2 and RFC 7748 §6.1 require. Before that check existed, a
+after conceding authentication, so it is worth saying what upholds it. On
+**master, and not yet in any release**, the X25519 shared secret is rejected
+when it comes out all zero, as RFC 8446 §7.4.2 and RFC 7748 §6.1 require.
+(The fix is commit `47ab00c`; `git tag --contains 47ab00c` is empty, so
+**v0.4.2 — the current release — does not have it**. Build from master if you
+want it. An earlier draft of this section credited it to a "v0.4.3" that does
+not exist.) Before that check existed, a
 server (or an attacker who rewrote one ServerHello in passing) could send a
 low-order `key_share` and force every handshake and traffic key to be a
 function of the two *plaintext* hello messages — which would have made a
@@ -198,8 +208,14 @@ $22-$2B   ECDSA bignum pointers (fp_src1..fp_loop)
 $2C-$37   fe25519 field arithmetic
 $38-$3A   x25519 ladder state (shares $39-$3A with fp_mul_i/j)
 $3B-$3C   ec_scalar_ptr
+$3D       nistcurves_zp_ptr2 (the sibling's ZP override slot)
 $FB-$FF   General pointers (save/restore around ip65 calls)
 ```
+
+Nothing here is `.importzp`'d: every slot is defined locally, in
+`src/constants.inc` and `src/crypto/shared/zp_canon.inc`. The sibling
+library's slots are requested by name at build time, so the place to confirm
+what actually landed is `build/labels.txt`.
 
 The authoritative list is `src/constants.inc`; the table above is a
 summary of it.
@@ -209,8 +225,21 @@ The ip65 TCP callback (fired during `ip65_process`) copies received data into a 
 ## Memory Map
 
 The two backends do **not** share a layout. Each is defined by its own
-ld65 config, and the tables below were read back from
-`build/c64-https.map` after `make clean && make [BACKEND=uci]`.
+ld65 config, and the tables below were read back from the `Segment list:`
+section of `build/c64-https.map` for the **three shipped products**
+(`tools/package/_common.sh`), re-measured 2026-09-05:
+
+| product | make args | cfg |
+|---|---|---|
+| `ip65-onchip` | `BACKEND=ip65 USE_NISTCURVES_ONCHIP=1` | `cfg/c64-https-ip65.cfg` |
+| `uci-onchip` | `BACKEND=uci USE_NISTCURVES_ONCHIP=1` | `cfg/c64-https-uci.cfg` |
+| `uci-comb` | `BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1` | `cfg/c64-https-uci-onchip.cfg` |
+
+Note the third row: the `-onchip.cfg` swap is driven by
+`USE_NISTCURVES_ONCHIP_COMB`, **not** by `USE_NISTCURVES_ONCHIP` — plain
+onchip keeps the base cfg, and `cfg/c64-https-ip65-onchip.cfg` does not
+exist. The cfg files are the authority for region bounds; this section is a
+summary of them.
 
 Common to both:
 
@@ -227,15 +256,21 @@ ip65 backend — `cfg/c64-https-ip65.cfg`:
 ```
 $0801-$1FFF  LOADER              BASIC stub + boot + HTTP + most of TLS
 $2000-$3FFF  NET_CODE            ip65 blob (6,951 B) + LOADER_OVERFLOW
-                                 + CRYPTO_AUX_CODE2
-$4000-$4F8B  NET_BSS             ip65 blob's BSS
+                                 + CRYPTO_AUX_CODE2 + HTTP_SINK_CODE
+                                 + HTTPS_TARGET_RODATA
+$4000-$4F8B  NET_BSS             ip65 blob's BSS (live at runtime; ld65
+                                 sees it as EMPTY, so do not read it as
+                                 headroom)
 $4F8C-$5FFF  CRYPTO_OVERLAY      4,212 B; holds TLS_CODE + CRYPTO_AUX_CODE
+                                 + HTTP_AUX_CODE
 $6000-$9FFF  CRYPTO_RESIDENT     16 KB code + rodata, incl. the
                                  libs/nistcurves P-256 verify path
 $A000-$BFFF  CRYPTO_COLD_SHADOW  8 KB BSS under the BASIC ROM shadow
                                  (cert_buf $A000, tls_rec_buf $A600,
-                                  tables $BA00, sqtab_lo $BC00)
-$C000-$CFFF  TCP_BUF             tcp_recv_buf, 4 KB ring
+                                  tables $BA00, sqtab_lo $BC00 — all four
+                                  confirmed in build/labels.txt)
+$C000-$CFFF  TCP_BUF             tcp_recv_buf, 4 KB ring (runtime only;
+                                 not a region in the PRG image)
 ```
 
 UCI backend — `cfg/c64-https-uci.cfg`:
@@ -244,25 +279,59 @@ UCI backend — `cfg/c64-https-uci.cfg`:
 $0801-$1FFF  LOADER              BASIC stub + boot + HTTP + most of TLS
 $2000-$3B65  NET_CODE            UCI adapter (~2 KB) + LOADER_OVERFLOW
                                  + TLS_CODE + CRYPTO_AUX_CODE(2)
-$3B66-$41FF  NET_BSS_TAIL        LIB_NISTCURVES_P256_BSS spill
-$4200-$5FFF  CRYPTO_OVERLAY      7.5 KB overlay slot — empty in the
-                                 shipped build; claimed by the X25519
-                                 sibling / P-384 / P-256-embed flags
+$3B66-$41FF  NET_BSS_TAIL        NET_BSS_TAIL segment (deframer/viewer
+                                 BSS) + LIB_NISTCURVES_P256_BSS
+$4200-$5FFF  CRYPTO_OVERLAY      7,680 B, and NOT an empty overlay slot:
+                                 it is full of RESIDENT tenants in both
+                                 shipped UCI images — TLS_DEFRAME_CODE,
+                                 CERT_BUF_BSS (2,048 B), X509_NAME_CODE,
+                                 HTTP_SINK_CODE, HTTP_AUX_CODE2,
+                                 HTTPS_TARGET_RODATA, the nistcurves
+                                 mul code, plus VIEWER_CODE (onchip) or
+                                 the comb rodata + LIMLEE_BSS (comb)
 $6000-$9FFF  CRYPTO_HOT          16 KB code + rodata + UCI_BSS
-$A000-$BFFF  CRYPTO_COLD_SHADOW  8 KB BSS (same tenants as ip65)
+$A000-$BFFF  CRYPTO_COLD_SHADOW  8 KB BSS (same tenants as ip65, less
+                                 cert_buf — which sits in CRYPTO_OVERLAY
+                                 under UCI, at 2,048 B against ip65's
+                                 1,536 B)
 $C000-$DFFF  OVERLAY_FILE_PAD    zero-pad in the PRG; at runtime the
                                  4 KB TCP_BUF ring lives at $C000
-$E000-$FDFF  OVERLAY_BLOB_CURVE  P-384 curve overlay blob slot (empty
+$E000-$FDFF  OVERLAY_BLOB_CURVE_RAM  P-384 curve overlay blob slot (empty
                                  by default — P-384 is not built)
 ```
+
+An earlier version of this section called `CRYPTO_OVERLAY` "empty in the
+shipped build". That was wrong by about two orders of magnitude, and it is
+the kind of error that invites someone to put 2 KB there. The measured
+free space in every region of every shipped product, tail of the last
+segment to the end of the region:
+
+| region | `ip65-onchip` | `uci-onchip` | `uci-comb` |
+|---|---:|---:|---:|
+| `LOADER` | 21 B | 148 B | 122 B |
+| `NET_CODE` | 56 B | 67 B | 67 B |
+| `NET_BSS_TAIL` | — | 43 B | 43 B |
+| `CRYPTO_OVERLAY` | 22 B | 2,035 B | **159 B** |
+| `CRYPTO_RESIDENT` / `CRYPTO_HOT` | 40 B | 36 B | 193 B |
+| `CRYPTO_COLD_SHADOW` (gap below the `$BA00` `TABLES_BSS` pin) | 44 B | 1,578 B | 1,578 B |
+
+So ip65 is genuinely full — its largest block is the 56 B `NET_CODE` tail,
+which is also the budget a longer `HTTPS_HOST`/`HTTPS_PATH` eats into — and
+`uci-comb` has 159 B of overlay tail, not the kilobytes the old text implied.
+`uci-onchip` is the roomy one, and only because it ships neither the comb
+tables nor the comb rodata.
+
+**PRG size is not a headroom gauge.** Both UCI products are 62,977 B and both
+ip65 profiles are 47,105 B, because the ld65 configs mark the inter-region
+gaps `fill = yes` so load addresses stay right. Re-measure from the map.
 
 No segment may cross $A000: boot zeroes $A000-$BFFF as BSS, so anything
 executable there would be wiped on first call.
 
 TLS 1.3 records can be up to 16,384 bytes. The ClientHello negotiates
 `max_fragment_length` (RFC 6066) with value 1 = **512 bytes**
-(`src/tls_handshake.s:281`), and `TLS_RECORD_MAX = 512` in
-`src/constants.inc` sizes the buffers to match.
+(`src/tls_handshake.s`, grep `max_fragment_length`), and
+`TLS_RECORD_MAX = 512` in `src/constants.inc` sizes the buffers to match.
 
 ## Building
 
@@ -279,9 +348,36 @@ make BACKEND=uci              # the Ultimate 64 / C64 Ultimate (UCI) variant
 make USE_NISTCURVES_ONCHIP=1  # the no-REU "onchip" P-256 verify profile
 make VIC_BLANK=0              # measurement control only: VIC blanking off (never ship)
 make run                      # build and launch in VICE (x64sc)
-make clean                    # remove build artifacts
+make clean                    # remove build/ (the ip65 blob survives)
+make ip65-libs                # once per clone, ip65 backend only
 make package                  # the three release products into dist/
+make package-verify           # rebuild, compare PRG hashes, boot each .d64 in VICE
 ```
+
+**No shipped product is built by a bare `make`.** The default is the REU
+profile, which was retired from the release lineup; every shipped image passes
+`USE_NISTCURVES_ONCHIP=1` or `USE_NISTCURVES_ONCHIP_COMB=1`. See the table
+under Memory Map, and `PACKAGE_VARIANTS` in `tools/package/_common.sh`, which
+is the single source of truth for the matrix.
+
+The knobs, all read straight from the Makefile:
+
+| variable | effect |
+|---|---|
+| `BACKEND=ip65\|uci` | selects `cfg/c64-https-$(BACKEND).cfg` and `src/net/$(BACKEND)/`. Default `ip65`. |
+| `USE_NISTCURVES_ONCHIP=1` | no-REU P-256 verify profile. Keeps the base cfg. |
+| `USE_NISTCURVES_ONCHIP_COMB=1` | implies onchip, adds the Lim-Lee comb + a boot precompute into REU bank 2. **Needs an REU.** Switches to `cfg/c64-https-$(BACKEND)-onchip.cfg`. |
+| `HTTPS_HOST=` / `HTTPS_PATH=` | the single target baked into the image. Hosts over 63 chars are a build error. |
+| `HTTPS_SNI=` | SNI override, when it must differ from `HTTPS_HOST` (e.g. dialling an IP). |
+| `HTTPS_PORT=` | default 443. |
+| `HTTPS_BODY_TO_REU=1` | stream the response body into the REU instead of `http_resp_buf`. UCI only. |
+| `VIC_BLANK=0` | degrade `vic_blank`/`vic_unblank` to `RTS`. A/B measurement control. |
+| `USE_X25519_SIBLING=1` | the `libs/x25519` sibling. Off by default; see Known Issues. |
+| `CA65`, `LD65`, `VICE` | toolchain overrides. |
+
+`ENABLE_P384_VERIFY`, `EMBED_P256_OVERLAY` and `USE_OVERLAY_P384_EMBED` also
+exist; all three are guarded, retired or broken, and none of them belongs in a
+build you intend to run. See Known Issues.
 
 **A flag change no longer needs `make clean` (#159).** make tracks source
 timestamps rather than the command line, so switching `BACKEND=` or a
@@ -293,8 +389,10 @@ object and the PRG before make builds its file database.
 
 Two things to know anyway:
 
-- The compare runs at parse time, so `make -n` with different flags is
-  **not** side-effect-free — it deletes the objects without rebuilding them.
+- The compare runs at parse time, so on master `make -n` (and `-q`, and `-t`)
+  with different flags is **not** side-effect-free — it deletes the objects
+  without rebuilding them. That is issue #174, and a fix is in flight; check
+  whether it has landed before relying on either behaviour.
 - `make clean` is still the right move if you want to be certain of a tree
   for any other reason, and it costs about a second.
 
@@ -339,16 +437,22 @@ it is supposed to detect.
 
 ## Project Status
 
-Current status (measured 2026-08-14 with cc65 from Homebrew;
-`ls -l build/c64-https.prg` and `grep -c '^al ' build/labels.txt` after
-`make clean && make [BACKEND=uci]`):
+Current status of the three shipped products (measured 2026-09-05 with cc65
+from Homebrew; `make clean` before each, then `stat` the PRG and
+`grep -c '^al ' build/labels.txt`):
 
-- ip65 build: 47,105 B PRG, 2292 labels
-- uci build:  62,977 B PRG, 2400 labels
+| product | PRG | labels |
+|---|---:|---:|
+| `c64-https-ip65-onchip` | 47,105 B | 2,398 |
+| `c64-https-uci-onchip`  | 62,977 B | 2,729 |
+| `c64-https-uci-comb`    | 62,977 B | 2,864 |
 
-Much of both PRGs is deliberate zero fill — the ld65 configs mark the
-inter-region gaps `fill = yes` so the load addresses stay right — so
-neither figure is a code-size measurement.
+The unshipped default profiles land on the same two PRG sizes (47,105 B /
+62,977 B) with fewer labels, which is the point: **the PRG size is not a
+code-size measurement and not a headroom gauge.** Much of each image is
+deliberate zero fill, because the ld65 configs mark the inter-region gaps
+`fill = yes` so the load addresses stay right. Two different builds sharing a
+size tells you nothing; only the sha256 of the PRG proves which build you have.
 
 Progress:
 
@@ -377,7 +481,7 @@ Progress:
 ### Known Issues
 
 - **The handshake is slow, and the ECDSA P-256 verify dominates it.** Every figure here is quoted from the measurement record in `CLAUDE.md`. Except where noted they were taken at the **`libs/nistcurves` v0.6.0 pin**, and the pin is now v0.11.2, so treat them as a baseline rather than as current. The one profile re-measured at the current pin is comb: 46.986 / 24.440 / 16.402 s verify at 16 / 32 / 48 MHz (U64E, n=3, VIC blanking active). End-to-end handshake + GET against the local listener, U64E, master 2ceb5b1: **80.8 s** (REU profile, 48 MHz), **45.5 s** (onchip profile, 48 MHz), **1,157.7 s** (REU, stock 1 MHz). One point of that sweep has been carried forward: 48 MHz REU measures **82.1 s** at v0.9.1 and **82.4 s** at v0.10.1 (n=1 each, so the 0.4% step between them is noise; the 1.6% from v0.6.0 is the FIPS 186-5 public-key validation gate v0.7.0 added). No other clock or profile has been re-measured. On the REU-less stock-C64 path (ip65 + onchip, no REU, honest 1 MHz in VICE) the whole run measured **2,159.7 s = 36.0 min**, of which the verify stretch alone was 1,416.7 s. That is fine for the local listener, which holds the connection open; it exceeds a typical 10-30 s real-world server handshake window.
-- **P-384** ECDSA is stubbed at the TLS layer. The dispatcher advertises `ecdsa_secp384r1_sha384` (0x0503) and routes to `src/crypto/ecdsa_verify_384.s`, but no P-384 build target completes. Measured 2026-08-14: `make p384-overlay` from a clean tree stops at `No rule to make target 'build/labels.txt'`, and after a main build has produced that file it stops at `Segment 'LIB_NISTCURVES_SHA384_TABLES' overflows memory area 'OVERLAY_REGION' by 1536 bytes`. Cert chains requiring P-384 will not verify.
+- **P-384 is parked, and doubly gated — it is not merely "stubbed".** An earlier version of this entry said the dispatcher "advertises `ecdsa_secp384r1_sha384` (0x0503)". It does not, and has not since v0.4.1: `sig_algs_ext_data` in `src/tls_handshake.s` carries exactly one scheme, `ecdsa_secp256r1_sha256` (0x0403), and `src/crypto/ecdsa_verify.s` compiles its P-384 arm to a `sec` reject unless `ENABLE_P384_VERIFY=1`. Both gates matter, because the curve comes from the certificate rather than from what we advertised — that combination is what closed the v0.4.0 hang in which a P-384 certificate made the overlay swap DMA over live resident code. Separately, **no P-384 build target has ever completed**: `make p384-overlay` from a clean tree stops at `No rule to make target 'build/labels.txt'`, and once a main build has produced that file it stops at `Segment 'LIB_NISTCURVES_SHA384_TABLES' overflows memory area 'OVERLAY_REGION' by 1536 bytes`. Certificates requiring P-384 are rejected, not verified.
 - **`USE_X25519_SIBLING=1` now links under UCI, and still does not under ip65.** The duplicate-symbol failure this entry used to record — `ld65: Error: Duplicate external identifier: 'reu_mul_tables_init'`, on **both** backends — was closed by the `libs/nistcurves` v0.10.1 / `libs/x25519` v0.11.0 bump plus one line of archive surgery: `tools/integration/build_nistcurves_p256.sh` now also drops `reu_mul_init.o`, the SPEC §8.2 `reu_mul` provider that `src/boot.s` supplies itself. Re-measured at the current v0.11.2 pins, unchanged: `make clean && make BACKEND=uci USE_X25519_SIBLING=1` produces a 62,977 B PRG, and ip65 stops instead at `Segment 'X25519_RODATA' overflows memory area 'CRYPTO_OVERLAY' by 3584 bytes` — a placement problem (ip65's overlay slot is 4,212 B against UCI's 7,680 B), not a symbol collision. The flag remains **off by default** and no shipped artifact contains the sibling; the in-tree X25519 in `src/crypto/{x25519,fe25519}.s` is what every release PRG is built from. Flipping the default is a separate decision that wants a hardware handshake behind it.
 - **Real-server reach is UCI/comb + turbo only, and has size limits.** The public-internet HTTPS above works on the comb profile at turbo; the stock-C64 ip65 path is far too slow for a real server's connection window (~36 min/handshake). Among real leaves, en.wikipedia.org's 1636 B leaf needs the 2048 B UCI `cert_buf` (fits); anything larger, or a server that ignores `max_fragment_length` and sends >548 B records (e.g. Cloudflare), is out of scope. Cloudflare additionally enforces a ~15 s connect-to-first-request deadline the C64 cannot meet and is deliberately unsupported.
 - **The wikipedia stall was a client bug, now fixed.** Historical note for anyone bisecting: TLS flights larger than the ~4 KB UCI receive ring used to stall permanently, because `net_poll` requested a fixed 512 B and its fill loop dropped bytes past the ring's current free space (discarded as "delivered"). Fixed by clamping the `SOCKET_READ` request to ring free space (`src/net/uci/net.s`). It was never a firmware bug; github/browserleaks/lwn flights are under 4 KB and were unaffected.
@@ -385,46 +489,79 @@ Progress:
 
 ## Test Automation
 
-**266 assertions across 11 suites**, plus several standalone scripts the
-parallel runner does not cover, using the
-[`c64-test-harness`](https://github.com/JC-000/c64-test-harness) package
-to drive VICE via its binary monitor protocol. VICE runs the **ip65
-backend by default** (the UCI backend targets real U64E hardware — see
-the Ultimate 64 Elite Hardware Tests section below). The parallel runner
-allocates a fresh VICE instance per suite (with REU, which the sibling
-P-256 code requires) to avoid state contamination. All tests log VICE
-PID and port for multi-agent safety.
+`tools/run_all_tests.py` dispatches **14 suites** (`SUITE_ORDER` in that file
+is the source of truth; `tools/test_runner_coverage.py` fails the build if a
+`tools/test_*.py` defining `run_tests()` is missing from it). They use the
+[`c64-test-harness`](https://github.com/JC-000/c64-test-harness) package to
+drive VICE via its binary monitor protocol. VICE runs the **ip65 backend by
+default** (the UCI backend targets real hardware — see the hardware section
+below). The runner allocates a fresh VICE instance per suite, with `-reu
+-reusize 512`, which the sibling P-256 code requires. All tests log VICE PID
+and port for multi-agent safety.
 
-Suite counts below were taken from a `tools/run_all_tests.py` run on
-2026-08-14 (266/266, 2 min 5 s wall clock on an M-series Mac).
+Measured 2026-09-05 on an M-series Mac, plain `python3 tools/run_all_tests.py`
+(so: the default ip65 REU-profile build):
+
+```
+TOTAL: 329/329 passed, 0 failed -- 1 suite(s) SKIPPED: hs_sequence
+```
+
+**13 suites ran; `hs_sequence` did not.** It needs `tls_deframe_pump`, which
+only exists in a `TLS_STREAM_DEFRAME` (i.e. `BACKEND=uci`) build, so the runner
+skips it *loudly* and prints a warning that the aggregate does not certify it.
+Read the skip line, not just the TOTAL. The `x509` suite alone takes ~2 min and
+sets the wall-clock floor for the whole run.
+
+| suite | assertions |
+|---|---:|
+| `x25519` | 73 |
+| `net` | 65 |
+| `http` | 61 |
+| `crypto` | 22 |
+| `tls_handshake` | 21 |
+| `finished_verify` | 18 |
+| `tls_record` | 17 |
+| `hkdf` | 12 |
+| `x509` | 11 |
+| `keyschedule` | 9 |
+| `sha256` | 7 |
+| `entropy` | 7 |
+| `ecdh_zero_check` | 6 |
+| `hs_sequence` | needs `BACKEND=uci` |
 
 ```bash
 python3 -m pip install -e ../c64-test-harness
 
-# Run all 11 suites in parallel (one VICE instance per suite, ~2 min)
+# Run every dispatched suite in parallel (one VICE instance per suite)
 python3 tools/run_all_tests.py
-python3 tools/run_all_tests.py --skip-slow   # Skip the x509/ECDSA suite: 255 assertions, ~45 s
-python3 tools/run_all_tests.py --workers 6   # Limit concurrent VICE instances
+python3 tools/run_all_tests.py --skip-slow   # drop the x509 suite (11 assertions, but ~2 min: the ECDSA verify)
+python3 tools/run_all_tests.py --workers 6   # limit concurrent VICE instances
 
-# Individual suites (the 11 the runner aggregates)
-python3 tools/test_net.py           # 60 tests: ip65 integration, ZP save/restore, ring buffer, TCP recv callback
-python3 tools/test_sha256.py        # 7 tests: NIST vectors, boundary cases, random inputs
-python3 tools/test_crypto.py        # 22 tests: ChaCha20/Poly1305/AEAD RFC 7539 vectors + random
-python3 tools/test_hkdf.py          # 12 tests: RFC 5869 vectors, TLS 1.3 key schedule, random
-python3 tools/test_tls_record.py    # 17 tests: nonce, seq increment, encrypt/decrypt, roundtrips
-python3 tools/test_x509.py          # 11 tests: DER parse P-256/P-384, ECDSA verify (valid+tampered+boundary)
-python3 tools/test_tls_handshake.py # 21 tests: transcript hash, ClientHello, ServerHello, key schedule (RFC 8448), Finished MAC
-python3 tools/test_keyschedule_steps.py # 9 tests: key schedule step-by-step (RFC 8448 vectors)
-python3 tools/test_entropy.py          # 7 tests: SID/CIA hardware init, DRBG seeding, output quality
-python3 tools/test_http.py            # 27 tests: HTTP/1.1 GET builder, response parser, status codes
-python3 tools/test_x25519.py          # 73 tests: fe25519 field ops, x25519_clamp, scalarmult + RFC 7748 vectors
+# Individual suites (assertion counts in the table above; run the suite for a current figure)
+python3 tools/test_net.py               # ip65 integration, ZP save/restore, ring buffer, TCP recv callback
+python3 tools/test_sha256.py            # NIST vectors, boundary cases, random inputs
+python3 tools/test_crypto.py            # ChaCha20/Poly1305/AEAD RFC 7539 vectors + random
+python3 tools/test_hkdf.py              # RFC 5869 vectors, TLS 1.3 key schedule, random
+python3 tools/test_tls_record.py        # nonce, seq increment, encrypt/decrypt, roundtrips
+python3 tools/test_x509.py              # DER parse P-256/P-384, ECDSA verify (valid+tampered+boundary)
+python3 tools/test_tls_handshake.py     # transcript hash, ClientHello, ServerHello, key schedule (RFC 8448), Finished MAC
+python3 tools/test_keyschedule_steps.py # key schedule step-by-step (RFC 8448 vectors)
+python3 tools/test_entropy.py           # SID/CIA hardware init, DRBG seeding, output quality
+python3 tools/test_http.py              # HTTP/1.1 GET builder, response parser, status codes
+python3 tools/test_x25519.py            # fe25519 field ops, x25519_clamp, scalarmult + RFC 7748 vectors
+python3 tools/test_finished_verify.py   # the server-Finished REJECTION path, driven over DMA
+python3 tools/test_ecdh_zero_check.py   # the all-zero X25519 shared secret must abort the handshake
+python3 tools/test_hs_sequence.py       # BACKEND=uci only — skipped by the runner on an ip65 build
 
-# Standalone scripts, not aggregated by run_all_tests.py
-python3 tools/test_chained_hmac.py     # 10 cases: chained HMAC-SHA256 stability (N=1..10)
-python3 tools/test_finished_verify.py  # 18 cases: the server-Finished REJECTION path, driven over DMA
-python3 tools/test_ecdsa_kat_oracle.py # 6 vectors: ECDSA P-256 KAT, 3 valid + 3 negative CAVP
-python3 tools/test_package_verify.py   # 31 cases: pure-logic tests for the release gate (no VICE, no build)
-python3 tools/test_pytest_boundary.py  # 5 checks: the pytest collection boundary below is intact
+# Not dispatched by run_all_tests.py — run these directly
+python3 tools/test_tls_deframer.py     # streaming deframer; needs BACKEND=uci and minted cert fixtures.
+                                       # Deliberately undispatched: its run_tests() has a different
+                                       # signature and returns a 4-tuple (UNDISPATCHED_SUITES says why).
+python3 tools/test_chained_hmac.py     # chained HMAC-SHA256 stability (N=1..10)
+python3 tools/test_ecdsa_kat_oracle.py # ECDSA P-256 KAT, 3 valid + 3 negative CAVP
+python3 tools/test_x509_name.py        # BACKEND=uci only — SAN dNSName matching + wildcards
+python3 tools/test_package_verify.py   # pure-logic tests for the release gate (no VICE, no build)
+python3 tools/test_pytest_boundary.py  # the pytest collection boundary below is intact
 
 # Benchmark
 python3 tools/bench_x25519.py         # X25519 basepoint multiply: 12,637 jiffies / 211 s C64 time (VIC blanked)
@@ -464,6 +601,25 @@ prints the scope of the run in both the header and the summary. A bare
 that this is not a statement about the C64 suites or the rig scripts.
 `pytest tests/` and `pytest tools/uci/` both exit 5, "no tests ran", with
 an explanation naming the right README.
+
+**One of those modules is not build-independent, and this surprises people.**
+`tools/test_uci_data_acc.py` executes the shipped 6502 bytes out of
+`build/c64-https.prg`, so it needs a `BACKEND=uci` build sitting in `build/`.
+It is still pure-logic — no VICE, no hardware, well under a second — but it
+means a bare root `pytest` is **red by design on an ip65 or stale build**,
+because an involuntary skip is treated as a failure (#158, #165). Measured
+2026-09-05, same tree, same command, only the build differing:
+
+```
+BACKEND=uci build in build/    ->  55 passed
+default ip65 build in build/   ->  3 failed, 52 passed
+```
+
+If you are working the ip65 lane, say so explicitly rather than ignoring the
+red: `C64_UCI_TESTS_OPTIONAL=1 pytest` skips those three loudly (the skip
+message states that the exit 0 certifies nothing) and exits 0. Dropping the
+module from `testpaths` instead would trip
+`tools/test_pytest_boundary.py`.
 
 `testpaths` applies only when pytest is invoked from the rootdir, so from
 a subdirectory you get that subdirectory instead — from `tools/`, the same
@@ -516,9 +672,17 @@ The setup script creates `br-c64` with `tap-c64-0`/`tap-c64-1`, assigns `10.0.65
 | `http_listener.py` | `start_http_listener()` → `HttpListenerHandle`, `stop_http_listener()` |
 | `https_listener.py` | `start_https_listener()` → `HttpsListenerHandle`, `stop_https_listener()` |
 
-### Ultimate 64 Elite Hardware Tests (UCI backend)
+### Ultimate 64 Elite / C64 Ultimate Hardware Tests (UCI backend)
 
-Scripts under `tools/uci/` drive a real Ultimate 64 Elite over the network (default `192.168.1.81`, overridable via the `U64_HOST` environment variable), exercising the **UCI backend only** (built with `make BACKEND=uci`). They DMA the PRG into RAM, run the boot, and snapshot UCI/TLS state on completion or timeout. These scripts do not run under VICE.
+Scripts under `tools/uci/` drive a real Ultimate 64 Elite or C64 Ultimate over
+the network, exercising the **UCI backend only** (built with `make
+BACKEND=uci`). They DMA the PRG into RAM, run the boot, and snapshot UCI/TLS
+state on completion or timeout. These scripts do not run under VICE.
+
+The device address comes from `U64_HOST`. Every rig script defaults it to
+`192.168.1.81` if unset, but `tools/uci/_device_lock_helper.py` — the shared
+device-queue helper — defaults to a different address, so **set `U64_HOST`
+explicitly** rather than relying on a default agreeing with itself.
 
 **Prerequisite — `c64-test-harness` (same as the VICE suites above).** It is a separate public package, not vendored here; `requirements.txt` carries only `cryptography`. Without it every script in this directory dies at import with `ModuleNotFoundError: No module named 'c64_test_harness'`:
 
@@ -530,13 +694,23 @@ pip install -e ../c64-test-harness
 Install it into the **same interpreter you run the scripts with** — if you use a virtualenv, `pip` and `python3` must both be that venv's, or the import fails despite the install appearing to succeed.
 
 ```bash
-python3 tools/uci/boot_check.py          # UCI firmware detection
-python3 tools/uci/phase2_check.py        # DHCP + local IP readback
-python3 tools/uci/phase3_tcp_echo.py     # TCP connect/send/recv
-python3 tools/uci/rig_http_local.py     # HTTP GET against local listener
-python3 tools/uci/rig_https_local.py    # HTTPS GET (TLS 1.3 + ECDSA-P256)
+python3 tools/uci/boot_check.py              # UCI firmware detection
+python3 tools/uci/phase2_check.py            # DHCP + local IP readback
+python3 tools/uci/phase3_tcp_echo.py         # TCP connect/send/recv
+python3 tools/uci/rig_http_local.py          # HTTP GET against local listener
+python3 tools/uci/rig_http_live.py           # HTTP GET against a real server
+python3 tools/uci/rig_https_local.py         # HTTPS GET (TLS 1.3 + ECDSA-P256)
+python3 tools/uci/rig_https_live.py          # HTTPS against a real public server
+python3 tools/uci/rig_https_wiki.py          # the 125 KB Wikipedia fetch into the REU
+python3 tools/uci/rig_https_banner.py        # the only rig that walks the menu into do_https_get
+python3 tools/uci/rig_https_print_body.py    # wrapper: print the response body
 python3 tools/uci/rig_https_bad_finished.py  # client must ABORT on a forged server Finished
+python3 tools/uci/bench_ecdsa_u64e.py        # ECDSA verify wall-clock sweeps
 ```
+
+`tools/uci/README.md` is the authoritative list. Note that every HTTPS rig
+except `rig_https_banner.py` enters through a DMA'd `http_get` trampoline
+rather than the on-screen menu, so the banner path has exactly one test.
 
 These are `rig_*.py`, not `test_*.py`, for the same reason as `tests/`: a
 hardware `main()` script named the pytest way gets walked by pytest, collects
@@ -590,7 +764,7 @@ Environment variables honored by `rig_https_local.py`:
 Vendored as submodules and linked into the PRG:
 
 - [c64-nist-curves](https://github.com/JC-000/c64-nist-curves) — `libs/nistcurves`, the ECDSA P-256 verify used for CertificateVerify
-- [c64-x25519](https://github.com/JC-000/c64-x25519) — `libs/x25519`, an alternative X25519 behind `USE_X25519_SIBLING=1` (not currently linkable — see Known Issues)
+- [c64-x25519](https://github.com/JC-000/c64-x25519) — `libs/x25519`, an alternative X25519 behind `USE_X25519_SIBLING=1`. **Contributes zero bytes to all three shipped products**: the flag is off by default and the in-tree `src/crypto/{x25519,fe25519}.s` is what links. See Known Issues for its current link status.
 - [ip65](https://github.com/cc65/ip65) — the TCP/IP stack behind the ip65 backend
 
 Not vendored — origin of code that now lives in-tree, or tooling:
