@@ -3694,9 +3694,10 @@ across the window.
 ### The one red check, which is the rig and not the client
 
 24/25 passed. `check_tls_connected` failed with `tls_state_max` = 5
-(CERT_VERIFY). It is a **sampling** oracle: `src/tls13.s:303` sets
+(CERT_VERIFY). It is a **sampling** oracle: `src/tls13.s:303-304` sets
 tls_state = CONNECTED right after the traffic-key derivation and seq
-reset, and `tls_close` (`src/tls13.s:380`) writes it back to IDLE, which
+reset, and `tls_close` (`src/tls13.s:379`, storing IDLE at `:382-383`)
+writes it back to IDLE, which
 is why the rig polls rather than reading it afterwards. At 1 MHz that
 window is minutes wide; at 48 MHz the client Finished, the GET, the
 response and the close all fitted inside one 1 s poll. `tls_last_state` is

@@ -46,12 +46,22 @@ A 271-byte standalone program at $CA00 programs CIA2 exactly as ip65's
 `timer_init` does, then loops reading timer B.
 
 UNWRAPPING — timer B is a 16-bit DOWN counter that ip65 inverts, so the
-inverted value wraps every 65536 ticks: 65.5 s at 1 kHz, 1.37 s at 48 kHz.
-A host that read raw values across a long interval would alias. This probe
-never exports a raw value: the C64 accumulates the MODULAR 16-bit
-difference between consecutive samples into a 32-bit counter. The loop
-period is microseconds against a 1.37 s worst-case wrap, so no single
-delta can alias, and the interval length stops mattering.
+inverted value wraps every 65536 ticks. **The margin here is budgeted
+against the hypothesis being REFUTED, not the one expected, and the two
+differ by 48x — which is why the figure below looks wrong until you read
+this sentence.** If the timers are realtime the wrap period is 65.5 s; if
+they scale with a 48 MHz CPU it is **1.37 s**, and 1.37 s is the number
+this probe is built to survive. That matters because the aliasing points
+the wrong way: a host reading raw 16-bit values across a 15 s interval
+under the scaling hypothesis would alias, and would alias *towards* the
+answer "about 1000/s" — it would manufacture the realtime result it was
+supposed to test for.
+
+So this probe never exports a raw value: the C64 accumulates the MODULAR
+16-bit difference between consecutive samples into a 32-bit counter. The
+loop period is microseconds against that 1.37 s worst case, so no single
+delta can alias under either hypothesis, and the interval length stops
+mattering.
 
 TORN READS — the host does not read a counter the loop is updating. It
 writes REQ; the loop copies the accumulator, its iteration count and the

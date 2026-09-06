@@ -754,11 +754,14 @@ both flags load-bearing). Stock 1 MHz, ~40-80 min.
     input, and `tools/mutate_ip65_hw_checks.py` breaks each one to prove
     the suite goes red. Adding a `check_*` without a red case fails that
     suite by introspection. **The rig is not judgment-free, though**: 15
-    delegated verdicts against 18 of its own `RES.check()` assertions
-    (screen scrapes, config writes, the listener probe, the selftests),
-    which have no red case. Do not attribute a run's whole check count to
-    the cartridge — 8 of the 24 in the first passing run touched neither
-    the cartridge nor the 6510.
+    delegated verdicts against 19 of its own `RES.check()` assertions
+    (screen scrapes, config writes, the clock assertion, the listener
+    probe, the selftests), which have no red case. Do not attribute a
+    run's whole check count to the cartridge — 8 of the 24 in the first
+    passing run touched neither the cartridge nor the 6510. **A stock
+    re-run reports 25, not 24**: the clock assertion arrived with
+    `TURBO_MHZ` and fires at 1 MHz too, landing in that host-side group.
+    The first run's decomposition is history and stays as written.
   - Two stations on the cable and the Mac is one of them, so every wire
     assertion discriminates by **Ethernet source address**; a third MAC
     is a hard failure. The cleartext-absence check needs a positive
@@ -794,7 +797,8 @@ both flags load-bearing). Stock 1 MHz, ~40-80 min.
     1,979 s at 1 MHz (46x), CS8900a fine, DHCP on the automatic
     attempt.** One check goes red there and must stay red:
     `check_tls_connected` samples `tls_state`, which lives only between
-    `tls13.s:303` and `tls_close`, and at 48 MHz that window fits inside
+    `tls13.s:303-304` and `tls_close` (`:382-383`), and at 48 MHz that
+    window fits inside
     one poll (`tls_last_state` is written only on the ERROR path, so it
     is no fallback). A turbo run's handshake verdict is inference.
   - **CIA timers are realtime under turbo** — 1023.2 ticks/wall-s at

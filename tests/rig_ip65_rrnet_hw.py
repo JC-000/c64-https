@@ -29,14 +29,25 @@ those are the claims a release would cite.
 
 **This file is NOT free of judgment, and an earlier draft of this
 docstring said it was.** Counted: 15 `RES.verdict()` calls delegate to the
-library; 18 `RES.check()` calls are the rig's own opinion, with no red
+library; 19 `RES.check()` calls are the rig's own opinion, with no red
 case and outside the introspection backstop (which enumerates only
 `check_*` in the module). Several of those fire on the green path and
 count toward the total — the boot-menu and DHCP screen scrapes, the
-cartridge-preference write, the listener reachability probe, the image's
-zero-fill tail, and the four selftest assertions. They are ordinary
-procedural assertions, not wire evidence, and a run's headline number
-should not be attributed to the cartridge wholesale.
+cartridge-preference write, the clock assertion, the listener
+reachability probe, the image's zero-fill tail, and the four selftest
+assertions. They are ordinary procedural assertions, not wire evidence,
+and a run's headline number should not be attributed to the cartridge
+wholesale.
+
+**A stock re-run now reports 25 checks, not the 24 of the first passing
+run.** The clock assertion ("the device is running at the requested
+N MHz") came in with `TURBO_MHZ` and fires unconditionally, including at
+the default 1 MHz, so it lands in the host-side-precondition group and
+shifts the total by one. Nothing else about a default run changed: the
+recorded decomposition of the first passing run stands as history, and
+the extra check is not a cartridge check. It is here because a device
+that silently ignores the clock write is exactly the failure the turbo
+probe's negative control guards against from the other side.
 
 The split exists because a first-ever hardware result is the one nobody
 re-reads, and this repo has three recorded instances of a suite passing
@@ -123,8 +134,9 @@ first 48 MHz run (2026-09-06, 43.1 s 'G' to CONNECTION CLOSED against
 that check while every other check passed, HTTP 200 and the exact body
 came out of the C64's own buffer, and `net_last_error` was $00.
 
-`src/tls13.s:303` sets tls_state = CONNECTED right after the traffic-key
-derivation, and `tls_close` (`src/tls13.s:380`) writes it back to IDLE, so
+`src/tls13.s:303-304` sets tls_state = CONNECTED right after the
+traffic-key derivation, and `tls_close` (`src/tls13.s:379`, storing IDLE
+at `:382-383`) writes it back to IDLE, so
 the value only exists between them — which is why the rig polls rather
 than reading it afterwards. At 1 MHz that window is minutes wide. At
 48 MHz the client Finished, the GET, the response and the close all fit
