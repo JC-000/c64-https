@@ -16,10 +16,22 @@ see "Why not pytest" below.
 | `rig_phase3_https.py` | Linux `br-c64` bridge + RR-Net | HTTPS handshake + GET |
 | `rig_phase3_https_1mhz.py` | Linux `br-c64` bridge + RR-Net | the same at honest 1 MHz, no warp |
 | `rig_vice_https_macos.py` | macOS feth pair + pcap, no hardware | HTTPS handshake + GET, hardware-free |
+| `rig_ip65_rrnet_hw.py` | macOS `en4` + a PHYSICAL RR-Net in the U64E | HTTPS handshake + GET on real CS8900a silicon |
 
-Setup lives in `scripts/setup-bridge-tap.sh` (Linux) and
-`tools/rig-up-macos.sh` (macOS); the macOS rig additionally needs a VICE
-built with the pcap driver's `geteuid()==0` gate patched out. See the
+`rig_ip65_rrnet_hw.py` is the only one of these that runs the ip65 backend
+on real hardware; every other ip65 result in this repo came from an
+emulator. It decides nothing itself — every verdict comes from
+`tools/ip65_hw_checks.py`, and `tools/test_ip65_hw_checks_unit.py` (in
+pytest's `testpaths`, no hardware, milliseconds) proves each of those
+verdicts alarms on a known-bad input. Its segment is 10.0.66.0/24,
+deliberately not the feth rig's 10.0.65.0/24, so both rigs can be up at
+once and real silicon can be compared against the emulated pair.
+
+Setup lives in `scripts/setup-bridge-tap.sh` (Linux),
+`tools/rig-up-macos.sh` (macOS feth pair) and
+`tools/rig-up-rrnet-macos.sh` (the physical RR-Net segment); the macOS
+VICE rig additionally needs a VICE built with the pcap driver's
+`geteuid()==0` gate patched out. See the
 "End-to-End Bridge Tests" and "VICE ip65 rig" sections of `README.md` and
 `CLAUDE.md` for the full prerequisites.
 
@@ -30,7 +42,17 @@ sudo PYTHONPATH=tools python3 tests/rig_phase1_dhcp.py
 sudo PYTHONPATH=tools python3 tests/rig_phase2_http.py
 sudo env VICE_HTTPS_OK_TO_RUN=1 PYTHONPATH=tools python3 tests/rig_phase3_https_1mhz.py
 python3 tests/rig_vice_https_macos.py
+
+# the physical RR-Net rig: two sudo commands by hand first, then no sudo
+sudo bash tools/rig-up-rrnet-macos.sh en4
+sudo tcpdump -i en4 -n -s0 -U -w /tmp/rrnet-https.pcap   # leave running
+U64_HOST=10.43.23.81 python3 tests/rig_ip65_rrnet_hw.py
 ```
+
+`rig_ip65_rrnet_hw.py` runs at a stock 1 MHz because
+`c64-https-ip65-onchip.prg` is the stock-C64 product, so budget ~40-80
+minutes for the fetch; it exits 78 (inconclusive) rather than 0 when a
+check could not be decided, and reports a timeout as a timeout.
 
 Each prints `PASS` or `FAIL` and exits non-zero on failure. They verify
 properly — `rig_vice_https_macos.py`, for instance, hard-fails on
