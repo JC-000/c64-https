@@ -3584,3 +3584,146 @@ that day comes is two lines in `src/boot.s` (a `reu_mul_tables_init:` label
 at the existing entry plus its `.export`), costs zero PRG bytes, and is
 deliberately not done pre-emptively: an unused export is a claim we would
 then have to keep true.
+
+## The CIA timers do not scale with turbo, and the RR-Net path runs at 48 MHz (2026-09-06)
+
+Two hardware experiments on the U64E, both prompted by the same doubt: the
+physical RR-Net rig (`tests/rig_ip65_rrnet_hw.py`) had run only at stock
+1 MHz, and one of the two stated reasons for that was a suspicion about
+ip65's DHCP budget rather than a measurement.
+
+### The question
+
+`ip65/drivers/c64timer.s` `timer_init` programs CIA2 timer A to 1000
+cycles, continuous, and cascades it into timer B; `timer_read` returns
+timer B. **CIA timers count phi2 cycles**, so a "tick" is a millisecond
+only if phi2 is 1 MHz. `ip65/ip65/dhcp.s` budgets
+`MAX_DHCP_MESSAGES_SENT = 12` retries with growing backoff, about 15
+seconds. If the CIAs scale with a 48 MHz CPU, that budget collapses ~48x
+to ~0.3 s and the DHCP server never gets to answer — which is exactly why
+`tests/rig_vice_https_macos.py` runs DHCP at 1x, warp decoupling emulated
+from wall time the same way.
+
+**CLAUDE.md's CIA1 TOD result does not settle it and was deliberately not
+used.** TOD is a different clock domain, fed from mains rather than phi2;
+that it measured 0.996 of wall rate under turbo transfers nothing to
+timers A and B.
+
+### Experiment 1 — the timer rate
+
+`tools/probe_cia_timer_rate.py`. A 271-byte standalone program at $CA00
+does ip65's `timer_init` verbatim, then loops reading timer B.
+
+Unwrapping, which is the part that could have gone quietly wrong: timer B
+is a 16-bit down counter that ip65 inverts, so the inverted value wraps
+every 65536 ticks — 65.5 s at 1 kHz but only 1.37 s at 48 kHz, so a host
+reading raw values across a 15 s interval would alias at exactly the rate
+under test, and alias *towards* the answer "1000/s". The probe therefore
+never exports a raw value: the C64 accumulates the modular 16-bit
+difference between consecutive samples into a 32-bit counter, at a loop
+period of microseconds against a 1.37 s worst case. Torn host reads are
+excluded by a request/publish handshake (host writes REQ; the loop copies
+the counters into a block nothing else writes, clears REQ, bumps SERVED),
+and the timestamp is the midpoint of the REQ write, whose span was
+0.02-0.16 s against 15 s intervals.
+
+Result, n=6 intervals per clock, three independent program starts each:
+
+    clock    ticks/wall-second (mean)   individual intervals
+    1 MHz    1023.2                     1022.3 1022.6 1022.4 1024.1 1025.1 1022.7
+    48 MHz   1022.9                     1022.7 1022.7 1022.0 1023.4 1024.9 1022.0
+    ratio    1.000
+
+**The timers are realtime.** Two things make that more than a ratio:
+
+  * The absolute value is right for a reason that would not have survived
+    a broken method. NTSC phi2 is 1,022,727 Hz and timer A is 1000 cycles,
+    so the prediction is 1022.7 ticks/s; both clocks land inside 0.05% of
+    it. A phi2-scaled timer would have read ~49,000/s, and a timer running
+    off some unrelated oscillator would not have landed on the NTSC
+    dot-clock derivative.
+  * **The negative control.** The same probe's loop-iteration counter DID
+    scale: 6,266/s at 1 MHz against 152,396/s at 48 MHz, a factor of
+    **24.3**. Without this the headline is ambiguous — a CPU that never
+    left 1 MHz produces exactly the same flat tick rate, and "the timers
+    are realtime" and "the turbo write silently did nothing" are the same
+    measurement. The 6510 was demonstrably at turbo while the timer it was
+    reading was not. (24.3x rather than 48x because the loop's three CIA
+    register reads are stretched to bus speed — which is itself the
+    mechanism: the CIAs are on the 1 MHz bus.)
+
+CIA1 TOD was published as a control and read 0.996-1.004 of wall at both
+clocks, consistent with the existing figure. Both clocks realtime, in one
+run, from one program.
+
+**So the 1 MHz DHCP assist is not needed on this device for timer
+reasons — on hardware.** It is still needed in VICE, and for a different
+mechanism: `tests/rig_vice_https_macos.py` runs DHCP at 1x because *warp*
+accelerates the whole emulated machine, CIAs included, so ip65's budget
+burns in a second or two of wall clock while dnsmasq answers on wall
+clock. Hardware turbo leaves the CIAs on the 1 MHz bus; warp does not.
+The guard against someone reading this entry and deleting that assist is
+in the VICE rig's own docstring, where they would go to do it. That is the whole of what this measures; it says nothing about
+CS8900a register timing, which was the other and better reason the rig
+defaulted to stock speed.
+
+### Experiment 2 — the same end-to-end fetch at 48 MHz
+
+`TURBO_MHZ=48 tests/rig_ip65_rrnet_hw.py`, same topology, same cable, same
+listener, same PRG (sha256 `9d33683a…`, byte-identical to an independent
+build of the same command line).
+
+**43.1 s from 'G' to CONNECTION CLOSED, against 1,979 s at 1 MHz — 46x.**
+
+    +1.2s  TCP CONNECTED   +7.7s  CH   +14.1s  RX   +15.2s  PROC
+    +43.1s CONNECTION CLOSED
+
+DHCP completed on the **automatic** attempt with zero explicit retries,
+and the C64 held the pinned 10.0.66.200 read out of its own
+`net_local_ip`. That is experiment 1 confirmed on the live path: a
+compressed budget would have failed here first and loudest.
+
+The thing this run existed to risk did not happen: **the CS8900a behaved
+at 48 MHz.** HTTP 200 and the exact 24-byte body out of the C64's own
+buffer, `net_last_error` $00, ClientHello with SNI on the wire,
+application data both ways (2 records from the C64, 8 from the host), body
+never in cleartext with the control needle found twice, 20 frames sourced
+from `00:0e:3a:64:64:64` and no third MAC. Capture 14,344 -> 23,417 bytes
+across the window.
+
+### The one red check, which is the rig and not the client
+
+24/25 passed. `check_tls_connected` failed with `tls_state_max` = 5
+(CERT_VERIFY). It is a **sampling** oracle: `src/tls13.s:303` sets
+tls_state = CONNECTED right after the traffic-key derivation and seq
+reset, and `tls_close` (`src/tls13.s:380`) writes it back to IDLE, which
+is why the rig polls rather than reading it afterwards. At 1 MHz that
+window is minutes wide; at 48 MHz the client Finished, the GET, the
+response and the close all fitted inside one 1 s poll. `tls_last_state` is
+no fallback — tls13.s writes it only on the ERROR path, so a clean run
+leaves it 0.
+
+The check was left red. Softening it to make a turbo run green is the
+exact failure this repo has recorded three times (#158, #161, #176), and
+the rig's own docstring is about not doing it. That the handshake
+completed is inference from converging evidence — the final screen carries
+FIN, CFIN, TLS HANDSHAKE OK and REQUEST SENT; the GET and the decrypted
+response both require the traffic keys derived immediately before that
+store; the wire shows application data both ways — and a turbo run must
+report it as inference. The real fix is a high-water latch for tls_state
+on the C64 side, which is a change to shipped source for test
+observability and has not been made. Tracked as **issue #204**, scoped
+after the release.
+
+### What is now known, and what still is not
+
+Known: the CIA timers are realtime under turbo on the U64E, ip65's DHCP
+budget survives it, and the ip65 image completes a full TLS 1.3 handshake
+and fetch over real CS8900a silicon at 48 MHz in 43.1 s.
+
+Not known: whether any of this holds on the C64 Ultimate, whose expansion
+bus timing has needed its own floor before (`uci_fence` INNER=217); what
+happens at 64 MHz; and whether a slower or marginal CS8900a would survive
+where this one did. One device, one cartridge, one clock, one run. The
+shipped `c64-https-ip65-onchip.prg` is still a stock-C64 product and the
+rig still defaults to 1 MHz for that reason.

@@ -785,8 +785,22 @@ both flags load-bearing). Stock 1 MHz, ~40-80 min.
     whatever name it carries — this rig fetches from a local listener
     presenting a self-signed leaf and asserts nothing about the name in
     it. Do not cite this run as coverage of that gap; it is the gap.
-  - What one passing run covers: one clock (1 MHz), one device, one
-    cartridge, one local listener, and an image differing from the
-    shipped one only in `HTTPS_PORT`. Nothing about CS8900a register
-    timing at turbo — deliberately, since the stock-C64 product never
-    runs there.
+  - What one passing run covers: one clock, one device, one cartridge,
+    one local listener, and an image differing from the shipped one only
+    in `HTTPS_PORT`.
+  - `TURBO_MHZ=48` runs the same image at turbo — an experiment, not a
+    product check; the default stays 1 MHz because that is the clock the
+    product ships at. **Measured 2026-09-06: 43.1 s 'G' to close against
+    1,979 s at 1 MHz (46x), CS8900a fine, DHCP on the automatic
+    attempt.** One check goes red there and must stay red:
+    `check_tls_connected` samples `tls_state`, which lives only between
+    `tls13.s:303` and `tls_close`, and at 48 MHz that window fits inside
+    one poll (`tls_last_state` is written only on the ERROR path, so it
+    is no fallback). A turbo run's handshake verdict is inference.
+  - **CIA timers are realtime under turbo** — 1023.2 ticks/wall-s at
+    1 MHz vs 1022.9 at 48 MHz, ratio 1.000, both within 0.05% of NTSC
+    phi2/1000. So ip65's `timer_read` (CIA2 timer B, 1000-cycle cascade)
+    keeps its ~15 s DHCP budget at any clock, and no 1 MHz assist is
+    needed for that. Do NOT re-derive this from the CIA1 TOD figure in
+    the bounded-timeouts design note: different clock domain.
+    Reproducer: `tools/probe_cia_timer_rate.py`.
