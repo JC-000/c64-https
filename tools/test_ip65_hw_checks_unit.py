@@ -759,13 +759,28 @@ def test_resolve_symbols_red_green() -> None:
 def test_the_build_exports_every_symbol_the_rig_reads() -> None:
     """This build's labels.txt carries the whole diagnostic set.
 
-    Skipped only when there is no build to look at; a labels.txt that IS
-    present and incomplete is a failure, because the rig would then read
-    unrelated RAM and report it as http_status.
+    NO SILENT SKIP. This used to `return` when `build/labels.txt` was
+    absent, printing PASS while verifying nothing — the exact shape
+    CLAUDE.md flags on `test_x509_name.py` and that #158/#165 spent real
+    effort removing. An absent build is a state where this check DID NOT
+    RUN, and the two must not look alike.
+
+    So: absent labels.txt is a FAILURE by default, opt-out-able with
+    `C64_ALLOW_NO_BUILD=1` for a lane that knowingly has no build — and
+    even then it says so loudly rather than passing quietly. The
+    exemplars are `test_x509.py` (missing labels counted as failures) and
+    `test_finished_verify.py` (missing label = FATAL).
     """
     labels_path = REPO / "build" / "labels.txt"
     if not labels_path.exists():
-        return
+        msg = (f"{labels_path} is absent, so this check verified NOTHING about "
+               "whether the build exports the symbols the hardware rig reads. "
+               "Build first (`make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1`), or "
+               "set C64_ALLOW_NO_BUILD=1 to accept an unverified run.")
+        if os.environ.get("C64_ALLOW_NO_BUILD") == "1":
+            print(f"\n!! EXPLICIT SKIP (C64_ALLOW_NO_BUILD=1): {msg}")
+            return
+        raise AssertionError(msg)
     labels = {}
     for line in labels_path.read_text().splitlines():
         parts = line.split()

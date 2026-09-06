@@ -586,6 +586,19 @@ def check_mac_on_wire(frames: Sequence[Frame], c64_mac: bytes,
     it. Rejects the all-zero MAC, the broadcast MAC, a multicast source
     (illegal as a source address), and ip65's build-time cfg_mac default,
     which is the ABSENCE of a MAC rather than a MAC to check.
+
+    CONTRIBUTES NO INDEPENDENT INFORMATION AS THE RIG CALLS IT TODAY, and
+    that is worth knowing before anyone counts it as a separate result.
+    `tests/rig_ip65_rrnet_hw.py` passes `c64_mac` as a CONSTANT read from
+    the rig script, so all six value-rejections above are statically false
+    on every run; the only branch that can fire is the frame count, against
+    the same threshold and the same corpus as `check_c64_originated`. It
+    cannot fail unless that one fails too. It is kept, not deleted, because
+    the value-rejections become live the moment a caller passes a MAC read
+    back from the DEVICE — which is the stronger memory-versus-wire
+    agreement check c64-wireguard's `--mac observe` mode performs, and the
+    obvious next step for this rig. Until then, count the independent
+    verdicts as one, not two.
     """
     ev = {"c64_mac": fmt_mac(c64_mac), "host_mac": fmt_mac(host_mac)}
     mac = bytes(c64_mac)

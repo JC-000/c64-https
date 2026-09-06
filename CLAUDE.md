@@ -748,11 +748,17 @@ tools/rig-up-rrnet-macos.sh en4`), deliberately not the feth rig's
 only. The capture is hand-started (`sudo tcpdump -i en4 -n -s0 -U -w …` —
 both flags load-bearing). Stock 1 MHz, ~40-80 min.
 
-  - **The rig decides nothing.** Every verdict is a pure function in
-    `tools/ip65_hw_checks.py`, and `tools/test_ip65_hw_checks_unit.py`
-    (pytest testpaths, no hardware, ms) proves each one alarms on a
-    known-bad input. Adding a `check_*` without a red case fails that
-    suite by introspection.
+  - **Every wire and memory verdict is a pure function** in
+    `tools/ip65_hw_checks.py`; `tools/test_ip65_hw_checks_unit.py`
+    (pytest testpaths, no hardware, ms) proves each alarms on a known-bad
+    input, and `tools/mutate_ip65_hw_checks.py` breaks each one to prove
+    the suite goes red. Adding a `check_*` without a red case fails that
+    suite by introspection. **The rig is not judgment-free, though**: 15
+    delegated verdicts against 18 of its own `RES.check()` assertions
+    (screen scrapes, config writes, the listener probe, the selftests),
+    which have no red case. Do not attribute a run's whole check count to
+    the cartridge — 8 of the 24 in the first passing run touched neither
+    the cartridge nor the 6510.
   - Two stations on the cable and the Mac is one of them, so every wire
     assertion discriminates by **Ethernet source address**; a third MAC
     is a hard failure. The cleartext-absence check needs a positive
@@ -773,3 +779,14 @@ both flags load-bearing). Stock 1 MHz, ~40-80 min.
     UCI command interface is a second consumer of the same expansion bus,
     and an RR-Net run does not need it. Its value is read and reported,
     never written.
+  - **A green run here does NOT mean the ip65 product validates server
+    names.** `src/x509_name.s` is UCI-only (see Memory layout), so the
+    ip65 image accepts any certificate that chains-free-verifies,
+    whatever name it carries — this rig fetches from a local listener
+    presenting a self-signed leaf and asserts nothing about the name in
+    it. Do not cite this run as coverage of that gap; it is the gap.
+  - What one passing run covers: one clock (1 MHz), one device, one
+    cartridge, one local listener, and an image differing from the
+    shipped one only in `HTTPS_PORT`. Nothing about CS8900a register
+    timing at turbo — deliberately, since the stock-C64 product never
+    runs there.

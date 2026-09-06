@@ -20,13 +20,27 @@ at once (tools/rig-up-rrnet-macos.sh, tools/https_e2e).
 
 WHAT DECIDES, AND WHAT ONLY OBSERVES
 ====================================
-This file supplies the pcap and the DMA reads. It decides nothing:
-every verdict comes from `tools/ip65_hw_checks.py`, and every one of those
-has a red case in `tools/test_ip65_hw_checks_unit.py` proving it alarms on
-a known-bad input off-device. That split exists because a first-ever
-hardware result is the one nobody re-reads, and this repo has three
-recorded instances of a suite passing for the wrong reason (#158, #161,
-#176).
+**Every WIRE verdict, and every verdict about the C64's own memory, comes
+from `tools/ip65_hw_checks.py`** — pure functions over bytes, each with a
+red case in `tools/test_ip65_hw_checks_unit.py` proving it alarms on a
+known-bad input off-device, and each mutation-tested by
+`tools/mutate_ip65_hw_checks.py`. That is the part that matters, because
+those are the claims a release would cite.
+
+**This file is NOT free of judgment, and an earlier draft of this
+docstring said it was.** Counted: 15 `RES.verdict()` calls delegate to the
+library; 18 `RES.check()` calls are the rig's own opinion, with no red
+case and outside the introspection backstop (which enumerates only
+`check_*` in the module). Several of those fire on the green path and
+count toward the total — the boot-menu and DHCP screen scrapes, the
+cartridge-preference write, the listener reachability probe, the image's
+zero-fill tail, and the four selftest assertions. They are ordinary
+procedural assertions, not wire evidence, and a run's headline number
+should not be attributed to the cartridge wholesale.
+
+The split exists because a first-ever hardware result is the one nobody
+re-reads, and this repo has three recorded instances of a suite passing
+for the wrong reason (#158, #161, #176).
 
 The library selftest below runs BEFORE the device is touched: it feeds the
 imported checker a capture that must fail and one that must pass. If the
@@ -47,10 +61,27 @@ TIMING — BUDGET HONESTLY
 This is a stock-clock 1 MHz run, because `c64-https-ip65-onchip.prg` is
 the stock-C64 product: no turbo, no REU. The same profile took 2,159.7 s
 (36.0 min) in VICE at honest 1 MHz, of which ~1,417 s is the P-256 verify
-and ~326 s each is an X25519. Real silicon is the same clock, and
-c64-wireguard measured cartridge-port I/O on this bench as only ~1.7x
-faster from 1 MHz to 48 MHz, so nothing here is quick. The default budget
-is 80 minutes and a timeout is REPORTED AS A TIMEOUT, never as a defect.
+and ~326 s each is an X25519. Real silicon is the same clock, so nothing
+here is quick. The default budget is 80 minutes and a timeout is REPORTED
+AS A TIMEOUT, never as a defect.
+
+**That 2,159.7 s comparator is not a like-for-like binary.**
+`docs/engineering-notes.md` records all four ip65 VICE rows at the
+`libs/nistcurves` v0.6.0 pin; this rig runs at v0.11.2, about five months
+newer. CLAUDE.md's own rule for that table is "read the pin, not the
+commit". The direction is in our favour — v0.7.0 added public-key
+validation costing ~1.6% on a verify that is 1,417 s of the 2,159.7 s, so
+a current-pin emulator run would be SLOWER — which makes any measured
+speed-up a lower bound rather than an estimate. Say "at least", never
+"about".
+
+A note on the wider bench: c64-wireguard's rig docstring
+(`tools/test_ip65_rrnet_hw.py:144`) says cartridge-port I/O throttles this
+path to ~1.7x from 1 MHz to 48 MHz, against 14.5x-51.7x for UCI. It is
+recorded here because it shapes what a turbo run would be worth — but it
+is attributed there to "the user measured" with no measurement record in
+that repo, so it is SECOND-HAND on both sides and must not be quoted as a
+measurement. Nothing in this rig depends on it; the clock is 1 MHz.
 
 The clock is not raised because nobody has measured whether the U64 times
 CS8900a register cycles correctly at 48 MHz, and a run that answered "does
@@ -112,8 +143,16 @@ from c64_test_harness.backends.ultimate64_helpers import (         # noqa: E402
     get_turbo_mhz, recover, runner_health_check, set_reu, set_turbo_mhz,
 )
 
-CERTIFIES = ("the TLS 1.3 handshake + GET over a PHYSICAL RR-Net cartridge "
-             "on real CS8900a silicon")
+#: What a PASSING run may be said to certify — deliberately narrower than
+#: the check count, which also includes off-device selftests, file reads
+#: and device-config steps that involve no cartridge and no 6510. It does
+#: NOT include server-name validation: src/x509_name.s is UCI-only, so the
+#: ip65 image performs none, and this rig asserts nothing about it.
+CERTIFIES = ("the TLS 1.3 handshake + GET carried over a PHYSICAL RR-Net "
+             "cartridge — DHCP, DNS, ClientHello, application data both ways "
+             "and the decrypted body, each attributed to the cartridge by "
+             "Ethernet source address; NOT server-name validation, which the "
+             "ip65 build does not perform")
 
 RIG_SCRIPT = PROJECT_ROOT / "tools" / "rig-up-rrnet-macos.sh"
 PRG_PATH = PROJECT_ROOT / "build" / "c64-https.prg"

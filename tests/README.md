@@ -20,12 +20,24 @@ see "Why not pytest" below.
 
 `rig_ip65_rrnet_hw.py` is the only one of these that runs the ip65 backend
 on real hardware; every other ip65 result in this repo came from an
-emulator. It decides nothing itself — every verdict comes from
+emulator. Every **wire and memory** verdict comes from
 `tools/ip65_hw_checks.py`, and `tools/test_ip65_hw_checks_unit.py` (in
 pytest's `testpaths`, no hardware, milliseconds) proves each of those
-verdicts alarms on a known-bad input. Its segment is 10.0.66.0/24,
+alarms on a known-bad input, with `tools/mutate_ip65_hw_checks.py`
+breaking each one to prove the suite goes red. The rig itself is not
+judgment-free — 15 delegated verdicts against 18 of its own procedural
+assertions (screen scrapes, the config write, the listener probe, the
+selftests), which have no red case — so a run's headline check count
+should not be read as that many facts about the cartridge. Its segment is
+10.0.66.0/24,
 deliberately not the feth rig's 10.0.65.0/24, so both rigs can be up at
 once and real silicon can be compared against the emulated pair.
+
+**A green run does not mean the ip65 product validates server names.**
+`src/x509_name.s` is UCI-only, so the ip65 image accepts any certificate
+that verifies, whatever name it carries; this rig fetches from a local
+listener with a self-signed leaf and asserts nothing about the name in it.
+Do not cite the rig as coverage of that gap — it is the gap.
 
 Setup lives in `scripts/setup-bridge-tap.sh` (Linux),
 `tools/rig-up-macos.sh` (macOS feth pair) and
