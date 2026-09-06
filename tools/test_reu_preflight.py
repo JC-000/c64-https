@@ -61,6 +61,13 @@ _spec.loader.exec_module(pf)
 CAT = pf.CAT_CART
 ITEM = pf.ITEM_REU_ENABLED
 
+#: The ``RAM Expansion Unit`` enum as real firmware reports it — measured on
+#: a U64E (unique_id 601A96) at fw 3.15, not invented. The third value is the
+#: point: ``"GeoRAM Mode"`` is settable and is neither Enabled nor Disabled,
+#: so a device can legitimately answer something this check must refuse
+#: without that answer being an error, a disabled REU, or an unreadable read.
+REU_VALUES = ["Disabled", "Enabled", "GeoRAM Mode"]
+
 # A labels file with neither the manifest equate nor an on-chip row
 # generator: detect_crypto_profile calls that the REU profile, which is the
 # only profile that reads device config at all.
@@ -156,7 +163,7 @@ def _assert_raises_preflight(client, labels_text=LABELS_REU, what=""):
 def test_item_map_enabled_is_read() -> None:
     """The post-#226 item map must read as Enabled, with no warning."""
     client = FakeClient(item={"current": "Enabled",
-                              "values": ["Disabled", "Enabled"],
+                              "values": REU_VALUES,
                               "default": "Disabled"})
     result, out = _run(client)
     assert result == "reu", f"expected the REU profile, got {result!r}"
@@ -172,10 +179,39 @@ def test_item_map_enabled_is_read() -> None:
 def test_item_map_disabled_raises() -> None:
     """Disabled in the item map must still stop the run."""
     client = FakeClient(item={"current": "Disabled",
-                              "values": ["Disabled", "Enabled"],
+                              "values": REU_VALUES,
                               "default": "Disabled"})
     exc = _assert_raises_preflight(client, what="item map / Disabled")
     assert "REU PREFLIGHT FAILED" in str(exc)
+
+
+def test_georam_mode_is_not_an_reu() -> None:
+    """A third enum value must refuse, and it is not a hypothetical.
+
+    Real firmware offers ``"GeoRAM Mode"`` alongside Enabled and Disabled.
+    It is not an REU, so a REU-profile build must not run against it — and
+    it is not an unreadable read either, so it earns the device-level
+    message, not the "could not read" one.
+
+    The code is already right, by comparing ``current`` *against*
+    ``"enabled"`` rather than against ``"disabled"``. That is worth
+    pinning precisely because it is right by construction and nothing
+    forced it: the plausible alternative — refuse only what says
+    "Disabled" — passes every other check in this file and lets GeoRAM
+    Mode through as if an REU were present. Verified by mutation, not
+    assumed.
+    """
+    client = FakeClient(item={"current": "GeoRAM Mode", "values": REU_VALUES})
+    exc = _assert_raises_preflight(client, what="GeoRAM Mode")
+    text = str(exc)
+    assert "REU PREFLIGHT FAILED" in text
+    assert "GeoRAM Mode" in text, (
+        f"the observed value must appear in the message:\n{text}"
+    )
+    assert "could not read" not in text, (
+        "GeoRAM Mode is a successful read of a value we must refuse, not "
+        f"an unreadable one; it earns the device-level message:\n{text}"
+    )
 
 
 def test_legacy_envelope_still_read() -> None:
@@ -265,7 +301,7 @@ def test_empty_current_is_unreadable_not_disabled() -> None:
     device said nothing intelligible, and nothing has been learned about
     whether the REU is there.
     """
-    client = FakeClient(item={"current": "", "values": ["", "Enabled"]})
+    client = FakeClient(item={"current": "", "values": REU_VALUES})
     exc = _assert_raises_preflight(client, what="empty current")
     assert "could not read" in str(exc), (
         "an empty value was reported as a disabled REU. It is an "

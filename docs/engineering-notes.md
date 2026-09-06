@@ -924,12 +924,54 @@ fail closed, on-chip and skip paths still touch nothing. Against the
 pre-fix code 6 of its 10 checks failed; the 4 that passed either side are
 the must-not-break guards, which is what made the other 6 evidence.
 
-Two residual risks, both inherited rather than introduced, neither
-closable without a device: whether #226's item map matches real firmware
-on the wire (its shape came from the harness's own live-verified
-docstrings), and whether any firmware returns a non-empty `errors` array
-on a *successful* single-item GET — post-#226 that raises, which now
-aborts the run here. No instance is recorded in the harness tree.
+**Validated on hardware** (U64E, unique_id `601A96`, fw 3.15, rev
+`4011c97c`, fpga 125; via DeviceLock, no config writes). Both modules
+loaded side by side against the same live client and the same real
+firmware response: master's
+`_extract_config_value(get_config_item(...))` returns `None` and
+`preflight_reu` returns `'reu'` with the "unrecognised shape … continuing
+unchecked" warning, while the fixed module returns `'Disabled'` and
+raises. So the #97 guard was confirmed **absent on master against real
+firmware**, in both the Disabled and Enabled cases — not just against a
+reconstructed envelope.
+
+The fail-closed path was then proved end to end with zero writes, because
+the device's REU was genuinely Disabled at the time: `bench_ecdsa_u64e.py`
+exited 4 with the full remedy text before `set_turbo_mhz`, `reset()` or
+`run_prg`. No machine state touched, no 44-minute spin.
+
+That run also settled two things this note previously hedged as
+unfalsifiable without a device.
+
+First, **the `errors` risk is not reachable.** On fw 3.15 no *successful*
+config GET carries a non-empty `errors` array — known item, unknown item,
+glob names, case-folded names and whole-category GETs all answer
+`"errors": []`. The only non-empty `errors` observed accompanies an HTTP
+404, which the request layer turns into `Ultimate64Error` *before*
+#226's errors check runs. Where `errors` is non-empty the read has
+genuinely failed, so raising is the correct answer rather than a hazard.
+
+Second, **the item map matches the wire**, including a real unsubstituted
+`REU Size` read of `2 MB`.
+
+Third, and the reason the test fake changed: the firmware enum is
+`["Disabled", "Enabled", "GeoRAM Mode"]` — **three** values. `"GeoRAM
+Mode"` is settable and is neither Enabled nor Disabled, so a device can
+legitimately answer something the preflight must refuse without that
+answer being an error, a disabled REU, or an unreadable read. The code
+already refuses it, because it tests `current` *against* `"enabled"`
+rather than against `"disabled"` — right by construction, but nothing
+forced it. It is now pinned. The plausible alternative (refuse only what
+says "Disabled") passes every other check in the suite and reports
+`device REU Enabled, GeoRAM Mode — OK`; the new case is the only thing
+that catches it, verified by mutation.
+
+What remains unproven, and must not be implied otherwise: the Enabled arm
+was exercised against genuine firmware responses but **not with the REU
+actually enabled**, because that write persists on a queue-shared device
+that was found Disabled. A REU-profile PRG completing a full crypto run
+on a REU-enabled U64E is unchanged by this work and was last proven in the
+2026-08-21/22 sessions.
 
 Two traps worth keeping. First, **`boot_check.py` does not call
 `preflight_reu`** (see the deliberate exclusion above), so it cannot
