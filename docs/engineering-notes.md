@@ -936,9 +936,13 @@ firmware**, in both the Disabled and Enabled cases — not just against a
 reconstructed envelope.
 
 The fail-closed path was then proved end to end with zero writes, because
-the device's REU was genuinely Disabled at the time: `bench_ecdsa_u64e.py`
-exited 4 with the full remedy text before `set_turbo_mhz`, `reset()` or
-`run_prg`. No machine state touched, no 44-minute spin.
+the device's REU was Disabled — which is simply the **factory default**
+(`current` and `default` both `Disabled`), not drift and not a finding.
+Device configuration is runtime-only and we do not write flash, so a
+device nobody has configured for the run is the ordinary case, and it is
+the case the fail-closed path must handle. `bench_ecdsa_u64e.py` exited 4
+with the full remedy text before `set_turbo_mhz`, `reset()` or `run_prg`.
+No machine state touched, no 44-minute spin.
 
 That run also settled two things this note previously hedged as
 unfalsifiable without a device.
@@ -968,10 +972,25 @@ that catches it, verified by mutation.
 
 What remains unproven, and must not be implied otherwise: the Enabled arm
 was exercised against genuine firmware responses but **not with the REU
-actually enabled**, because that write persists on a queue-shared device
-that was found Disabled. A REU-profile PRG completing a full crypto run
-on a REU-enabled U64E is unchanged by this work and was last proven in the
+actually enabled**, because the run did not configure the device and the
+default is Disabled. A REU-profile PRG completing a full crypto run on a
+REU-enabled U64E is unchanged by this work and was last proven in the
 2026-08-21/22 sessions.
+
+The corrected model is worth stating, because an earlier draft of this
+note got it wrong. Device configuration is **runtime-only**: every
+re-flash returns factory defaults and we do not write flash. So the
+pattern is that a test **restores baseline and then sets what that run
+needs**, rather than hoping the previous test reverted its changes. Under
+that model finding the REU Disabled means only that nobody configured it.
+
+Which exposes a real gap, filed as its own issue rather than fixed here:
+of the five `preflight_reu` callers, only `rig_https_wiki.py` configures
+the REU (`ensure_reu_16mb`, called *before* the preflight — the right
+order). The other four read the state and refuse. On a default device
+they decline instead of configuring and running. **The #97 preflight is
+the right backstop for a rig that forgot; it is not a substitute for
+setup.**
 
 Two traps worth keeping. First, **`boot_check.py` does not call
 `preflight_reu`** (see the deliberate exclusion above), so it cannot
