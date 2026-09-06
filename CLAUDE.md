@@ -323,6 +323,13 @@ uppercases); at 48 MHz the handshake scrolls the screen, so read it
 immediately. Crypto-path rigs call `preflight_reu()` (#97): a REU-profile
 build on a REU-disabled device exits 4 in ~2 s instead of spinning ~44 min;
 it never writes device config. `C64_SKIP_REU_PREFLIGHT=1` bypasses.
+**It fails closed (#179)**: a REU setting that cannot be read — a raise, an
+unrecognised shape, an empty value — exits 4 too, not a warning.
+`c64-test-harness` is an **editable** install from a sibling working tree,
+so their merges are our regressions; audit every `get_config_*` call
+against their tree, not against memory. Pinned by
+`tools/test_reu_preflight.py` (faked client, no hardware). Story in
+engineering-notes.
 
 ### Device gotchas (read before diagnosing a "wedge")
 

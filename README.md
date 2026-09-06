@@ -558,12 +558,22 @@ make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1
 ```
 
 Every script that exercises the crypto path (`rig_https_local.py`,
-`rig_https_bad_finished.py`, `rig_https_print_body.py`,
-`rig_https_local_p384.py`, `bench_ecdsa_u64e.py`) now **preflights this in one
+`rig_https_live.py`, `rig_https_wiki.py`, `rig_https_bad_finished.py`,
+`bench_ecdsa_u64e.py`, and the `rig_https_print_body.py` /
+`rig_https_local_p384.py` wrappers, which inherit it by importing
+`rig_https_local`) now **preflights this in one
 REST call and exits 4 in seconds** if a REU-profile build meets a device with no
-REU. On-chip builds skip the check entirely. The preflight never writes device
-config — the U64E is queue-shared and config writes persist until power cycle,
-so enabling the REU is yours to do. `C64_SKIP_REU_PREFLIGHT=1` bypasses it.
+REU. It **also exits 4 when it cannot read the setting at all** — the read
+raised, the response had a shape it does not recognise, or the value came back
+empty (issue #179). That is not a device verdict: nothing has been learned
+about whether the REU is there, and the failure text lists the causes in order,
+device reachability first. It used to warn and carry on, which meant the guard
+could go missing without anyone noticing. On-chip builds skip the check
+entirely — no REST call is made — so the REU-less configuration is unaffected.
+The preflight never writes device config — the U64E is queue-shared and config
+writes persist until power cycle, so enabling the REU is yours to do.
+`C64_SKIP_REU_PREFLIGHT=1` bypasses it. Note `boot_check.py` is deliberately
+not guarded, so it does not exercise this path.
 
 `rig_https_bad_finished.py` is the negative path: it talks to
 `tools/https_e2e/evil_listener.py`, a hand-rolled TLS 1.3 server that

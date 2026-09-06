@@ -853,12 +853,16 @@ went straight to these scripts never crossed it.
 
 **REU preflight (issue #97).** Every script here that exercises the
 crypto path — `rig_https_local.py` (and its `rig_https_print_body.py`
-/ `rig_https_local_p384.py` wrappers), `rig_https_bad_finished.py`,
-`bench_ecdsa_u64e.py` — calls `preflight_reu()` from
+/ `rig_https_local_p384.py` wrappers, which inherit the call by
+importing it), `rig_https_live.py`, `rig_https_wiki.py`,
+`rig_https_bad_finished.py`, `bench_ecdsa_u64e.py` — calls
+`preflight_reu()` from
 `tools/uci/_reu_preflight.py` under the DeviceLock, right after
 `enable_uci` and before the reset. A REU-profile build meeting a device
 with `RAM Expansion Unit: Disabled` now exits **4** in ~2 s with both
-remedies named, instead of spinning ~44 min at `KEYS ENC1 RX`. The
+remedies named, instead of spinning ~44 min at `KEYS ENC1 RX`. Since #179
+it exits 4 on an *unreadable* setting as well — a raise, an unrecognised
+response shape, or an empty value (see the next paragraph). The
 profile is read from `build/labels.txt` — onchip markers are checked as
 a **union** (`LIB_NISTCURVES_REU_BANKS_USED == 0`, `gen_mul_row`,
 `fe_gen_mul_row`, `sqtab_reserved`) so renaming one upstream cannot
@@ -871,6 +875,143 @@ error for a mystery on someone else's branch. `C64_SKIP_REU_PREFLIGHT=1`
 bypasses. Scripts that never touch the REU (`boot_check`, `phase2`,
 `phase3_tcp_echo`, `rig_http_local`, `rig_http_live`) are deliberately
 not guarded.
+
+**The preflight failed open for a while, and nothing here changed to
+cause it (#179).** `c64-test-harness` is installed **editable** from a
+sibling working tree (`~/.local/share/c64-test-harness/venv` →
+`~/Documents/c64-test-harness`), so a merge in that repo alters this
+repo's behaviour with no commit on our side. Their PR #226 (their issue
+#214) changed `Ultimate64Client.get_config_item` from returning the REST
+envelope `{category: {item: ...}}` to returning the item's own map
+`{"current": ..., "values": [...], "default": ...}`. Our
+`_extract_config_value` did `resp.get(category, resp).get(item)`: against
+the item map neither key exists, so it returned `None`, the preflight
+printed `WARNING — unrecognised shape (...); continuing unchecked`, and
+the run carried on with #97's guard silently absent. Reproduced against
+the real installed `Ultimate64Client` with only `_get_json` stubbed —
+master returned `'reu'` and warned.
+
+Two things came out of that, and the second is the general one.
+
+The narrow fix reads every shape: `_read_config_value` prefers
+`get_config_value` (new in #226 — it returns `current` and resolves names
+the way the firmware does), and falls back to `get_config_item` +
+`_extract_config_value` on an older harness, which is load-bearing rather
+than decorative because `get_config_value` did not exist before #226.
+`_extract_config_value` tests for a top-level `"current"` before the
+category descent; that is unambiguous, since a REST envelope is keyed by
+category name. Either direction of the harness landing now works.
+
+The general one: **an unreadable probe is not a result.** The old code
+called itself advisory and warned. It is not advisory — it is the only
+thing between a REU-less device and 44 minutes of apparent lockup, and a
+WARNING at minute one of a 45-minute run is not read by anyone. It now
+raises. Failing closed was checked against the paths that must stay open
+first: the on-chip profile makes no device call at all (so the
+configuration we recommend to REU-less users is untouched),
+`C64_SKIP_REU_PREFLIGHT=1` still bypasses everything, and all five
+callers already `except ReuPreflightError` → `return 4`.
+
+An **empty** `current` is grouped with "unreadable", not with "Disabled".
+Both stop the run, so this is only about which message the operator gets,
+and they point at different machines: the Disabled text sends someone to
+the device's settings menu for a fact not in evidence.
+
+`tools/test_reu_preflight.py` pins both halves with a faked client (no
+VICE, no hardware, ~10 ms): item map and legacy envelope both read,
+`get_config_value` preferred when present, raise/unparseable/empty all
+fail closed, on-chip and skip paths still touch nothing. Against the
+pre-fix code 6 of its 10 checks failed; the 4 that passed either side are
+the must-not-break guards, which is what made the other 6 evidence.
+
+**Validated on hardware** (U64E, unique_id `601A96`, fw 3.15, rev
+`4011c97c`, fpga 125; via DeviceLock, no config writes). Both modules
+loaded side by side against the same live client and the same real
+firmware response: master's
+`_extract_config_value(get_config_item(...))` returns `None` and
+`preflight_reu` returns `'reu'` with the "unrecognised shape … continuing
+unchecked" warning, while the fixed module returns `'Disabled'` and
+raises. So the #97 guard was confirmed **absent on master against real
+firmware**, in both the Disabled and Enabled cases — not just against a
+reconstructed envelope.
+
+The fail-closed path was then proved end to end with zero writes, because
+the device's REU was Disabled — which is simply the **factory default**
+(`current` and `default` both `Disabled`), not drift and not a finding.
+Device configuration is runtime-only and we do not write flash, so a
+device nobody has configured for the run is the ordinary case, and it is
+the case the fail-closed path must handle. `bench_ecdsa_u64e.py` exited 4
+with the full remedy text before `set_turbo_mhz`, `reset()` or `run_prg`.
+No machine state touched, no 44-minute spin.
+
+That run also settled two things this note previously hedged as
+unfalsifiable without a device.
+
+First, **the `errors` risk is not reachable.** On fw 3.15 no *successful*
+config GET carries a non-empty `errors` array — known item, unknown item,
+glob names, case-folded names and whole-category GETs all answer
+`"errors": []`. The only non-empty `errors` observed accompanies an HTTP
+404, which the request layer turns into `Ultimate64Error` *before*
+#226's errors check runs. Where `errors` is non-empty the read has
+genuinely failed, so raising is the correct answer rather than a hazard.
+
+Second, **the item map matches the wire**, including a real unsubstituted
+`REU Size` read of `2 MB`.
+
+Third, and the reason the test fake changed: the firmware enum is
+`["Disabled", "Enabled", "GeoRAM Mode"]` — **three** values. `"GeoRAM
+Mode"` is settable and is neither Enabled nor Disabled, so a device can
+legitimately answer something the preflight must refuse without that
+answer being an error, a disabled REU, or an unreadable read. The code
+already refuses it, because it tests `current` *against* `"enabled"`
+rather than against `"disabled"` — right by construction, but nothing
+forced it. It is now pinned. The plausible alternative (refuse only what
+says "Disabled") passes every other check in the suite and reports
+`device REU Enabled, GeoRAM Mode — OK`; the new case is the only thing
+that catches it, verified by mutation.
+
+What remains unproven, and must not be implied otherwise: the Enabled arm
+was exercised against genuine firmware responses but **not with the REU
+actually enabled**, because the run did not configure the device and the
+default is Disabled. A REU-profile PRG completing a full crypto run on a
+REU-enabled U64E is unchanged by this work and was last proven in the
+2026-08-21/22 sessions.
+
+The corrected model is worth stating, because an earlier draft of this
+note got it wrong. Device configuration is **runtime-only**: every
+re-flash returns factory defaults and we do not write flash. So the
+pattern is that a test **restores baseline and then sets what that run
+needs**, rather than hoping the previous test reverted its changes. Under
+that model finding the REU Disabled means only that nobody configured it.
+
+Which exposes a real gap, filed as its own issue rather than fixed here:
+of the five `preflight_reu` callers, only `rig_https_wiki.py` configures
+the REU (`ensure_reu_16mb`, called *before* the preflight — the right
+order). The other four read the state and refuse. On a default device
+they decline instead of configuring and running. **The #97 preflight is
+the right backstop for a rig that forgot; it is not a substitute for
+setup.**
+
+Two traps worth keeping. First, **`boot_check.py` does not call
+`preflight_reu`** (see the deliberate exclusion above), so it cannot
+exercise this path — the cheapest hardware check that does is a
+crypto-path rig on a REU-enabled device, or leaving
+`C64_SKIP_REU_PREFLIGHT` unset against a deliberately disabled REU.
+Second, the standalone `python3 tools/test_reu_preflight.py` runner had
+to break this repo's house pattern of catching only `AssertionError`
+(`test_pytest_boundary.py`, `test_runner_coverage.py`). Those two are
+pure AST inspection and can raise nothing else. This suite is the first
+whose code under test *converts* arbitrary exceptions: the fake client's
+"you must not have called me" `AssertionError` comes back wrapped in a
+`ReuPreflightError`, escapes an `AssertionError`-only handler, and aborts
+the run. Measured on a mutant with the on-chip early return removed: six
+`ok` lines, a traceback, three tests never run — and the most prominent
+text on screen was the `REU PREFLIGHT FAILED` banner, which reads as "your
+device has no REU" rather than "the on-chip guard regressed". The runner
+now catches `Exception`, digs the causing `AssertionError` out of the
+`__cause__` chain, and prints one `ERROR` line per case; the same mutant
+now reports 11 ok + 1 ERROR naming the real cause. pytest handled this
+correctly all along, which is the argument for it being the primary path.
 
 The scripts:
 
