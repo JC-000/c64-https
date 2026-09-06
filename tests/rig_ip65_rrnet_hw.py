@@ -370,26 +370,6 @@ def load_prg_verified(tr, prg: bytes) -> bool:
         return False
     t_ready = time.monotonic()
 
-    t0 = time.monotonic()
-    wrote = "write_memory"
-    try:
-        tr.write_memory(load_addr, body)
-    except Exception as exc:                                     # noqa: BLE001
-        print(f"  single-shot write failed ({exc}); falling back to chunked")
-        wrote = "write_bytes"
-        write_bytes(tr, load_addr, body)
-    tr.write_memory(load_addr, body[:2])
-    load_s = time.monotonic() - t0
-
-    settle = 7.0 - (time.monotonic() - t_ready)
-    if settle > 0:
-        time.sleep(settle)
-    for _ in range(3):
-        if bytes(tr.read_memory(load_addr, 2)) == body[:2]:
-            break
-        tr.write_memory(load_addr, body[:2])
-        time.sleep(1.0)
-
     # VERIFY ONLY BELOW $A000, AND SAY SO. The ip65 image runs to $BFFF, but
     # everything from $A000 up is CRYPTO_COLD_SHADOW: 8,192 bytes of zero fill
     # for BSS that boot.s zeroes again anyway. A host read of that span comes
@@ -400,21 +380,66 @@ def load_prg_verified(tr, prg: bytes) -> bool:
     # property that IS decidable from the file: that it is all zeros.
     verify_len = min(len(body), 0xA000 - load_addr)
     tail = body[verify_len:]
-    back = bytes(tr.read_memory(load_addr, verify_len))
-    RUN["load"] = {"load_addr": f"${load_addr:04X}", "bytes": len(body),
-                   "verified_bytes": verify_len,
-                   "unverified_tail_bytes": len(tail),
-                   "unverified_tail_all_zero": set(tail) <= {0},
-                   "sys": sys_addr, "seconds": round(load_s, 1), "path": wrote}
     if not RES.check(set(tail) <= {0},
                      "the image's $A000+ tail is zero fill, not code",
                      f"{len(tail)} bytes; if this ever holds code, the "
                      "verification below stops covering the whole image and "
                      "this rig must bank the ROM out to read it"):
         return False
-    if not RES.verdict(hw.check_image_readback(body[:verify_len], back),
-                       f"the PRG's {verify_len} code/rodata bytes loaded into "
-                       "RAM byte-exact"):
+
+    attempts: list = []
+    verdict = None
+    for attempt in (1, 2):
+        # CHUNKED, not one big write_memory. MEASURED on this device
+        # (2026-09-05, U64E fw v3.15-78-g71480a9d, n=2): a single 47,103-byte
+        # `write_memory` lands in 0.22 s and reads back with EXACTLY ONE wrong
+        # byte, at a different offset each time -- offset 2715 ($12BC) on one
+        # attempt, 3181 ($146E, $C8 read back as $AB) on the next. Not
+        # truncation and not a size cap; a sporadic single-byte corruption in
+        # the bulk path. The 84-byte chunked path takes ~33 s and came back
+        # byte-exact. A one-byte flip inside 6502 code is precisely the fault
+        # that surfaces 40 minutes later as a crash or a failed handshake and
+        # gets written up as "ip65 does not work on real silicon", so the
+        # slower path is the right one and the verify is not optional.
+        t0 = time.monotonic()
+        write_bytes(tr, load_addr, body)
+        # THE HEAD GOES LAST, AND IS RE-CHECKED PAST A SETTLE WINDOW.
+        # c64-wireguard measured, and this rig reproduced independently
+        # (2026-09-05): a single event zeroes $0801/$0802 between ~2 s and
+        # ~5 s after READY. is drawn, with no write involved. Those two bytes
+        # are the BASIC next-line pointer, which SYS does not use, so the
+        # program runs either way -- but a verifier taught to tolerate two
+        # wrong bytes tolerates them being wrong for some other reason too.
+        tr.write_memory(load_addr, body[:2])
+        load_s = time.monotonic() - t0
+        settle = 7.0 - (time.monotonic() - t_ready)
+        if settle > 0:
+            time.sleep(settle)
+        for _ in range(3):
+            if bytes(tr.read_memory(load_addr, 2)) == body[:2]:
+                break
+            tr.write_memory(load_addr, body[:2])
+            time.sleep(1.0)
+
+        back = bytes(tr.read_memory(load_addr, verify_len))
+        verdict = hw.check_image_readback(body[:verify_len], back)
+        attempts.append({"attempt": attempt, "seconds": round(load_s, 1),
+                         "ok": verdict.ok,
+                         "first_difference":
+                             verdict.evidence.get("first_difference")})
+        if verdict.ok:
+            break
+        print(f"  load attempt {attempt} did not verify "
+              f"({verdict.reason}); rewriting")
+
+    RUN["load"] = {"load_addr": f"${load_addr:04X}", "bytes": len(body),
+                   "verified_bytes": verify_len,
+                   "unverified_tail_bytes": len(tail),
+                   "unverified_tail_all_zero": set(tail) <= {0},
+                   "sys": sys_addr, "path": "write_bytes",
+                   "attempts": attempts}
+    if not RES.verdict(verdict, f"the PRG's {verify_len} code/rodata bytes "
+                                "loaded into RAM byte-exact"):
         return False
     send_text(tr, f"SYS{sys_addr}\r")
     return True

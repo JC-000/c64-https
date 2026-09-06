@@ -308,6 +308,33 @@ def test_tcp_stream_dedupes_retransmissions() -> None:
     assert hw.tcp_stream(frames, eth_src=C64_MAC, dport=PORT) == payload
 
 
+def test_tcp_streams_are_split_per_connection() -> None:
+    """Two connections must not be fused into one sequence space.
+
+    A run that retries — ip65 has no next-hop MAC yet, or the first connect
+    is refused — puts a short stub connection on the cable ahead of the real
+    one. Keying assembly on the absolute sequence number across both would
+    zero-fill the gulf between two unrelated ISNs and destroy the framing of
+    each, so a completed handshake would read as "no TLS records".
+    """
+    ch = _tls_record(hw.TLS_CONTENT_HANDSHAKE, _client_hello(SNI))
+    frames = hw.parse_pcap(_pcap([
+        # attempt 1: a stub that carried nothing useful, high ISN
+        _tcp_frame(C64_MAC, HOST_MAC, C64_IP, HOST_IP, 1024, PORT,
+                   0xF000_0000, b"\x16\x03"),
+        # attempt 2: the real connection, low ISN, a different source port
+        _tcp_frame(C64_MAC, HOST_MAC, C64_IP, HOST_IP, 1025, PORT, 1000, ch),
+    ]))
+    streams = hw.tcp_streams(frames, eth_src=C64_MAC, dport=PORT)
+    assert len(streams) == 2, streams
+    assert max(len(s) for s in streams) == len(ch)
+    # The whole point: the ClientHello is still decodable, and picking the
+    # longest connection is what finds it.
+    v = hw.check_client_hello_on_wire(frames, C64_MAC, port=PORT,
+                                      expect_sni=SNI)
+    assert v.ok, v.reason
+
+
 # ===========================================================================
 # The capture is OF this run, and adequate
 # ===========================================================================

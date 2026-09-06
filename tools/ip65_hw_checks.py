@@ -338,18 +338,27 @@ def _decode_arp(f: Frame) -> None:
 # ===========================================================================
 # TCP stream reassembly and TLS record framing
 # ===========================================================================
-def tcp_stream(frames: Sequence[Frame], *, eth_src: bytes | None = None,
-               dport: int | None = None, sport: int | None = None) -> bytes:
-    """The bytes one station put into a TCP connection, in sequence order.
+def tcp_streams(frames: Sequence[Frame], *, eth_src: bytes | None = None,
+                dport: int | None = None, sport: int | None = None) -> list:
+    """One byte stream PER CONNECTION, in first-appearance order.
 
-    Keyed on the TCP sequence number rather than capture order, so a
-    retransmission contributes its bytes ONCE and an out-of-order capture
-    still assembles. Frames are selected by Ethernet source, never by IP: an
-    IP address is a claim the sender makes about itself, an Ethernet source
-    address on a two-station cable is a fact about which box put the frame
-    on the wire.
+    PER CONNECTION, not per station. A run that retries — ip65 not having
+    the next-hop MAC yet, a refused connect, a second attempt after a
+    failure — puts two connections on the cable, and their sequence-number
+    spaces are unrelated. Assembling them into one buffer keyed on absolute
+    seq would zero-fill the gulf between two random ISNs, produce a
+    multi-gigabyte sparse buffer, and destroy the record framing of both.
+
+    Within a connection the assembly IS keyed on the sequence number rather
+    than capture order, so a retransmission contributes its bytes once and
+    an out-of-order capture still assembles.
+
+    Frames are selected by Ethernet source, never by IP: an IP address is a
+    claim the sender makes about itself, an Ethernet source address on a
+    two-station cable is a fact about which box put the frame on the wire.
     """
-    pieces: dict[int, bytes] = {}
+    conns: dict = {}
+    order: list = []
     for f in frames:
         if f.ip_proto != IPPROTO_TCP or not f.tcp_payload or f.tcp_seq is None:
             continue
@@ -359,19 +368,39 @@ def tcp_stream(frames: Sequence[Frame], *, eth_src: bytes | None = None,
             continue
         if sport is not None and f.sport != sport:
             continue
+        key = (bytes(f.ip_src or b""), f.sport, bytes(f.ip_dst or b""), f.dport)
+        pieces = conns.get(key)
+        if pieces is None:
+            pieces = conns[key] = {}
+            order.append(key)
         prev = pieces.get(f.tcp_seq)
         if prev is None or len(f.tcp_payload) > len(prev):
             pieces[f.tcp_seq] = f.tcp_payload
-    if not pieces:
-        return b""
-    out = bytearray()
-    base = min(pieces)
-    for seq in sorted(pieces):
-        off = seq - base
-        if off > len(out):
-            out.extend(b"\x00" * (off - len(out)))
-        out[off:off + len(pieces[seq])] = pieces[seq]
-    return bytes(out)
+    out: list = []
+    for key in order:
+        pieces = conns[key]
+        buf = bytearray()
+        base = min(pieces)
+        for seq in sorted(pieces):
+            off = seq - base
+            if off > len(buf):
+                buf.extend(b"\x00" * (off - len(buf)))
+            buf[off:off + len(pieces[seq])] = pieces[seq]
+        out.append(bytes(buf))
+    return out
+
+
+def tcp_stream(frames: Sequence[Frame], *, eth_src: bytes | None = None,
+               dport: int | None = None, sport: int | None = None) -> bytes:
+    """The LONGEST single connection matching the filter, or b"".
+
+    "Longest" rather than "first": a run whose first connect attempt failed
+    leaves a short stub connection ahead of the real one, and framing the
+    stub would report the C64 as having sent nothing recognisable when it in
+    fact completed a handshake on the next attempt.
+    """
+    streams = tcp_streams(frames, eth_src=eth_src, dport=dport, sport=sport)
+    return max(streams, key=len) if streams else b""
 
 
 @dataclass
@@ -870,9 +899,7 @@ def check_body_not_on_wire(frames: Sequence[Frame], secret: bytes,
                        status="inconclusive")
     corpora: list[bytes] = [bytes(f.raw) for f in frames]
     for src in sorted({bytes(f.eth_src) for f in frames}):
-        s = tcp_stream(frames, eth_src=src)
-        if s:
-            corpora.append(s)
+        corpora.extend(s for s in tcp_streams(frames, eth_src=src) if s)
     control_hits = [i for i, c in enumerate(corpora) if control in c]
     secret_hits = [i for i, c in enumerate(corpora) if secret in c]
     ev["control_hits"] = len(control_hits)
