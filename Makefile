@@ -594,6 +594,72 @@ build/net/ip65/ip65_blob.o: $(IP65_BIN)
 # worktrees — and it is why the file is not comparable between machines.
 FLAGS_STAMP := build/flags.stamp
 
+# Issue #174: -n / -q / -t must not mutate the tree.
+#
+# Both invalidation blocks below run inside a $(shell ...) during PARSE, which
+# is the whole point (see the comments on each) — but it also means -n cannot
+# suppress them. `-n` suppresses RECIPES; it does not suppress $(shell). So
+# `make -n` with a flag set that differed from the stamp used to delete every
+# object and the PRG, exit 0, and say nothing. One such probe destroyed a
+# working tree on 2026-08-31, and `make -npq` is what shell tab-completion runs
+# to enumerate targets.
+#
+# Finding the single-letter options is the whole difficulty, and the obvious
+# answer is WRONG. `$(firstword $(MAKEFLAGS))` holds the letter bundle only
+# when no long option is present; long options arrive as their own `--word`s
+# and push the letters elsewhere. Measured on GNU Make 3.81 (macOS):
+#
+#     make                              ->  []
+#     make -n                           ->  [n]
+#     make -q                           ->  [q]
+#     make -t                           ->  [t]
+#     make --dry-run                    ->  [n]
+#     make -npq                         ->  [qpn]
+#     make -s -n                        ->  [sn]
+#     make BACKEND=uci HTTPS_HOST=en.host.invalid  ->  []
+#     make --no-print-directory         ->  [ --no-print-directory]
+#     make --warn-undefined-variables   ->  [ --warn-undefined-variables]
+#     make -n --no-print-directory      ->  [ --no-print-directory -n]
+#     make --no-print-directory --warn-undefined-variables
+#                                       ->  [ --warn-undefined-variables - --no-print-directory]
+#
+# Two things the last four rows kill. `--no-print-directory` contains an `n`
+# AND a `t`; `--warn-undefined-variables` contains an `n` — so searching the
+# first word calls a REAL build a dry run, skips the invalidation, and the
+# link reuses the previous profile's objects. That is the mixed link this
+# whole mechanism exists to prevent, produced by the guard meant to protect
+# it, and it is worse than the bug in #174: same PRG size, different hash,
+# exit 0. And the letters are not first, nor undashed, when a long option is
+# present, so `$(filter-out -%,$(firstword ...))` is not a fix either — it
+# re-opens #174 on `make -n --no-print-directory`. Both were measured, both
+# directions.
+#
+# So: take every word that is neither `--`-prefixed nor a `VAR=value`
+# assignment (make 4.x appends those after a `--`), and strip one leading
+# dash. A stray bare `-` word, as in the last row above, patsubsts to the
+# empty string and drops out. 52/52 correct across the option matrix in
+# tools/test_build_flags_stamp.py's two guard tests.
+#
+# Testing for `n` alone is not enough — `make -q` is equally destructive and
+# equally a dry run, and `-t` is the third.
+MAKE_OPT_LETTERS := $(patsubst -%,%,$(filter-out --% %=%,$(MAKEFLAGS)))
+MAKE_DRY_RUN := $(strip \
+    $(findstring n,$(MAKE_OPT_LETTERS)) \
+    $(findstring q,$(MAKE_OPT_LETTERS)) \
+    $(findstring t,$(MAKE_OPT_LETTERS)))
+
+# Under a dry run each block below still runs its COMPARE — it just reports
+# instead of acting, so `make -n` stays an honest answer to "what would a build
+# do?" rather than silently printing "nothing to be done". The dry-run compare
+# writes nothing at all: the body goes down a pipe into `cmp -`, so not even
+# build/ is created. A missing stamp (or a missing build/) reads as "differs",
+# which is correct — a real build would invalidate there too.
+#
+# The one thing a guard must NOT do is weaken #159. Every non-dry-run
+# invocation is byte-for-byte unchanged, so the invalidation stays
+# unconditional and immediate for real builds, and CLAUDE.md's #128
+# no-`make clean` exemption for HTTPS_HOST/HTTPS_PATH stands as documented.
+
 # One line, so it can serve both the parse-time compare and the recovery rule
 # below. Single-quoted: no value here may contain a single quote.
 FLAGS_STAMP_BODY := printf '%s\n' \
@@ -611,6 +677,7 @@ FLAGS_STAMP_BODY := printf '%s\n' \
     'X25519_SEG_LADDER=$(X25519_SEG_LADDER)'
 
 ifneq ($(MAKECMDGOALS),clean)
+ifeq ($(MAKE_DRY_RUN),)
 _ := $(shell mkdir -p build; \
              $(FLAGS_STAMP_BODY) > $(FLAGS_STAMP).tmp; \
              if cmp -s $(FLAGS_STAMP).tmp $(FLAGS_STAMP); then \
@@ -619,6 +686,14 @@ _ := $(shell mkdir -p build; \
                  mv $(FLAGS_STAMP).tmp $(FLAGS_STAMP); \
                  rm -f $(ALL_OBJS) $(PRG); \
              fi)
+else
+# -n / -q / -t: compare and report, mutate nothing. See MAKE_DRY_RUN above.
+ifneq ($(shell $(FLAGS_STAMP_BODY) 2>/dev/null | cmp -s - $(FLAGS_STAMP) >/dev/null 2>&1 || echo differs),)
+$(warning DRY RUN (-$(MAKE_OPT_LETTERS)): build flags differ from $(FLAGS_STAMP).)
+$(warning   A real build would rewrite the stamp and delete every object and $(PRG))
+$(warning   at parse time. NOTHING was deleted; the tree is untouched.)
+endif
+endif
 
 # Order-only: the deletion above is what actually invalidates, and it has
 # already happened by the time make reads this edge. The edge states the
@@ -673,16 +748,27 @@ $(FLAGS_STAMP):
 # make builds its file database, so the deletion is visible to the dependency
 # graph. Absence is not a timestamp comparison, which is the whole point:
 # nothing here can be defeated by two files sharing a second.
+HTTPS_TARGET_INC_BODY := printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n.define HTTPS_SNI_STR "%s"\n' \
+                    '$(HTTPS_HOST)' '$(HTTPS_PATH)' '$(HTTPS_SNI)'
+
 ifneq ($(MAKECMDGOALS),clean)
+ifeq ($(MAKE_DRY_RUN),)
 _ := $(shell mkdir -p build; \
-             printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n.define HTTPS_SNI_STR "%s"\n' \
-                    '$(HTTPS_HOST)' '$(HTTPS_PATH)' '$(HTTPS_SNI)' > build/https_host.inc.tmp; \
+             $(HTTPS_TARGET_INC_BODY) > build/https_host.inc.tmp; \
              if cmp -s build/https_host.inc.tmp build/https_host.inc; then \
                  rm -f build/https_host.inc.tmp; \
              else \
                  mv build/https_host.inc.tmp build/https_host.inc; \
                  rm -f build/boot.o build/http.o $(PRG); \
              fi)
+else
+# -n / -q / -t: compare and report, mutate nothing. See MAKE_DRY_RUN above.
+ifneq ($(shell $(HTTPS_TARGET_INC_BODY) 2>/dev/null | cmp -s - build/https_host.inc >/dev/null 2>&1 || echo differs),)
+$(warning DRY RUN (-$(MAKE_OPT_LETTERS)): target strings differ from build/https_host.inc.)
+$(warning   A real build would delete build/boot.o, build/http.o and $(PRG) at parse)
+$(warning   time. NOTHING was deleted; the tree is untouched.)
+endif
+endif
 endif
 
 # build/http.o joins boot.o here (issue #141). src/http.s is the second
