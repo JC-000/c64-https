@@ -18,10 +18,17 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
 ## I just want to run it
 
 Grab a release — latest is
-[**v0.4.2**](https://github.com/JC-000/c64-https/releases/tag/v0.4.2).
-**If you have v0.4.0, replace it**: a server presenting a P-384 certificate
-could corrupt resident code and hang the machine (fixed in v0.4.1; no real
-server triggered it).
+[**v0.4.3**](https://github.com/JC-000/c64-https/releases/tag/v0.4.3), a
+**security release**.
+**If you have any earlier release, replace it.** v0.4.3 carries two
+client-side TLS fixes that v0.4.2 and everything before it lack: the X25519
+shared secret is now rejected when it comes out all zero (issue #153 — without
+that check, a passive observer who merely recorded the session could derive
+the traffic keys), and the handshake message sequence is now enforced (issue
+#152 — without that, four handshake messages of one harmless type satisfied
+the whole flight, so the client could report success having verified no
+signature at all). v0.4.0 additionally had a P-384 certificate hang, fixed in
+v0.4.1; no real server triggered that one.
 Every build is prebuilt, as a `.prg` and as a bootable `.d64`.
 No assembler, no cc65, no Python packages, no build step. **Three products,
 one disk each** — the label is the whole contents, and `MANIFEST.txt` in the
@@ -36,16 +43,16 @@ release walks you through the choice:
 Every image is built for **one** host, baked in at build time (`make
 HTTPS_HOST=...`). The packaging scripts never override it, so an image carries
 whatever the Makefile default was when it was built — and **that default
-changed after v0.4.2 was tagged**:
+changed between v0.4.2 and v0.4.3**:
 
-- **v0.4.2's images carry `www.foo.bar`.** `.bar` is a delegated gTLD, so that
-  is a name a third party can register. It is NXDOMAIN today, but combine it
-  with the missing checks below and an unmodified v0.4.2 image would dial an
-  attacker-controlled host on its first GET if anyone ever registered it. This
-  is why it was renamed.
-- **Master's default is `www.foo.invalid`** — RFC 2606 / RFC 6761 reserved,
-  never delegated, so it cannot resolve at all. That rename (`cdf02b4`) is
-  **not in any release yet**.
+- **v0.4.2's images, and every release before it, carry `www.foo.bar`.**
+  `.bar` is a delegated gTLD, so that is a name a third party can register. It
+  is NXDOMAIN today, but combine it with the missing checks below and an
+  unmodified v0.4.2 image would dial an attacker-controlled host on its first
+  GET if anyone ever registered it. This is why it was renamed.
+- **v0.4.3's images carry `www.foo.invalid`** — RFC 2606 / RFC 6761 reserved,
+  never delegated, so it cannot resolve at all. The rename is commit
+  `cdf02b4`, and v0.4.3 is the first release to carry it.
 
 Either way, point the name at the bundled test listener via your local DNS, or
 rebuild with your own `HTTPS_HOST=`. New in v0.4.2: the two **UCI** images
@@ -185,6 +192,18 @@ checked against the transcript, and a forged server Finished is genuinely
 rejected — see `tools/test_finished_verify.py`). What it does not prove is
 that anyone vouches for that certificate.
 
+That first claim only became reliably true in **v0.4.3**. Before it, nothing
+compared a received handshake message's type against the state the client was
+in, so a server — or an on-path attacker, the hello exchange being
+unauthenticated — could satisfy the whole encrypted flight with four messages
+of one harmless type and reach "connected" having seen no Certificate, no
+CertificateVerify and no server Finished. On the UCI images it took the name
+check down with it: `x509_verify_hostname` is a tail call off
+`x509_extract_pubkey`'s success exit (`src/tls_cert.s`), so a flight carrying no
+Certificate never reaches it and the SAN check described above never runs.
+v0.4.2 and earlier have that hole. See issue #152, the `TLS_HS_SEQ_CHECK` macro
+in `src/tls_hs_seq.inc`, and `tools/test_hs_sequence.py`.
+
 **Name validation alone does not fix this.** Without a chain to a trust
 anchor, an attacker who can redirect your connection simply self-signs a
 certificate carrying the *correct* name and the check passes. What it buys is
@@ -198,14 +217,14 @@ resident keys — not an oversight. Treat the transport as confidential against
 passive observers, not authenticated against active ones.
 
 Confidentiality against passive observers is the property this client keeps
-after conceding authentication, so it is worth saying what upholds it. On
-**master, and not yet in any release**, the X25519 shared secret is rejected
-when it comes out all zero, as RFC 8446 §7.4.2 and RFC 7748 §6.1 require.
-(The fix is commit `47ab00c`; `git tag --contains 47ab00c` is empty, so
-**v0.4.2 — the current release — does not have it**. Build from master if you
-want it. An earlier draft of this section credited it to a "v0.4.3" that does
-not exist. Issue #195 tracks which security fixes are master-only, and what
-if anything to do about the released images.) Before that check existed, a
+after conceding authentication, so it is worth saying what upholds it. **As of
+v0.4.3** the X25519 shared secret is rejected when it comes out all zero, as
+RFC 8446 §7.4.2 and RFC 7748 §6.1 require. (The fix is commit `47ab00c`, whose
+earliest tag is v0.4.3 — run `git tag --contains 47ab00c` to see which releases
+carry it — so **v0.4.2 and every release before it lack it**: replace them
+rather than trusting them.
+Issue #195 asked whether these master-only fixes warranted a release; v0.4.3
+is that release, and is the answer.) Before that check existed, a
 server (or an attacker who rewrote one ServerHello in passing) could send a
 low-order `key_share` and force every handshake and traffic key to be a
 function of the two *plaintext* hello messages — which would have made a
