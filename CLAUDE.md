@@ -735,3 +735,58 @@ euid 0 and segfault), and `sudo bash tools/rig-up-macos.sh` (feth pair,
 10.0.65.1, `/dev/bpf*` perms — **reset every reboot** — dnsmasq). VICE
 3.10 SDL2 warp caps at ~1.2x. macOS Local Network privacy can silently
 block the listener; the preflight probes for it.
+
+### Physical RR-Net rig (real CS8900a silicon)
+
+`tests/rig_ip65_rrnet_hw.py`: the same fetch over a REAL RR-Net cartridge
+in the U64E's cartridge port, cabled straight to the Mac's `en4`. The PRG
+is loaded over the U64's REST interface; nothing about the network path
+goes through the Ultimate. Segment is **10.0.66.0/24** (`sudo bash
+tools/rig-up-rrnet-macos.sh en4`), deliberately not the feth rig's
+10.0.65.0/24 so both can be up at once; dnsmasq pins
+`00:0e:3a:64:64:64 -> 10.0.66.200` and answers for `www.foo.invalid`
+only. The capture is hand-started (`sudo tcpdump -i en4 -n -s0 -U -w …` —
+both flags load-bearing). Stock 1 MHz, ~40-80 min.
+
+  - **Every wire and memory verdict is a pure function** in
+    `tools/ip65_hw_checks.py`; `tools/test_ip65_hw_checks_unit.py`
+    (pytest testpaths, no hardware, ms) proves each alarms on a known-bad
+    input, and `tools/mutate_ip65_hw_checks.py` breaks each one to prove
+    the suite goes red. Adding a `check_*` without a red case fails that
+    suite by introspection. **The rig is not judgment-free, though**: 15
+    delegated verdicts against 18 of its own `RES.check()` assertions
+    (screen scrapes, config writes, the listener probe, the selftests),
+    which have no red case. Do not attribute a run's whole check count to
+    the cartridge — 8 of the 24 in the first passing run touched neither
+    the cartridge nor the 6510.
+  - Two stations on the cable and the Mac is one of them, so every wire
+    assertion discriminates by **Ethernet source address**; a third MAC
+    is a hard failure. The cleartext-absence check needs a positive
+    control (the SNI hostname, which TLS 1.3 leaves in the clear) or it
+    reports INCONCLUSIVE, and the rig exits 78 for that, never 0.
+  - **Load the PRG chunked and verify it before SYS.** A single
+    `write_memory` of the 47 kB image lands in 0.22 s and comes back with
+    one wrong byte at a random offset (measured n=2, U64E fw 3.15 fork);
+    `write_bytes` takes ~33 s and is exact. Also: $0801/$0802 are zeroed
+    by the device ~2-5 s after READY. with no write involved. And
+    `client.run_prg` would deselect the cartridge (harness #217).
+  - Only $0801-$9FFF is verifiable from the host — the image's
+    $A000-$BFFF tail is BSS zero fill and reads back as the BASIC ROM
+    until `boot.s` banks it out. `check_shadow_ram_readable` is what
+    tells a ROM read from a RAM read; run it before believing any $A000+
+    value.
+  - This rig does NOT call `enable_uci` (the only one that does not): the
+    UCI command interface is a second consumer of the same expansion bus,
+    and an RR-Net run does not need it. Its value is read and reported,
+    never written.
+  - **A green run here does NOT mean the ip65 product validates server
+    names.** `src/x509_name.s` is UCI-only (see Memory layout), so the
+    ip65 image accepts any certificate that chains-free-verifies,
+    whatever name it carries — this rig fetches from a local listener
+    presenting a self-signed leaf and asserts nothing about the name in
+    it. Do not cite this run as coverage of that gap; it is the gap.
+  - What one passing run covers: one clock (1 MHz), one device, one
+    cartridge, one local listener, and an image differing from the
+    shipped one only in `HTTPS_PORT`. Nothing about CS8900a register
+    timing at turbo — deliberately, since the stock-C64 product never
+    runs there.
