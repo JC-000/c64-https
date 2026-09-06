@@ -4,20 +4,41 @@
 #
 # Produces, from the PRGs build_prgs.sh left in dist/:
 #
-#   c64-https-<key>.d64        one per variant, one PRG each (4 images)
-#   c64-https-<backend>.d64    one per backend, both of that backend's
-#                              profiles on one disk (2 images)
+#   c64-https-<key>.d64        one per variant, one PRG each, one image per
+#                              product in PACKAGE_VARIANTS (_common.sh is the
+#                              matrix -- do not restate the count here).
 #
-# WHY NOT ONE DISK WITH ALL FOUR: it does not fit, and that is arithmetic, not
-# preference. A .d64 holds 664 free blocks = 168,656 usable bytes; the four
-# PRGs total ~220 KB (2 x 62,977 UCI + 2 x 47,105 ip65). Each backend's pair
-# does fit (UCI ~496 blocks, ip65 ~371), so the per-backend disk is the largest
-# useful bundle. The per-variant singles are the "I know what I want, give me
-# one disk" case and are what the release notes point at.
+# WHY NO COMBO DISKS: they existed and were retired. The reasoning is at the
+# "No per-backend combo images" block near the bottom of this file, where the
+# code that does not emit them lives; it is not repeated here.
 #
-# Every image is bootable with LOAD"*",8,1 (the wanted PRG is the first file on
-# the single-variant disks). File names are shared between the single and the
-# per-backend disk so a user only ever learns one name.
+# What is worth stating up here is which reason applies TODAY, because the
+# arithmetic that triggered the retirement no longer reaches: it was 3 x 248
+# blocks against a .d64's 664, WHEN the UCI lineup carried three variants.
+# PACKAGE_VARIANTS carries two UCI products now, 2 x 248 = 496, which fits.
+# So a per-backend UCI disk is possible and is omitted by CURATION, not by
+# capacity: one product per disk means the label is the whole contents, and
+# no image can silently omit a variant. (An all-three disk still does not
+# fit -- 248 + 248 + 186 = 682 against 664 -- but that was never the disk
+# anyone proposed.)
+#
+# Every image is bootable with LOAD"*",8,1 -- there is only one PRG on each,
+# so the label is the whole contents.
+#
+# THE RULE THAT KEEPS THIS FILE HONEST, since six sites in this tree broke it
+# in one session: DELEGATE A SINGLE-OWNER FACT RATHER THAN RESTATING IT, and
+# where it must be restated -- history, incident records -- PUT IT IN THE PAST
+# TENSE AND NAME THE CONDITION THAT MADE IT TRUE.
+#
+# Stated that way because the tempting shorter version ("restated numbers go
+# stale, delegated ones do not") is false, and this tree falsifies it twice
+# over. _common.sh:18 and verify_release.py:135 both RESTATE 3 x 248 = 744
+# and are both still accurate -- they say the lineup REACHED three variants,
+# so the sentence stays true after the lineup moved. Meanwhile the four sites
+# that started this whole sweep (write_manifest.sh, build_prgs.sh's TRAP 1,
+# test_build_flags_stamp.py, test_tls_deframer.py) went stale restating a
+# RATIONALE with no number in them at all. Tense is what saved the survivors;
+# single ownership, not arithmetic, is what sank the casualties.
 #
 # Usage:  tools/package/build_d64.sh     [C1541=... to override the tool]
 # =============================================================================
@@ -90,18 +111,26 @@ for line in "${PACKAGE_VARIANTS[@]}"; do
     prg="$(variant_field "$line" 2)"
     name="$(variant_field "$line" 4)"
     # Disk label is the variant key: <=16 PETSCII chars, and it makes the
-    # directory header self-identifying when four near-identical disks are
-    # sitting in a downloads folder.
+    # directory header self-identifying when several near-identical disks are
+    # sitting in a downloads folder. (No count here on purpose -- it is
+    # len(PACKAGE_VARIANTS). Four copies of the word "four" went stale in
+    # this tree by spelling it out; see the header for the rule that
+    # actually covers them.)
     make_disk "$DIST/c64-https-$key.d64" "$key" "01" "$DIST/$prg" "$name"
 done
 
 # --- No per-backend combo images ------------------------------------------
 # Retired deliberately. Their premise was "a user only ever learns one
-# name", and that breaks the moment a backend carries three variants: the
-# UCI set is 3 x 248 = 744 blocks against a .d64's 664, so a combo image
-# could not hold the lineup even if we wanted one. Rather than ship a disk
-# that silently omits a variant, every image now carries exactly the one
-# product named on its label, so what a consumer downloads is what they
-# get. See PACKAGE_VARIANTS in _common.sh for the three products.
+# name", and that broke WHEN the UCI lineup reached three variants: 3 x 248
+# = 744 blocks against a .d64's 664, so the combo image could not hold the
+# lineup it was named after. Past tense on purpose -- the lineup is two UCI
+# products today (2 x 248 = 496, which fits), so that arithmetic is the
+# HISTORY of the decision and no longer its justification.
+#
+# What keeps them retired is curation: one product per disk means the label
+# is the whole contents, so no image can silently omit a variant and what a
+# consumer downloads is what boots. That reason does not depend on how many
+# variants there happen to be, which is why it is the one stated. See
+# PACKAGE_VARIANTS in _common.sh for the products themselves.
 
 echo "[package] disk images complete."
