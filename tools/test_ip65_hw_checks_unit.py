@@ -459,6 +459,12 @@ def test_dhcp_lease_red_green() -> None:
 
     default = bytes(hw.IP65_DEFAULT_CFG_IP)
     assert naive_dhcp_ok(default), "naive arm no longer fires"
+    # ISOLATED: no subnet, no expect_ip, nothing else that could reject it.
+    # With those constraints supplied, 192.168.1.64 fails the subnet test
+    # anyway, so a checker that had DROPPED the build-time-default rejection
+    # would still look right -- mutation-verified: removing that branch
+    # survived this case until it was asserted on its own.
+    assert not hw.check_dhcp_lease(default).ok
     assert not hw.check_dhcp_lease(default, subnet="10.0.66.0",
                                    host_ip=HOST_IP, expect_ip=C64_IP).ok
 
@@ -646,6 +652,14 @@ def test_shadow_ram_red_green() -> None:
 
     assert naive_read_ok(rom), "naive arm no longer fires"
     assert not hw.check_shadow_ram_readable(rom).ok
+    # Each ROM marker asserted ON ITS OWN. A real $A000 read carries both, so
+    # a checker that had lost one arm would still reject the realistic input
+    # and look correct -- mutation-verified.
+    prefix_only = hw.BASIC_ROM_A000_PREFIX + bytes(RNG.getrandbits(8)
+                                                   for _ in range(12))
+    assert not hw.check_shadow_ram_readable(prefix_only).ok
+    signature_only = bytes(4) + hw.BASIC_ROM_SIGNATURE + bytes(4)
+    assert not hw.check_shadow_ram_readable(signature_only).ok
     assert not hw.check_shadow_ram_readable(None).ok
     assert not hw.check_shadow_ram_readable(b"\x01\x02\x03").ok      # too short
     assert hw.check_shadow_ram_readable(bytes(RNG.getrandbits(8)
@@ -690,6 +704,15 @@ def test_http_response_red_green() -> None:
     assert not hw.check_http_response(200, len(body), body, b"").ok
     # A buffer that merely STARTS with the body is not the body.
     assert not hw.check_http_response(200, len(body) + 3, body + b"XYZ", body).ok
+    # SAME LENGTH, right first bytes, wrong content. This is the case that
+    # isolates the exact compare: every other red case above has a length
+    # mismatch too, so a checker that compared only a prefix would pass them
+    # all on the length check alone -- mutation-verified. (The converse
+    # holds: with the exact compare in place the length check cannot fail on
+    # its own, so it is kept for its message, not for its coverage.)
+    near_miss = body[:4] + _rand_body(len(body) - 4)
+    assert near_miss != body and len(near_miss) == len(body)
+    assert not hw.check_http_response(200, len(body), near_miss, body).ok
     assert hw.check_http_response(200, len(body), body + b"\x00" * 100, body).ok
 
 
