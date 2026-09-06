@@ -47,6 +47,18 @@ second because ca65 is fast and the tree is small.
 Runs under pytest, and standalone::
 
     python3 tools/test_build_flags_stamp.py
+
+Exit codes (standalone), per tools/_skip_policy.py::
+
+    0  every case ran and passed
+    1  a case ran and FAILED
+    2  COULD NOT RUN -- ca65/ld65 absent, so nothing was verified
+
+An absent toolchain is an INVOLUNTARY skip and must never read as a pass
+(#177): this module is pinned in pytest.ini `testpaths`, so a silent skip
+here is bare `pytest` at the repo root going green while asserting an
+invariant it never checked. `C64_ALLOW_SKIP=1` is the deliberate opt-out
+for a CI lane with no cc65; it still prints the warning.
 """
 
 import hashlib
@@ -57,7 +69,16 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _skip_policy import EXIT_CANNOT_RUN, cannot_run, require   # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
+
+# What every test here certifies, and therefore what a run that could not
+# execute them certifies NOTHING about. Named once so the involuntary-skip
+# block says the same thing on both channels.
+CERTIFIES = ("build/flags.stamp — that a build-flag change invalidates the "
+             "tree, and that an unchanged flag set does not")
 
 # What a build reads. `libs` carries the sibling submodules the archive
 # wrappers assemble from; `ip65`/`ip65-build` are symlinked for
@@ -127,6 +148,35 @@ def _toolchain_missing():
     return None
 
 
+def _require_toolchain():
+    """Fail loudly, on both channels, when cc65 is not installed (#177).
+
+    Every test here shells out to `make`, so an absent ca65/ld65 means the
+    body cannot run. This used to be four lines of `print("SKIP: ...")` and a
+    bare `return` -- and a pytest test that returns None without asserting is
+    a PASS, so `pytest tools/test_build_flags_stamp.py` on a machine without
+    cc65 reported `7 passed in 0.01s`, the SKIP lines swallowed by pytest's
+    stdout capture. This module is pinned in pytest.ini `testpaths`, so that
+    is bare `pytest` at the repo root going green while asserting an
+    invariant it never checked.
+
+    `require()` raises instead, carrying the vacuity warning INSIDE the
+    reason string, because under pytest `-ra` the reason is the only channel
+    that survives. `C64_ALLOW_SKIP=1` is the deliberate opt-out for a CI lane
+    with no toolchain: it downgrades to a real pytest skip and still prints
+    the warning.
+    """
+    missing = _toolchain_missing()
+    require(
+        missing is None,
+        f"{missing} not on PATH -- every case here shells out to `make`",
+        executed=0,
+        total=1,
+        certifies=CERTIFIES,
+        opt_out_env="C64_ALLOW_SKIP",
+    )
+
+
 class Farm:
     """A disposable tree that builds the repo without writing to it."""
 
@@ -182,10 +232,7 @@ def test_flag_change_without_clean_matches_a_clean_build():
     `make clean` is the documented remedy and it is absent here on
     purpose — the whole point is what happens when someone forgets it.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     oracle = _clean_build_sha(*UCI, "HTTPS_SNI=www.foo.invalid")
     with Farm() as farm:
         farm.make(*UCI)
@@ -215,10 +262,7 @@ def test_profile_flip_without_clean_matches_a_clean_build():
     the sibling archive, AND retargets $(CFG) to the -onchip cfg variant.
     Nothing in the old Makefile noticed any of the three.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     comb = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1")
     oracle = _clean_build_sha(*comb)
     with Farm() as farm:
@@ -236,10 +280,7 @@ def test_profile_flip_without_clean_matches_a_clean_build():
 
 def test_vic_blank_flip_without_clean_matches_a_clean_build():
     """A pure `-D` knob with no generated include anywhere near it."""
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     noblank = UCI + ("VIC_BLANK=0",)
     oracle = _clean_build_sha(*noblank)
     with Farm() as farm:
@@ -272,10 +313,7 @@ def test_backend_flip_removes_the_other_backends_prg():
     `make -n BACKEND=ip65`, which relied on a dry run mutating the tree —
     the defect fixed in #174.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     with Farm() as farm:
         farm.make(*UCI)
         assert farm.exists(PRG)
@@ -319,10 +357,7 @@ def test_dry_run_options_do_not_touch_the_tree():
     "simplification" of the Makefile restores #174 with this file fully
     green. See the comment on that table.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     comb = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1")
     with Farm() as farm:
         farm.make(*UCI)
@@ -397,10 +432,7 @@ def test_an_unrelated_option_does_not_suppress_invalidation():
         exactly the `make clean` image — the end-to-end statement, and the
         one that catches a guard that merely warns without acting.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     # Cheap probe: real build, links nothing (the goal is already up to
     # date once the parse-time block has written it), two common long
     # options plus one that shares no letters with n/q/t.
@@ -443,10 +475,7 @@ def test_an_unrelated_option_does_not_suppress_invalidation():
 
 def test_unchanged_flags_rebuild_nothing():
     """The inverse property: the stamp must not make every build a rebuild."""
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     with Farm() as farm:
         farm.make(*UCI)
         before_objs = farm.mtimes()
@@ -471,10 +500,7 @@ def test_https_host_change_is_still_incremental():
     finer grain (boot.o + http.o, not the whole tree). Certificate pinning
     (#155) is about to depend on that staying cheap.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     retarget = UCI + ("HTTPS_HOST=en.wikipedia.org",)
     oracle = _clean_build_sha(*retarget)
     with Farm() as farm:
@@ -504,10 +530,7 @@ def test_stamp_records_the_whole_command_line():
     answering "what was this PRG built with?" at a glance, which is the
     question the incident started from.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     with Farm() as farm:
         farm.make(*UCI)
         text = farm.path(STAMP).read_text()
@@ -531,18 +554,47 @@ def test_stamp_records_the_whole_command_line():
 
 def main() -> int:
     print("=== build/flags.stamp ===")
+    tests = [(name, fn) for name, fn in sorted(globals().items())
+             if name.startswith("test_") and callable(fn)]
+
+    # The toolchain check is hoisted out of the loop on purpose. Per-test it
+    # would report eight identical failures for one missing binary, and the
+    # standalone lane wants the "could not run" EXIT CODE (2), which is a
+    # thing only a process has -- `require()`'s AssertionError is the right
+    # answer for pytest, where the unit of reporting is the test.
+    missing = _toolchain_missing()
+    if missing:
+        return cannot_run(
+            f"{missing} not on PATH -- every case here shells out to `make`",
+            executed=0,
+            total=len(tests),
+            certifies=CERTIFIES,
+            opt_out_env="C64_ALLOW_SKIP",
+        )
+
     failed = 0
-    for name, fn in sorted(globals().items()):
-        if not name.startswith("test_") or not callable(fn):
-            continue
+    ran = 0
+    for name, fn in tests:
         try:
             fn()
-        except Exception as exc:            # noqa: BLE001 — a crash is a fail
+        except Exception as exc:            # noqa: BLE001 - a crash is a fail
             failed += 1
             print(f"  FAIL {name}\n       {type(exc).__name__}: {exc}")
         else:
+            ran += 1
             print(f"  ok   {name}")
-    print(f"\n{'FAILED' if failed else 'PASSED'}: {failed} failure(s)")
+
+    # A run that executed nothing must never print PASSED. Asserted rather
+    # than assumed, because the version of this file that #177 reports did
+    # print "PASSED: 0 failure(s)" for a run in which zero assertions ran.
+    if ran + failed == 0:
+        return cannot_run(
+            "no test functions were collected from this module",
+            executed=0, total=0, certifies=CERTIFIES,
+        )
+
+    print(f"\n{'FAILED' if failed else 'PASSED'}: {failed} failure(s) "
+          f"({ran}/{len(tests)} executed)")
     return 1 if failed else 0
 
 
