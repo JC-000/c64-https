@@ -25,11 +25,13 @@ emulator. Every **wire and memory** verdict comes from
 pytest's `testpaths`, no hardware, milliseconds) proves each of those
 alarms on a known-bad input, with `tools/mutate_ip65_hw_checks.py`
 breaking each one to prove the suite goes red. The rig itself is not
-judgment-free — 15 delegated verdicts against 18 of its own procedural
-assertions (screen scrapes, the config write, the listener probe, the
-selftests), which have no red case — so a run's headline check count
-should not be read as that many facts about the cartridge. Its segment is
-10.0.66.0/24,
+judgment-free: some of its checks are procedural assertions of its own
+(screen scrapes, the config write, the clock assertion, the listener
+probe, the selftests) with no red case, so a run's headline check count
+should not be read as that many facts about the cartridge. **The
+decomposition is stated in the rig's own docstring and is deliberately
+not repeated here** — it moves when a check is added, and this file has
+already carried a stale copy of it once. Its segment is 10.0.66.0/24,
 deliberately not the feth rig's 10.0.65.0/24, so both rigs can be up at
 once and real silicon can be compared against the emulated pair.
 

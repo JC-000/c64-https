@@ -3704,6 +3704,19 @@ response and the close all fitted inside one 1 s poll. `tls_last_state` is
 no fallback — tls13.s writes it only on the ERROR path, so a clean run
 leaves it 0.
 
+A note on those line numbers, because getting them right cost more than
+the finding did: **five wrong line cites into `src/tls13.s` were produced
+today by four different parties**, every one of them by reading a symbol
+tool's position output and treating it as a 1-based file line. It is off
+by one. The rule is narrower than "do not cite line numbers" — it is
+*whatever produced a line number, confirm it against a 1-based read of
+the file before it goes into a document*. Citing the span rather than the
+instruction (`:303-304`, `:382-383`) is the cheap second defence: it is
+right whichever of the load or the store the reader means, and it
+survives exactly this off-by-one. Ground truth here, read from the file:
+`sta tls_state` has ten sites, all in `tls13.s`, at :137, 158, 169, 207,
+218, 229, 243, 304, 312 and 383.
+
 The check was left red. Softening it to make a turbo run green is the
 exact failure this repo has recorded three times (#158, #161, #176), and
 the rig's own docstring is about not doing it. That the handshake
