@@ -78,6 +78,8 @@
         .import tls_recv
 
         ; ---- imports: net.asm wrappers around ip65 ----
+        ; §13 retired at contract v1.0.0; net_abi.inc is the normative
+        ; source now and carries the anchor.
         .include "net_abi.inc"  ; the §13 surface, nothing imported directly
 
 ; =============================================================================

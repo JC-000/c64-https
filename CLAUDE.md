@@ -64,6 +64,22 @@ exit 0). Because the stamp holds the expanded command lines rather than a
 list of knob names, a new flag is covered the day it is added. The suite
 also pins the inverse — an unchanged flag set must still rebuild nothing.
 
+Parse time includes a dry run, so `make -n` used to delete the tree while
+answering "what would this build?". **`-n`/`-q`/`-t` are now exempt
+(#174)**: they still run the compare and `$(warning)` what a real build
+would delete, but they write nothing — not the stamp, not the objects.
+`-q` and the `make -npq` completion idiom matter as much as `-n`. The
+guard has to find the single-letter options in `MAKEFLAGS`, and
+`$(firstword ...)` is **not** where they are: a long option arrives as
+its own `--word` and pushes the letters elsewhere, so
+`make -n --no-print-directory` reads `[ --no-print-directory -n]` — last,
+and dash-prefixed. Worse, `--no-print-directory` itself contains an `n`
+and a `t`, so searching the first word calls a *real* build a dry run and
+skips an invalidation it needed. The guard therefore takes every word
+that is neither `--`-prefixed nor a `VAR=value` assignment and strips one
+leading dash; the option matrix behind that is in the Makefile comment
+and pinned by two tests. Real builds are byte-for-byte unchanged.
+
 The target *strings* `HTTPS_HOST`/`HTTPS_PATH`/`HTTPS_SNI` keep their own
 narrower stamp, the generated `build/https_host.inc` (#128): it invalidates
 `boot.o` + `http.o` only, so retargeting stays cheap. Only the strings are
@@ -169,11 +185,18 @@ fixed buffers in crypto BSS.
     `nistcurves_zp_ptr2=$3D` (verify in `build/labels.txt`). All defined
     locally (`src/constants.inc`, `src/crypto/shared/zp_canon.inc`); no
     `.importzp` anywhere.
-  - c64-lib-contract: pin the **tag** (v0.10.3 is newest tag and newest
-    SPEC; note 0.10.1 has no tag). §8.0 APP_OWNED shape is requested via
-    `CONTRACT_DEFINES` — no archive member is edited (§6.1) — and the
+  - c64-lib-contract is a **prose dependency, not a submodule** — nothing
+    in `make` reads it, so a contract release can never break a build.
+    Always cite a **tag** (newest: v1.1.0). v1.0.0 cut the SPEC by 7/8 and
+    retired §9, §12, §13, §14, §15, §6.3, §6.6, §6.7: those resolve only
+    at **v0.17.1**, in a c64-lib-contract checkout (it is not a submodule
+    here); survivors keep their numbers against the current SPEC. Note
+    §6.1/§6.2/§6.4/§6.5 survive while §6.3/§6.6/§6.7 do not — §6 is split.
+    §8.0 APP_OWNED shape is requested
+    via `CONTRACT_DEFINES` — no archive member is edited (§6.1) — and the
     manifest attests it, so the asserts in `src/lib_contract_asserts.s`
-    are live. §13 (network ABI) is not adopted yet (issue #70).
+    are live. §13 (network ABI) **is** adopted (#70, merged #142); see
+    Networking backend ABI for what its retirement did and did not change.
 
 **P-384 is PARKED, and deliberately gated.** The wire path used to be fully
 live while the overlay image was a stub: a P-384 certificate made
@@ -196,7 +219,12 @@ bank 2; banks 6-7 reserved for the P-384 overlay experiment.
 Switching backend = a different cfg + different `src/net/<backend>/*.o`.
 
 **`src/net_abi.inc` is the build-enforced boundary** (c64-lib-contract
-SPEC §13, issue #70). `boot.s`, `http.s`, `tls_record_io.s` and `tls13.s`
+SPEC §13, issue #70). **§13 was retired at contract v1.0.0; every §13.x
+number in this section resolves at tag `v0.17.1`, nowhere else.** No §13
+assert has a contract-derived counterparty, so no contract release can
+break a build — but the error codes below are asserted NOWHERE, and that
+is the live hazard (see the allocation note). `src/net_abi.inc` is the
+normative source now. `boot.s`, `http.s`, `tls_record_io.s` and `tls13.s`
 `.include` it and import no `net_*` symbol directly, so a backend that
 drops a symbol fails the link by name on both backends. Surface:
 
@@ -222,8 +250,11 @@ drops a symbol fails the link by name on both backends. Surface:
     over-claim test — both fleet adapters misfiled it independently (#140).
     `net_poll` caps the copy at the request and never emits `$8A`; a header
     above the request that is NOT `$FFFF` leaves `$8B UCI_ERR_BAD_READ_HDR`
-    (C=0, stream continues) — the stream-family counterpart of `$8A`. Allocate new codes
-    in SPEC §13.2's table first — `$8B` was the first one allocated that way.
+    (C=0, stream continues) — the stream-family counterpart of `$8A`.
+    **SPEC §13.2's allocation table moved, it did not vanish**: allocate a
+    new code in `c64-wireguard/src/net_abi.inc`, which declares itself
+    canonical for both ranges, then here. It owns `$8C-$8F` and `$46-$49`,
+    which our two error headers used to present as free (#184).
   - Gone, per §13.1: `net_tcp_set_recv_cb` (stub), `net_recv_ready`,
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
     is now `print_local_ip` in `boot.s`, one copy for both backends.
@@ -307,6 +338,13 @@ uppercases); at 48 MHz the handshake scrolls the screen, so read it
 immediately. Crypto-path rigs call `preflight_reu()` (#97): a REU-profile
 build on a REU-disabled device exits 4 in ~2 s instead of spinning ~44 min;
 it never writes device config. `C64_SKIP_REU_PREFLIGHT=1` bypasses.
+**It fails closed (#179)**: a REU setting that cannot be read — a raise, an
+unrecognised shape, an empty value — exits 4 too, not a warning.
+`c64-test-harness` is an **editable** install from a sibling working tree,
+so their merges are our regressions; audit every `get_config_*` call
+against their tree, not against memory. Pinned by
+`tools/test_reu_preflight.py` (faked client, no hardware). Story in
+engineering-notes.
 
 ### Device gotchas (read before diagnosing a "wedge")
 
@@ -386,8 +424,11 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     4,212 B slot). UCI: by 1,280 B since `CERT_BUF_BSS` moved into
     `CRYPTO_OVERLAY` for wikipedia (accepted casualty). The earlier
     `Duplicate external identifier: 'reu_mul_tables_init'` collision is
-    handled by dropping `reu_mul_init.o` in the nistcurves wrapper — it is
-    APP_OWNED here. Flag stays off; the in-tree X25519 is correct (RFC 7748
+    handled by **deferral through `CONTRACT_DEFINES`** (`-D
+    SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH`), not by dropping
+    `reu_mul_init.o` — the wrapper does no member surgery at all any more
+    (§6.1), it `cp`s the upstream archive. `reu_mul` is APP_OWNED here.
+    Flag stays off; the in-tree X25519 is correct (RFC 7748
     vector 2 passes) and ships.
   - **P-384 build is broken**, one link deeper than before: the `ar65`
     member-name bug was ours (fixed), and the chain now stops at
@@ -667,8 +708,10 @@ here** — and `tools/test_pytest_boundary.py` proves it is exactly the set
 pytest can run, in both directions. Both rig dirs (`tests/`, `tools/uci/`)
 are `rig_*.py` and in `norecursedirs`, and each exits 5 on its own. A bare
 `pytest` at the root is green; the total is not quotable, because it tracks
-`testpaths` *and* the build state (`test_uci_data_acc.py` skips its cases
-without a UCI PRG in `build/`). Run it rather than citing a number.
+`testpaths` *and* the build state. Run it rather than citing a number, and
+**build `BACKEND=uci` first**: `test_uci_data_acc.py` does not *skip*
+without a UCI PRG in `build/`, it **fails** 3 cases (#178's gap, not a
+regression).
 
 Negative-path coverage exists because an audit found the Finished-mismatch
 abort had no test: `test_finished_verify.py` (VICE, carry-latching stub)

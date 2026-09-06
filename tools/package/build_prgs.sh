@@ -2,12 +2,11 @@
 # =============================================================================
 # tools/package/build_prgs.sh — build the release PRG matrix into dist/.
 #
-# Four variants, every combination of networking backend x crypto profile:
+# Three variants, one per shipped product (PACKAGE_VARIANTS in _common.sh):
 #
-#   c64-https-uci-reu.prg      make BACKEND=uci
-#   c64-https-uci-onchip.prg   make BACKEND=uci USE_NISTCURVES_ONCHIP=1
-#   c64-https-ip65-reu.prg     make BACKEND=ip65
 #   c64-https-ip65-onchip.prg  make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1
+#   c64-https-uci-onchip.prg   make BACKEND=uci  USE_NISTCURVES_ONCHIP=1
+#   c64-https-uci-comb.prg     make BACKEND=uci  USE_NISTCURVES_ONCHIP_COMB=1
 #
 # The matrix itself lives in _common.sh; this script has no per-variant
 # knowledge and nothing version-specific, so it survives a library bump with
@@ -15,11 +14,43 @@
 #
 # TWO TRAPS this script exists to avoid, both observed in this repo:
 #
-#   1. `make clean` runs before EVERY variant. `BACKEND=` is not a -D flag, it
-#      selects an include path, and make's dependency graph cannot see it.
-#      Skipping the clean yields either a mixed binary at exactly the right
+#   1. `make clean` runs before EVERY variant, and it is load-bearing — but
+#      for a different reason than it used to be.
+#
+#      It used to be about the flags. `BACKEND=` is not a -D flag, it selects
+#      an include path, and make's dependency graph had no way to see it:
+#      skipping the clean yielded either a mixed binary at exactly the right
 #      size, or (macOS GNU Make 3.81, 1-second mtime resolution) no relink at
 #      all, leaving the *other* variant's PRG in place. Exit 0 either way.
+#      Issue #159 closed that in the Makefile: `build/flags.stamp` holds the
+#      fully expanded ca65/ld65 command lines, is content-compared at Makefile
+#      *parse* time, and on any change deletes every object and the PRG before
+#      make builds its file database. (`build/labels.txt`, `.map` and `.dbg`
+#      survive that rm; harmless here, since every variant starts clean.)
+#
+#      What the stamp does NOT reach is `build/lib/*.a`. Its invalidation is
+#      exactly `rm -f $(ALL_OBJS) $(PRG)`, and ALL_OBJS is the four .o lists;
+#      the sibling-archive rules have no prerequisites at all — nothing under
+#      libs/ is a prerequisite of any archive rule — so an archive that
+#      already exists is up to date by definition, whatever the submodule pin
+#      now says. SIBLING_LIB_ARCHIVES is stamped, but that is the archive
+#      *filename* list: it is keyed on the profile flags, and reads no
+#      submodule state at all. Which cuts both ways, and the safe half is
+#      worth stating: a PROFILE change needs no clean, because it names a
+#      different archive and one that is not there gets built. A PIN change
+#      does — the filename does not move, so the archive from the old
+#      checkout stays, and `make clean` (rm -rf build) is the only thing that
+#      rebuilds it.
+#
+#      That is what makes the submodule pins this script writes into
+#      dist/build-info.txt, and write_manifest.sh prints in dist/MANIFEST.txt,
+#      an attestation rather than a guess. Without the clean, an archive built
+#      from a previous libs/nistcurves checkout links into the release PRG
+#      while the manifest reports the current pin, at exit 0. #124's staleness
+#      probe does not catch it: the probe lives inside
+#      build_nistcurves_p256.sh, which is not run when the .a is already
+#      there. `CA65=` has the same shape — it is stamped, so the objects go,
+#      but the wrapper is not re-invoked.
 #   2. Every build is checked by PRG sha256, recorded in dist/build-info.txt.
 #      Object hashes are worthless as evidence — ca65 stamps wall-clock time
 #      into every .o header — but ld65 does not propagate it, so the PRG is
@@ -151,8 +182,8 @@ done
 # single broken variant left the operator with no artifacts AND no written
 # record of what broke. Partial is the common case during a library bump (one
 # profile's archive trips a link assert while the other is fine), and the
-# useful outcome there is "here are the three that work, here is the error for
-# the fourth" — the release still cannot be cut, but the blocker is legible
+# useful outcome there is "here are the ones that work, here is the error for
+# the one that did not" — the release still cannot be cut, but the blocker is legible
 # and the good artifacts are testable. The non-zero status is what stops
 # anyone mistaking a partial run for a complete one.
 built=$(( ${#PACKAGE_VARIANTS[@]} - failed ))

@@ -47,6 +47,18 @@ second because ca65 is fast and the tree is small.
 Runs under pytest, and standalone::
 
     python3 tools/test_build_flags_stamp.py
+
+Exit codes (standalone), per tools/_skip_policy.py::
+
+    0  every case ran and passed
+    1  a case ran and FAILED
+    2  COULD NOT RUN -- ca65/ld65 absent, so nothing was verified
+
+An absent toolchain is an INVOLUNTARY skip and must never read as a pass
+(#177): this module is pinned in pytest.ini `testpaths`, so a silent skip
+here is bare `pytest` at the repo root going green while asserting an
+invariant it never checked. `C64_ALLOW_SKIP=1` is the deliberate opt-out
+for a CI lane with no cc65; it still prints the warning.
 """
 
 import hashlib
@@ -57,7 +69,16 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _skip_policy import EXIT_CANNOT_RUN, cannot_run, require   # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
+
+# What every test here certifies, and therefore what a run that could not
+# execute them certifies NOTHING about. Named once so the involuntary-skip
+# block says the same thing on both channels.
+CERTIFIES = ("build/flags.stamp — that a build-flag change invalidates the "
+             "tree, and that an unchanged flag set does not")
 
 # What a build reads. `libs` carries the sibling submodules the archive
 # wrappers assemble from; `ip65`/`ip65-build` are symlinked for
@@ -80,12 +101,80 @@ UCI = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP=1")
 PRG = "build/c64-https.prg"
 STAMP = "build/flags.stamp"
 
+# Invocations that must NOT mutate the tree. The bare short forms are the
+# ones #174 reported; the COMBINED forms are what keep the guard from being
+# "simplified" back into that bug.
+#
+# `make -n --no-print-directory` is the discriminating case, and it is the
+# only one. GNU make 3.81 renders it as `MAKEFLAGS=[ --no-print-directory -n]`
+# — the letters are LAST, and they carry a leading dash — so the two
+# obvious-looking guards split exactly here:
+#
+#   $(firstword $(MAKEFLAGS))                    -> [--no-print-directory]
+#       finds an `n` and a `t` in the long option's NAME. Right verdict here,
+#       wrong reason; and on `make --no-print-directory` alone (no `-n`) the
+#       same reasoning calls a REAL build a dry run, skips the invalidation,
+#       and ships a mixed link. That is the direction
+#       test_an_unrelated_option_does_not_suppress_invalidation pins.
+#
+#   $(filter-out -%,$(firstword $(MAKEFLAGS)))   -> []
+#       drops the letters entirely because they are dash-prefixed, so a real
+#       build runs and DELETES THE TREE. This is #174 verbatim, and without
+#       the row below it passes every other test in this file — measured, by
+#       mutating the Makefile to that form: 9/9 green while
+#       `make -n --no-print-directory BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1`
+#       left 0 objects and no PRG at exit 0.
+#
+# So the bare forms alone cannot tell a correct guard from a destructive one.
+# Neither long option here is exotic: `--no-print-directory` contains both an
+# `n` and a `t`, `--warn-undefined-variables` an `n`, and either can arrive
+# from the environment, a parent make, or an IDE.
+DRY_RUN_INVOCATIONS = (
+    ("-n",),
+    ("-q",),
+    ("-t",),
+    ("-npq",),                              # what shell completion runs
+    ("-n", "--no-print-directory"),         # the discriminating case
+    ("--no-print-directory", "-n"),         # same, option order swapped
+    ("-t", "--no-print-directory"),
+    ("-q", "--warn-undefined-variables"),
+)
+
 
 def _toolchain_missing():
     for tool in ("ca65", "ld65"):
         if shutil.which(tool) is None:
             return tool
     return None
+
+
+def _require_toolchain():
+    """Fail loudly, on both channels, when cc65 is not installed (#177).
+
+    Every test here shells out to `make`, so an absent ca65/ld65 means the
+    body cannot run. This used to be four lines of `print("SKIP: ...")` and a
+    bare `return` -- and a pytest test that returns None without asserting is
+    a PASS, so `pytest tools/test_build_flags_stamp.py` on a machine without
+    cc65 reported `7 passed in 0.01s`, the SKIP lines swallowed by pytest's
+    stdout capture. This module is pinned in pytest.ini `testpaths`, so that
+    is bare `pytest` at the repo root going green while asserting an
+    invariant it never checked.
+
+    `require()` raises instead, carrying the vacuity warning INSIDE the
+    reason string, because under pytest `-ra` the reason is the only channel
+    that survives. `C64_ALLOW_SKIP=1` is the deliberate opt-out for a CI lane
+    with no toolchain: it downgrades to a real pytest skip and still prints
+    the warning.
+    """
+    missing = _toolchain_missing()
+    require(
+        missing is None,
+        f"{missing} not on PATH -- every case here shells out to `make`",
+        executed=0,
+        total=1,
+        certifies=CERTIFIES,
+        opt_out_env="C64_ALLOW_SKIP",
+    )
 
 
 class Farm:
@@ -104,8 +193,8 @@ class Farm:
     def __exit__(self, *exc):
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def make(self, *flags, dry_run=False, check=True):
-        cmd = ["make"] + (["-n"] if dry_run else []) + list(flags)
+    def make(self, *flags, dry_run=False, opts=(), check=True):
+        cmd = ["make"] + (["-n"] if dry_run else []) + list(opts) + list(flags)
         proc = subprocess.run(cmd, cwd=self.dir, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if check:
@@ -140,13 +229,11 @@ def _clean_build_sha(*flags):
 def test_flag_change_without_clean_matches_a_clean_build():
     """The 2026-08-30 incident: HTTPS_SNI= on a tree built without it.
 
-    `make clean` is the documented remedy and it is absent here on
-    purpose — the whole point is what happens when someone forgets it.
+    `make clean` WAS the documented remedy, and it is absent here on
+    purpose — the whole point is what happens when someone forgets it,
+    which since #159 build/flags.stamp has to handle unaided.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     oracle = _clean_build_sha(*UCI, "HTTPS_SNI=www.foo.invalid")
     with Farm() as farm:
         farm.make(*UCI)
@@ -176,10 +263,7 @@ def test_profile_flip_without_clean_matches_a_clean_build():
     the sibling archive, AND retargets $(CFG) to the -onchip cfg variant.
     Nothing in the old Makefile noticed any of the three.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     comb = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1")
     oracle = _clean_build_sha(*comb)
     with Farm() as farm:
@@ -197,10 +281,7 @@ def test_profile_flip_without_clean_matches_a_clean_build():
 
 def test_vic_blank_flip_without_clean_matches_a_clean_build():
     """A pure `-D` knob with no generated include anywhere near it."""
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     noblank = UCI + ("VIC_BLANK=0",)
     oracle = _clean_build_sha(*noblank)
     with Farm() as farm:
@@ -222,26 +303,25 @@ def test_backend_flip_removes_the_other_backends_prg():
     macOS GNU Make 3.81 compares mtimes at 1-second resolution, so a
     same-second backend flip could leave the OTHER backend's PRG on disk
     and exit 0 — and every rig loads that path by name. The invalidation
-    happens during parse, so it is visible here with `make -n`: no recipe
-    runs, yet the stale PRG and objects must already be gone.
+    happens during parse, so the stale PRG and objects are gone before
+    make has even built its file database.
 
-    This case deliberately does not LINK ip65 — `make -n` is enough to
-    show the parse-time invalidation, and a real ip65 link would drag in
-    a blob build. (It is not a correctness restriction: the `.incbin`
-    CWD hazard that used to be cited here was retired by #116. See
-    FARM_LINKS above.)
+    This case deliberately does not LINK ip65 — a real ip65 link would
+    drag in a blob build this suite has no use for. The goal is
+    `build/flags.stamp`, which the parse-time block has already written
+    by the time make looks at it, so the invocation is a REAL build (no
+    `-n`) that assembles nothing and links nothing. It used to be spelled
+    `make -n BACKEND=ip65`, which relied on a dry run mutating the tree —
+    the defect fixed in #174.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     with Farm() as farm:
         farm.make(*UCI)
         assert farm.exists(PRG)
-        farm.make("BACKEND=ip65", dry_run=True, check=False)
+        farm.make("BACKEND=ip65", STAMP, check=False)
         assert not farm.exists(PRG), (
-            "a BACKEND flip left the UCI PRG in place. A dry run performs no "
-            "link, so whatever `make BACKEND=ip65` did next, "
+            "a BACKEND flip left the UCI PRG in place. This invocation "
+            "performs no link, so whatever `make BACKEND=ip65` did next, "
             "build/c64-https.prg was a UCI image that rigs load by path."
         )
         assert not farm.exists("build/tls13.o"), (
@@ -250,12 +330,153 @@ def test_backend_flip_removes_the_other_backends_prg():
         )
 
 
+def test_dry_run_options_do_not_touch_the_tree():
+    """Issue #174: `make -n`, `-q` and `-t` are contractually side-effect-free.
+
+    The stamp's compare/invalidate lives in a `$(shell …)` evaluated while
+    make PARSES the makefile — before the dependency graph exists, and
+    therefore before `-n` can suppress anything. `-n` suppresses *recipes*;
+    it does not suppress `$(shell)`. So asking "what would this build?" with
+    a flag set that differs from build/flags.stamp used to delete every
+    object and the PRG, exit 0, and print nothing about it. One `make -n`
+    destroyed a working tree during a supervised session on 2026-08-31.
+
+    Two things must survive a dry run, and the second is the subtle one:
+
+      * the objects and the PRG (the deletion), and
+      * build/flags.stamp itself (the `mv`). A dry run that rewrites the
+        stamp leaves it asserting a flag set that was never built, which
+        makes a LATER real build skip an invalidation it needed — the exact
+        mixed link this file exists to prevent.
+
+    `-q` matters as much as `-n`, and `make -npq` (what shell completion runs
+    to enumerate targets) is a third spelling — so a guard that tests only
+    for `n` misses both. The COMBINED short+long invocations in
+    DRY_RUN_INVOCATIONS matter for a different reason: they are the only
+    rows that distinguish a correct guard from one that reads the letters
+    out of a long option's name, and without them a plausible
+    "simplification" of the Makefile restores #174 with this file fully
+    green. See the comment on that table.
+    """
+    _require_toolchain()
+    comb = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1")
+    with Farm() as farm:
+        farm.make(*UCI)
+        prg_sha = farm.sha()
+        objs = farm.mtimes()
+        stamp = farm.path(STAMP).read_text()
+        assert objs, "the baseline build produced no objects — vacuous"
+
+        for opts in DRY_RUN_INVOCATIONS:
+            shown = " ".join(opts)
+            farm.make(*comb, opts=list(opts), check=False)
+            assert farm.exists(PRG), (
+                f"`make {shown}` with a changed flag set DELETED {PRG}. A dry "
+                "run must not mutate the tree: -n/-q/-t answer 'what would "
+                "this do?' and are the idiom shell completion uses."
+            )
+            assert farm.sha() == prg_sha, (
+                f"`make {shown}` rewrote {PRG}"
+            )
+            surviving = farm.mtimes()
+            lost = sorted(set(objs) - set(surviving))
+            assert not lost, (
+                f"`make {shown}` with a changed flag set deleted "
+                f"{len(lost)} object(s), e.g. {lost[:3]}"
+            )
+            assert farm.path(STAMP).read_text() == stamp, (
+                f"`make {shown}` rewrote {STAMP} to a flag set that was never "
+                "built. The next real build with the ORIGINAL flags would "
+                "then see a matching stamp and skip the invalidation it "
+                "needs — a mixed link produced by a dry run."
+            )
+
+        # And the tree is still genuinely usable: a real rebuild of the
+        # baseline flags must be a no-op, not a full rebuild.
+        proc = farm.make(*UCI)
+        assert farm.mtimes() == objs, (
+            "after the dry runs, a real rebuild of the SAME flags "
+            "re-assembled objects:\n" + proc.stdout
+        )
+
+
+def test_an_unrelated_option_does_not_suppress_invalidation():
+    """The other half of #174, and the one that bit: a REAL build must invalidate.
+
+    The dry-run guard has to answer "is this -n/-q/-t?" and it has exactly
+    two ways to be wrong. The destructive direction (a dry run that deletes)
+    is what #174 reported and what the test above pins. THIS pins the
+    dangerous direction: a real build misread as a dry run skips the
+    invalidation, and the result is precisely the mixed link build/flags.stamp
+    exists to prevent — same PRG size, different hash, exit 0, no diagnostic.
+
+    The trap is that `$(firstword $(MAKEFLAGS))` is NOT reliably the
+    single-letter option bundle. GNU make 3.81 puts long options in their own
+    words, and the letters can land LAST and dash-prefixed:
+
+        make                           MAKEFLAGS=[]
+        make -n                        MAKEFLAGS=[n]
+        make --no-print-directory      MAKEFLAGS=[ --no-print-directory]
+        make -n --no-print-directory   MAKEFLAGS=[ --no-print-directory -n]
+
+    `--no-print-directory` contains an `n` AND a `t`, and
+    `--warn-undefined-variables` contains an `n` — so a guard that searches
+    the first word classifies both as dry runs and lets a real build through
+    with no invalidation. Neither option is exotic; either can also arrive
+    from the environment, a parent make, or an IDE.
+
+    Two probes, in increasing cost:
+
+      * a real invocation with an extra option word must still delete the
+        other backend's objects and PRG at parse time, and
+      * a real profile flip with an extra option word must still produce
+        exactly the `make clean` image — the end-to-end statement, and the
+        one that catches a guard that merely warns without acting.
+    """
+    _require_toolchain()
+    # Cheap probe: real build, links nothing (the goal is already up to
+    # date once the parse-time block has written it), two common long
+    # options plus one that shares no letters with n/q/t.
+    for opt in ("--no-print-directory", "--warn-undefined-variables", "--silent"):
+        with Farm() as farm:
+            farm.make(*UCI)
+            assert farm.exists(PRG)
+            farm.make(opt, "BACKEND=ip65", STAMP, check=False)
+            assert not farm.exists(PRG), (
+                f"`make {opt} BACKEND=ip65` did NOT invalidate. It is a real "
+                "build, not a dry run, so the parse-time block must have "
+                "deleted the UCI PRG — every rig loads that path by name."
+            )
+            assert not farm.exists("build/tls13.o"), (
+                f"`make {opt} BACKEND=ip65` left UCI-flavoured objects in "
+                "place; the next ip65 link would reuse them (mixed link)."
+            )
+
+    # The end-to-end statement, on the option that carries both an `n` and
+    # a `t`: the image a real build produces must not depend on whether an
+    # unrelated option was typed.
+    comb = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1")
+    oracle = _clean_build_sha(*comb)
+    with Farm() as farm:
+        farm.make(*UCI)
+        onchip = farm.sha()
+        farm.make("--no-print-directory", *comb)
+        flipped = farm.sha()
+    assert onchip != oracle, "comb and onchip images are identical — vacuous"
+    assert flipped == oracle, (
+        "MIXED LINK: `make --no-print-directory` with changed flags produced\n"
+        f"  {flipped}\nbut a clean build of the same flags produces\n"
+        f"  {oracle}\n"
+        "An unrelated long option was misread as -n/-q/-t, so the parse-time "
+        "invalidation never ran and the link reused the previous profile's "
+        "objects. Same size, different hash, exit 0 — the failure mode "
+        "CLAUDE.md says only a sha256 catches."
+    )
+
+
 def test_unchanged_flags_rebuild_nothing():
     """The inverse property: the stamp must not make every build a rebuild."""
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     with Farm() as farm:
         farm.make(*UCI)
         before_objs = farm.mtimes()
@@ -280,10 +501,7 @@ def test_https_host_change_is_still_incremental():
     finer grain (boot.o + http.o, not the whole tree). Certificate pinning
     (#155) is about to depend on that staying cheap.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     retarget = UCI + ("HTTPS_HOST=en.wikipedia.org",)
     oracle = _clean_build_sha(*retarget)
     with Farm() as farm:
@@ -313,10 +531,7 @@ def test_stamp_records_the_whole_command_line():
     answering "what was this PRG built with?" at a glance, which is the
     question the incident started from.
     """
-    missing = _toolchain_missing()
-    if missing:
-        print(f"SKIP: {missing} not on PATH")
-        return
+    _require_toolchain()
     with Farm() as farm:
         farm.make(*UCI)
         text = farm.path(STAMP).read_text()
@@ -340,18 +555,47 @@ def test_stamp_records_the_whole_command_line():
 
 def main() -> int:
     print("=== build/flags.stamp ===")
+    tests = [(name, fn) for name, fn in sorted(globals().items())
+             if name.startswith("test_") and callable(fn)]
+
+    # The toolchain check is hoisted out of the loop on purpose. Per-test it
+    # would report eight identical failures for one missing binary, and the
+    # standalone lane wants the "could not run" EXIT CODE (2), which is a
+    # thing only a process has -- `require()`'s AssertionError is the right
+    # answer for pytest, where the unit of reporting is the test.
+    missing = _toolchain_missing()
+    if missing:
+        return cannot_run(
+            f"{missing} not on PATH -- every case here shells out to `make`",
+            executed=0,
+            total=len(tests),
+            certifies=CERTIFIES,
+            opt_out_env="C64_ALLOW_SKIP",
+        )
+
     failed = 0
-    for name, fn in sorted(globals().items()):
-        if not name.startswith("test_") or not callable(fn):
-            continue
+    ran = 0
+    for name, fn in tests:
         try:
             fn()
-        except Exception as exc:            # noqa: BLE001 — a crash is a fail
+        except Exception as exc:            # noqa: BLE001 - a crash is a fail
             failed += 1
             print(f"  FAIL {name}\n       {type(exc).__name__}: {exc}")
         else:
+            ran += 1
             print(f"  ok   {name}")
-    print(f"\n{'FAILED' if failed else 'PASSED'}: {failed} failure(s)")
+
+    # A run that executed nothing must never print PASSED. Asserted rather
+    # than assumed, because the version of this file that #177 reports did
+    # print "PASSED: 0 failure(s)" for a run in which zero assertions ran.
+    if ran + failed == 0:
+        return cannot_run(
+            "no test functions were collected from this module",
+            executed=0, total=0, certifies=CERTIFIES,
+        )
+
+    print(f"\n{'FAILED' if failed else 'PASSED'}: {failed} failure(s) "
+          f"({ran}/{len(tests)} executed)")
     return 1 if failed else 0
 
 

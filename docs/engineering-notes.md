@@ -853,12 +853,16 @@ went straight to these scripts never crossed it.
 
 **REU preflight (issue #97).** Every script here that exercises the
 crypto path — `rig_https_local.py` (and its `rig_https_print_body.py`
-/ `rig_https_local_p384.py` wrappers), `rig_https_bad_finished.py`,
-`bench_ecdsa_u64e.py` — calls `preflight_reu()` from
+/ `rig_https_local_p384.py` wrappers, which inherit the call by
+importing it), `rig_https_live.py`, `rig_https_wiki.py`,
+`rig_https_bad_finished.py`, `bench_ecdsa_u64e.py` — calls
+`preflight_reu()` from
 `tools/uci/_reu_preflight.py` under the DeviceLock, right after
 `enable_uci` and before the reset. A REU-profile build meeting a device
 with `RAM Expansion Unit: Disabled` now exits **4** in ~2 s with both
-remedies named, instead of spinning ~44 min at `KEYS ENC1 RX`. The
+remedies named, instead of spinning ~44 min at `KEYS ENC1 RX`. Since #179
+it exits 4 on an *unreadable* setting as well — a raise, an unrecognised
+response shape, or an empty value (see the next paragraph). The
 profile is read from `build/labels.txt` — onchip markers are checked as
 a **union** (`LIB_NISTCURVES_REU_BANKS_USED == 0`, `gen_mul_row`,
 `fe_gen_mul_row`, `sqtab_reserved`) so renaming one upstream cannot
@@ -871,6 +875,143 @@ error for a mystery on someone else's branch. `C64_SKIP_REU_PREFLIGHT=1`
 bypasses. Scripts that never touch the REU (`boot_check`, `phase2`,
 `phase3_tcp_echo`, `rig_http_local`, `rig_http_live`) are deliberately
 not guarded.
+
+**The preflight failed open for a while, and nothing here changed to
+cause it (#179).** `c64-test-harness` is installed **editable** from a
+sibling working tree (`~/.local/share/c64-test-harness/venv` →
+`~/Documents/c64-test-harness`), so a merge in that repo alters this
+repo's behaviour with no commit on our side. Their PR #226 (their issue
+#214) changed `Ultimate64Client.get_config_item` from returning the REST
+envelope `{category: {item: ...}}` to returning the item's own map
+`{"current": ..., "values": [...], "default": ...}`. Our
+`_extract_config_value` did `resp.get(category, resp).get(item)`: against
+the item map neither key exists, so it returned `None`, the preflight
+printed `WARNING — unrecognised shape (...); continuing unchecked`, and
+the run carried on with #97's guard silently absent. Reproduced against
+the real installed `Ultimate64Client` with only `_get_json` stubbed —
+master returned `'reu'` and warned.
+
+Two things came out of that, and the second is the general one.
+
+The narrow fix reads every shape: `_read_config_value` prefers
+`get_config_value` (new in #226 — it returns `current` and resolves names
+the way the firmware does), and falls back to `get_config_item` +
+`_extract_config_value` on an older harness, which is load-bearing rather
+than decorative because `get_config_value` did not exist before #226.
+`_extract_config_value` tests for a top-level `"current"` before the
+category descent; that is unambiguous, since a REST envelope is keyed by
+category name. Either direction of the harness landing now works.
+
+The general one: **an unreadable probe is not a result.** The old code
+called itself advisory and warned. It is not advisory — it is the only
+thing between a REU-less device and 44 minutes of apparent lockup, and a
+WARNING at minute one of a 45-minute run is not read by anyone. It now
+raises. Failing closed was checked against the paths that must stay open
+first: the on-chip profile makes no device call at all (so the
+configuration we recommend to REU-less users is untouched),
+`C64_SKIP_REU_PREFLIGHT=1` still bypasses everything, and all five
+callers already `except ReuPreflightError` → `return 4`.
+
+An **empty** `current` is grouped with "unreadable", not with "Disabled".
+Both stop the run, so this is only about which message the operator gets,
+and they point at different machines: the Disabled text sends someone to
+the device's settings menu for a fact not in evidence.
+
+`tools/test_reu_preflight.py` pins both halves with a faked client (no
+VICE, no hardware, ~10 ms): item map and legacy envelope both read,
+`get_config_value` preferred when present, raise/unparseable/empty all
+fail closed, on-chip and skip paths still touch nothing. Against the
+pre-fix code 6 of its 10 checks failed; the 4 that passed either side are
+the must-not-break guards, which is what made the other 6 evidence.
+
+**Validated on hardware** (U64E, unique_id `601A96`, fw 3.15, rev
+`4011c97c`, fpga 125; via DeviceLock, no config writes). Both modules
+loaded side by side against the same live client and the same real
+firmware response: master's
+`_extract_config_value(get_config_item(...))` returns `None` and
+`preflight_reu` returns `'reu'` with the "unrecognised shape … continuing
+unchecked" warning, while the fixed module returns `'Disabled'` and
+raises. So the #97 guard was confirmed **absent on master against real
+firmware**, in both the Disabled and Enabled cases — not just against a
+reconstructed envelope.
+
+The fail-closed path was then proved end to end with zero writes, because
+the device's REU was Disabled — which is simply the **factory default**
+(`current` and `default` both `Disabled`), not drift and not a finding.
+Device configuration is runtime-only and we do not write flash, so a
+device nobody has configured for the run is the ordinary case, and it is
+the case the fail-closed path must handle. `bench_ecdsa_u64e.py` exited 4
+with the full remedy text before `set_turbo_mhz`, `reset()` or `run_prg`.
+No machine state touched, no 44-minute spin.
+
+That run also settled two things this note previously hedged as
+unfalsifiable without a device.
+
+First, **the `errors` risk is not reachable.** On fw 3.15 no *successful*
+config GET carries a non-empty `errors` array — known item, unknown item,
+glob names, case-folded names and whole-category GETs all answer
+`"errors": []`. The only non-empty `errors` observed accompanies an HTTP
+404, which the request layer turns into `Ultimate64Error` *before*
+#226's errors check runs. Where `errors` is non-empty the read has
+genuinely failed, so raising is the correct answer rather than a hazard.
+
+Second, **the item map matches the wire**, including a real unsubstituted
+`REU Size` read of `2 MB`.
+
+Third, and the reason the test fake changed: the firmware enum is
+`["Disabled", "Enabled", "GeoRAM Mode"]` — **three** values. `"GeoRAM
+Mode"` is settable and is neither Enabled nor Disabled, so a device can
+legitimately answer something the preflight must refuse without that
+answer being an error, a disabled REU, or an unreadable read. The code
+already refuses it, because it tests `current` *against* `"enabled"`
+rather than against `"disabled"` — right by construction, but nothing
+forced it. It is now pinned. The plausible alternative (refuse only what
+says "Disabled") passes every other check in the suite and reports
+`device REU Enabled, GeoRAM Mode — OK`; the new case is the only thing
+that catches it, verified by mutation.
+
+What remains unproven, and must not be implied otherwise: the Enabled arm
+was exercised against genuine firmware responses but **not with the REU
+actually enabled**, because the run did not configure the device and the
+default is Disabled. A REU-profile PRG completing a full crypto run on a
+REU-enabled U64E is unchanged by this work and was last proven in the
+2026-08-21/22 sessions.
+
+The corrected model is worth stating, because an earlier draft of this
+note got it wrong. Device configuration is **runtime-only**: every
+re-flash returns factory defaults and we do not write flash. So the
+pattern is that a test **restores baseline and then sets what that run
+needs**, rather than hoping the previous test reverted its changes. Under
+that model finding the REU Disabled means only that nobody configured it.
+
+Which exposes a real gap, filed as its own issue rather than fixed here:
+of the five `preflight_reu` callers, only `rig_https_wiki.py` configures
+the REU (`ensure_reu_16mb`, called *before* the preflight — the right
+order). The other four read the state and refuse. On a default device
+they decline instead of configuring and running. **The #97 preflight is
+the right backstop for a rig that forgot; it is not a substitute for
+setup.**
+
+Two traps worth keeping. First, **`boot_check.py` does not call
+`preflight_reu`** (see the deliberate exclusion above), so it cannot
+exercise this path — the cheapest hardware check that does is a
+crypto-path rig on a REU-enabled device, or leaving
+`C64_SKIP_REU_PREFLIGHT` unset against a deliberately disabled REU.
+Second, the standalone `python3 tools/test_reu_preflight.py` runner had
+to break this repo's house pattern of catching only `AssertionError`
+(`test_pytest_boundary.py`, `test_runner_coverage.py`). Those two are
+pure AST inspection and can raise nothing else. This suite is the first
+whose code under test *converts* arbitrary exceptions: the fake client's
+"you must not have called me" `AssertionError` comes back wrapped in a
+`ReuPreflightError`, escapes an `AssertionError`-only handler, and aborts
+the run. Measured on a mutant with the on-chip early return removed: six
+`ok` lines, a traceback, three tests never run — and the most prominent
+text on screen was the `REU PREFLIGHT FAILED` banner, which reads as "your
+device has no REU" rather than "the on-chip guard regressed". The runner
+now catches `Exception`, digs the causing `AssertionError` out of the
+`__cause__` chain, and prints one `ERROR` line per case; the same mutant
+now reports 11 ok + 1 ERROR naming the real cause. pytest handled this
+correctly all along, which is the argument for it being the primary path.
 
 The scripts:
 
@@ -3240,3 +3381,206 @@ but every byte read carries a fence (~5.45 ms at 1 MHz), so it is a
 measured follow-up, not a free change — and any test around it should
 find the accepted length by bisection, not hard-code it.
 
+
+## c64-lib-contract v1.0.0 — §13 retired, and what it did not change (2026-09-05)
+
+The contract released **v1.0.0** on 2026-09-03, cutting SPEC.md from 40,737
+words (v0.17.1) to 5,154 and retiring **§9, §12, §13, §14, §15** plus
+**§6.3, §6.6, §6.7**. **v1.1.0** followed 67 minutes later (§7: the ABI
+counter turns on what the code does, not on whether the export list
+changed), settling upstream issue #167 — which was open at v1.0.0 and is
+now CLOSED. No shipped counter changed as a result.
+
+§13 was the network backend ABI, which we adopted deliberately (#70, merged
+as #142) and cite throughout. Upstream's rationale: a network backend is
+source in its consumer's own tree, so a backend and its consumer are never
+two independently built artifacts; the names live only in the consumers'
+own `net_*.inc` headers.
+
+### The "migration: none" claim, checked rather than assumed
+
+Upstream's claim is about *libraries*. We are a *consumer*, so it was
+checked directly. Three independent lines of evidence:
+
+1. **c64-lib-contract is not a submodule and never was** (`.gitmodules`
+   lists `ip65`, `libs/nistcurves`, `libs/x25519` and nothing else).
+   `grep -rn 'c64-lib-contract'` over `Makefile` and `tools/` returns
+   comments only. No `make` rule reads SPEC.md, so no contract release can
+   reach a build.
+2. **No §13 assert has a contract-derived counterparty.** In
+   `src/net_abi_asserts.s`, `NET_BACKEND_FAMILIES` is exported by
+   `src/net/<backend>/net_manifest.s`, `NET_FAMILY_*` come from
+   `src/net/net_families.inc`, `TCP_RECV_MASK` from `src/constants.inc` —
+   all local. `src/net/ip65/net_manifest.s` is the one that is *not* purely
+   local, and the first version of this entry overstated it: the labels
+   `ip65_blob_start`/`_end` are ours, but their DIFFERENCE is the size of
+   the ip65 submodule's built artifact, so bumping that submodule is exactly
+   what fires the assert. The counterparty there is the blob, not the
+   contract. §13 defined no numeric value we import, which is the claim that
+   actually matters and is the one to make. Contrast the §5/§8.0 asserts in
+   `src/lib_contract_asserts.s`, which do compare our values against the
+   sibling archive's exported manifest.
+3. **Both profiles still link green at master + these doc edits.** UCI
+   default `7c79a4e00a19685de7540970247c759a5e1cc7e13a88b12bf8b8234fcc013c14`,
+   UCI comb `c423476011e1928f5955e4773c3cf28c4876dcf76e70be9de40c2f4522f8bf72`,
+   ip65 default `d780f719fac82e07bba9d30db804e853ddea3409e99d6477f118c006ad4eff9a`
+   — identical before and after, which is the proof that this change is
+   comment-only.
+
+**§13.2's cross-consumer error-code allocation table is the one thing that
+did not stay home — and the first version of this entry got it wrong.** It
+said the table "is frozen at v0.17.1 and has no successor registry". That is
+false, and adversarial review against the peer repo is what caught it.
+`c64-wireguard/src/net_abi.inc`, on their master post-v1.0.0, carries a
+reconstituted table that names the retirement explicitly and self-declares:
+"net_last_error REGISTRY — canonical for this repository … Only ownership
+moved: this file is now the registry." It lists every code in both family
+ranges, ours included.
+
+It also records a **second** collision, which the table caught: wg#120's
+first commit minted `$40-$44` for their ip65 channel by picking free-looking
+bytes, and `$41-$45` were already ours — "a live collision, in review, three
+weeks after the `$88` incident". Remapped before merge. So the mechanism
+demonstrably works, twice, and the correct action for us is to MIRROR their
+registry, not to propose building one.
+
+**The real hazard, which the first version missed entirely, is in our own
+headers.** `src/net/uci/uci_errors.inc` recorded only `$8A` as
+c64-wireguard's. Their registry also owns `$8C UCI_ERR_SEND_TOO_LONG`, `$8D
+UCI_ERR_OPEN_REFUSED`, `$8E UCI_ERR_CMD_UNKNOWN` (wg#112) and `$8F
+UCI_ERR_SHORT_READ` (wg#130); `src/net/ip65/ip65_errors.inc` recorded
+`$41-$45` and nothing above, while they own `$46`, `$47` (reserved, never
+emitted), `$48` and `$49`. Both headers also carried a dead imperative —
+"allocate a new code THERE first, then here" — pointing at a section that
+no longer exists.
+
+**Provenance, measured against wireguard's history rather than assumed** —
+the first version of this entry said "`$8E`/`$8F`/`$48`/`$49` post-date the
+retirement", and `$8E` does not:
+
+    2026-08-31  v0.17.1 tagged — the §13.2 table's last revision
+    2026-09-03  15:04Z  wg#112 merges, minting $8E   (a82a48a)
+    2026-09-03  19:23Z  v1.0.0 tagged, §13 retired
+    2026-09-03  19:45Z  wg#120 lands $48 / $49
+    2026-09-04  20:45Z  wg#128 lands $8F
+
+`$8C`/`$8D`/`$46`/`$47` were allocated in the retired table (v0.17.1 §13.2)
+and we simply never copied them down. `$8E` was minted **4h18m before the
+retirement** — after v0.17.1 froze the table, while §13.2 was still the live
+rule, and outside it. Only `$48`/`$49`/`$8F` post-date the retirement.
+
+The accurate version is the stronger argument, which is why getting it
+wrong mattered: the table was already being bypassed while it was still
+normative, so "the registry lapsed when §13 was retired" understates it.
+And a provenance annotation that does not survive a check against the
+neighbour's history invites a reader to discount the whole transcribed
+list, including the eight rows that are right.
+
+Compose those and you get the `$88` incident again, exactly: someone reads
+`uci_errors.inc`, sees `$8C` free and no registry named, and mints it. The
+information needed to avoid that was sitting in the peer repo the whole
+time. Both headers now list the codes their neighbour owns (as comments, not
+equates — an equate would imply we emit them) and point at
+`c64-wireguard/src/net_abi.inc` as the place to allocate.
+
+What remains genuinely open is narrower than the first version claimed: the
+two repos hold *independent copies* of the registry and of `NET_FAMILY_*`,
+and nothing on either side checks that they agree. Upstream's two-prong rule
+correctly excludes this from the contract (both adapters are consumer-owned
+source), so it is not a defect in the retirement. Filed as #184.
+
+### The re-anchoring decision
+
+Two candidates were considered: (a) keep the §-numbers and anchor them to
+`v0.17.1`, or (b) drop the §-numbers and let `src/net_abi.inc` be
+self-describing. **(a) was chosen**, applied once per file rather than once
+per citation.
+
+The project's triage rule is *would this second copy change if the first
+did?* Applied here it cuts for (a): `v0.17.1` is an immutable tag, so a
+citation to it is a pointer, not a copy, and cannot drift. What *was*
+drifting is the unqualified word "SPEC" — those citations pointed into a
+living document where §13 is now a numbering gap, so a reader following one
+today finds nothing and gets no error. One anchor line per file fixes
+exactly that, and costs nothing per citation.
+
+Against (b): the §13.x numbers are the audit trail to the reasoning behind
+the surface's shape — most of which was learned expensively (the `$88`
+collision, the `$FFFF` sentinel both fleet adapters misfiled, `net_print_ip`
+being consumer UI). RETIRED.md preserves that text permanently, so deleting
+the numbers would discard recoverable rationale to save nothing.
+
+**Upstream does not endorse this work, and should not be cited as if it
+did.** RETIRED.md's plain reading argues against it: "a citation to a
+retired section is a citation to `v0.17.1` … Rewriting them would be churn
+with no reader benefit." The distinction that an *added anchor* is not a
+*rewritten citation* is defensible, but it is ours, not theirs. The
+independent justification stands on its own: upstream was reasoning about a
+reader who knows the section was retired, and our citations did not say so —
+an unqualified "SPEC §13" points into a live document where §13 is a silent
+numbering gap. That is the reader benefit RETIRED.md did not consider.
+
+Scope note: the anchor applies **only to retired sections**, and the split
+runs *through* §6 rather than between chapters — §6.1, §6.2, §6.4 and §6.5
+survive while **§6.3, §6.6 and §6.7 are retired** (confirmed by diffing the
+SPEC headings at v0.17.1 against v1.1.0, not by reading chapter numbers).
+The first version of this entry said "§1-§8, §10 and §11 survive", which is
+wrong, and that error is what made the first anchoring pass skip
+`src/contract_footprint_asserts.s` — a TU *named for* the retired §6.6 and
+citing it seven times — along with the §6.3 citations in the Makefile and in
+`build_nistcurves_p256.sh`. Everything else in §1-§8, §10 and §11 does
+survive and must keep resolving against the current SPEC; anchoring those to
+v0.17.1 would freeze live citations.
+
+### Two §8.2 items checked in the same pass
+
+**The `LIB_SHARED_REU_MUL_BANK < 31` tightening is a non-event here, and
+the reason is stronger than "our banks are small".** We hold **no copy of
+the §8.2 placement snippet at all** — `grep -rn 'LIB_SHARED_REU_MUL' src/
+tools/ cfg/ Makefile` finds only a comment in `src/lib_contract_asserts.s`
+recording that we import none of the three consumer-input equates; we own
+our REU layout in `src/crypto/shared/reu_layout.inc` and pass no bank
+override to either sibling. So there is nothing to tighten. Measured at the
+v0.11.2 pin from `build/labels.txt`, both profiles: default
+`LIB_NISTCURVES_SHARED_REU_MUL_BANK = 0`, `_OFFSET = 0`, `_BANKS_USED =
+$03`; comb `LIB_NISTCURVES_REU_BANK_MUL = 0`, `REU_BANK_COMB = 2`,
+`REU_BANKS_USED = $04`. Both bounds accept every one of those identically.
+Residual, worth knowing: our own live assert `(LIB_NISTCURVES_REU_BANKS_USED
+& $C0) = 0` (banks 6–7 reserved for P-384) reads the same 32-bit mask and
+would therefore pass falsely against a bank ≥ 32 in exactly the way the old
+`< $FE` bound did. No configuration in this tree can reach one, because we
+pass no bank override — but if we ever start passing one, that assert needs
+a companion bound on the bank number itself.
+
+**`reu_mul_tables_init` as the canonical init entry: conformant, and the
+premise behind the question is stale.** The wrapper no longer drops
+`reu_mul_init.o`, or any other member: `build_nistcurves_p256.sh` ends with
+`cp "$UPSTREAM_ARCHIVE" "$ARCHIVE"` and the comment "steps 4 and 5 retired:
+no member drops, no glue TU, no re-archive". The deferral is requested
+through `CONTRACT_DEFINES` (`-D SHARED_SQTAB_INIT -D SHARED_REU_MUL_INIT -D
+SHARED_REU_MUL_FETCH -D SHARED_CT_MUL_8X8 -D LIB_NO_BARE_EXPORTS=1 …`), the
+manifest attests it (`LIB_NISTCURVES_SHARED_PRIMITIVES = 0`), and no ar65
+surgery happens — which is what §6.1 wants. Under the restated clause we
+are conformant on the load-bearing half of import-never-stub: no second
+canonical definition exists, and `reu_mul_tables_init` appears nowhere in
+`build/labels.txt`. The mechanism is simpler than "an import dropped as
+unreferenced" (the first version of this entry said that, and there is no
+import to drop): `libs/nistcurves/src/reu_mul_init.s:52` wraps the entire
+file body — imports, `.export reu_mul_init`, `.export reu_mul_tables_init`
+and the alias at line 76 — in `.ifndef SHARED_REU_MUL_INIT`, so a deferred
+build emits an object that exports nothing and imports nothing.
+`reu_fetch_mul_row` *is*
+referenced, is imported, and `src/boot.s` exports it (except under
+`USE_NISTCURVES_ONCHIP`, where the rebuilt `mul_8x8_onchip.o` exports it and
+ours yields).
+
+The one gap is cosmetic-until-it-isn't: as the §8.2 provider we export
+`reu_mul_init`, not the canonical `reu_mul_tables_init`. Nothing references
+the canonical name today, so nothing fails. If a future library variant ever
+does reference it — x25519 does exactly this under `SQR_DMA_K > 0`, invoking
+a private adjacent-cache init *after* `reu_mul_tables_init` returns — our
+link fails **loudly** with an unresolved external, not silently. The fix if
+that day comes is two lines in `src/boot.s` (a `reu_mul_tables_init:` label
+at the existing entry plus its `.export`), costs zero PRG bytes, and is
+deliberately not done pre-emptively: an unused export is a claim we would
+then have to keep true.

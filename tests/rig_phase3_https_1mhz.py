@@ -20,11 +20,18 @@ Gated by the ``VICE_HTTPS_OK_TO_RUN=1`` environment variable.
 Run (after the UCI test has fully stopped):
     sudo env VICE_HTTPS_OK_TO_RUN=1 PYTHONPATH=tools python3 tests/rig_phase3_https_1mhz.py
 
-Exit codes:
+Exit codes (tools/_skip_policy.py, issue #178):
     0 -- PASS
-    0 -- SKIP (clearly printed)
-    1 -- FAIL
-    2 -- pre-flight gate refused (U64E test probably still running)
+    0 -- NOT APPLICABLE, as a named verdict rather than a bare skip: this
+         rig is Linux-only, and on any other host
+         tests/rig_vice_https_macos.py owns the coverage.
+    1 -- FAIL (a check ran and failed)
+    2 -- COULD NOT RUN (a prerequisite is missing ON LINUX, the build is
+         broken, or the rig is interlocked -- VICE_HTTPS_OK_TO_RUN unset,
+         or port 443 held by another run.  Nothing was verified).  Set
+         C64_ALLOW_SKIP=1 to accept a prerequisite-missing run as exit 0;
+         a FAILED BUILD and CONTENTION are never opted out of, and the
+         pre-flight gate is contention.
 """
 
 from __future__ import annotations
@@ -39,6 +46,9 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _TOOLS = os.path.join(_REPO_ROOT, "tools")
 if _TOOLS not in sys.path:
     sys.path.insert(0, _TOOLS)
+
+# needs _TOOLS on sys.path, hence the placement below the block above
+from _skip_policy import cannot_run, not_applicable  # noqa: E402
 
 PRG_PATH = os.path.join(_REPO_ROOT, "build", "c64-https.prg")
 
@@ -98,9 +108,42 @@ SCREEN_SNAP_DIR = "/tmp/c64-https-phase3-1mhz-screens"
 SCREEN_SNAP_KEEP = 30
 
 
-def _skip(reason: str) -> int:
-    print(f"SKIP: {reason}")
-    return 0
+_CERTIFIES = "the TLS 1.3 handshake + GET at honest 1 MHz over emulated RR-Net"
+
+
+def _cannot_run(reason: str, *, opt_out: bool = True) -> int:
+    """An involuntary skip is a FAILURE -- nothing was verified (issue #178).
+
+    `opt_out=False` for a broken build: a failed `make` is never laundered
+    into a pass, not even by C64_ALLOW_SKIP.
+    """
+    return cannot_run(
+        reason,
+        executed=0,
+        total=1,
+        certifies=_CERTIFIES,
+        opt_out_env="C64_ALLOW_SKIP" if opt_out else None,
+    )
+
+
+_COUNTERPART = (
+    "tests/rig_vice_https_macos.py owns this coverage on macOS (E2E_NO_WARP=1 for the 1 MHz variant)"
+)
+
+
+def _wrong_platform() -> int:
+    """A VOLUNTARY skip: this host can never run this rig (issue #178).
+
+    The load-bearing question is what the remedy is.  "install iproute2" is
+    an involuntary skip and stays exit 2 -- but on a non-Linux host there is
+    no remedy at all, and another rig owns the coverage, so nothing is lost
+    and exit 2 would be a red nobody can ever clear.
+    """
+    return not_applicable(
+        f"this rig is Linux-only (br-c64 bridge + netfilter + /proc/net/udp); "
+        f"this host is {sys.platform} -- {_COUNTERPART}",
+        certifies=_CERTIFIES,
+    )
 
 
 def _ensure_built() -> bool:
@@ -540,33 +583,13 @@ def _dump_diagnostics(transport=None) -> None:
 
 
 def main() -> int:
-    # --- Pre-flight gate (must run BEFORE BridgeEnv, which mutates host
-    # netfilter via sudo). Refuses if the UCI HTTPS listener is still up.
-    if os.environ.get("VICE_HTTPS_OK_TO_RUN") != "1":
-        print(
-            "ABORT: VICE_HTTPS_OK_TO_RUN is not set.\n"
-            "  This test is gated to prevent collision with the UCI HTTPS\n"
-            "  listener (which binds 443/4433 on the LAN interface). The\n"
-            "  U64E test is likely still running. Wait for it to finish,\n"
-            "  then re-run with:\n"
-            "      sudo env VICE_HTTPS_OK_TO_RUN=1 PYTHONPATH=tools \\\n"
-            "          python3 tests/rig_phase3_https_1mhz.py"
-        )
-        return 2
-    for port in (443,):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.bind(("0.0.0.0", port))
-        except OSError as e:
-            # something else is holding it — refuse
-            print(f"refusing: port {port} is in use (UCI test?): {e}")
-            return 2
-        finally:
-            s.close()
-
+    # This import is inert (module-level constants and defs only), so it can
+    # precede the pre-flight gate, whose real constraint is that it run
+    # before BridgeEnv mutates host netfilter via sudo.
     from https_e2e import (
         BridgeEnv,
         check_prerequisites,
+        platform_supported,
         launch_vice_on_bridge,
         shutdown_vice,
         press_key,
@@ -576,12 +599,68 @@ def main() -> int:
         stop_https_listener,
     )
 
+    # Platform FIRST: check_prerequisites() cannot answer this, because the
+    # same string ("ip not on PATH") means "installable" on Linux and "wrong
+    # OS" everywhere else (issue #178).  Ahead of the gates below so that a
+    # host which can never run this rig is never told to opt in, and never
+    # trips the port check.
+    if not platform_supported():
+        return _wrong_platform()
+
+    # --- Pre-flight gate (must run BEFORE BridgeEnv, which mutates host
+    # netfilter via sudo). Refuses if the UCI HTTPS listener is still up.
+    #
+    # This flag is a CONTENTION INTERLOCK, not a taste setting, so an unset
+    # flag stays exit 2 exactly as it was before #178 -- the verdict is now
+    # a named block instead of a bare print, and that is the whole change.
+    #
+    # An earlier draft called it "the operator declining an opt-in rig" and
+    # routed it to not_applicable() (exit 0).  That was wrong in this repo's
+    # own terms.  UNSET IS THE DEFAULT STATE: it cannot distinguish "I
+    # considered this and declined" from "I forgot", so exit 0 hands a green
+    # run to someone who verified nothing -- the class #178 exists to close,
+    # committed by #178's own implementation.  What the flag actually
+    # asserts is "the UCI HTTPS listener has fully stopped", which is a
+    # contention claim, and contention is the one category this policy gives
+    # no opt-out at all -- see the port-443 check immediately below, which is
+    # the same interlock measured directly rather than asserted.
+    if os.environ.get("VICE_HTTPS_OK_TO_RUN") != "1":
+        return _cannot_run(
+            "VICE_HTTPS_OK_TO_RUN is not set -- this rig is interlocked because\n"
+            "    it collides with the UCI HTTPS listener (which binds 443/4433\n"
+            "    on the LAN interface); the U64E test may still be running.\n"
+            "    To run it, wait for that to finish, then:\n"
+            "      sudo env VICE_HTTPS_OK_TO_RUN=1 PYTHONPATH=tools \\\n"
+            "          python3 tests/rig_phase3_https_1mhz.py",
+            opt_out=False,
+        )
+
+    # A held port is CONTENTION, the third category: the rig exists, someone
+    # else has it.  Exit 2 like any could-not-run, but deliberately NOT
+    # opt-out-able -- a lane that silences contention goes green exactly when
+    # it collides, and unlike a missing tool it clears on its own.  Same
+    # decision as tests/rig_vice_https_macos.py's feth0 check.
+    for port in (443,):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("0.0.0.0", port))
+        except OSError as e:
+            return _cannot_run(
+                f"port {port} is held by another process (the UCI test?): {e}"
+                f"\n    fix: wait for the other run to finish",
+                opt_out=False,
+            )
+        finally:
+            s.close()
+
     missing = check_prerequisites()
     if missing:
-        return _skip("missing prerequisites: " + "; ".join(missing))
+        return _cannot_run("missing prerequisites: " + "; ".join(missing))
 
     if not _ensure_built():
-        return _skip("c64-https.prg could not be built")
+        return _cannot_run("c64-https.prg could not be built -- `make` "
+                           "failed; this is a broken build, not a "
+                           "missing prerequisite", opt_out=False)
 
     handle = None
     listener = None

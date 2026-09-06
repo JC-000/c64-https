@@ -1,7 +1,16 @@
 ; src/net/net_families.inc — c64-lib-contract SPEC §13.0 family bits.
 ;
-; Copied VERBATIM from the contract (like the §8.x bit constants); do not
-; derive or extend locally. Plain assemble-time equates, never .export'ed:
+; These bits were copied verbatim from the contract's §13.0 block. **§13 was
+; retired at contract v1.0.0 (2026-09-03)**, so there is no longer an
+; upstream to copy from: this file is the normative source for c64-https and
+; the original text resolves at tag `v0.17.1`, in a c64-lib-contract
+; checkout. The values MUST NOT change — c64-wireguard holds an independent
+; copy of the same bits and nothing checks the two agree. Allocating a NEW
+; bit is a cross-repo agreement, not a local edit: do it with the wireguard
+; lane, whose `src/net_abi.inc` is the fleet registry for the neighbouring
+; net_last_error ranges and the obvious home for these too (#184).
+;
+; Plain assemble-time equates, never .export'ed:
 ; both the backend manifest (src/net/<backend>/net_manifest.s) and every
 ; family-asserting consumer (src/net_abi_asserts.s) include this header,
 ; and only exported symbols can collide at link time.

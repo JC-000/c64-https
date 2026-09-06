@@ -1,5 +1,12 @@
 ; src/net/ip65/net_manifest.s — c64-lib-contract SPEC §13.0 / §13.7 manifest
 ; for the ip65/RR-Net backend. Emits no bytes: equates only.
+;
+; CITATION ANCHOR: §13 retired at contract v1.0.0; §13.x resolves at tag
+; `v0.17.1` only. The asserts below have no contract-derived counterparty
+; and are unaffected. (They are not purely local either: the LABELS are
+; ours, but their DIFFERENCE is the size of the ip65 submodule's built blob,
+; so bumping that submodule is what fires them — which is the point.)
+; See src/net_abi.inc.
 
 .include "net_families.inc"
 

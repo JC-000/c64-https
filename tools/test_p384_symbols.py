@@ -44,7 +44,11 @@ This script smoke-tests the dispatcher in isolation:
      only assert the state byte updates.
   9. JSR crypto_swap_none.  Confirm current_overlay == 0.
 
-Exits 0 on PASS, 1 on FAIL or environmental error.
+Exit codes (tools/_skip_policy.py, issue #178):
+    0 PASS, or a declared NOT APPLICABLE (BACKEND != uci)
+    1 FAIL (a check ran and failed)
+    2 COULD NOT RUN -- a required build artifact is missing, so nothing was
+      verified.
 
 VICE harness gotcha: the PRG's boot path executes nistcurves P-256
 fp_mul, which fetches 8x8 multiply rows from REU banks 0/1.  Without
@@ -57,14 +61,20 @@ Usage:
     BACKEND=uci /Users/someone/.local/share/c64-test-harness/venv/bin/python3 \
         tools/test_p384_symbols.py [--verbose]
 
-Under BACKEND=ip65 the script exits 0 with a skip message -- the
-embedded-blobs path is UCI-only (ip65 has no main-RAM headroom for the
+Under BACKEND=ip65 the script prints a NOT APPLICABLE verdict and exits 0
+(a voluntary skip, issue #178) -- the embedded-blobs path is UCI-only (ip65 has no main-RAM headroom for the
 extra 15 KB; see cfg/c64-https-ip65.cfg's Phase 3 comment block).
 """
 
 import os
 import subprocess
 import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from _skip_policy import cannot_run, not_applicable  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -125,10 +135,16 @@ def main() -> int:
     # Phase 3 dual-overlay embed is UCI-only -- ip65 has no main-RAM
     # headroom for the extra 15 KB after the existing layout.  Under
     # ip65 the OVERLAY_BLOB_* segments are empty and the boot DMA is
-    # a no-op, so there is nothing meaningful to test.  Skip cleanly.
+    # a no-op, so there is nothing meaningful to test.
     if backend != "uci":
-        print(f"  SKIP: dual-overlay smoke test is UCI-only (backend={backend})")
-        return 0
+        # VOLUNTARY skip (issue #178): the caller chose this backend and the
+        # segments under test are empty in it, so there is nothing to verify
+        # and exit 0 is honest -- but it is announced as a named verdict, not
+        # a bare `return 0` that reads as a pass.
+        return not_applicable(
+            f"dual-overlay smoke test is UCI-only (backend={backend})",
+            certifies="the UCI dual-overlay swap dispatcher",
+        )
 
     if os.environ.get("C64_SKIP_BUILD") != "1":
         subprocess.run(["make", "clean", f"BACKEND={backend}"],
@@ -145,8 +161,12 @@ def main() -> int:
     # Sanity-check on-disk artifacts.
     for path in (PRG_PATH, LABELS_PATH, SHA_BIN_PATH, CURVE_BIN_PATH):
         if not os.path.exists(path):
-            print(f"FATAL: required artifact missing: {path}")
-            return 1
+            return cannot_run(
+                f"required artifact missing: {path}",
+                executed=0,
+                total=7,
+                certifies="the UCI dual-overlay swap dispatcher",
+            )
 
     sha_image = open(SHA_BIN_PATH, "rb").read()
     curve_image = open(CURVE_BIN_PATH, "rb").read()
