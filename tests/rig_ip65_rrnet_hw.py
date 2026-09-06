@@ -391,7 +391,11 @@ def load_prg_verified(tr, prg: bytes) -> bool:
     verdict = None
     for attempt in (1, 2):
         # CHUNKED, not one big write_memory. MEASURED on this device
-        # (2026-09-05, U64E fw v3.15-78-g71480a9d, n=2): a single 47,103-byte
+        # (2026-09-05, U64E fw 3.15 / commit 4011c97c / fpga 125 as `/v1/info`
+        # reports it -- NOT the `v3.15-78-g71480a9d` our fleet notes carry for
+        # this box; I cited the note before reading the device, which is the
+        # mistake this file exists to stop, so the corrected string stands
+        # here. n=2): a single 47,103-byte
         # `write_memory` lands in 0.22 s and reads back with EXACTLY ONE wrong
         # byte, at a different offset each time -- offset 2715 ($12BC) on one
         # attempt, 3181 ($146E, $C8 read back as $AB) on the next. Not
@@ -613,12 +617,22 @@ def stage_wire(started_at: float, ended_at: float) -> None:
         return
     corpus = hw.frames_in_window(frames, started_at, ended_at)
     RUN["pcap_frames_in_window"] = len(corpus)
-    host_macs = sorted({bytes(f.eth_src) for f in corpus} - {bytes(C64_MAC)})
-    if not host_macs:
+    # The BUSIEST non-C64 source, not the lexicographically first: on a
+    # two-station cable they are the same address, but if a third station
+    # ever appears, picking the wrong one would make check_c64_originated
+    # report the real Mac as the intruder. It still fails — it must — but it
+    # would fail naming the innocent party, and a diagnostic that points at
+    # the wrong box is worse than one that points at nothing.
+    counts: dict = {}
+    for f in corpus:
+        src = bytes(f.eth_src)
+        if src != bytes(C64_MAC):
+            counts[src] = counts.get(src, 0) + 1
+    if not counts:
         RES.check(False, "the capture holds frames from both stations",
                   "no frame from anything but the C64's MAC")
         return
-    host_mac = host_macs[0]
+    host_mac = max(counts, key=lambda m: counts[m])
     RUN["host_mac"] = hw.fmt_mac(host_mac)
     RUN["c64_mac"] = hw.fmt_mac(C64_MAC)
 
