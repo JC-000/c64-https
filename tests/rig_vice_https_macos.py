@@ -20,6 +20,21 @@ DHCP OK the TLS phase runs under warp via the binary monitor's
 WarpMode resource unless E2E_NO_WARP=1 (set that for honest stock-clock
 wall-time; budget hours for the REU-less onchip profile).
 
+DO NOT REMOVE THE 1x DHCP ASSIST ON THE STRENGTH OF THE U64E TIMER
+MEASUREMENT. On 2026-09-06 the CIA2 timers were measured on hardware and
+found to run at real NTSC phi2 at every CPU clock — ratio 1.000 from
+1 MHz to 48 MHz — so ip65's ~15 s DHCP budget survives turbo there and
+`tests/rig_ip65_rrnet_hw.py` needs no assist (`docs/engineering-notes.md`,
+`tools/probe_cia_timer_rate.py`). **That result does not transfer to this
+file, because the mechanism is different.** A turbo CPU leaves the CIAs on
+the 1 MHz bus, so emulated time and wall time still agree. Warp
+accelerates the whole emulated machine, CIAs included, so ip65's budget
+still burns in a second or two of wall clock while dnsmasq answers on wall
+clock — the retry budget is measured in emulated ticks and the OFFER
+arrives in real ones. "The timers are realtime, the assist is
+unnecessary" is true of hardware turbo and false of warp; deleting this
+guarantees DHCP FAILED in the emulator.
+
 Environment knobs:
   C64_SKIP_BUILD=1     reuse build/c64-https.prg (default: rebuild)
   E2E_PROFILE          onchip (default) | reu — build flags + -reu for VICE

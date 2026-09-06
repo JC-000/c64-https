@@ -754,11 +754,14 @@ both flags load-bearing). Stock 1 MHz, ~40-80 min.
     input, and `tools/mutate_ip65_hw_checks.py` breaks each one to prove
     the suite goes red. Adding a `check_*` without a red case fails that
     suite by introspection. **The rig is not judgment-free, though**: 15
-    delegated verdicts against 18 of its own `RES.check()` assertions
-    (screen scrapes, config writes, the listener probe, the selftests),
-    which have no red case. Do not attribute a run's whole check count to
-    the cartridge — 8 of the 24 in the first passing run touched neither
-    the cartridge nor the 6510.
+    delegated verdicts against 19 of its own `RES.check()` assertions
+    (screen scrapes, config writes, the clock assertion, the listener
+    probe, the selftests), which have no red case. Do not attribute a
+    run's whole check count to the cartridge — 8 of the 24 in the first
+    passing run touched neither the cartridge nor the 6510. **A stock
+    re-run reports 25, not 24**: the clock assertion arrived with
+    `TURBO_MHZ` and fires at 1 MHz too, landing in that host-side group.
+    The first run's decomposition is history and stays as written.
   - Two stations on the cable and the Mac is one of them, so every wire
     assertion discriminates by **Ethernet source address**; a third MAC
     is a hard failure. The cleartext-absence check needs a positive
@@ -785,8 +788,23 @@ both flags load-bearing). Stock 1 MHz, ~40-80 min.
     whatever name it carries — this rig fetches from a local listener
     presenting a self-signed leaf and asserts nothing about the name in
     it. Do not cite this run as coverage of that gap; it is the gap.
-  - What one passing run covers: one clock (1 MHz), one device, one
-    cartridge, one local listener, and an image differing from the
-    shipped one only in `HTTPS_PORT`. Nothing about CS8900a register
-    timing at turbo — deliberately, since the stock-C64 product never
-    runs there.
+  - What one passing run covers: one clock, one device, one cartridge,
+    one local listener, and an image differing from the shipped one only
+    in `HTTPS_PORT`.
+  - `TURBO_MHZ=48` runs the same image at turbo — an experiment, not a
+    product check; the default stays 1 MHz because that is the clock the
+    product ships at. **Measured 2026-09-06: 43.1 s 'G' to close against
+    1,979 s at 1 MHz (46x), CS8900a fine, DHCP on the automatic
+    attempt.** One check goes red there and must stay red:
+    `check_tls_connected` samples `tls_state`, which lives only between
+    `tls13.s:303-304` and `tls_close` (`:382-383`), and at 48 MHz that
+    window fits inside
+    one poll (`tls_last_state` is written only on the ERROR path, so it
+    is no fallback). A turbo run's handshake verdict is inference.
+  - **CIA timers are realtime under turbo** — 1023.2 ticks/wall-s at
+    1 MHz vs 1022.9 at 48 MHz, ratio 1.000, both within 0.05% of NTSC
+    phi2/1000. So ip65's `timer_read` (CIA2 timer B, 1000-cycle cascade)
+    keeps its ~15 s DHCP budget at any clock, and no 1 MHz assist is
+    needed for that. Do NOT re-derive this from the CIA1 TOD figure in
+    the bounded-timeouts design note: different clock domain.
+    Reproducer: `tools/probe_cia_timer_rate.py`.

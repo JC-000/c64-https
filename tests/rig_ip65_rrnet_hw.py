@@ -29,14 +29,25 @@ those are the claims a release would cite.
 
 **This file is NOT free of judgment, and an earlier draft of this
 docstring said it was.** Counted: 15 `RES.verdict()` calls delegate to the
-library; 18 `RES.check()` calls are the rig's own opinion, with no red
+library; 19 `RES.check()` calls are the rig's own opinion, with no red
 case and outside the introspection backstop (which enumerates only
 `check_*` in the module). Several of those fire on the green path and
 count toward the total — the boot-menu and DHCP screen scrapes, the
-cartridge-preference write, the listener reachability probe, the image's
-zero-fill tail, and the four selftest assertions. They are ordinary
-procedural assertions, not wire evidence, and a run's headline number
-should not be attributed to the cartridge wholesale.
+cartridge-preference write, the clock assertion, the listener
+reachability probe, the image's zero-fill tail, and the four selftest
+assertions. They are ordinary procedural assertions, not wire evidence,
+and a run's headline number should not be attributed to the cartridge
+wholesale.
+
+**A stock re-run now reports 25 checks, not the 24 of the first passing
+run.** The clock assertion ("the device is running at the requested
+N MHz") came in with `TURBO_MHZ` and fires unconditionally, including at
+the default 1 MHz, so it lands in the host-side-precondition group and
+shifts the total by one. Nothing else about a default run changed: the
+recorded decomposition of the first passing run stands as history, and
+the extra check is not a cartridge check. It is here because a device
+that silently ignores the clock write is exactly the failure the turbo
+probe's negative control guards against from the other side.
 
 The split exists because a first-ever hardware result is the one nobody
 re-reads, and this repo has three recorded instances of a suite passing
@@ -58,12 +69,12 @@ READ and reported so a reader can see what it was; it is never written.
 
 TIMING — BUDGET HONESTLY
 ========================
-This is a stock-clock 1 MHz run, because `c64-https-ip65-onchip.prg` is
-the stock-C64 product: no turbo, no REU. The same profile took 2,159.7 s
-(36.0 min) in VICE at honest 1 MHz, of which ~1,417 s is the P-256 verify
-and ~326 s each is an X25519. Real silicon is the same clock, so nothing
-here is quick. The default budget is 80 minutes and a timeout is REPORTED
-AS A TIMEOUT, never as a defect.
+This defaults to a stock-clock 1 MHz run, because
+`c64-https-ip65-onchip.prg` is the stock-C64 product: no turbo, no REU.
+The same profile took 2,159.7 s (36.0 min) in VICE at honest 1 MHz, of
+which ~1,417 s is the P-256 verify and ~326 s each is an X25519. Real
+silicon is the same clock, so nothing here is quick. The default budget is
+80 minutes and a timeout is REPORTED AS A TIMEOUT, never as a defect.
 
 **That 2,159.7 s comparator is not a like-for-like binary.**
 `docs/engineering-notes.md` records all four ip65 VICE rows at the
@@ -81,12 +92,64 @@ path to ~1.7x from 1 MHz to 48 MHz, against 14.5x-51.7x for UCI. It is
 recorded here because it shapes what a turbo run would be worth — but it
 is attributed there to "the user measured" with no measurement record in
 that repo, so it is SECOND-HAND on both sides and must not be quoted as a
-measurement. Nothing in this rig depends on it; the clock is 1 MHz.
+measurement. Nothing in this rig depends on it; the default clock is 1 MHz.
 
-The clock is not raised because nobody has measured whether the U64 times
-CS8900a register cycles correctly at 48 MHz, and a run that answered "does
-our shipped stock-C64 image work" at a clock that image never uses would
-be answering a different question.
+The default is not raised because a run that answered "does our shipped
+stock-C64 image work" at a clock that image never uses would be answering
+a different question — and because nobody has measured whether the U64
+times CS8900a register cycles correctly at 48 MHz.
+
+`TURBO_MHZ` OPTS INTO THE UNMEASURED HALF, DELIBERATELY
+=======================================================
+`TURBO_MHZ=48` runs the same image at turbo. That is an EXPERIMENT, not a
+product check, and a failure at turbo says nothing about the shipped
+image; read the phase timeline and `net_last_error` before attributing
+anything to the cartridge.
+
+One objection to turbo has been retired by measurement, and one has not:
+
+  RETIRED — ip65's DHCP budget does not compress at turbo. `timer_read`
+  returns CIA2 timer B, which `ip65/drivers/c64timer.s` cascades off timer
+  A at 1000 cycles, and CIA timers count phi2 — so the whole ~15 s /
+  12-retry budget in `ip65/ip65/dhcp.s` would collapse to ~0.3 s if the
+  CIAs scaled with the CPU. Measured on the U64E 2026-09-06: 1023.2
+  ticks/wall-second at 1 MHz and 1022.9 at 48 MHz, ratio 1.000, both
+  within 0.05% of the 1022.7/s that NTSC phi2 predicts. The same probe's
+  loop counter went 6,266 -> 152,396 iterations/s across those clocks
+  (24.3x), so the 6510 was demonstrably at turbo while the timer it read
+  was not — without that control, a turbo write that silently did nothing
+  would produce the same flat tick rate. Do
+  not re-derive this from CLAUDE.md's CIA1 TOD figure: TOD is a different
+  clock domain and does not transfer.
+
+  STANDING — CS8900a register timing at turbo is still unmeasured. The
+  cartridge is on the expansion bus and its access timing is the U64's to
+  honour; that is what a turbo run actually tests.
+
+AND ONE CHECK GOES RED AT TURBO FOR A REASON THAT IS NOT THE CLIENT
+===================================================================
+`check_tls_connected` is a SAMPLING oracle, and turbo outruns it. The
+first 48 MHz run (2026-09-06, 43.1 s 'G' to CONNECTION CLOSED against
+1,979 s at 1 MHz) reported `tls_state_max` = 5 (CERT_VERIFY) and failed
+that check while every other check passed, HTTP 200 and the exact body
+came out of the C64's own buffer, and `net_last_error` was $00.
+
+`src/tls13.s:303-304` sets tls_state = CONNECTED right after the
+traffic-key derivation, and `tls_close` (`src/tls13.s:379`, storing IDLE
+at `:382-383`) writes it back to IDLE, so
+the value only exists between them — which is why the rig polls rather
+than reading it afterwards. At 1 MHz that window is minutes wide. At
+48 MHz the client Finished, the GET, the response and the close all fit
+inside one poll. `tls_last_state` is no fallback: tls13.s writes it only
+on the ERROR path, so a clean run leaves it 0.
+
+DO NOT soften the check to make a turbo run green — that is the failure
+mode this file's docstring is otherwise entirely about. A real fix is a
+high-water latch for tls_state on the C64 side, which is a change to
+shipped source for test observability: issue #204, scoped after the
+release. Until someone writes it, a turbo run's verdict on the handshake
+is INFERENCE from the screen markers, the body and the wire, and must be
+reported as inference.
 
 USAGE
 =====
@@ -104,6 +167,7 @@ Environment:
     C64_SKIP_BUILD=1    reuse build/c64-https.prg instead of building
     E2E_TIMEOUT         fetch budget in seconds (default 4800)
     HTTPS_PORT          listener + PRG port (default 4433)
+    TURBO_MHZ           CPU clock (default 1 = the shipped product's clock)
 
 Exit codes: 0 PASS / 1 FAIL / 2 COULD NOT RUN / 78 INCONCLUSIVE.
 """
@@ -165,6 +229,12 @@ U64_HOST = os.environ.get("U64_HOST", "10.43.23.81")
 HTTPS_PORT = int(os.environ.get("HTTPS_PORT", "4433"))
 FETCH_BUDGET_S = float(os.environ.get("E2E_TIMEOUT", "4800"))
 LOCK_TIMEOUT_S = 120.0
+TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "1"))
+#: Phase-timeline resolution. At 1 MHz a phase lasts minutes and a 5 s
+#: cadence is free; at turbo the whole handshake is under a minute, so 5 s
+#: would collapse the timeline into three points. Screen scrapes also have
+#: to be prompt at turbo — the handshake scrolls its own markers away.
+POLL_S = 1.0 if TURBO_MHZ > 1 else 5.0
 
 RESPONSE_BODY = "TLS13 OK OVER REAL RRNET"
 MENU_NEEDLE = "Q=QUIT"
@@ -550,7 +620,8 @@ def stage_boot_and_dhcp(tr, labels: dict) -> bool:
 
 def stage_fetch(tr, labels: dict) -> str:
     """Press G and watch. Returns "pass", "fail" or "timeout"."""
-    print(f"=== 3. HTTPS GET (budget {FETCH_BUDGET_S / 60:.0f} min at 1 MHz) ===")
+    print(f"=== 3. HTTPS GET (budget {FETCH_BUDGET_S / 60:.0f} min at "
+          f"{TURBO_MHZ} MHz) ===")
     press_key(tr, "G")
     t0 = time.monotonic()
     deadline = t0 + FETCH_BUDGET_S
@@ -561,7 +632,7 @@ def stage_fetch(tr, labels: dict) -> str:
     tls_addr = labels["tls_state"]
     result = "timeout"
     while time.monotonic() < deadline:
-        time.sleep(5.0)
+        time.sleep(POLL_S)
         try:
             screen = get_screen_text(tr)
             state = tr.read_memory(tls_addr, 1)[0]
@@ -765,9 +836,16 @@ def main() -> int:
         # REU off: this is a no-REU product and inheriting another lane's
         # attachment is exactly the state that makes a failure look like ours.
         set_reu(client, False)
-        set_turbo_mhz(client, 1)
-        time.sleep(1.0)
+        # THE CLOCK IS SET BEFORE THE RESET, AND ALLOWED TO SETTLE. A
+        # runtime speed switch loses the next command on the C64U
+        # (CLAUDE.md), and the same insurance is cheap here; the reset that
+        # starts the machine is inside load_prg_verified, below.
+        set_turbo_mhz(client, TURBO_MHZ)
+        time.sleep(3.0)
         RUN["turbo_mhz"] = get_turbo_mhz(client)
+        RES.check(RUN["turbo_mhz"] == TURBO_MHZ,
+                  f"the device is running at the requested {TURBO_MHZ} MHz",
+                  f"device reports {RUN['turbo_mhz']}")
         # Command Interface (UCI) is READ, never written -- see the module
         # docstring. A second consumer of the expansion bus is not something
         # an RR-Net run needs.
