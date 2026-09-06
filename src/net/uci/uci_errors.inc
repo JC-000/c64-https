@@ -4,10 +4,44 @@
 ;
 ; $80-$BF is the UCI-family range c64-lib-contract SPEC §13.2 grandfathers,
 ; and it is ONE namespace shared by every UCI-family adapter in the fleet
-; (c64-https and c64-wireguard today). The allocation table in SPEC §13.2
-; is the authority: allocate a new code THERE first, then here, so the two
-; adapters cannot hand out the same value with different meanings.
-; ip65-family codes live in $40-$7F (src/net/ip65/ip65_errors.inc).
+; (c64-https and c64-wireguard today). ip65-family codes live in $40-$7F
+; (src/net/ip65/ip65_errors.inc).
+;
+; **WHERE TO ALLOCATE A NEW CODE — this changed.** SPEC §13.2 was retired
+; at c64-lib-contract v1.0.0 (its text is permanent at tag v0.17.1), so the
+; instruction that stood here — "allocate in the §13.2 table first" — no
+; longer resolves. The registry moved, it did not vanish:
+; **`c64-wireguard/src/net_abi.inc`** now carries the reconstituted table
+; and declares itself canonical for the whole fleet range. Allocate THERE
+; first, then here. The one rule is unchanged and is the only one that ever
+; mattered: a published value is never reassigned.
+;
+; The range above $8B is NOT free. Codes owned by c64-wireguard, listed so
+; nobody here mints over them (this repo emits none of them):
+;
+;   $8A  UCI_ERR_LONG_READ      theirs, datagram-only — see below
+;   $8C  UCI_ERR_SEND_TOO_LONG  theirs; net_udp_send_len over NET_UDP_SEND_MAX
+;   $8D  UCI_ERR_OPEN_REFUSED   theirs; firmware refused the open, with a
+;                               named refusal on the $DF1F STATUS channel
+;   $8E  UCI_ERR_CMD_UNKNOWN    theirs; minted 2026-09-03 (wg#112), i.e.
+;                               after v0.17.1 froze the §13.2 table and
+;                               ~4 h BEFORE §13 was retired — outside the
+;                               table while the table was still the rule
+;   $8F  UCI_ERR_SHORT_READ     theirs, minted after the retirement (wg#130)
+;
+; $8C/$8D were allocated in the retired table and this file never recorded
+; them. Comments only, deliberately — an equate here would imply we emit
+; them. Re-read their registry before allocating; this list is a snapshot,
+; not the authority (#184).
+;
+; One inconsistency, called out rather than hidden: $8A below IS a real
+; equate, and is likewise reserved-never-emitted. It predates this block and
+; stays — a published value is never reassigned, and removing the equate
+; would break nothing but would lose the name. c64-wireguard goes further
+; for their reserved $47, protecting it with .export plus asserts
+; (their src/net/ip65/net.s), which is the more durable shape. If a code
+; here ever needs that strength, copy their form; the comment list above is
+; for codes we neither emit nor name.
 
 .include "net_states.inc"       ; NET_TCP_* (SPEC §13.1) — the primary names
 
@@ -59,7 +93,9 @@ UCI_ERR_BAD_READ_HDR   = $8B    ; Stream family: SOCKET_READ header exceeded
                                 ; the copy is still capped at the request and
                                 ; net_poll returns normally; the code stays in
                                 ; net_last_error for post-mortems. Allocated in
-                                ; SPEC §13.2's table first (c64-lib-contract#139).
+                                ; SPEC §13.2's table first (c64-lib-contract#139)
+                                ; — the last code allocated that way before
+                                ; §13 was retired.
 
 ; TCP state values stored in net_tcp_state. The NET_TCP_* spellings in
 ; net_states.inc are the contract's (§13.1); these aliases keep the

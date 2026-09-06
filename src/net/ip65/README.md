@@ -10,8 +10,13 @@ c64-lib-contract SPEC §13 (issue #70): core, TCP and DNS families —
 BSS `$4000-$4F8B`), and the blob size is link-asserted against the bytes
 actually `.incbin`'d.
 
+§13 was retired at c64-lib-contract v1.0.0; the §13.x numbers here resolve
+at tag `v0.17.1`, in a c64-lib-contract checkout. See `src/net_abi.inc`.
+
 Error channel: `net_last_error` carries `NET_ERR_IP65_*` codes from
-`ip65_errors.inc`, allocated in the §13.2 ip65-family range `$40-$7F`.
+`ip65_errors.inc`, allocated in the §13.2 ip65-family range `$40-$7F` —
+one namespace shared with c64-wireguard, whose `src/net_abi.inc` is now the
+registry and owns `$46-$49`. Allocate there first.
 ip65 itself reports only a carry, so each code names the adapter entry
 point that failed. `net_tcp_state` follows `NET_TCP_*`
 (`src/net/net_states.inc`); `net_local_ip` / `net_resolved_ip` are copies

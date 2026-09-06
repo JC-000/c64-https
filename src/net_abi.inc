@@ -1,8 +1,23 @@
 ; src/net_abi.inc — the networking ABI consumed by TLS/HTTP/boot.
 ;
 ; This header IS the build-enforced boundary between the protocol layers
-; and the network backend (c64-lib-contract SPEC §13, issue #70). Every
-; consumer TU that touches the network `.include`s it, and every symbol
+; and the network backend (c64-lib-contract SPEC §13, issue #70).
+;
+; CITATION ANCHOR. §13 was RETIRED at contract v1.0.0 (2026-09-03), on the
+; grounds that a network backend is source in its consumer's own tree and so
+; never crossed a library boundary. Every §13.x number in this file resolves
+; at tag `v0.17.1` and nowhere else, in a c64-lib-contract checkout — that
+; repo is not a submodule here, so the tag does not resolve from this tree.
+;
+; No §13 assert has a contract-derived counterparty (§13 defined no numeric
+; value we import), so no contract release can break a build. THIS FILE is
+; the normative source for the surface now, not a restatement of one; change
+; it here first. The ONE thing that did not stay home is the §13.2 error-code
+; allocation table, which spanned two consumers: it now lives in
+; `c64-wireguard/src/net_abi.inc`, which declares itself canonical for both
+; family ranges. Allocate a new net_last_error code THERE first (#184).
+;
+; Every consumer TU that touches the network `.include`s it, and every symbol
 ; below is `.import`ed — so a backend that stops exporting one fails the
 ; link by name, on both backends, in every profile. Nothing else in the
 ; consumer layer may `.import` a `net_*` symbol directly.

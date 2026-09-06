@@ -1,5 +1,8 @@
 ; src/net/net_states.inc — c64-lib-contract SPEC §13.1 `net_tcp_state` values.
 ;
+; §13 was retired at contract v1.0.0; §13.x resolves at tag v0.17.1 only.
+; These values are defined here and nowhere else. See src/net_abi.inc.
+;
 ; The values are normative: they are the original UCI_TCP_* values,
 ; name-promoted by the contract. Included by both backends (which store
 ; them) and by src/net_abi.inc (so consumers can compare against them).

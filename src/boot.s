@@ -122,6 +122,7 @@
 
         ; ---- imports: network (backend adapter — ip65 or uci) ----
         ; Networking comes ONLY through the §13 ABI header (issue #70).
+        ; §13 retired at contract v1.0.0; net_abi.inc carries the anchor.
         .include "net_abi.inc"
 
         ; ---- imports: TLS state machine ----

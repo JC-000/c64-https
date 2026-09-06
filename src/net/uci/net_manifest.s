@@ -7,6 +7,9 @@
 ; still set — the consumer-visible behaviour ("pass a hostname, connect to
 ; it") is what the bit declares. No §13.7 equates: the UCI adapter is
 ; ordinary relocatable code in UCI_CODE, not a fixed-address blob.
+;
+; CITATION ANCHOR: §13 retired at contract v1.0.0; §13.x resolves at tag
+; `v0.17.1` only. See src/net_abi.inc.
 
 .include "net_families.inc"
 
