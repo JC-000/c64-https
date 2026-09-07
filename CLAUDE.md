@@ -429,8 +429,17 @@ engineering-notes.
 
 **Real servers work** (2026-08-21/22, U64E @ 48 MHz, comb): github.com,
 browserleaks.com, lwn.net all HTTP 200 (~32-39 s to Finished), and
-en.wikipedia.org's C64 article — 125,235 B, chunked, into REU `$10:0000`
-via `HTTPS_BODY_TO_REU=1`, byte-verified, shown by `src/viewer.s`. The
+en.wikipedia.org's C64 article streamed into REU `$10:0000` via
+`HTTPS_BODY_TO_REU=1` and shown by `src/viewer.s` — **handshake and GET
+verified, body completeness NOT** (#211). This entry used to claim
+125,235 B byte-verified; that does not reproduce on either tree. `http_get`
+returns `carry=0`/`http_status=200` on bodies tens of KB short of their
+`Content-Length`, intermittently and not as a function of size — measured
+offline against a local listener with no chunking, and live at
+117,192 / 89,526 / 73,720 B against a same-day 125,703 B anchor. It can also
+hang outright. **Do not treat any large-body fetch as complete until #211
+closes**; it went unnoticed because the only rig on that path cannot go red
+on a short body (#210). The handshake results above are unaffected. The
 local-listener handshake works on both backends (UCI at 48 MHz and 1 MHz;
 ip65 in VICE at honest 1 MHz, ~36 min).
 
