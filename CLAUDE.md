@@ -419,16 +419,24 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
 
 ## Known issues
 
-  - **`USE_X25519_SIBLING=1` links under neither backend.** ip65:
-    `X25519_RODATA` overflows `CRYPTO_OVERLAY` by 3,584 B (structural —
-    4,212 B slot). UCI: by 1,280 B since `CERT_BUF_BSS` moved into
-    `CRYPTO_OVERLAY` for wikipedia (accepted casualty). The earlier
+  - **`USE_X25519_SIBLING=1` links under neither backend**, and each
+    backend dies on a **different segment**. ld65's literal warning,
+    measured at pin v0.16.0 and identical at v0.13.0: ip65
+    `X25519_RODATA` overflows `CRYPTO_OVERLAY` by **3,840 B** (4,212 B
+    slot); UCI `X25519_BSS` overflows it by **1,536 B**, since
+    `CERT_BUF_BSS` moved into `CRYPTO_OVERLAY` for wikipedia (accepted
+    casualty). **Neither is a total deficit**: ld65 warns once per
+    memory area, on the first segment to push it past its size, so
+    everything placed there afterwards is uncounted — ip65's real
+    shortfall is **5,376 B**. The 3,840 is `X25519_RODATA`'s *linked*
+    size — never sum od65 object rows to get a footprint; the `Makefile`
+    block beside `X25519_SEG_LADDER` derives why. The earlier
     `Duplicate external identifier: 'reu_mul_tables_init'` collision is
     handled by **deferral through `CONTRACT_DEFINES`** (`-D
     SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH`), not by dropping
-    `reu_mul_init.o` — the wrapper does no member surgery at all any more
-    (§6.1), it `cp`s the upstream archive. `reu_mul` is APP_OWNED here.
-    Flag stays off; the in-tree X25519 is correct (RFC 7748
+    `reu_mul_init.o` — the wrapper does no member surgery at all any
+    more (§6.1), it `cp`s the upstream archive. `reu_mul` is APP_OWNED
+    here. Flag stays off; the in-tree X25519 is correct (RFC 7748
     vector 2 passes) and ships.
   - **P-384 build is broken**, one link deeper than before: the `ar65`
     member-name bug was ours (fixed), and the chain now stops at

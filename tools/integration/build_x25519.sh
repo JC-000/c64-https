@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# tools/integration/build_x25519.sh - Build c64-x25519 v0.10.0
+# tools/integration/build_x25519.sh - Build c64-x25519 v0.16.0
 # X25519 primitives as a resident .a archive linked into the main PRG.
 #
 # Optional sibling-library integration (Phase C.5). Produces
@@ -12,7 +12,7 @@
 #   - data buffers (x25_*, fe25519_tmp*, mul_*, sqr_*, a24_*, fe_p)
 #   - util (vic_blank, vic_unblank, bench helpers — pulled in if referenced)
 #
-# Submodule pin: v0.10.0 (68ae0ef). What the v0.6.0 -> v0.10.0 bump
+# Submodule pin: v0.16.0 (16157a1). What each bump since v0.6.0
 # changed that this wrapper had to be migrated through:
 #
 #   v0.7.0  RFC 7748 decodeUCoordinate fix (upstream #64) — adds the
@@ -29,10 +29,104 @@
 #           imports no contract manifest equate, so nothing to do.
 #   v0.10.0 LIB_ABI_VERSION 1 -> 2 (v0.9.0 erratum) + contract v0.7.4
 #           precalc macro. No source-level consumer impact here.
+#   v0.11.x ABI 2 -> 3 (bare LIB_SHARED_REU_MUL_* / zp_ptr1 / zp_tmp1 /
+#           zp_tmp2 export removals, poly_carry -> mul_carry rename),
+#           then three PATCH releases of upstream build-correctness
+#           fixes. Nothing to migrate: this wrapper stages neither
+#           lib_manifest.s nor lib_version.s, and it does not use
+#           upstream's `make lib-*` surface at all — it assembles the
+#           staged sources itself, so upstream's own build defects
+#           (#109/#110) cannot reach us.
+#   v0.12.0 SPEC v0.13.0 §8.2 REU post-execute settle + a
+#           fe25519_mul_a24 byte-31 carry fold. The carry fold IS a
+#           correctness fix and it DOES reach us — fe25519.s is staged.
+#           It landed at v0.12.0, i.e. before the v0.13.0 pin this bump
+#           starts from, so it is already in the shipped analysis.
+#   v0.13.0 Documentation, headers and verification machinery only;
+#           upstream PRG byte-identical to v0.12.0. Note for anyone
+#           calling reu_fetch_mul_row / reu_fetch_doubled_row directly:
+#           they clobber A and C, not A only, and always have — v0.13.0
+#           corrected the header that said otherwise.
+#   v0.14.0 Contract SPEC v1.1.0 alignment + §6.1 member isolation
+#           (LIB_PRECALC_* split out of lib_manifest.s — that member is
+#           not staged). But reu_config.s IS staged, and it changed by
+#           56 lines here: the §8.2 base-bank assert tightened from
+#           `< $FE` to `< 31`, a new unconditional
+#           `.global mul_dma_lo, mul_dma_hi`, and two new `lderror`
+#           asserts that fire if a consumer overrides
+#           LIB_SHARED_REU_MUL_STAGE_LO/HI without the code following.
+#           Nothing to migrate — we pass none of those overrides and our
+#           bank is well under 31 — but note this is the counterexample
+#           to the "most upstream change never reaches us" reasoning
+#           below: reu_config.s is one of the six staged files, so a
+#           change in it DOES reach ca65. It happens to ship nothing
+#           this time. Check it, not just the unstaged members, at every
+#           bump.
+#   v0.15.0 ABI 3 -> 4, and the first upstream PRG change since
+#           v0.11.3. Three parts, none of which reach us: the §8.2
+#           staging buffers mul_dma_lo/hi/carry split into
+#           src/mul_stage.s (not staged); reu_fetch_mul_row honouring
+#           the documented `A = a` fetch entry (x25519_init.s IS
+#           staged, and this is where the +3 bytes below come from);
+#           and a constant-time regression fix re-aligning
+#           mul38_lo_tab (upstream's own tables, not ours).
+#   v0.16.0 §6.1 member isolation, count 2: mul_8x8.o exported eight
+#           displaceable names governed by two different switches, so
+#           the §8.1 group (sqtab_init / mul_tables_init) moved to
+#           src/sqtab_init.s. ABI stays 4. Nothing to migrate — this
+#           wrapper stages NEITHER file (see "Excluded" below) — but
+#           the split is why the exclusion note names two files now
+#           where it used to name one.
 #
-# Zero-page layout (src/zp_config.s) is BYTE-IDENTICAL across the whole
-# range — `git diff v0.6.0 v0.10.0 -- src/zp_config.s` is empty — so the
-# time-sharing analysis below did not need revisiting.
+# WHY SO LITTLE OF THAT REACHES US, and why that is the useful thing to
+# know at the next bump: this wrapper does not link upstream's archive.
+# It stages a WHITELIST of three upstream sources (fe25519.s, x25519.s,
+# x25519_init.s, plus constants.s and its two transitive includes) and
+# emits the BSS and RODATA modules itself from the heredocs below. Every
+# upstream change to any other member — manifests, version equates,
+# mul_8x8, mul_stage, util, main — is structurally invisible here, which
+# is why an ABI generation bump (3 -> 4 at v0.15.0) passed through with
+# no wrapper edit. The corollary is the thing to watch: a change inside
+# one of those three staged files reaches us with NO link-time gate at
+# all, because lib_version.s is not staged and so no `.assert
+# LIB_X25519_ABI_VERSION = N, lderror` can be written. That gap is what
+# tools/test_x25519_pin.py exists to cover.
+#
+# Measured delta of the whole v0.13.0 -> v0.16.0 range as it reaches
+# this wrapper (od65 --dump-segments on the staged objects, both tags):
+# +3 bytes in CRYPTO_CODE (x25519_init.s, the `A = a` fix), and ZERO
+# bytes in X25519_RODATA and X25519_BSS at both tags. fe25519.s and
+# x25519.s are byte-identical across the range. Those are per-object
+# od65 counts; for the LINKED footprints of those two segments, and why
+# summing objects does not give you one, see the Makefile block beside
+# X25519_SEG_LADDER.
+#
+# Zero-page layout (src/zp_config.s): byte-identical across THIS bump —
+# `git diff v0.13.0 v0.16.0 -- src/zp_config.s` is empty — so the
+# time-sharing analysis below did not need revisiting for it.
+#
+# It is NOT byte-identical across the wider v0.6.0 -> v0.16.0 range this
+# log now covers (29 insertions / 19 deletions), and the difference is
+# not cosmetic: v0.11.0 DELETED three ZP slot definitions — zp_ptr1
+# ($fb), zp_tmp1 ($02), zp_tmp2 ($03), moved to upstream's own main.s
+# per contract #83 — and renamed poly_carry to mul_carry ($1c), leaving
+# an `.ifdef poly_carry` / `.error` guard behind for consumers still
+# passing the old override. A wrong ZP slot is silent runtime
+# corruption with no link error, so that claim is re-derived rather
+# than inherited:
+#
+#   - None of the three sources this wrapper assembles (fe25519.s,
+#     x25519.s, x25519_init.s) references any of the four names. The
+#     only hits at v0.16.0 are inside zp_config.s itself — its own
+#     comments and the .error guard.
+#   - c64-https defines zp_tmp1/zp_tmp2 itself, at the SAME addresses
+#     ($02/$03, src/crypto/shared/zp_canon.inc), so the upstream
+#     removal deletes what would now be a duplicate, not a slot we
+#     depend on.
+#   - This wrapper passes no -D poly_carry, so the .error guard is
+#     never armed.
+#
+# Re-check those three points, not just the diffstat, at the next bump.
 #
 # Earlier contract-§1/§2/§3/§5 adoption remains in place: every ZP slot
 # is `.exportzp`-ed (zp_config.s), LIB_VERSION_*/LIB_ABI_VERSION
@@ -62,6 +156,18 @@
 #     SHARED_SQTAB_INIT collapses the duplicate init body but keeps
 #     the SHARED_SQTAB_BASE-derived loads pointing at c64-https's
 #     resident table.
+#   - src/sqtab_init.s: at v0.16.0 the §8.1 group that
+#     SHARED_SQTAB_INIT displaces — the `sqtab_init` /
+#     `mul_tables_init` bodies — moved OUT of src/mul_8x8.s into its
+#     own member (upstream #128, contract §6.1 member isolation).
+#     Excluded for the same reason as mul_8x8.s: in-tree
+#     src/crypto/poly1305.s already exports those names. Nothing
+#     changes here in practice, because this wrapper stages an explicit
+#     whitelist rather than excluding by name — neither file has ever
+#     been copied into $STAGING. The note exists so the next reader
+#     does not go looking for `sqtab_init` in mul_8x8.s and conclude
+#     the comment is describing a file that no longer contains it.
+#     (Verify with: git -C libs/x25519 ls-tree v0.16.0 src/ | grep sqtab)
 #   - src/main.s: the sibling's BASIC stub / test harness entry. We
 #     have our own boot.s entry point.
 #
@@ -510,12 +616,33 @@ X25519_CODE_SEGMENT="${X25519_CODE_SEGMENT:-CRYPTO_CODE}"
 # sibling does not fit CRYPTO_HOT whole and does not fit CRYPTO_OVERLAY
 # whole either, so making it link at all requires splitting it — and the
 # only split that matters is per-source, since ca65 emits one segment
-# per source. Measured sizes at v0.10.0 (od65, --dump-segments):
+# per source.
 #
-#   X25519_SEG_FE25519  fe25519.s        2,711 B   field arithmetic
-#   X25519_SEG_LADDER   x25519.s           717 B   Montgomery ladder
-#   X25519_SEG_REU      x25519_init.s      132 B   REU fetch helpers (hot)
-#   X25519_INIT_SEGMENT x25519_init.s      666 B   table init (boot-only)
+# Measured at submodule pin v0.16.0 (od65 --dump-segments over
+# $STAGING/obj/*.o after a `make BACKEND=uci USE_X25519_SIBLING=1`, so
+# the two X25519_RODATA rows reflect the Makefile's linking overrides,
+# not this script's CRYPTO_CODE defaults). ALWAYS re-measure and
+# re-stamp the tag when the pin moves — these are per-tag facts, and
+# the table sat three pins stale at v0.10.0 numbers before v0.16.0:
+#
+#   knob                source          v0.10.0   v0.16.0   what it is
+#   X25519_SEG_FE25519  fe25519.s        2,711 B   2,750 B  field arithmetic
+#   X25519_SEG_LADDER   x25519.s           717 B     717 B  Montgomery ladder
+#   X25519_SEG_REU      x25519_init.s      132 B     216 B  REU fetch helpers (hot)
+#   X25519_INIT_SEGMENT x25519_init.s      666 B     787 B  table init (boot-only)
+#
+# Of the v0.16.0 column, only the 216 B row moved across the most
+# recent bump (v0.13.0 -> v0.16.0, 213 -> 216 B, the §8.2 `A = a` fetch
+# entry at v0.15.0); the other three were already at these values at
+# v0.13.0. The remaining v0.10.0 -> v0.13.0 growth is not attributed
+# here — nobody measured the intermediate tags.
+#
+# These are per-object segment sizes. They do NOT sum to a linked
+# segment footprint -- alignment fill is added at link time, and the two
+# generated modules are not listed here. The fill in question belongs to
+# this wrapper's OWN generated RODATA module, not to anything upstream
+# emits. For what actually lands in CRYPTO_OVERLAY, see the
+# USE_X25519_SIBLING block in the Makefile.
 #
 # Anything routed to X25519_RODATA lands in CRYPTO_OVERLAY, which under
 # USE_X25519_SIBLING=1 is not a paged overlay at all — the two embed

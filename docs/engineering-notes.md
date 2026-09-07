@@ -3024,6 +3024,173 @@ hardening and belongs nowhere near production.
 The `tools/uci/` scripts cover the UCI backend on U64E hardware (see
 the "UCI rig scripts" subsection above).
 
+### `USE_X25519_SIBLING=1` overflow — two relink experiments (2026-09-06)
+
+Written while bumping `libs/x25519` v0.13.0 → v0.16.0. Both `Makefile`
+and `CLAUDE.md` carried overflow figures, they disagreed with each
+other, both were wrong, and — worse — the *mechanism* prose that a
+reviewer would use to sanity-check a future figure was wrong in two
+independent ways. Neither error was visible from the tree; both fell to
+one relink each.
+
+#### Experiment 1 — "ld65 aborts at the first unfillable area" is false
+
+Copy `cfg/c64-https-ip65.cfg` to scratch, undersize a **second** area
+alongside the already-overflowing `CRYPTO_OVERLAY`, and relink with the
+same `ld65` command line the failing build emitted. Two warnings, not
+one:
+
+    two-areas.cfg(103): Segment 'X25519_RODATA' overflows 'CRYPTO_OVERLAY'  by 3840 bytes
+    two-areas.cfg(106): Segment 'CRYPTO_CODE'   overflows 'CRYPTO_RESIDENT' by 4914 bytes
+
+(Run twice with different second-area sizes — `CRYPTO_RESIDENT` at
+`$0800` and at `$0400` — which names a different tipping segment each
+time, `CRYPTO_CODE` vs `RODATA`. That variation is itself the point.)
+
+The real mechanism: ld65 walks **every** memory area and warns **once
+per area**, on the first segment whose placement pushes that area past
+its size. Everything routed into that area afterwards is uncounted.
+
+The actionable half is that second sentence. ip65's 3,840 omits
+`X25519_BSS` entirely, so it is not a "free this much and it links"
+number — and it is why the two backends name different segments in the
+first place. `X25519_RODATA` is merely what tips ip65's area over;
+`X25519_BSS` is what tips UCI's. Neither is "the problem".
+
+#### Experiment 2 — the true deficit, and a wrong explanation that fit
+
+Enlarge `CRYPTO_OVERLAY` (`size = $4000`) so the link **completes** and
+emits a map, then read the last X25519 segment's end against the *real*
+area end. Do **not** compute it as 3,840 + 1,536: that infers a total
+from two warnings, which experiment 1 says do not compose that way.
+
+    TLS_CODE              004F8C  0056C7  00073C  00001
+    CRYPTO_AUX_CODE       0056C8  005E15  00074E  00001
+    HTTP_AUX_CODE         005E16  005FE9  0001D4  00001
+    X25519_RODATA         006000  006EFF  000F00  00100
+    X25519_BSS            006F00  0074FF  000600  00100
+
+`$74FF - $5FFF = $1500` = **5,376 B**. That is the ip65 figure to quote.
+
+The map also kills the second error. `X25519_RODATA`'s **linked** size
+is `$0F00` = 3,840 B — the warning's number exactly. The retired
+explanation was that 3,840 exceeded the segment's "own 3,808 B" because
+the area was already full. Two separate facts were wrong in it:
+
+  * 3,808 B was never a segment size. It is an `od65 --dump-segments`
+    sum of *object* sizes, and object sums cannot see link-time fill.
+    The per-module rows show where the difference comes from:
+
+        X25519_RODATA  Offs=000000  Size=0002CD  Align=00001  Fill=0000
+        X25519_RODATA  Offs=0002CD  Size=000313  Align=00001  Fill=0000
+        X25519_RODATA  Offs=000600  Size=000900  Align=00100  Fill=0020
+
+    `$2CD + $313 = $5E0`, next module starts at `$600`: 32 B of fill,
+    inserted ahead of the `align=$100` module. 717 + 787 + 2,304 + 32 =
+    3,840. That aligned module is **this wrapper's own generated
+    heredoc RODATA**, not anything upstream emits.
+
+  * Prior tenants contribute **zero**. `CRYPTO_OVERLAY` ends on a page
+    boundary (`$5FFF`) and `X25519_RODATA` is page-aligned, so the
+    alignment pad consumes exactly whatever headroom the prior tenants
+    left — `HTTP_AUX_CODE` ends at `$5FE9`, so 22 B here — and the area
+    sits at exactly 100% before the first X25519 byte is placed.
+
+    That `$5FE9` is the **precondition, not an illustration**. The
+    invariant holds only while the last prior tenant ends inside the
+    area's FINAL page. Route `HTTP_AUX_CODE` out of `CRYPTO_OVERLAY`
+    (area size untouched) and `CRYPTO_AUX_CODE` becomes last, ending at
+    `$5E15` — a page earlier — so `X25519_RODATA` starts at `$5F00`,
+    *inside* the area, and the warning drops by exactly one page:
+
+        baseline                3840 bytes   (starts $6000, outside)
+        HTTP_AUX_CODE removed   3584 bytes   (starts $5F00, inside)
+
+    So the reported overflow **moves when the area's tenants move**, in
+    256 B steps. This is why the figure needs re-measuring after any
+    change to what else lands in `CRYPTO_OVERLAY`, and it is the
+    mechanism behind the stale figure discussed below.
+
+**One of the two retired figures was stale, not wrong.** CLAUDE.md
+carried 3,584 B for ip65 — which is exactly what the link reports once
+`HTTP_AUX_CODE` is not a tenant of `CRYPTO_OVERLAY`. It was correct for
+the tree it was written against and drifted when a tenant moved in;
+nobody re-measured. The `Makefile`'s 2,048 B / 2,816 B has no such
+provenance and is simply wrong. Worth separating: "someone wrote down a
+wrong number" and "this number moves when tenants move" call for
+different fixes, and only the second explains how the drift happened.
+
+Worth recording *why* the wrong story was plausible, because it is the
+same shape as the "+12% comb gap" that closed on re-measurement: two
+effects cancelled (32 B of intra-segment fill, 22 B of pre-segment pad)
+and the residue was read as evidence for a cause contributing nothing.
+A number that is close to right for the wrong reason survives every
+cheap check. The discriminator was a map, not more arithmetic.
+
+Caveat on experiment 2, so nobody re-runs it and files a bug: with
+`CRYPTO_OVERLAY` enlarged to `$4000` the X25519 segments land on top of
+`CRYPTO_RESIDENT`'s `$6000` area, so the map shows overlapping
+placements (`HTTP_AUX_CODE2` at `$6511`). That is an artifact of the
+enlargement and does not affect the reading — the segments' sizes and
+their `$100` alignment off `$5FE9` are independent of how big the area
+was declared.
+
+### The assemble-time `.include` pin gate — viable, not taken (2026-09-06)
+
+Recorded here because the evidence has nowhere else to live. `libs/x25519`
+is the one submodule whose version constants no build can see: the archive
+carrying `lib_version.s` only ever enters a link under
+`USE_X25519_SIBLING=1`, and that configuration does not link on either
+backend. That is why `tools/test_x25519_pin.py` is a host-side tripwire
+rather than an `.assert … lderror`. This note is about the alternative that
+was considered, shown to work, and not taken.
+
+**It works.** `lib_version.s` is pure equates, so `.include`-ing it from a
+source that is always assembled puts the constants in front of ca65 on
+every build, and an assemble-time `.if` fires without ever reaching ld65.
+Two cases, run directly:
+
+    $ cat probe_bad.s
+    .include "lib_version.s"
+    .if LIB_X25519_ABI_VERSION <> 3
+    .error "ABI moved"
+    .endif
+
+    A  expectation matches the checkout (ABI 4)   -> exit 0, silent
+    B  expectation wrong (says 3, checkout is 4)  -> probe_bad.s(3): Error: User error: ABI moved
+                                                     exit 1
+
+**The include root must be `$(abspath …)`.** This is the same hazard shape
+as #116 and the same fix — cite it as the precedent for *how*, never as a
+hazard that `.include` inherits. #116 was about `.incbin` resolving a
+CWD-relative path, closed by `--bin-include-dir $(abspath …)`; `.include`
+resolves through the including file's directory and the `-I` list instead,
+so it is a different mechanism reaching the same trap. Demonstrated with
+one probe and two roots, which is the whole argument in two lines:
+
+    $ ca65 -I /Users/…/c64-https/libs/x25519/src            -o /dev/null probe_bad.s
+    $                                                        # silent: that checkout IS ABI 3
+    $ ca65 -I /Users/…/c64-worktrees/x25519-bump/libs/x25519/src -o /dev/null probe_bad.s
+    probe_bad.s(3): Error: User error: ABI moved              # this worktree is ABI 4
+
+Identical source, identical expectation, opposite verdicts — the include
+root alone decides which checkout is read. A relative root would make that
+depend on the invoking directory, which is exactly how a nested worktree
+ends up gated against the parent's pin.
+
+**Why it was not taken.** No defect is alleged against the route. The
+tripwire needs no build at all and runs under `pytest`, which nothing
+gated on `USE_X25519_SIBLING=1` can — that is the whole of it. What remains
+**unevaluated** is what adding `libs/x25519/src` to a translation unit's
+include path would shadow; upstream ships its own `constants.s`, and
+nobody has checked the collision surface. That is a reason for whoever
+picks this up to look first, not a reason the route is unsound, and it is
+written down here as an open question rather than a finding.
+
+If a later reader wants the gate at assemble time, this is the route and
+these are the two things to get right: `$(abspath …)` for the root, and an
+audit of what the new include path shadows.
+
 ### Upstream pin drift — `tools/check_upstream_pins.py`
 
 Reports, for every submodule in `.gitmodules`, which release the pin

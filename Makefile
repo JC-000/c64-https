@@ -274,11 +274,15 @@ CA65FLAGS += -D USE_X25519_SIBLING=1
 # what makes USE_X25519_SIBLING=1 link at all under UCI, so it is a
 # default rather than something the operator has to know.
 #
-# The sibling's 4,226 B of code does not fit either region whole:
-# CRYPTO_HOT has ~3.3 KB of room for it (measured), and CRYPTO_OVERLAY
-# has ~3.7 KB once the sibling's own 3,840 B of tables and BSS are in
-# there. Leaving the ladder (717 B) and the boot-only table init (666 B)
-# in CRYPTO_OVERLAY satisfies both. Under USE_X25519_SIBLING=1 that
+# The sibling's 4,470 B of code (v0.16.0: 2,750 + 717 + 216 + 787) does
+# not fit either region whole: CRYPTO_HOT has ~3.3 KB of room for it
+# (measured), and CRYPTO_OVERLAY has ~3.7 KB once the sibling's own
+# 3,840 B of tables and BSS are in there -- that is 2,304 B of RODATA
+# plus 1,536 B of BSS, and it is NOT the 3840 in the overflow warning
+# below, which is X25519_RODATA's linked size. The collision is a
+# coincidence; do not read one for the other. Leaving the ladder (717 B)
+# and the boot-only table init (787 B) in CRYPTO_OVERLAY satisfies
+# both. Under USE_X25519_SIBLING=1 that
 # region is not a paged overlay -- both embed flags that page it are
 # mutually exclusive with this one -- so it is plain resident RAM.
 #
@@ -288,9 +292,46 @@ CA65FLAGS += -D USE_X25519_SIBLING=1
 # (LIB_X25519_CODE / LIB_X25519_INIT_CODE / LIB_X25519_DATA); at that
 # point these two lines and the wrapper's sed both go away.
 #
-# ip65 does not link either way -- its CRYPTO_OVERLAY is 4,212 B and
-# already holds TLS_CODE + CRYPTO_AUX_CODE, so X25519_RODATA overflows
-# it by 2,048 B (2,816 B with these settings). See build_x25519.sh.
+# NEITHER BACKEND LINKS under USE_X25519_SIBLING=1, and each dies on a
+# different segment. Figures below are the literal ld65 warning, measured
+# at submodule pin v0.16.0 and identical at v0.13.0:
+#
+#   ip65  Segment 'X25519_RODATA' overflows memory area 'CRYPTO_OVERLAY'
+#         by 3840 bytes   (cfg/c64-https-ip65.cfg:103)
+#   uci   Segment 'X25519_BSS'    overflows memory area 'CRYPTO_OVERLAY'
+#         by 1536 bytes   (cfg/c64-https-uci.cfg:120)
+#
+# ip65's CRYPTO_OVERLAY is 4,212 B and already holds TLS_CODE +
+# CRYPTO_AUX_CODE + HTTP_AUX_CODE; uci's is 7.5 KB but already holds
+# TLS_DEFRAME_CODE + CERT_BUF_BSS + HTTPS_TARGET_RODATA + x509_name.
+#
+# NEITHER NUMBER IS A TOTAL DEFICIT. ld65 does not stop at the first area
+# it cannot fill -- it walks every memory area and warns ONCE PER AREA,
+# on the first segment whose placement pushes that area past its size,
+# reporting the overflow at that instant. Every segment routed into the
+# same area afterwards is uncounted: ip65's 3840 omits X25519_BSS
+# entirely. Relink against an enlarged CRYPTO_OVERLAY and X25519_BSS ends
+# at $74FF against an area ending at $5FFF -- a real shortfall of $1500,
+# 5,376 B.
+#
+# The 3840 IS X25519_RODATA's linked size, exactly. Two reasons it is not
+# the figure you get by summing per-source od65 rows (build_x25519.sh),
+# and both need stating because they cancel:
+#
+#   1. INSIDE the segment: our own generated RODATA module is align=$100,
+#      so ld65 inserts 32 B of fill ahead of it. The objects therefore
+#      link as a larger segment than their sizes sum to (map: Offs=0002CD
+#      + 000313 then Offs=000600 with Fill=0020).
+#   2. BEFORE the segment: CRYPTO_OVERLAY ends on a page boundary ($5FFF)
+#      and X25519_RODATA is page-aligned, so the alignment pad always
+#      consumes exactly whatever headroom the prior tenants left --
+#      HTTP_AUX_CODE ends at $5FE9, so 22 B here -- and the area is at
+#      exactly 100% before the first X25519 byte is placed.
+#
+# So the prior tenants contribute ZERO to the reported overflow, and
+# 3840 is not a "shrink X25519_RODATA by 3,840 B and it links" number.
+# See build_x25519.sh, and docs/engineering-notes.md for the two relink
+# experiments that established all of this.
 export X25519_INIT_SEGMENT ?= X25519_RODATA
 export X25519_SEG_LADDER   ?= X25519_RODATA
 endif
