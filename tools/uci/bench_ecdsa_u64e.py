@@ -49,7 +49,9 @@ import time
 import traceback
 from pathlib import Path
 
-from c64_test_harness.backends.device_lock import DeviceLock
+from c64_test_harness.backends.device_lock import (
+    DeviceLock, DeviceLockTimeout,
+)
 from c64_test_harness.labels import Labels
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
@@ -64,6 +66,9 @@ from c64_test_harness.backends.u64_debug_capture import (
 )
 from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
+from _device_lock_helper import (
+    LockTimeoutConfigError, acquire_device_lock,
+)
 
 from _memory_policy import build_policy_and_arbiter
 from _reu_preflight import ReuPreflightError, preflight_reu
@@ -419,8 +424,16 @@ def main() -> int:
         print(f"Debug dir: {run_dir}")
 
     lock = DeviceLock(HOST)
-    if not lock.acquire(timeout=60.0):
-        print(f"ERROR: could not acquire DeviceLock({HOST})", file=sys.stderr)
+    try:
+        # Budget: C64_DEVICE_LOCK_TIMEOUT, else 30 min. The old
+        # bare-bool acquire() discarded every diagnostic the
+        # harness had gathered and reported only False.
+        acquire_device_lock(lock)
+    except LockTimeoutConfigError as exc:
+        print(f"[fatal] {exc}", file=sys.stderr)
+        return 2
+    except DeviceLockTimeout as exc:
+        print(f"[fatal] DeviceLock({HOST}): {exc}", file=sys.stderr)
         return 3
     print(f"Acquired DeviceLock({HOST})")
 

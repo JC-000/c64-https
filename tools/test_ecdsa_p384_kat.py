@@ -96,6 +96,13 @@ if _HERE not in sys.path:
 
 from _skip_policy import cannot_run  # noqa: E402
 
+# The device-lock budget is one number for the whole repo, and it lives
+# with the rigs that take the lock most often. This suite is the only
+# module outside tools/uci/ and tests/ that drives a real device.
+if os.path.join(_HERE, "uci") not in sys.path:
+    sys.path.insert(0, os.path.join(_HERE, "uci"))
+from _device_lock_helper import lock_timeout_s  # noqa: E402
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PRG_PATH = PROJECT_ROOT / "build" / "c64-https.prg"
 LABELS_PATH = PROJECT_ROOT / "build" / "labels.txt"
@@ -703,7 +710,10 @@ def _run_backend(*, backend: str, vectors: list[dict],
         )
         mgr = UnifiedManager(backend="vice", vice_config=config)
     else:
-        mgr = UnifiedManager(backend="u64", lock_timeout=120.0)
+        # C64_DEVICE_LOCK_TIMEOUT, else 30 min. UnifiedManager takes the
+        # lock itself, so the budget is passed rather than the helper
+        # called; the number is the same one every rig uses.
+        mgr = UnifiedManager(backend="u64", lock_timeout=lock_timeout_s())
 
     passed = failed = 0
     details: list[dict] = []

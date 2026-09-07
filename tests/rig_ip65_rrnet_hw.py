@@ -183,12 +183,16 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
+sys.path.insert(0, str(PROJECT_ROOT / "tools" / "uci"))
 for _p in ("/Users/someone/Documents/c64-test-harness/src",):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
 import ip65_hw_checks as hw                                        # noqa: E402
 from _skip_policy import cannot_run, not_applicable                # noqa: E402
+from _device_lock_helper import (                                  # noqa: E402
+    LockTimeoutConfigError, acquire_device_lock,
+)
 from https_e2e import (                                            # noqa: E402
     press_key, get_screen_text, wait_for_screen_text,
     start_https_listener, stop_https_listener,
@@ -228,7 +232,9 @@ PCAP_PATH = os.environ.get("RRNET_PCAP", "/tmp/rrnet-https.pcap")
 U64_HOST = os.environ.get("U64_HOST", "10.43.23.81")
 HTTPS_PORT = int(os.environ.get("HTTPS_PORT", "4433"))
 FETCH_BUDGET_S = float(os.environ.get("E2E_TIMEOUT", "4800"))
-LOCK_TIMEOUT_S = 120.0
+# The device-lock budget is no longer a constant here: it is the one
+# shared, C64_DEVICE_LOCK_TIMEOUT-overridable number owned by
+# tools/uci/_device_lock_helper.py.
 TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "1"))
 #: Phase-timeline resolution. At 1 MHz a phase lasts minutes and a 5 s
 #: cadence is free; at turbo the whole handshake is under a minute, so 5 s
@@ -813,7 +819,10 @@ def main() -> int:
 
     lock = DeviceLock(U64_HOST)
     try:
-        lock.acquire_or_raise(timeout=LOCK_TIMEOUT_S)
+        acquire_device_lock(lock)
+    except LockTimeoutConfigError as exc:
+        return cannot_run(str(exc), executed=0, total=1, certifies=CERTIFIES,
+                          opt_out_env=None)
     except DeviceLockTimeout as exc:
         return cannot_run(f"another lane holds {U64_HOST}: {exc}",
                           executed=0, total=1, certifies=CERTIFIES,
