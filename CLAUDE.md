@@ -704,6 +704,16 @@ ip65 (`cfg/c64-https-ip65.cfg`):
                                    capped so growth is a link error)
   $C000-$CFFF  TCP_BUF             4 KB ring for the ip65 callback
 
+**Maintenance hazard for every margin figure below, and in the UCI section
+above: they are PER PROFILE, and the recurring failure is that a figure gets
+corrected in the profile someone was looking at and left stale in the other
+four.** Three instances in the v0.14.0 bump alone, two of which left this
+file contradicting itself hundreds of lines apart. When you change a number
+here, re-measure it in all five builds off `build/c64-https.map` rather than
+deriving the others by arithmetic — the deltas are not uniform, because a
+segment recovered in one profile can land in a different region in another
+(comb's `CRYPTO_RODATA` is the worked example: see the 33 B note above).
+
 ip65 is essentially full. Measured at the v0.14.0 pin, with the P-384
 objects gated out of the link: 56 B NET_CODE tail (on top of the 20 B the
 default target strings already use), 145 B CRYPTO_RESIDENT, 152 B
@@ -745,7 +755,13 @@ between each, matrix in `tools/package/_common.sh`:
   c64-https-uci-comb.prg      turbo + REU, fastest (needs bank 2 + boot precompute)
 
 REU-profile images were retired (curation: still fastest below ~18 MHz,
-one line in `PACKAGE_VARIANTS` to restore). One product per .d64. The
+one line in `PACKAGE_VARIANTS` to restore). **That line is a
+security-relevant decision, not just a curation one.** Measured
+`LIB_NISTCURVES_REU_BANKS_USED`: `$0000` for both shipped onchip products,
+`$0004` for uci-comb, and **`$0003` for the two REU profiles** — they do
+library REU DMA, so restoring one restores an image exposed to the
+SPEC §8.2 REU DMA settle fix (libs/nistcurves v0.12.0). Check the pin
+covers it before adding the line back. One product per .d64. The
 listener `c64-https-listener.py` is a single self-extracting file with no
 third-party deps; it needs an `ssl` with TLS 1.3 (macOS `/usr/bin/python3`
 is LibreSSL and cannot serve this client) and `--selftest` proves the path
