@@ -418,6 +418,20 @@ def acquire_with_queue_budget(
     :param lock_timeout_sec: budget for the acquire wait. ``None``
         (the default) reads ``C64_DEVICE_LOCK_TIMEOUT``, falling back to
         :data:`DEFAULT_LOCK_TIMEOUT_S`.
+
+    Two things a cron runner adopting this must know, since nothing in
+    this repo calls it and so nothing here would notice:
+
+    * **Keep the budget under your tick.** The default is 1800 s. A bot
+      that ticks more often than its budget stacks a new waiter on every
+      tick until ``max_queue_depth`` self-trips, which reads as queue
+      saturation caused by the bot itself. Pass ``lock_timeout_sec``
+      explicitly rather than inheriting the interactive default.
+    * :class:`LockTimeoutConfigError` escapes this contextmanager
+      un-wrapped, deliberately: a malformed ``C64_DEVICE_LOCK_TIMEOUT``
+      is a misconfiguration to fix, not a busy queue to retry on the
+      next tick, and wrapping it as :class:`QueueSaturatedError` would
+      make a typo look like contention for ever.
     :raises QueueSaturatedError: when the acquire fails inside the
         configured budget(s).
     """
