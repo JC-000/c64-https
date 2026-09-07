@@ -70,6 +70,16 @@ UNDISPATCHED_SUITES = {
         "folding it into the TOTAL would report expected xfails as "
         "regressions. Run it directly: python3 tools/test_tls_deframer.py"
     ),
+    "test_ecdsa_kat_oracle": (
+        "speaks this runner's interface, but its six CAVP vectors are "
+        "each a full P-256 verify under VICE -- a 2400 s per-vector "
+        "budget, tens of minutes for the set. Folding that into an "
+        "aggregate people run for a quick verdict would make the "
+        "aggregate one nobody runs. run_tests() exists so a future "
+        "long-form runner can dispatch it; today, run it directly: "
+        "python3 tools/test_ecdsa_kat_oracle.py (see C64_MAKE_ARGS in "
+        "its docstring to point it at a shipped profile)"
+    ),
 }
 
 
