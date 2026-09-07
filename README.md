@@ -539,9 +539,10 @@ below). The runner allocates a fresh VICE instance per suite, with `-reu
 -reusize 512`, which the sibling P-256 code requires. All tests log VICE PID
 and port for multi-agent safety.
 
-Measured 2026-09-05 on an M-series Mac at commit `48657f5`, plain
-`python3 tools/run_all_tests.py` (so: the default ip65 REU-profile build). Suites
-added since move the TOTAL, so re-run it rather than quoting this:
+Measured 2026-09-05 on an M-series Mac, on master and before this branch,
+plain `python3 tools/run_all_tests.py` (so: the default ip65 REU-profile
+build). Suites added since move the TOTAL, so re-run it rather than quoting
+this:
 
 ```
 TOTAL: 329/329 passed, 0 failed -- 1 suite(s) SKIPPED: hs_sequence
@@ -556,7 +557,7 @@ sets the wall-clock floor for the whole run.
 | suite | assertions |
 |---|---:|
 | `x25519` | 73 |
-| `x25519_pin` | 2 (host-side, no VICE) |
+| `x25519_pin` | 2 (reads the submodule off disk) |
 | `net` | 65 |
 | `http` | 61 |
 | `crypto` | 22 |
