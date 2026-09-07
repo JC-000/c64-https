@@ -739,6 +739,34 @@ The device address comes from `U64_HOST`. Every rig script defaults it to
 device-queue helper — defaults to a different address, so **set `U64_HOST`
 explicitly** rather than relying on a default agreeing with itself.
 
+The device is shared — across sessions and across the `c64-*` repos — so every
+script here queues for it, and the wait has **one** budget:
+`C64_DEVICE_LOCK_TIMEOUT`, default **1800 s (30 min)**. Every rig takes the
+lock through `acquire_device_lock()` in `tools/uci/_device_lock_helper.py`, and
+`tools/test_device_lock_timeout.py` fails if any script grows a budget of its
+own back. A malformed value (`30m`, `2 min`, `0`) is a hard error before the
+device is touched rather than a silent fall back to the default; an empty value
+falls back with a notice. While waiting, a progress line goes to **stderr**
+every 30 s — elapsed, budget, holder PID, lockfile age (flagged stale past the
+60 s progress window) and queue depth — so a half-hour block is distinguishable
+from a hang. stdout stays parseable.
+
+That budget is **not** the longest run you may queue behind. The harness
+re-arms its deadline on every poll while the holder is alive and its lockfile
+is fresh, so a waiter sits behind one long healthy holder indefinitely; the
+budget bounds only the waits it refuses to extend — a dead or wedged holder,
+and a **handoff chain**. Several lanes cycling one device is the case that
+bites: after the **fourth** change of holder identity the harness stops
+extending for the rest of that acquire (four, not three — `_MAX_HOLDER_HANDOFFS`
+is 3 but extension survives `handoffs <= 3`, so the harness's own docstring is
+one out), and from there the budget is everything. That is issue #212, and it
+is why the old hardcoded 120 s could fail against a device that was merely
+busy. Raise it when you know you are behind a long run:
+
+```bash
+C64_DEVICE_LOCK_TIMEOUT=7200 python3 tools/uci/rig_https_live.py   # queue for 2 h
+```
+
 **Prerequisite — `c64-test-harness` (same as the VICE suites above).** It is a separate public package, not vendored here; `requirements.txt` carries only `cryptography`. Without it every script in this directory dies at import with `ModuleNotFoundError: No module named 'c64_test_harness'`:
 
 ```bash
@@ -816,6 +844,7 @@ control. `tools/test_finished_verify.py` is the VICE-only equivalent.
 Environment variables honored by `rig_https_local.py`:
 
 - `U64_HOST` (default `192.168.1.81`) — U64E address
+- `C64_DEVICE_LOCK_TIMEOUT` (default `1800`) — seconds to queue for the shared device; see the paragraph above
 - `TURBO_MHZ` (default `48`) — C64 CPU speed. `TURBO_MHZ=1` runs the test at stock 1 MHz with every wall-clock budget auto-scaled, and is validated end-to-end on real U64E hardware; the handshake + GET itself measured 1,157.7 s (~19 min) there, not the full budget.
 - `HTTPS_PORT` (default `443`, falls back to `4433` if the bind fails)
 - `SENTINEL_POLL_TIMEOUT`, `ACCEPT_TIMEOUT` — per-test overrides in seconds; default to `600 * max(1, 48 / TURBO_MHZ)`.
