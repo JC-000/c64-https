@@ -571,6 +571,7 @@ sets the wall-clock floor for the whole run.
 | `sha256` | 7 |
 | `entropy` | 7 |
 | `ecdh_zero_check` | 6 |
+| `reu_row_abi` | REU profile only |
 | `hs_sequence` | needs `BACKEND=uci` |
 
 ```bash
@@ -596,6 +597,8 @@ python3 tools/test_x25519.py            # fe25519 field ops, x25519_clamp, scala
 python3 tools/test_x25519_pin.py        # libs/x25519 checkout is the reviewed pin (host-side, milliseconds)
 python3 tools/test_finished_verify.py   # the server-Finished REJECTION path, driven over DMA
 python3 tools/test_ecdh_zero_check.py   # the all-zero X25519 shared secret must abort the handshake
+python3 tools/test_reu_row_abi.py       # reu_fetch_mul_row takes its row index where SPEC 8.2 says
+                                        # (REU profile only — a bare `make`, which is what the runner builds)
 python3 tools/test_hs_sequence.py       # BACKEND=uci only — skipped by the runner on an ip65 build
 
 # Not dispatched by run_all_tests.py — run these directly
@@ -603,7 +606,14 @@ python3 tools/test_tls_deframer.py     # streaming deframer; needs BACKEND=uci a
                                        # Deliberately undispatched: its run_tests() has a different
                                        # signature and returns a 4-tuple (UNDISPATCHED_SUITES says why).
 python3 tools/test_chained_hmac.py     # chained HMAC-SHA256 stability (N=1..10)
-python3 tools/test_ecdsa_kat_oracle.py # ECDSA P-256 KAT, 3 valid + 3 negative CAVP
+python3 tools/test_ecdsa_kat_oracle.py # ECDSA P-256 KAT, 3 valid + 3 negative CAVP. Speaks the
+                                       # runner's interface but is deliberately undispatched:
+                                       # six full VICE verifies is tens of minutes, and an
+                                       # aggregate that slow is one nobody runs. See
+                                       # UNDISPATCHED_SUITES, and C64_MAKE_ARGS in its docstring
+                                       # to point it at a shipped profile.
+python3 tools/test_pins.py             # each submodule checkout matches the gitlink (host-side,
+                                       # under a second; also collected by pytest)
 python3 tools/test_x509_name.py        # BACKEND=uci only — SAN dNSName matching + wildcards
 python3 tools/test_package_verify.py   # pure-logic tests for the release gate (no VICE, no build)
 python3 tools/test_pytest_boundary.py  # the pytest collection boundary below is intact

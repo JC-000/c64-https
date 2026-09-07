@@ -47,13 +47,47 @@ here: all 15 records in the .rsp agreed with their Result column, with Q on
 curve and r, s in range. The `expect_carry` field encodes the .rsp Result
 column (P -> 0, F -> 1), never an observed C64 result.
 
+Which build this runs against (C64_MAKE_ARGS)
+--------------------------------------------
+The build was hardcoded to a bare ``make`` — BACKEND=ip65 with the REU
+multiply profile. That configuration ships in **none** of the three
+products (`tools/package/_common.sh` PACKAGE_VARIANTS are ip65-onchip,
+uci-onchip and uci-comb), so the only hardware-free ECDSA correctness
+oracle in the tree was pointed at a build nobody runs.
+
+``C64_MAKE_ARGS`` now supplies the make arguments, shlex-split, and is
+passed to ``make clean`` and ``make`` alike. Empty (the default) is the
+old bare ``make``, byte for byte, so nothing regresses::
+
+    # default, unchanged
+    python3 tools/test_ecdsa_kat_oracle.py
+
+    # the shipped onchip field arithmetic (no REU row-fetch DMA)
+    C64_MAKE_ARGS="BACKEND=uci USE_NISTCURVES_ONCHIP=1" \
+        python3 tools/test_ecdsa_kat_oracle.py
+
+    # the shipped comb profile (Lim-Lee; needs an REU and a boot
+    # precompute -- see C64_INIT_TIMEOUT below)
+    C64_MAKE_ARGS="BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1" \
+        python3 tools/test_ecdsa_kat_oracle.py
+
+The comb profile is the one that most needs these vectors: upstream
+nistcurves v0.13.0 fixed a fail-OPEN defect on exactly that path (a
+collapsed Lim-Lee anchor slot let ``ecdsa_verify`` accept a u1*G = O
+forgery), and the three ``Result = F`` records here are the oracle for a
+verify that fails open. Its boot precompute runs 256 point multiplies
+before the menu appears; raise ``C64_INIT_TIMEOUT`` accordingly.
+
 Usage:
     python3 tools/test_ecdsa_kat_oracle.py [--verbose]
 
-Honours `C64_SKIP_BUILD=1` for the same reason `test_x509.py` does.
+Honours `C64_SKIP_BUILD=1` for the same reason `test_x509.py` does --
+note that it and `C64_MAKE_ARGS` are mutually exclusive in effect: a
+skipped build applies no arguments, and the run reports that.
 """
 
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -369,6 +403,35 @@ def run_kat_oracle(transport, labels):
     return passed, failed
 
 
+def make_args_from_env():
+    """Make arguments for this run, from ``C64_MAKE_ARGS``.
+
+    Empty/unset reproduces the historical bare ``make`` exactly. Split with
+    :mod:`shlex` so a make variable whose value contains a space survives
+    as one argument instead of splitting into two.
+    """
+    return shlex.split(os.environ.get("C64_MAKE_ARGS", ""))
+
+
+def run_tests(transport, labels):
+    """Runner entry point: returns (passed, failed).
+
+    Assumes the caller has a booted machine at the menu. `sqtab_init` is
+    re-run here because the quarter-square tables are what `mul_8x8` (and
+    therefore every REU-profile row) depends on, and a preceding suite may
+    have scribbled on them.
+    """
+    if not check_labels(labels, ECDSA_LABELS):
+        print("  FAIL: ECDSA verify labels missing; nothing to test.")
+        return 0, 1
+    try:
+        jsr(transport, labels["sqtab_init"], timeout=60.0)
+    except Exception as e:
+        print(f"  FAIL: sqtab_init: {e}")
+        return 0, 1
+    return run_kat_oracle(transport, labels)
+
+
 def main():
     global VERBOSE
     os.chdir(PROJECT_ROOT)
@@ -377,13 +440,20 @@ def main():
     if "--verbose" in args:
         VERBOSE = True
 
+    make_args = make_args_from_env()
+    profile = " ".join(make_args) if make_args else "(no args: ip65, REU profile)"
     if os.environ.get("C64_SKIP_BUILD"):
         print("\n=== Building (skipped: C64_SKIP_BUILD set) ===")
+        print("  reusing build/ as it stands. Whatever profile that is, it is "
+              "NOT selected here:")
+        print(f"  C64_MAKE_ARGS = {profile} was not applied. Read "
+              "build/flags.stamp for what is actually in build/.")
     else:
-        print("\n=== Building ===")
-        subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
-        result = subprocess.run(["make"], capture_output=True, text=True,
-                                cwd=PROJECT_ROOT)
+        print(f"\n=== Building: make {profile} ===")
+        subprocess.run(["make", "clean"] + make_args, capture_output=True,
+                       cwd=PROJECT_ROOT)
+        result = subprocess.run(["make"] + make_args, capture_output=True,
+                                text=True, cwd=PROJECT_ROOT)
         if result.returncode != 0:
             print(f"Build failed:\n{result.stderr}")
             sys.exit(1)

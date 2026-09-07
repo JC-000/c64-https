@@ -54,6 +54,7 @@ SUITE_ORDER = (
     "finished_verify",
     "ecdh_zero_check",
     "hs_sequence",
+    "reu_row_abi",
 )
 
 # Suites that define run_tests() but are deliberately NOT dispatched here,
@@ -69,6 +70,16 @@ UNDISPATCHED_SUITES = {
         "that xfails by design on the ip65 build this runner produces, so "
         "folding it into the TOTAL would report expected xfails as "
         "regressions. Run it directly: python3 tools/test_tls_deframer.py"
+    ),
+    "test_ecdsa_kat_oracle": (
+        "speaks this runner's interface, but its six CAVP vectors are "
+        "each a full P-256 verify under VICE -- a 2400 s per-vector "
+        "budget, tens of minutes for the set. Folding that into an "
+        "aggregate people run for a quick verdict would make the "
+        "aggregate one nobody runs. run_tests() exists so a future "
+        "long-form runner can dispatch it; today, run it directly: "
+        "python3 tools/test_ecdsa_kat_oracle.py (see C64_MAKE_ARGS in "
+        "its docstring to point it at a shipped profile)"
     ),
 }
 
@@ -166,6 +177,10 @@ def run_test_suite(name, transport, labels, seed):
         elif name == "ecdh_zero_check":
             from test_ecdh_zero_check import run_tests as ecdh_zero_run
             passed, failed = ecdh_zero_run(transport, labels)
+
+        elif name == "reu_row_abi":
+            from test_reu_row_abi import run_tests as reu_row_abi_run
+            passed, failed = reu_row_abi_run(transport, labels)
 
         elif name == "hs_sequence":
             # Needs a TLS_STREAM_DEFRAME build; main() drops it from the
