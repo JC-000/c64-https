@@ -233,23 +233,6 @@ $(error USE_NISTCURVES_ONCHIP places LIB_NISTCURVES_MUL_CODE in CRYPTO_OVERLAY -
 endif
 CA65FLAGS += -D USE_NISTCURVES_ONCHIP=1
 
-# ENABLE_P384_VERIFY=1 — re-arms the P-384 verify arm in
-# src/crypto/ecdsa_verify.s. OFF BY DEFAULT AND UNSAFE ON ITS OWN.
-#
-# The arm calls crypto_swap_to_p384_sha384, which DMAs $1E00 bytes from REU
-# banks that only reu_p384_overlay_init writes — and that routine is itself
-# `.ifdef USE_OVERLAY_P384_EMBED`, which no shipped build sets and which
-# cannot currently be built at all (the SHA-384 table overflows OVERLAY_REGION
-# by 1,536 B; see "Known issues"). Setting this flag WITHOUT a working overlay
-# reproduces the c64-https#128-era hazard on purpose: live resident code
-# overwritten, machine hung.
-#
-# It exists so the guard can be mutation-tested — a safety gate nobody can
-# switch off is a gate nobody can prove is load-bearing. Turning it on is
-# expected to make tools/test_p384_overlay_hazard.py FAIL.
-ifeq ($(ENABLE_P384_VERIFY),1)
-CA65FLAGS += -D ENABLE_P384_VERIFY=1
-endif
 ifeq ($(USE_NISTCURVES_ONCHIP_COMB),1)
 SIBLING_LIB_ARCHIVES := build/lib/nistcurves-p256-onchip-comb.a
 CA65FLAGS += -D USE_NISTCURVES_COMB=1
@@ -344,6 +327,38 @@ ifeq ($(USE_X25519_SIBLING),1)
 CRYPTO_SRCS_EFFECTIVE := $(filter-out src/crypto/fe25519.s src/crypto/x25519.s,$(CRYPTO_SRCS_ALL))
 else
 CRYPTO_SRCS_EFFECTIVE := $(CRYPTO_SRCS_ALL)
+endif
+
+# ENABLE_P384_VERIFY=1 — re-arms the P-384 verify arm in
+# src/crypto/ecdsa_verify.s. OFF BY DEFAULT AND UNSAFE ON ITS OWN.
+#
+# The arm calls crypto_swap_to_p384_sha384, which DMAs $1E00 bytes from REU
+# banks that only reu_p384_overlay_init writes — and that routine is itself
+# `.ifdef USE_OVERLAY_P384_EMBED`, which no shipped build sets and which
+# cannot currently be built at all (the SHA-384 table overflows OVERLAY_REGION
+# by 1,536 B; see "Known issues"). Setting this flag WITHOUT a working overlay
+# reproduces the c64-https#128-era hazard on purpose: live resident code
+# overwritten, machine hung.
+#
+# It exists so the guard can be mutation-tested — a safety gate nobody can
+# switch off is a gate nobody can prove is load-bearing. Turning it on is
+# expected to make tools/test_p384_overlay_hazard.py FAIL.
+#
+# TOP LEVEL ON PURPOSE. This block used to sit inside
+# `ifeq ($(USE_NISTCURVES_ONCHIP),1)`, so the two REU-profile builds — plain
+# `make` and `make BACKEND=uci` — dropped the -D silently and the flag did
+# nothing at all. Measured at the previous commit, PRG sha256, ip65 REU
+# profile:
+#
+#   make BACKEND=ip65                       d780f719fac82e07…
+#   make BACKEND=ip65 ENABLE_P384_VERIFY=1  d780f719fac82e07…   <- identical
+#
+# and the same for BACKEND=uci (7c79a4e00a19685d… both ways). The mutation
+# test that proves this gate is load-bearing was a no-op on two of the five
+# configurations. The three onchip profiles were unaffected and their armed
+# PRGs are byte-identical across this move.
+ifeq ($(ENABLE_P384_VERIFY),1)
+CA65FLAGS += -D ENABLE_P384_VERIFY=1
 endif
 
 # Per-backend source + object selection.
