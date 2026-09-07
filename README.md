@@ -758,8 +758,11 @@ budget bounds only the waits it refuses to extend — a dead or wedged holder,
 and a **handoff chain**. Several lanes cycling one device is the case that
 bites: after the **fourth** change of holder identity the harness stops
 extending for the rest of that acquire (four, not three — `_MAX_HOLDER_HANDOFFS`
-is 3 but extension survives `handoffs <= 3`, so the harness's own docstring is
-one out), and from there the budget is everything. That is issue #212, and it
+is 3 but extension survives `handoffs <= 3`), and from there the budget is
+everything. Take that boundary from `tools/test_device_lock_timeout.py`, which
+asserts it against the harness's real behaviour: the upstream docstring that
+said three was fixed in c64-test-harness#232 and is now deliberately
+literal-free, so there is no number there to check yours against. That is issue #212, and it
 is why the old hardcoded 120 s could fail against a device that was merely
 busy. Raise it when you know you are behind a long run:
 
