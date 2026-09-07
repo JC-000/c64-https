@@ -3569,10 +3569,69 @@ import to drop): `libs/nistcurves/src/reu_mul_init.s:52` wraps the entire
 file body — imports, `.export reu_mul_init`, `.export reu_mul_tables_init`
 and the alias at line 76 — in `.ifndef SHARED_REU_MUL_INIT`, so a deferred
 build emits an object that exports nothing and imports nothing.
-`reu_fetch_mul_row` *is*
-referenced, is imported, and `src/boot.s` exports it (except under
-`USE_NISTCURVES_ONCHIP`, where the rebuilt `mul_8x8_onchip.o` exports it and
-ours yields).
+`reu_fetch_mul_row` is referenced and imported on the REU profile, and
+`src/boot.s` exports it there. **The parenthetical this paragraph used to
+carry — "except under `USE_NISTCURVES_ONCHIP`, where the rebuilt
+`mul_8x8_onchip.o` exports it and ours yields" — is FALSE, and it is the
+same sentence as the comment at `src/boot.s:50`.** It cost four agents most
+of a day on 2026-09-06. See the od65 table below; `src/crypto/fe25519.s:69`
+has had the true mechanism in it the whole time, naming the two symbols the
+onchip member actually exports.
+
+**The full symbol picture at the v0.11.2 pin**, measured with `od65
+--dump-exports` / `--dump-imports` over every member of each archive
+(extracted with `ar65 x` from `build/lib/*.a`, not read out of
+`libs/nistcurves/build/`) and every object under `build/`:
+
+| build | exports `reu_fetch_mul_row` | imports it |
+| --- | --- | --- |
+| REU profile (plain `make`) | `build/boot.o` | `build/crypto/fe25519.o`, and nothing else |
+| onchip / comb | nobody | nobody |
+
+`mul_8x8_onchip.o` exports exactly `og_src_ld` and `og_common` — two
+symbols, neither of them the fetch. So on onchip/comb the routine is not
+provided by anyone *and is still there*: only the `.export` is gated in
+`src/boot.s`, the body is assembled on every profile and sits at a local
+label, and `src/boot.s` runs `reu_mul_init` under both profiles, so the REU
+rows are populated and a hand-made call to it **works**. It is simply dead:
+`fe_mul` takes `fe_gen_mul_row` under `USE_NISTCURVES_ONCHIP`. That is why
+`tools/test_reu_row_abi.py` gates on `build/flags.stamp` and not on the
+label — a green there would certify a calling convention on dead code and
+read as coverage.
+
+Two follow-ons this leaves open, neither acted on here:
+
+  - `src/boot.s:50` still carries the false sentence, and the
+    `.ifndef USE_NISTCURVES_ONCHIP` around its `.export` is guarding
+    against a duplicate that no member produces. Ungating it would not
+    collide at this pin. That file belongs to the §8.2 conformance change;
+    fix both there.
+  - `build/labels.txt` is what produced the wrong claim, twice. It is
+    emitted with `-Ln` plus `--debug-info` and therefore lists
+    **non-exported local labels**, so a symbol's presence in it says
+    nothing about who provides it, or whether anything calls it. It cannot
+    answer "is this routine live in this build?"; only `od65` can.
+
+**The cleanest available demonstration that the `SHARED_*` deferral does
+what it claims**: under our `CONTRACT_DEFINES`, `mul_8x8.o` in
+`nistcurves-p256.a` is an *empty object* — 0 imports, 0 exports, 0 bytes in
+every one of its 7 segments:
+
+    $ od65 --dump-imports libs/nistcurves/build/mul_8x8.o
+      Imports:   Count:  0
+    $ od65 --dump-exports libs/nistcurves/build/mul_8x8.o
+      Exports:   Count:  0
+
+Same shape as `reu_mul_init.o` above, and for the same reason: upstream
+wraps the body in `.ifdef SHARED_REU_MUL_FETCH`
+(`libs/nistcurves/src/mul_8x8.s:318-321` at v0.11.2, a single condition with
+no profile term), and the wrapper passes that flag on all three profiles.
+The consequence worth carrying forward is that **the §8.2 fetch rendezvous
+is not live on any profile we build**: the only importer anywhere is our own
+`fe25519.o`. The obligation is real and ours to honour — nothing else
+guards it, which is why `test_reu_row_abi.py` exists — but it is today
+exercised by one in-tree caller, on a profile that ships in none of the
+three products.
 
 The one gap is cosmetic-until-it-isn't: as the §8.2 provider we export
 `reu_mul_init`, not the canonical `reu_mul_tables_init`. Nothing references
