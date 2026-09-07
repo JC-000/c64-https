@@ -95,6 +95,9 @@ from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
 from c64_test_harness.labels import Labels
 
+from _device_lock_helper import (
+    LockTimeoutConfigError, acquire_device_lock,
+)
 from _memory_policy import build_policy_and_arbiter_with_overlay_carveout
 from _reu_preflight import ReuPreflightError, preflight_reu
 from _temp_gc import gc_temp
@@ -395,7 +398,12 @@ def main() -> int:
 
     lock = DeviceLock(HOST)
     try:
-        lock.acquire_or_raise(timeout=120.0)
+        # Shared, env-overridable budget: C64_DEVICE_LOCK_TIMEOUT, else
+        # 30 min (tools/uci/_device_lock_helper.py).
+        acquire_device_lock(lock)
+    except LockTimeoutConfigError as exc:
+        print(f"[fatal] {exc}", file=sys.stderr)
+        return 2
     except DeviceLockTimeout as exc:
         print(f"[fatal] DeviceLock({HOST}): {exc}", file=sys.stderr)
         return 2

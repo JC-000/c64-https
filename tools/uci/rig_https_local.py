@@ -110,6 +110,9 @@ from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
 from c64_test_harness.labels import Labels
 
+from _device_lock_helper import (
+    LockTimeoutConfigError, acquire_device_lock,
+)
 from _memory_policy import (
     build_policy_and_arbiter,
     build_policy_and_arbiter_with_overlay_carveout,
@@ -1487,16 +1490,22 @@ def main() -> int:
 
     lock = DeviceLock(HOST)
     try:
-        # acquire_or_raise (c64-test-harness PR #88) replaces the legacy
-        # bare-bool acquire+if pattern. On timeout it gathers holder
-        # PID/liveness, lockfile age, and a quick REST reachability probe
-        # and raises DeviceLockTimeout with a diagnostic message that
-        # disambiguates "queued behind healthy holder" from
-        # "wedged / stale / unreachable" -- supervisors and humans need
-        # this signal to know whether to wait, kill the holder, or call
-        # for a recover() (the last requires explicit user authorization,
-        # never automated here).
-        lock.acquire_or_raise(timeout=120.0)
+        # acquire_device_lock wraps the harness's acquire_or_raise
+        # (c64-test-harness PR #88), which replaced the legacy bare-bool
+        # acquire+if pattern: on timeout it gathers holder PID/liveness,
+        # lockfile age, and a quick REST reachability probe and raises
+        # DeviceLockTimeout with a message that disambiguates "queued
+        # behind healthy holder" from "wedged / stale / unreachable" --
+        # supervisors and humans need this signal to know whether to
+        # wait, kill the holder, or call for a recover() (the last
+        # requires explicit user authorization, never automated here).
+        # The helper adds the shared, env-overridable budget
+        # (C64_DEVICE_LOCK_TIMEOUT, else 30 min) and a stderr progress
+        # line every 30 s, so a long queue is not mistaken for a hang.
+        acquire_device_lock(lock)
+    except LockTimeoutConfigError as exc:
+        print(f"[fatal] {exc}", file=sys.stderr)
+        return 2
     except DeviceLockTimeout as exc:
         print(f"[fatal] DeviceLock({HOST}): {exc}", file=sys.stderr)
         return 2
