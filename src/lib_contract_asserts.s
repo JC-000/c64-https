@@ -162,11 +162,29 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; on MINOR bumps, so MAJOR carries no signal.
 ;
 ; nistcurves shipped 0 from v0.3.0 through v0.8.0, bumped to 1 at v0.9.0
-; (17 exported symbols REMOVED, c64-nist-curves #90/#91), and to 2 at
-; v0.10.0 (the lib-contract phase-3 namespace wave, c64-nist-curves #103).
+; (17 exported symbols REMOVED, c64-nist-curves #90/#91), to 2 at v0.10.0
+; (the lib-contract phase-3 namespace wave, c64-nist-curves #103), to 3 at
+; v0.13.0 (`ec_scalar_mul` gained a carry return, part of the #148
+; fail-closed fix) and to 4 at v0.14.0 (#153: `reu_fetch_mul_row` takes the
+; row index in A, which §8.2 had documented all along — what changed is
+; upstream's conformance to it, which is why upstream ruled it MINOR).
 ; If a submodule bump makes this assert fire, that is the gate working:
 ; re-check the integration against the new export surface, then update the
 ; expected value on the next line — do not delete the assert.
+;
+; THE 2 -> 4 RE-CHECK (v0.11.2 -> v0.14.0). NEITHER hop reaches c64-https's
+; call surface, and both were checked rather than assumed:
+;
+;   ec_scalar_mul's carry return — we never `jsr ec_scalar_mul` into the
+;   library. src/crypto/ecdsa_verify.s defines its own shim (compiled out
+;   under comb; dead code under the two non-comb builds, whose ECDSA_NO_COMB
+;   archives do not import it), and v0.13.0's new carry check sits inside
+;   the library's own `.ifndef ECDSA_NO_COMB`.
+;
+;   reu_fetch_mul_row's A-on-entry convention — c64-https never calls it.
+;   `git grep 'jsr reu_fetch_mul_row'` over the v0.14.0 sources finds one
+;   site, src/fp384.asm:697, which the archive build never assembles.
+;   src/boot.s owns the c64-https copy under SPEC §8.2 deferral.
 ;
 ; THE v0.9.1 -> v0.10.1 RE-CHECK, so the next person can audit the audit
 ; rather than re-run it blind. Method: `git diff v0.9.1 v0.10.1 -- src/`
@@ -187,20 +205,33 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ;   Everything else in the wave is ADDITIVE at the default gate: the §6.5
 ;   rename window (#107) adds canonical `nistcurves_zp_*` /
 ;   `nistcurves_mul_*` names while KEEPING the bare forms as same-address
-;   aliases, export-gated behind -D LIB_NO_BARE_EXPORTS=1. c64-https links
-;   ungated, so `mul_dma_lo` / `mul_dma_hi` / `mul_cached_a` /
-;   `mul_src2_buf` — which src/data.s provides and boot.s imports — are
-;   untouched. The functional surface c64-https actually consumes is the
-;   same four symbols as at v0.9.1: ec_base_x, ec_gx256, ec_scalar_mul_var,
-;   ecdsa_verify_256, all still exported.
+;   aliases, export-gated behind -D LIB_NO_BARE_EXPORTS=1. That sentence
+;   used to end "c64-https links ungated, so mul_dma_lo / mul_dma_hi /
+;   mul_cached_a / mul_src2_buf are untouched" — WE DO NOT LINK UNGATED,
+;   and have not since the wrapper started passing the flag (the very next
+;   paragraph depends on it). src/data.s owns those four buffers precisely
+;   BECAUSE the archive's copies are suppressed. The functional surface
+;   c64-https actually consumes is the same four symbols as at v0.9.1:
+;   ec_base_x, ec_gx256, ec_scalar_mul_var, ecdsa_verify_256, all still
+;   exported.
 ;
 ;   One INPUT-side break is real and was migrated: `-D zp_ptr2=$3d` in
 ;   tools/integration/build_nistcurves_p256.sh now hard-errors, because
 ;   the bare alias assignment is no longer `.ifndef`-guarded. The override
 ;   is spelled `-D nistcurves_zp_ptr2=$3d` from this pin; the wrapper's
 ;   od65 post-check was retargeted to the canonical name so it cannot go
-;   vacuous. See that script's ZP_OVERRIDES block.
-; PREFIXED FORM, from the v0.11.2 pin. The wrapper builds the archive with
+;   vacuous. (The ZP_OVERRIDES array this used to cite is gone — the
+;   overrides ride CONTRACT_ZP_DEFINES now; read the check_zp_slot calls.)
+;
+;   The SECOND leg of that post-check — "no member re-exports the bare
+;   zp_ptr2" — DID go vacuous at v0.14.0, which is the cautionary tale.
+;   #154 moved the bare aliases out of zp_config*.o into their own archived
+;   TU (zp_aliases*.o) for §6.1 member isolation, so the member the guard
+;   read could no longer carry the alias whether or not the suppression
+;   flag took effect, and it passed by reading the wrong object. It now
+;   scans every member of the archive, which cannot be re-homed out from
+;   under it.
+; PREFIXED FORM, from the v0.11.2 pin onward. The wrapper builds the archive with
 ; `-D LIB_NO_BARE_EXPORTS=1` (SPEC §6.5) — which is what lets src/data.s
 ; keep its own adopter-private mul_dma_* buffers without colliding — so the
 ; bare `LIB_ABI_VERSION` is no longer exported and importing it fails as an
@@ -208,7 +239,7 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; anticipated; it arrived via the bare-export gate rather than via a second
 ; contract library entering the link.
 .import LIB_NISTCURVES_ABI_VERSION
-.assert LIB_NISTCURVES_ABI_VERSION = 2, lderror, "libs/nistcurves: exported-surface generation changed (LIB_NISTCURVES_ABI_VERSION != 2) — re-check the integration, then bump the expected value in src/lib_contract_asserts.s"
+.assert LIB_NISTCURVES_ABI_VERSION = 4, lderror, "libs/nistcurves: exported-surface generation changed (LIB_NISTCURVES_ABI_VERSION != 4) — re-check the integration, then bump the expected value in src/lib_contract_asserts.s"
 
 
 ; =====================================================================
