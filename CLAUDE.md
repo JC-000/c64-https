@@ -164,8 +164,11 @@ Conventions: AX = pointer lo/hi, caller-provided buffers, keys/IVs via
 fixed buffers in crypto BSS.
 
   X25519 / fe25519      in-tree `src/crypto/{x25519,fe25519}.s` (default);
-                        sibling `libs/x25519@v0.11.2` opt-in, same ABI:
-                        `x25519_scalarmult`, `fe25519_mul/sqr/inv`
+                        sibling `libs/x25519@v0.16.0` opt-in, same ABI:
+                        `x25519_scalarmult`, `fe25519_mul/sqr/inv`.
+                        Opt-in only in name: it links under NEITHER
+                        backend (see Known issues), so no build reaches
+                        this row today.
   ChaCha20-Poly1305     in-tree, permanent: `chacha20_encrypt`,
                         `poly1305_init/update/final`, `aead_encrypt/decrypt`
   SHA-256               in-tree: `sha256_init/update/final`
