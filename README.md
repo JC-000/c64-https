@@ -528,8 +528,9 @@ Progress:
 
 ## Test Automation
 
-`tools/run_all_tests.py` dispatches **14 suites** (`SUITE_ORDER` in that file
-is the source of truth; `tools/test_runner_coverage.py` fails the build if a
+`tools/run_all_tests.py` dispatches every suite named in `SUITE_ORDER` (that
+tuple is the source of truth, and no count is quoted here because branches add
+suites; `tools/test_runner_coverage.py` fails the build if a
 `tools/test_*.py` defining `run_tests()` is missing from it). They use the
 [`c64-test-harness`](https://github.com/JC-000/c64-test-harness) package to
 drive VICE via its binary monitor protocol. VICE runs the **ip65 backend by
@@ -538,14 +539,15 @@ below). The runner allocates a fresh VICE instance per suite, with `-reu
 -reusize 512`, which the sibling P-256 code requires. All tests log VICE PID
 and port for multi-agent safety.
 
-Measured 2026-09-05 on an M-series Mac, plain `python3 tools/run_all_tests.py`
-(so: the default ip65 REU-profile build):
+Measured 2026-09-05 on an M-series Mac at commit `48657f5`, plain
+`python3 tools/run_all_tests.py` (so: the default ip65 REU-profile build). Suites
+added since move the TOTAL, so re-run it rather than quoting this:
 
 ```
 TOTAL: 329/329 passed, 0 failed -- 1 suite(s) SKIPPED: hs_sequence
 ```
 
-**13 suites ran; `hs_sequence` did not.** It needs `tls_deframe_pump`, which
+**Every dispatched suite ran but one: `hs_sequence` did not.** It needs `tls_deframe_pump`, which
 only exists in a `TLS_STREAM_DEFRAME` (i.e. `BACKEND=uci`) build, so the runner
 skips it *loudly* and prints a warning that the aggregate does not certify it.
 Read the skip line, not just the TOTAL. The `x509` suite alone takes ~2 min and
@@ -566,6 +568,7 @@ sets the wall-clock floor for the whole run.
 | `sha256` | 7 |
 | `entropy` | 7 |
 | `ecdh_zero_check` | 6 |
+| `reu_row_abi` | REU profile only |
 | `hs_sequence` | needs `BACKEND=uci` |
 
 ```bash
@@ -590,6 +593,8 @@ python3 tools/test_http.py              # HTTP/1.1 GET builder, response parser,
 python3 tools/test_x25519.py            # fe25519 field ops, x25519_clamp, scalarmult + RFC 7748 vectors
 python3 tools/test_finished_verify.py   # the server-Finished REJECTION path, driven over DMA
 python3 tools/test_ecdh_zero_check.py   # the all-zero X25519 shared secret must abort the handshake
+python3 tools/test_reu_row_abi.py       # reu_fetch_mul_row takes its row index where SPEC 8.2 says
+                                        # (REU profile only — a bare `make`, which is what the runner builds)
 python3 tools/test_hs_sequence.py       # BACKEND=uci only — skipped by the runner on an ip65 build
 
 # Not dispatched by run_all_tests.py — run these directly
@@ -597,7 +602,14 @@ python3 tools/test_tls_deframer.py     # streaming deframer; needs BACKEND=uci a
                                        # Deliberately undispatched: its run_tests() has a different
                                        # signature and returns a 4-tuple (UNDISPATCHED_SUITES says why).
 python3 tools/test_chained_hmac.py     # chained HMAC-SHA256 stability (N=1..10)
-python3 tools/test_ecdsa_kat_oracle.py # ECDSA P-256 KAT, 3 valid + 3 negative CAVP
+python3 tools/test_ecdsa_kat_oracle.py # ECDSA P-256 KAT, 3 valid + 3 negative CAVP. Speaks the
+                                       # runner's interface but is deliberately undispatched:
+                                       # six full VICE verifies is tens of minutes, and an
+                                       # aggregate that slow is one nobody runs. See
+                                       # UNDISPATCHED_SUITES, and C64_MAKE_ARGS in its docstring
+                                       # to point it at a shipped profile.
+python3 tools/test_pins.py             # each submodule checkout matches the gitlink (host-side,
+                                       # under a second; also collected by pytest)
 python3 tools/test_x509_name.py        # BACKEND=uci only — SAN dNSName matching + wildcards
 python3 tools/test_package_verify.py   # pure-logic tests for the release gate (no VICE, no build)
 python3 tools/test_pytest_boundary.py  # the pytest collection boundary below is intact
