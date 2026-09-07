@@ -13,15 +13,24 @@ The in-tree provider does not read A. It does::
             asl
             ...
 
-Both in-tree callers happen to leave A holding the same value they just
-stored into `mul_cached_a` (`src/crypto/fe25519.s` does
-``sta mul_cached_a`` immediately before the ``jsr``), so provider and
-library agree *by coincidence of the call sites*, not by contract. If
-either side changes — upstream nistcurves v0.14.0 makes its own copy
-``sta nistcurves_mul_cached_a`` and treats A as authoritative — nothing
-in this tree would go red. Every multiply row would silently be the
-wrong row, which is the class of defect that surfaces as "the signature
-did not verify" minutes downstream, with no diagnostic.
+The only caller in any build we ship or test happens to leave A holding
+the same value it just stored into `mul_cached_a` (`src/crypto/fe25519.s`
+does ``sta mul_cached_a`` immediately before the ``jsr``), so provider
+and contract agree *by coincidence of that one call site*, not by
+construction. If either side changes — upstream nistcurves v0.14.0 makes
+its own copy ``sta nistcurves_mul_cached_a`` and treats A as
+authoritative — nothing in this tree would go red. Every multiply row
+would silently be the wrong row, which is the class of defect that
+surfaces as "the signature did not verify" minutes downstream, with no
+diagnostic.
+
+Be precise about who calls this today, because it is easy to overstate
+(and was, in this file's first draft). At the v0.11.2 pin the sibling
+does NOT call it on any profile: the wrapper defers upstream's whole
+``mul_8x8.s`` via ``CONTRACT_DEFINES``, and ``mul_8x8.o`` in the archive
+is an empty object. The obligation is real and the provider is ours to
+get right, but it is currently exercised only in-tree. See
+:func:`profile_problem` for the od65 measurements.
 
 This suite closes that. It calls `reu_fetch_mul_row` with A and
 `mul_cached_a` **deliberately disagreeing**, then reads back the 512
@@ -51,10 +60,9 @@ the same build ``tools/test_ecdsa_kat_oracle.py`` defaults to. Under
 ``USE_NISTCURVES_ONCHIP=1`` / ``..._COMB=1`` the suite reports CANNOT
 RUN and exits 2, never 0: an involuntary skip is a failure, not a pass.
 It decides that from ``build/flags.stamp``, **not** from the label,
-because an onchip build still HAS a ``reu_fetch_mul_row`` — the
-sibling's on-chip row generator, exported unconditionally, which
-``src/boot.s`` yields to. See :func:`profile_problem`. Note that none of
-the three shipped products
+because on those profiles the label is still there and still works —
+and means nothing. See :func:`profile_problem`. Note that none of the
+three shipped products
 (`tools/package/_common.sh`) is a REU-profile image, so a green run here
 is coverage of the *rendezvous*, not of a shipped binary.
 
@@ -109,14 +117,41 @@ def profile_problem():
     """Return why this build cannot carry this suite, or None if it can.
 
     The label check alone is NOT sufficient, and that is the trap this
-    function exists for: under ``USE_NISTCURVES_ONCHIP`` the sibling's
-    rebuilt ``mul_8x8_onchip.o`` exports ``reu_fetch_mul_row``
-    *unconditionally* (upstream has no guard on it) and ``src/boot.s``
-    yields ours to avoid the ld65 duplicate. So an onchip or comb build
-    has all four REQUIRED_LABELS — they just name a different routine,
-    an on-chip row generator that never touches the REU. Asserting our
-    provider's convention against it would be measuring the wrong thing
-    and reporting it as a verdict.
+    function exists for. On an onchip or comb build
+    ``labels.address("reu_fetch_mul_row")`` still resolves — to
+    ``$0B4E``, our own routine — and calling it still WORKS: only the
+    ``.export`` is gated (``src/boot.s`` exports block), the body is
+    assembled either way, and ``src/boot.s`` still runs ``reu_mul_init``
+    under both profiles, so the REU rows are populated. Measured: with
+    this gate bypassed on a comb build the suite goes 7/7 green with the
+    same verdict. That green is worthless — on those profiles nothing
+    calls the routine at all. ``fe_mul`` uses ``fe_gen_mul_row``
+    instead. A suite that certifies a calling convention on dead code
+    reads as coverage and is not.
+
+    So the label is not a witness of anything here. ``labels.txt`` is
+    built with ``-Ln`` plus ``--debug-info`` and lists non-exported
+    local labels, which is exactly why a label probe cannot answer
+    "is this routine live in this build?".
+
+    Measured with od65 at the v0.11.2 pin (``--dump-exports`` /
+    ``--dump-imports`` over every member of both archives and every
+    c64-https object):
+
+      REU profile   exported by build/boot.o; imported by exactly one
+                    object, build/crypto/fe25519.o (our own fe_mul)
+      onchip/comb   exported by nobody, imported by nobody
+
+    No sibling member exports or imports it on either profile. The
+    wrapper passes ``-D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH -D
+    SHARED_CT_MUL_8X8`` in ``CONTRACT_DEFINES``, which defers the whole
+    of upstream's ``mul_8x8.s`` to us — ``mul_8x8.o`` in
+    ``nistcurves-p256.a`` is an EMPTY object (0 imports, 0 exports, 0
+    bytes in every segment). So today the convention this suite pins is
+    a contract obligation (SPEC 8.2) on a routine c64-https publishes as
+    the APP_OWNED provider, exercised only by an in-tree caller. It goes
+    live the moment a consumer stops deferring, or upstream's own copy
+    changes convention — nistcurves v0.14.0 does the latter.
 
     The authoritative witness is ``build/flags.stamp``, which holds the
     fully expanded ``CA65FLAGS`` the objects in ``build/`` were made
@@ -136,9 +171,10 @@ def profile_problem():
                 f"changed and this guard can no longer read it")
     if "USE_NISTCURVES_ONCHIP" in ca65[0]:
         return ("this is an on-chip build (USE_NISTCURVES_ONCHIP in "
-                "CA65FLAGS). Its `reu_fetch_mul_row` is the sibling's "
-                "on-chip row generator, not the REU DMA provider in "
-                "src/boot.s that this suite pins")
+                "CA65FLAGS). `reu_fetch_mul_row` is still assembled and "
+                "still callable here, but it is dead code: nothing in "
+                "the image or the sibling archive calls it, so pinning "
+                "its convention on this build certifies nothing")
     if "USE_X25519_SIBLING" in ca65[0]:
         return ("USE_X25519_SIBLING evicts the in-tree provider entirely "
                 "(src/boot.s .ifndef USE_X25519_SIBLING)")
