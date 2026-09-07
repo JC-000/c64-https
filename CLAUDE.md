@@ -43,10 +43,14 @@ Fresh clone (ip65 backend; UCI needs none of the ip65 steps):
   - To test blob provenance, **flip a byte** — never move the blob aside.
     `make` regenerates it deterministically, reproducing the baseline hash,
     which reads exactly like a live trap. That false positive has been hit.
-  - **`libs/nistcurves` must be >= v0.11.2** (`CONTRACT_ZP_DEFINES`,
-    knob-staleness guard). A stale checkout is caught in ~0.05 s by a
-    source probe in `tools/integration/build_nistcurves_p256.sh` (#124);
-    `tools/check_upstream_pins.py --worktree` reports checkout-vs-gitlink.
+  - **`libs/nistcurves` must be >= v0.14.0** (`CONTRACT_ZP_DEFINES`,
+    knob-staleness guard, the §8.2 REU DMA settle, the #148 comb
+    fail-closed fix, and the §6.1 `zp_aliases*.o` split the wrapper's
+    bare-export guard is written against — full list in the
+    `CONTRACT_DEFINES` block of `tools/integration/build_nistcurves_p256.sh`).
+    A stale checkout is caught in ~0.05 s by a source probe in that same
+    script (#124); `tools/check_upstream_pins.py --worktree` reports
+    checkout-vs-gitlink.
 
 **A flag change no longer needs `make clean` (#159).** make tracks source
 mtimes, not the command line, so this used to be a discipline you only had
@@ -172,7 +176,7 @@ fixed buffers in crypto BSS.
   ChaCha20-Poly1305     in-tree, permanent: `chacha20_encrypt`,
                         `poly1305_init/update/final`, `aead_encrypt/decrypt`
   SHA-256               in-tree: `sha256_init/update/final`
-  ECDSA P-256           sibling `libs/nistcurves@v0.11.2`:
+  ECDSA P-256           sibling `libs/nistcurves@v0.14.0`:
                         `ecdsa_verify_256`, `ec_scalar_mul_var` (plus the
                         `ec_base_x`, `ec_gx256` data — that is the whole
                         surface we import). Dispatcher:
@@ -183,6 +187,22 @@ fixed buffers in crypto BSS.
     range + on-curve check); c64-https does none of its own, and `Q` comes
     straight from the attacker-supplied certificate, so `ecdsa_verify.s`
     carries `.assert LIB_NISTCURVES_VERSION_MINOR >= 9`.
+  - `LIB_NISTCURVES_ABI_VERSION` is **4** from the v0.14.0 pin and
+    `src/lib_contract_asserts.s` pins it. Two hops from the 2 that stood
+    at v0.11.2 — v0.13.0 gave `ec_scalar_mul` a carry return, v0.14.0
+    fixed `reu_fetch_mul_row` to take the row index in A as §8.2 always
+    said — and NEITHER reaches our call surface: we never `jsr
+    ec_scalar_mul` into the library (`ecdsa_verify.s` defines its own
+    shim) and we never call the fetch. The counter moving is the gate
+    telling you to check, not a break.
+  - v0.13.0 (upstream #148, reported from here) made the Lim-Lee comb
+    fail closed on an unusable anchor-table slot; before it,
+    `ecdsa_verify` accepted the collapsed u1·G = O case. That is a real
+    forgery and `c64-https-uci-comb.prg` shipped on that path. Keep the
+    scope exact: it catches a **collapsed** anchor table, not a
+    **corrupt** one. Anyone who can write REU bank 2 plants a valid
+    point, reaches a forged R with Z != 0 throughout, and no
+    post-condition on the result sees it.
   - Zero page: fe25519 `$2C-$37`, x25519 `$38-$3A`, ECDSA bignum `$22-$3C`,
     time-shared; sibling slots `fp_mul_i=$39`, `fp_mul_j=$3A`,
     `nistcurves_zp_ptr2=$3D` (verify in `build/labels.txt`). All defined
@@ -476,9 +496,14 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     (server-name validation took the comb tail from 714 to 223 B and broke
     `rig_https_wiki.py`, which now drives the menu instead). The harness
     write guard raises `MemoryPolicyError` before the wire.
-  - `CRYPTO_HOT` margin under UCI is **81 B** at v0.9.1+ and was one byte at
-    v0.6.0; 288 B of that was a one-off dead-data recovery upstream. Watch
-    it on every pin bump.
+  - `CRYPTO_HOT` margin under UCI is **per profile, and the one number this
+    file used to carry (81 B) was wrong by more than half.** Measured at the
+    v0.14.0 pin: **170 B** uci-onchip, **93 B** uci-comb, 133 B on the
+    unshipped REU default. At v0.11.2 it was 36 / 193 / 23 — so the 81 B
+    was already stale before this bump (#193), and the onchip figure only
+    grew because `LIB_NISTCURVES_P256_RODATA` moved to `CRYPTO_OVERLAY` in
+    `cfg/c64-https-uci.cfg` to absorb v0.12.0's +58 B of settle call sites.
+    Watch it on every pin bump, and measure all three.
   - `http_recv_response`: `Content-Length` (single-SP matcher, 16-bit
     sentinel `$FFFF`) and chunked (`http_state_body_chunked`,
     `HTTP_AUX_CODE`; chunks >64 KB desync) supported; body rendered via
@@ -515,7 +540,7 @@ Model: `T(f) = D + C/f`. The REU profile has a ~42-56 s floor (row-fetch
 DMA anchored to the ~1 MHz bus, ~16 KB per `fp_mul`); onchip has none but
 ~1.9x the CPU work; comb halves the CPU work again but needs REU bank 2
 and a boot precompute. **Read the pin, not the commit** — almost every
-figure was taken at `libs/nistcurves` v0.6.0; the pin is v0.11.2 and the
+figure was taken at `libs/nistcurves` v0.6.0; the pin is v0.14.0 and the
 only re-measured points are 48 MHz UCI REU (80.8 → 82.1 → 82.4 s, n=1; the
 +1.6% is v0.7.0's public-key validation, worth paying) and comb.
 
@@ -607,7 +632,10 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
                                    build: TLS_DEFRAME_CODE (~1.4 KB),
                                    CERT_BUF_BSS (2,048 B), HTTPS_TARGET_RODATA,
                                    x509_name; comb adds RODATA/LIMLEE_BSS
-                                   (~223 B tail free). Also the slot for the
+                                   (**120 B** tail free measured at the
+                                   v0.14.0 pin — the ~223 B this file used
+                                   to claim was stale, it was 159 B at
+                                   v0.11.2). Also the slot for the
                                    (broken) overlay-embed flags.
   $6000-$9FFF  CRYPTO_HOT          resident code + rodata + small BSS
   $A000-$BFFF  CRYPTO_COLD_SHADOW  large BSS (RAM under BASIC ROM, $01=$36);
@@ -633,9 +661,17 @@ ip65 (`cfg/c64-https-ip65.cfg`):
                                    capped so growth is a link error)
   $C000-$CFFF  TCP_BUF             4 KB ring for the ip65 callback
 
-ip65 is essentially full: largest free block ~170-186 B (NET_CODE tail),
-40 B CRYPTO_RESIDENT, 22 B CRYPTO_OVERLAY, 16 B LOADER. PRG size is not a
-headroom gauge. A contiguous-region cfg restructure is a known TODO.
+ip65 is essentially full. Measured at the v0.11.2 pin: 56 B NET_CODE tail
+(on top of the 20 B the default target strings already use), 40 B
+CRYPTO_RESIDENT, 22 B CRYPTO_OVERLAY, 21 B LOADER — the "~170-186 B /
+16 B LOADER" this file used to carry was stale. PRG size is not a headroom
+gauge. **CRYPTO_OVERLAY and CRYPTO_RESIDENT are ADJACENT ($4F8C-$5FFF and
+$6000-$9FFF), so they are one pool of 20,596 B, and no amount of shuffling
+segments between them creates space** — that is why the contiguous-region
+cfg restructure is only worth the 22 B of boundary fragmentation it
+recovers. The other two free blocks are not reachable from that pool:
+NET_CODE's tail is the `HTTPS_HOST`/`HTTPS_PATH` budget and the smallest
+segment in the pool is 169 B.
 
   - `LOADER_OVERFLOW` carries ~125 B of `http.s` that outgrew LOADER.
   - `src/loadaddr.s` (PRG load address) and `src/exports.s` (promotes
