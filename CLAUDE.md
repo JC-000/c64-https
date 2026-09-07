@@ -524,11 +524,15 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     write guard raises `MemoryPolicyError` before the wire.
   - `CRYPTO_HOT` margin under UCI is **per profile, and the one number this
     file used to carry (81 B) was wrong by more than half.** Measured at the
-    v0.14.0 pin: **170 B** uci-onchip, **93 B** uci-comb, 133 B on the
-    unshipped REU default. At v0.11.2 it was 36 / 193 / 23 — so the 81 B
-    was already stale before this bump (#193), and the onchip figure only
-    grew because `LIB_NISTCURVES_P256_RODATA` moved to `CRYPTO_OVERLAY` in
-    `cfg/c64-https-uci.cfg` to absorb v0.12.0's +58 B of settle call sites.
+    v0.14.0 pin **with the P-384 objects gated out**: **203 B** uci-onchip,
+    **93 B** uci-comb, 166 B on the unshipped REU default. At v0.11.2 it was
+    36 / 193 / 23 — so the 81 B was already stale before this bump (#193).
+    The onchip figure grew for two independent reasons:
+    `LIB_NISTCURVES_P256_RODATA` moved to `CRYPTO_OVERLAY` in
+    `cfg/c64-https-uci.cfg` to absorb v0.12.0's +58 B of settle call sites,
+    and gating returned 33 B of `CRYPTO_RODATA`. Comb is the exception at
+    93 B because its cfg already routes `CRYPTO_RODATA` to `CRYPTO_OVERLAY`,
+    so its 33 B came back there instead — see the memory map below.
     Watch it on every pin bump, and measure all three.
   - `http_recv_response`: `Content-Length` (single-SP matcher, 16-bit
     sentinel `$FFFF`) and chunked (`http_state_body_chunked`,
@@ -658,10 +662,13 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
                                    build: TLS_DEFRAME_CODE (~1.4 KB),
                                    CERT_BUF_BSS (2,048 B), HTTPS_TARGET_RODATA,
                                    x509_name; comb adds RODATA/LIMLEE_BSS
-                                   (**120 B** tail free measured at the
-                                   v0.14.0 pin — the ~223 B this file used
-                                   to claim was stale, it was 159 B at
-                                   v0.11.2). Also the slot for the
+                                   (**153 B** tail free measured at the
+                                   v0.14.0 pin with the P-384 objects gated
+                                   out; it was 120 B before gating returned
+                                   33 B of CRYPTO_RODATA here, and the
+                                   ~223 B this file used to claim was stale
+                                   — it was 159 B at v0.11.2). Also the slot
+                                   for the
                                    (broken) overlay-embed flags.
   $6000-$9FFF  CRYPTO_HOT          resident code + rodata + small BSS
   $A000-$BFFF  CRYPTO_COLD_SHADOW  large BSS (RAM under BASIC ROM, $01=$36);
