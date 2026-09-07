@@ -141,17 +141,25 @@ AR65="${AR65:-ar65}"
 #
 # Probing for those two says exactly what the next 200 lines depend on, and
 # keeps saying it correctly if upstream renames a tag under us. It is
-# deliberately NOT the full requirement — CLAUDE.md records >= v0.11.2 for
-# reasons this cannot see (v0.11.1's on-chip SHARED_CT_MUL_8X8 fix, v0.11.2's
-# knob-staleness guard, both of which fail later and elsewhere). This gate
-# exists to convert one specific illegible failure into a remedy, not to
-# certify the pin.
+# deliberately NOT the full requirement — CLAUDE.md records >= v0.14.0 for
+# reasons this cannot see (the list is at the CONTRACT_DEFINES block below;
+# every one of them fails later and elsewhere, and one of them does not fail
+# at all — it changes what a signature check accepts). This gate exists to
+# convert one specific illegible failure into a remedy, not to certify the
+# pin.
 lib_preflight_fail() {
     local what="$1"
     local head;  head="$(git -C "$LIB_DIR" rev-parse HEAD 2>/dev/null || true)"
     local found; found="$(git -C "$LIB_DIR" describe --tags --always 2>/dev/null || echo '<unknown>')"
     local pin;   pin="$(git -C "$PROJECT_ROOT" ls-tree HEAD libs/nistcurves 2>/dev/null | awk '{print $3}')"
     local diagnosis
+    # The tag for the PINNED sha, resolved rather than hardcoded: this line
+    # used to carry a literal "(v0.11.2)" that had to be edited by hand at
+    # every pin bump, and a wrong version in a diagnostic aimed at a
+    # version-staleness failure is worse than no version at all. Empty when
+    # the checkout cannot resolve it (which is itself one of the states this
+    # message is printed in), and the sha still identifies the pin.
+    local pintag; pintag="$(git -C "$LIB_DIR" describe --tags --exact-match "$pin" 2>/dev/null || true)"
     if [ -z "$head" ]; then
         diagnosis="The submodule is not checked out at all."
     elif [ "$head" != "$pin" ]; then
@@ -170,7 +178,7 @@ ERROR: libs/nistcurves checkout is unusable for this build (c64-https#124).
   $what
 
   submodule checkout : $found
-  this repo pins     : ${pin:0:12}${pin:+ (v0.11.2)}
+  this repo pins     : ${pin:0:12}${pintag:+ ($pintag)}
 
 $diagnosis Fix it with:
 
@@ -282,13 +290,41 @@ grep -q 'CONTRACT_ZP_DEFINES' "$LIB_DIR/Makefile" \
 #                                           and silently yields a WRONG
 #                                           address with no diagnostic.
 #
-# Requires libs/nistcurves >= v0.11.2:
+# Requires libs/nistcurves >= v0.14.0:
 #   v0.11.1 made SHARED_CT_MUL_8X8 assemble against the on-chip TU
 #           (c64-nist-curves#123) — before that this needed a glue TU.
 #   v0.11.2 added the knob-staleness guard: a changed CONTRACT_DEFINES used
 #           to reuse stale objects and exit 0 with a DIFFERENT archive than
 #           requested. That silent no-op is why an earlier attempt at this
 #           change produced a comb image that would not boot.
+#   v0.12.0 added the SPEC §8.2 REU DMA settle (`nistcurves_reu_dma_wait`)
+#           across thirteen sites — a completion confirm plus a settle loop
+#           between a DMA and the next REU register write.
+#   v0.13.0 (c64-nist-curves#148) made the Lim-Lee comb FAIL CLOSED on an
+#           unusable anchor-table slot. Before it, `ecdsa_verify` accepted
+#           the collapsed u1·G = O case — a signature forgery, and
+#           c64-https-uci-comb.prg is a shipped product on that path
+#           (LIB_NISTCURVES_REU_BANKS_USED = $0004). Read the scope
+#           exactly: the guard catches a COLLAPSED anchor table, not a
+#           CORRUPT one. An attacker who can write REU bank 2 plants a
+#           valid point instead, reaches a forged R with Z != 0 throughout,
+#           and no post-condition on the result would see it. Upstream is
+#           emphatic about that distinction; do not widen the claim.
+#   v0.13.0 (c64-nist-curves#153) also fixed `reu_fetch_mul_row` to take the
+#           row index in A, as §8.2 had always documented; through v0.13.0
+#           it read a library-private cached byte and ignored A entirely.
+#           That plus v0.13.0's `ec_scalar_mul` carry return is why
+#           LIB_NISTCURVES_ABI_VERSION moved 2 -> 4 (see the assert in
+#           src/lib_contract_asserts.s). Neither hop reaches our call
+#           surface: we never `jsr ec_scalar_mul` into the library, and we
+#           do not call the fetch.
+#   v0.14.0 (c64-nist-curves#154) moved the deprecated bare `zp_*` aliases
+#           out of `zp_config*.o` into their own archived TU
+#           (`zp_aliases*.o`), for SPEC §6.1 member isolation. The
+#           bare-export scan in section 2 below depends on this pin's
+#           member layout — and, more to the point, was VACUOUS against it
+#           until retargeted, because the member it used to read can no
+#           longer carry a bare alias whether or not the flag took.
 CONTRACT_DEFINES="-D SHARED_SQTAB_INIT -D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH -D SHARED_CT_MUL_8X8 -D LIB_NO_BARE_EXPORTS=1 -D LIB_SHARED_SQTAB_BASE=0xBC00"
 # ZP-slot overrides go in the SEPARATE variable, not the one above: SPEC §6.2
 # splits them because a globally-delivered slot define collides with every
@@ -375,14 +411,55 @@ check_zp_slot nistcurves_zp_ptr2 0x0000003D
 check_zp_slot fp_mul_i           0x00000039
 check_zp_slot fp_mul_j           0x0000003A
 
-# The suppression gate must have reached this TU too — that is the whole
-# point of routing the overrides through CONTRACT_ZP_DEFINES.
-if "${OD65:-od65}" --dump-exports "$LIB_BUILD/$ZP_MEMBER" | grep -q '"zp_ptr2"'; then
-    echo "ERROR: $ZP_MEMBER re-exports the bare 'zp_ptr2' — LIB_NO_BARE_EXPORTS did not reach it." >&2
+# The suppression gate must have reached the archive too — that is the whole
+# point of routing the overrides through CONTRACT_ZP_DEFINES rather than
+# rebuilding one member with a different knob string.
+#
+# THIS SCAN COVERS EVERY MEMBER, and that is a correction, not thoroughness
+# for its own sake. It used to od65 "$ZP_MEMBER" alone, which was right while
+# the bare `zp_*` aliases were exported from zp_config.s. libs/nistcurves
+# v0.14.0 moved them into their own translation unit (src/zp_aliases.s ->
+# member zp_aliases_p256verify.o / _p256comb.o, upstream issue #154, SPEC
+# §6.1 member isolation), so from that pin `zp_config*.o` exports no bare
+# alias WHETHER OR NOT the suppression flag took effect and the old guard was
+# vacuous — it passed by reading an object that could no longer fail.
+#
+# Naming the new member instead would put the guard back in the same trap the
+# next time upstream re-homes an alias. Scanning the archive's whole member
+# list cannot go vacuous that way: wherever a bare export lands, it is in some
+# member of the archive we are about to link, and the loop names the member in
+# the error so the report is no less specific than the old one.
+#
+# Members are read from upstream's build directory, exactly as the ZP check
+# above does — listing an archive and reading the objects it names is not
+# extraction, so SPEC §6.1 stays clean. A member the archive names but that is
+# absent is a hard error, never a skipped iteration: a guard that silently
+# scans nothing is the failure mode this whole block exists to close, and a
+# wrong ZP slot has NO link error (it corrupts cert parsing at runtime).
+BARE_OFFENDERS=""
+SCANNED=0
+for m in $( "$AR65" t "$UPSTREAM_ARCHIVE" ); do
+    if [ ! -f "$LIB_BUILD/$m" ]; then
+        echo "ERROR: member '$m' named by $(basename "$UPSTREAM_ARCHIVE") but absent from $LIB_BUILD;" >&2
+        echo "       the bare-export scan cannot be completed and must not pass vacuously." >&2
+        exit 1
+    fi
+    SCANNED=$((SCANNED + 1))
+    if "${OD65:-od65}" --dump-exports "$LIB_BUILD/$m" | grep -q '"zp_ptr2"'; then
+        BARE_OFFENDERS="$BARE_OFFENDERS $m"
+    fi
+done
+if [ "$SCANNED" -eq 0 ]; then
+    echo "ERROR: $(basename "$UPSTREAM_ARCHIVE") lists no members — nothing was scanned for bare zp_* exports." >&2
+    exit 1
+fi
+if [ -n "$BARE_OFFENDERS" ]; then
+    echo "ERROR: these archive members re-export the bare 'zp_ptr2' —" >&2
+    echo "       LIB_NO_BARE_EXPORTS did not reach them:$BARE_OFFENDERS" >&2
     echo "       One archive must carry one configuration (SPEC 6.2)." >&2
     exit 1
 fi
-echo "[p256/$PROFILE] ZP overrides verified in $ZP_MEMBER; bare zp_* suppressed"
+echo "[p256/$PROFILE] ZP overrides verified in $ZP_MEMBER; bare zp_* suppressed across $SCANNED members"
 
 cp "$UPSTREAM_ARCHIVE" "$ARCHIVE"
 
