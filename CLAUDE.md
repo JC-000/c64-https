@@ -319,6 +319,28 @@ Second device: C64 Ultimate "Starlight", `U64_HOST=10.53.21.158`, fw 1.1.0,
 Scratch DMA addresses come from `build_policy_and_arbiter()`
 (`_memory_policy.py`, parses `build/labels.txt`) — never hardcode them.
 
+**The acquire budget is `C64_DEVICE_LOCK_TIMEOUT`, default 1800 s**, and
+it is one number: every rig here and `tests/rig_ip65_rrnet_hw.py` takes
+the lock through `acquire_device_lock()` in `_device_lock_helper.py`, and
+`tools/test_device_lock_timeout.py` fails if one grows its own back (it
+also pins the malformed-value and progress-window behaviour). The budget
+is **not** how long you may queue behind a running rig: the harness's
+`acquire` re-arms its deadline indefinitely behind a live, progressing
+holder, so the budget only bounds waits it refuses to extend — a wedged
+holder, or a *handoff chain*. **The chain boundary is the FOURTH change
+of holder identity, not the third**: `_MAX_HOLDER_HANDOFFS` is 3, but the
+harness extends while `handoffs <= 3` and its own docstring says
+otherwise (a harness doc bug — its WARNING text agrees with its code).
+Pinned by `test_the_handoff_boundary_is_four_changes_not_three`; do not
+re-derive it from their prose. That case is what several lanes cycling
+one U64E *would* produce — the mechanism is lab-measured, no such
+timeout has been captured from a real run here — and it is why the old
+hardcoded 120 s could fail against a device that was merely busy. A
+malformed value is fatal before the device is touched; a wait prints
+progress to stderr every 30 s (elapsed, budget, holder PID, lockfile age
+with a STALE flag past the 60 s progress window, queue depth), never to
+stdout.
+
   boot_check.py / phase2_check.py / phase3_tcp_echo.py — boot, DHCP, TCP
   rig_http_local.py / rig_http_live.py      — plaintext HTTP
   rig_https_local.py                        — HTTPS vs local TLS 1.3 listener
