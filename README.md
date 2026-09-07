@@ -9,11 +9,14 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
 
 > **Real-server milestone (2026-08-21/22).** The client now completes TLS 1.3
 > handshakes and HTTP GETs against real public servers on the open internet —
-> **github.com, browserleaks.com and lwn.net** all return HTTP 200 — and, as a
-> demonstration, fetches the full 125 KB **Wikipedia article about the
-> Commodore 64** over TLS into a 16 MB REU and scrolls it on the C64's own
-> screen. Requires the UCI backend at turbo (comb profile). See the Project
-> Status section and the "End-to-end HTTPS status" notes in `CLAUDE.md`.
+> **github.com, browserleaks.com and lwn.net** all return HTTP 200. It also
+> streams the **Wikipedia article about the Commodore 64** over TLS into a
+> 16 MB REU and scrolls it on the C64's own screen — but **that body is not
+> verified**: `http_get` intermittently reports success on a truncated body
+> (issue #211), so treat the large-body demo as a demo. The handshake result
+> is unaffected. Requires the UCI backend at turbo (comb profile). See the
+> Project Status section and the "End-to-end HTTPS status" notes in
+> `CLAUDE.md`.
 
 ## I just want to run it
 
@@ -300,7 +303,7 @@ $4000-$4F8B  NET_BSS             ip65 blob's BSS (live at runtime; ld65
                                  sees it as EMPTY, so do not read it as
                                  headroom)
 $4F8C-$5FFF  CRYPTO_OVERLAY      4,212 B; holds TLS_CODE + CRYPTO_AUX_CODE
-                                 + HTTP_AUX_CODE
+                                 + HTTP_AUX_CODE + HTTP_AUX_CODE2
 $6000-$9FFF  CRYPTO_RESIDENT     16 KB code + rodata, incl. the
                                  libs/nistcurves P-256 verify path
 $A000-$BFFF  CRYPTO_COLD_SHADOW  8 KB BSS under the BASIC ROM shadow
@@ -325,7 +328,8 @@ $4200-$5FFF  CRYPTO_OVERLAY      7,680 B, and NOT an empty overlay slot:
                                  CERT_BUF_BSS (2,048 B), X509_NAME_CODE,
                                  HTTP_SINK_CODE, HTTP_AUX_CODE2,
                                  HTTPS_TARGET_RODATA, the nistcurves
-                                 mul code, plus VIEWER_CODE (onchip) or
+                                 mul code and (from the v0.14.0 pin) its
+                                 P-256 rodata, plus VIEWER_CODE (onchip) or
                                  the comb rodata + LIMLEE_BSS (comb)
 $6000-$9FFF  CRYPTO_HOT          16 KB code + rodata + UCI_BSS
 $A000-$BFFF  CRYPTO_COLD_SHADOW  8 KB BSS (same tenants as ip65, less
@@ -341,21 +345,37 @@ $E000-$FDFF  OVERLAY_BLOB_CURVE_RAM  P-384 curve overlay blob slot (empty
 An earlier version of this section called `CRYPTO_OVERLAY` "empty in the
 shipped build". That was wrong by about two orders of magnitude, and it is
 the kind of error that invites someone to put 2 KB there. The measured
-free space in every region of every shipped product, tail of the last
-segment to the end of the region:
+free space in every region of every shipped product — first free address to
+the end of the region — re-measured off `build/c64-https.map` at the
+`libs/nistcurves` **v0.14.0** pin, with the unreachable P-384 objects gated
+out of the link:
 
 | region | `ip65-onchip` | `uci-onchip` | `uci-comb` |
 |---|---:|---:|---:|
 | `LOADER` | 21 B | 148 B | 122 B |
-| `NET_CODE` | 56 B | 67 B | 67 B |
+| `NET_CODE` | 56 B | 366 B | 366 B |
 | `NET_BSS_TAIL` | — | 43 B | 43 B |
-| `CRYPTO_OVERLAY` | 22 B | 2,035 B | **159 B** |
-| `CRYPTO_RESIDENT` / `CRYPTO_HOT` | 40 B | 36 B | 193 B |
-| `CRYPTO_COLD_SHADOW` (gap below the `$BA00` `TABLES_BSS` pin) | 44 B | 1,578 B | 1,578 B |
+| `CRYPTO_OVERLAY` | 152 B | 1,804 B | **153 B** |
+| `CRYPTO_RESIDENT` / `CRYPTO_HOT` | 145 B | 203 B | 93 B |
+| `CRYPTO_COLD_SHADOW` (gap below the `$BA00` `TABLES_BSS` pin) | 43 B | 1,577 B | 1,577 B |
 
-So ip65 is genuinely full — its largest block is the 56 B `NET_CODE` tail,
-which is also the budget a longer `HTTPS_HOST`/`HTTPS_PATH` eats into — and
-`uci-comb` has 159 B of overlay tail, not the kilobytes the old text implied.
+Every cell moved, and not by a common factor — **read them per profile and
+re-measure all three when you change one.** The UCI `NET_CODE` gain is the
+299 B of `CRYPTO_AUX_CODE` that `ecdsa_verify_384.o` occupied in every image
+while being reachable from none; `uci-onchip`'s overlay lost ground because
+`LIB_NISTCURVES_P256_RODATA` moved there to absorb the v0.12.0 REU-settle
+call sites, while `uci-comb`'s `CRYPTO_HOT` fell to 93 B because its cfg
+already routed `CRYPTO_RODATA` to the overlay, so its share of the recovery
+landed there instead. The two `CRYPTO_COLD_SHADOW` cells also lose a byte to
+arithmetic: they used to be measured from the last *used* address rather than
+the first free one.
+
+So ip65 is still genuinely full — 152 B is its largest block now, and the
+56 B `NET_CODE` tail is still the budget a longer `HTTPS_HOST`/`HTTPS_PATH`
+eats into. Note that ip65's `CRYPTO_OVERLAY` and `CRYPTO_RESIDENT` are
+**adjacent** ($4F8C-$5FFF and $6000-$9FFF), so they are one 20,596 B pool and
+moving segments between them creates nothing; the 332 B this bump recovered by
+gating P-384 out of the link is what made the v0.14.0 pin fit at all.
 `uci-onchip` is the roomy one, and only because it ships neither the comb
 tables nor the comb rodata.
 
@@ -397,6 +417,14 @@ profile, which was retired from the release lineup; every shipped image passes
 `USE_NISTCURVES_ONCHIP=1` or `USE_NISTCURVES_ONCHIP_COMB=1`. See the table
 under Memory Map, and `PACKAGE_VARIANTS` in `tools/package/_common.sh`, which
 is the single source of truth for the matrix.
+
+Restoring a REU-profile image is one line in `PACKAGE_VARIANTS`, and it is a
+**security-relevant** line rather than a curation one. Measured
+`LIB_NISTCURVES_REU_BANKS_USED`: `$0000` for both shipped onchip products —
+they share one archive and do no library REU DMA — `$0004` for `uci-comb`, and
+`$0003` for the two unshipped REU profiles. Only images with a non-zero value
+are exposed to the defects a `libs/nistcurves` bump fixes in that path, so
+check the pin covers them before adding the line back.
 
 The knobs, all read straight from the Makefile:
 
@@ -475,15 +503,15 @@ it is supposed to detect.
 
 ## Project Status
 
-Current status of the three shipped products (measured 2026-09-05 with cc65
-from Homebrew; `make clean` before each, then `stat` the PRG and
+Current status of the three shipped products (re-measured at the
+`libs/nistcurves` v0.14.0 pin with cc65 from Homebrew; `make clean` before each, then `stat` the PRG and
 `grep -c '^al ' build/labels.txt`):
 
 | product | PRG | labels |
 |---|---:|---:|
-| `c64-https-ip65-onchip` | 47,105 B | 2,398 |
-| `c64-https-uci-onchip`  | 62,977 B | 2,729 |
-| `c64-https-uci-comb`    | 62,977 B | 2,864 |
+| `c64-https-ip65-onchip` | 47,105 B | 2,395 |
+| `c64-https-uci-onchip`  | 62,977 B | 2,726 |
+| `c64-https-uci-comb`    | 62,977 B | 2,859 |
 
 The unshipped default profiles land on the same two PRG sizes (47,105 B /
 62,977 B) with fewer labels, which is the point: **the PRG size is not a
@@ -516,15 +544,15 @@ Progress:
   - ip65 on **real RR-Net silicon — a first, 2026-09-05.** An RR-Net (CS8900a) cartridge in a cartridge port, on its own wired 10.0.66.0/24 segment, ran the whole path at **stock 1 MHz with no turbo and no REU**: DHCP (the C64 took the pinned lease, read back from its own `net_local_ip` rather than from the server's lease file), a DNS lookup over the cartridge, a 141-byte ClientHello with the correct SNI on the cable, application data both ways, and **HTTP 200** with the body byte-checked out of `http_resp_buf` and `net_last_error` `$00`. Every check the rig ran passed. They are not all wire checks: the wire assertions that attribute traffic to the cartridge discriminate it by Ethernet source address, the rest read the C64's own memory back over DMA or assert host-side preconditions, and `tests/rig_ip65_rrnet_hw.py` says which is which. **1,979 s (33.0 min)** from `G` to done, n=1 on both sides — faster than the same profile in VICE at honest 1 MHz, and by **at least** the ~8% the raw figures show, because the VICE number predates the current `libs/nistcurves` pin and the newer pin is slower (the first Known Issues bullet below carries both that figure and the pin caveat). Our first measurement of the real cartridge port. The "body never appears on the wire in clear" check passed *conclusively*, because its positive control — the SNI, which genuinely is in the clear in the ClientHello — was found, making that a claim about the wire rather than about the searcher. **Scope:** this is `ip65-onchip` against the bundled local listener. It does not exercise ip65 against a real internet server, it says nothing about the two UCI images, and it does not touch the chain-validation or name-validation caveats above — `ip65-onchip` still does neither.
   - The same cartridge at **48 MHz turbo, 2026-09-06.** `TURBO_MHZ=48` on the same rig, the same build configuration and the same `G`-to-`CONNECTION CLOSED` boundary: **43.1 s, a 46x speed-up** over the 1 MHz run above. That comparison is like-for-like — same rig, same cartridge, real silicon on both sides — and is a different kind of claim from the VICE comparison in the bullet above, which crosses a `libs/nistcurves` pin and therefore stays a lower bound. The open risk was CS8900a register timing at turbo, which is the reason the rig defaults to stock speed, and it did not materialise: DHCP completed on the automatic attempt with no retries, because ip65's ~15 s budget rides CIA2 timer B and the CIA timers run at real phi2 at every CPU clock (measured, with the negative control that separates that from a CPU still at 1 MHz, in `docs/engineering-notes.md`; reproducer `tools/probe_cia_timer_rate.py`). **24 of 25 checks passed, and the one that failed has to be read before this run is quoted.** `check_tls_connected` samples `tls_state` over DMA, and at 48 MHz the window in which that value exists — between the traffic-key derivation and `tls_close` — fits inside a single poll. So the handshake's completion at turbo is **inference from converging evidence** (HTTP 200 and the exact body out of the C64's own buffer, `TLS HANDSHAKE OK` on screen, application data both ways on the cable) **rather than the direct observation the 1 MHz run had.** It is the weaker of the two results and the check was left red rather than softened; `tests/rig_ip65_rrnet_hw.py` says why, and issue #204 tracks the fix. **Nothing else widens:** still one device, one cartridge, one local listener, the same port-only deviation from the shipped image, and still no server-name validation on ip65. This adds a second clock and no more.
 - [x] **Real public-internet HTTPS (UCI/comb, turbo)** — github.com, browserleaks.com and lwn.net all return `http_status=200` on real U64E hardware at 48 MHz. Needed three pieces of work over the local-listener path: a streaming handshake-message deframer (`src/tls_deframe.s`) for flights where handshake messages don't align with TLS records; a 2048 B `cert_buf` under UCI so larger real leaves fit; and — the last blocker — clamping the UCI adapter's `SOCKET_READ` request to the receive ring's free space, without which any flight over ~4 KB lost its tail to a ring-wrap drop. Build-time target is `make HTTPS_HOST=<host>` / `HTTPS_PATH=<path>`; the rig is `tools/uci/rig_https_live.py`.
-- [x] **Wikipedia article into REU + on-screen viewer (stretch goal, UCI/comb)** — `make HTTPS_HOST=en.wikipedia.org HTTPS_PATH='/w/index.php?title=Commodore_64&action=raw' HTTPS_BODY_TO_REU=1` streams the 125,235 B article body into REU bank 16 (`$10:0000`) and drops into a scroll viewer (`src/viewer.s`, CRSR/SPACE/F1/HOME/Q). Verified on U64E @ 48 MHz, body byte-checked against a host-side reference fetch. Rig: `tools/uci/rig_https_wiki.py`.
+- [x] **Wikipedia article into REU + on-screen viewer (stretch goal, UCI/comb) — demonstrated, body NOT verified.** `make HTTPS_HOST=en.wikipedia.org HTTPS_PATH='/w/index.php?title=Commodore_64&action=raw' HTTPS_BODY_TO_REU=1` streams the article body into REU bank 16 (`$10:0000`) and drops into a scroll viewer (`src/viewer.s`, CRSR/SPACE/F1/HOME/Q); the handshake, the GET and the viewer all work on a U64E @ 48 MHz. **What does not hold is the byte count.** This entry used to claim 125,235 B byte-checked against a host-side reference fetch; that does not reproduce on either tree. `http_get` returns `carry=0` with `http_status=200` on bodies tens of kilobytes short of their `Content-Length`, intermittently and not as a function of size — reproduced offline against a local listener with no chunking involved, and seen live at 117,192 / 89,526 / 73,720 B against a same-day 125,703 B `curl` anchor. That is **issue #211**, and until it is closed no large-body fetch on any image should be treated as complete. It survived because the one rig on that path could not go red on a short body (**issue #210**). The defect is in the body path only: the handshake result above is unaffected, and nothing here changes what the client does or does not authenticate. **ip65 has never been tested against a body large enough to show this** — at any size, in fact, beyond the local listener's short one. Rig: `tools/uci/rig_https_wiki.py`.
 
 ### Known Issues
 
-- **The handshake is slow, and the ECDSA P-256 verify dominates it.** Every figure here is quoted from the measurement record in `CLAUDE.md`. Except where noted they were taken at the **`libs/nistcurves` v0.6.0 pin**, and the pin is now v0.11.2, so treat them as a baseline rather than as current. The one profile re-measured at the current pin is comb: 46.986 / 24.440 / 16.402 s verify at 16 / 32 / 48 MHz (U64E, n=3, VIC blanking active). End-to-end handshake + GET against the local listener, U64E, master 2ceb5b1: **80.8 s** (REU profile, 48 MHz), **45.5 s** (onchip profile, 48 MHz), **1,157.7 s** (REU, stock 1 MHz). One point of that sweep has been carried forward: 48 MHz REU measures **82.1 s** at v0.9.1 and **82.4 s** at v0.10.1 (n=1 each, so the 0.4% step between them is noise; the 1.6% from v0.6.0 is the FIPS 186-5 public-key validation gate v0.7.0 added). No other clock or profile has been re-measured. On the REU-less stock-C64 path (ip65 + onchip, no REU, honest 1 MHz in VICE) the whole run measured **2,159.7 s = 36.0 min**, of which the verify stretch alone was 1,416.7 s. That is fine for the local listener, which holds the connection open; it exceeds a typical 10-30 s real-world server handshake window.
-- **P-384 is parked, and doubly gated — it is not merely "stubbed".** An earlier version of this entry said the dispatcher "advertises `ecdsa_secp384r1_sha384` (0x0503)". It does not, and has not since v0.4.1: `sig_algs_ext_data` in `src/tls_handshake.s` carries exactly one scheme, `ecdsa_secp256r1_sha256` (0x0403), and `src/crypto/ecdsa_verify.s` compiles its P-384 arm to a `sec` reject unless `ENABLE_P384_VERIFY=1`. Both gates matter, because the curve comes from the certificate rather than from what we advertised — that combination is what closed the v0.4.0 hang in which a P-384 certificate made the overlay swap DMA over live resident code. Separately, **no P-384 build target has ever completed**: `make p384-overlay` from a clean tree stops at `No rule to make target 'build/labels.txt'`, and once a main build has produced that file it stops at `Segment 'LIB_NISTCURVES_SHA384_TABLES' overflows memory area 'OVERLAY_REGION' by 1536 bytes`. Certificates requiring P-384 are rejected, not verified.
+- **The handshake is slow, and the ECDSA P-256 verify dominates it.** Every figure here is quoted from the measurement record in `CLAUDE.md`. Except where noted they were taken at the **`libs/nistcurves` v0.6.0 pin**, and the pin is now v0.14.0, so treat them as a baseline rather than as current. The one profile re-measured since is comb, at the v0.11.2 pin: 46.986 / 24.440 / 16.402 s verify at 16 / 32 / 48 MHz (U64E, n=3, VIC blanking active). End-to-end handshake + GET against the local listener, U64E, master 2ceb5b1: **80.8 s** (REU profile, 48 MHz), **45.5 s** (onchip profile, 48 MHz), **1,157.7 s** (REU, stock 1 MHz). One point of that sweep has been carried forward: 48 MHz REU measures **82.1 s** at v0.9.1 and **82.4 s** at v0.10.1 (n=1 each, so the 0.4% step between them is noise; the 1.6% from v0.6.0 is the FIPS 186-5 public-key validation gate v0.7.0 added). No other clock or profile has been re-measured. On the REU-less stock-C64 path (ip65 + onchip, no REU, honest 1 MHz in VICE) the whole run measured **2,159.7 s = 36.0 min**, of which the verify stretch alone was 1,416.7 s. That is fine for the local listener, which holds the connection open; it exceeds a typical 10-30 s real-world server handshake window.
+- **P-384 is parked, and doubly gated — it is not merely "stubbed".** An earlier version of this entry said the dispatcher "advertises `ecdsa_secp384r1_sha384` (0x0503)". It does not, and has not since v0.4.1: `sig_algs_ext_data` in `src/tls_handshake.s` carries exactly one scheme, `ecdsa_secp256r1_sha256` (0x0403), and `src/crypto/ecdsa_verify.s` compiles its P-384 arm to a `sec` reject unless `ENABLE_P384_VERIFY=1`. Both gates matter, because the curve comes from the certificate rather than from what we advertised — that combination is what closed the v0.4.0 hang in which a P-384 certificate made the overlay swap DMA over live resident code. Separately, **no P-384 build target has ever completed**: `make p384-overlay` from a clean tree stops at `No rule to make target 'build/labels.txt'`, and once a main build has produced that file it stops at `Segment 'LIB_NISTCURVES_SHA384_TABLES' overflows memory area 'OVERLAY_REGION' by 1536 bytes`. Certificates requiring P-384 are rejected, not verified. From the v0.14.0 pin the lane is gated at the **link line** as well: `src/crypto/ecdsa_verify_384.s` and `src/crypto/p384_force_link.s` link only under `ENABLE_P384_VERIFY=1`. They used to be in every shipped image and reachable from none of it — ca65 emits no import record for an `.import` nothing references, so the wildcard pulled them in — at a cost of 332 B (299 B of `CRYPTO_AUX_CODE` + 33 B of `CRYPTO_RODATA`), which is the space that made the v0.14.0 bump fit on ip65 at all. `ENABLE_P384_VERIFY=1` now also applies on all five profiles: it used to be silently dropped by the two REU-profile builds, which is issue #207 — the mutation control that was supposed to fail under it passed vacuously there.
 - **`USE_X25519_SIBLING=1` links under neither backend, and each backend dies on a different segment.** The duplicate-symbol failure this entry used to record — `ld65: Error: Duplicate external identifier: 'reu_mul_tables_init'`, on **both** backends — was closed by the `libs/nistcurves` v0.10.1 / `libs/x25519` v0.11.0 bump plus a build-time deferral: `tools/integration/build_nistcurves_p256.sh` passes `-D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH` through `CONTRACT_DEFINES`, so the library gates out its own copy of the SPEC §8.2 `reu_mul` provider that `src/boot.s` supplies itself. (This entry used to describe an archive-surgery workaround — dropping `reu_mul_init.o`. That is gone: the wrapper `cp`s the upstream archive unmodified, which is what §6.1 requires.) What replaced it is a placement problem, not a symbol collision. Measured at the `libs/x25519` **v0.16.0** pin and identical at v0.13.0, `make clean && make ... USE_X25519_SIBLING=1` stops with `Segment 'X25519_BSS' overflows memory area 'CRYPTO_OVERLAY' by 1536 bytes` under UCI and `Segment 'X25519_RODATA' overflows memory area 'CRYPTO_OVERLAY' by 3840 bytes` under ip65 (ip65's overlay slot is 4,212 B against UCI's 7,680 B). **An earlier version of this entry claimed the UCI link succeeded, and quoted 3,584 B for ip65. Both were wrong** — the UCI link has not produced a PRG, and 3,584 was a figure from a tree in which `HTTP_AUX_CODE` was not yet a `CRYPTO_OVERLAY` tenant. **Neither number is a total deficit, either:** ld65 warns once per memory area, at the first segment that tips it over, so everything placed after that segment is uncounted. ip65's real shortfall is **5,376 B**. The derivation, and the wrong explanation that fit the evidence first, are in `docs/engineering-notes.md` under "`USE_X25519_SIBLING=1` overflow — two relink experiments". The flag remains **off by default** and no shipped artifact contains the sibling; the in-tree X25519 in `src/crypto/{x25519,fe25519}.s` is what every release PRG is built from. Flipping the default is not a decision anyone can take on byte grounds today.
 - **Real-server reach is UCI/comb + turbo only, and has size limits.** The public-internet HTTPS above works on the comb profile at turbo; the stock-C64 ip65 path is far too slow for a real server's connection window (~36 min/handshake). Among real leaves, en.wikipedia.org's 1636 B leaf needs the 2048 B UCI `cert_buf` (fits); anything larger, or a server that ignores `max_fragment_length` and sends >548 B records (e.g. Cloudflare), is out of scope. Cloudflare additionally enforces a ~15 s connect-to-first-request deadline the C64 cannot meet and is deliberately unsupported.
-- **The wikipedia stall was a client bug, now fixed.** Historical note for anyone bisecting: TLS flights larger than the ~4 KB UCI receive ring used to stall permanently, because `net_poll` requested a fixed 512 B and its fill loop dropped bytes past the ring's current free space (discarded as "delivered"). Fixed by clamping the `SOCKET_READ` request to ring free space (`src/net/uci/net.s`). It was never a firmware bug; github/browserleaks/lwn flights are under 4 KB and were unaffected.
+- **The wikipedia stall was a client bug, now fixed.** Historical note for anyone bisecting: TLS flights larger than the ~4 KB UCI receive ring used to stall permanently, because `net_poll` requested a fixed 512 B and its fill loop dropped bytes past the ring's current free space (discarded as "delivered"). Fixed by clamping the `SOCKET_READ` request to ring free space (`src/net/uci/net.s`). It was never a firmware bug; github/browserleaks/lwn flights are under 4 KB and were unaffected. **That fix is not the end of the large-body story** — the body path still terminates early and reports success, intermittently, on both trees (issue #211). Do not read this bullet as saying large fetches are now sound.
 - **VICE 3.9** previously appeared to crash on chained HMAC-SHA256 calls (backend-independent — affects the crypto-only test suites), but this was caused by hardcoded port numbers bypassing the test harness port allocator. With proper `ViceInstanceManager` usage (no hardcoded ports), all N=1..10 chained calls succeed reliably.
 
 ## Test Automation
@@ -756,7 +784,7 @@ python3 tools/uci/rig_http_local.py          # HTTP GET against local listener
 python3 tools/uci/rig_http_live.py           # HTTP GET against a real server
 python3 tools/uci/rig_https_local.py         # HTTPS GET (TLS 1.3 + ECDSA-P256)
 python3 tools/uci/rig_https_live.py          # HTTPS against a real public server
-python3 tools/uci/rig_https_wiki.py          # the 125 KB Wikipedia fetch into the REU
+python3 tools/uci/rig_https_wiki.py          # the Wikipedia fetch into the REU (body unverified, #211/#210)
 python3 tools/uci/rig_https_banner.py        # the only rig that walks the menu into do_https_get
 python3 tools/uci/rig_https_print_body.py    # wrapper: print the response body
 python3 tools/uci/rig_https_bad_finished.py  # client must ABORT on a forged server Finished
