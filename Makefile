@@ -357,8 +357,41 @@ endif
 # test that proves this gate is load-bearing was a no-op on two of the five
 # configurations. The three onchip profiles were unaffected and their armed
 # PRGs are byte-identical across this move.
+#
+# The two P-384-only objects are gated on the SAME flag, so the lane is one
+# switch and not two half-switches:
+#
+#   src/crypto/ecdsa_verify_384.s  the TLS-side P-384 dispatcher. Its only
+#                                  export is ecdsa_verify_384_tls, and the
+#                                  only `.import` of that symbol anywhere is
+#                                  the one inside ecdsa_verify.s's
+#                                  `.ifdef ENABLE_P384_VERIFY`. ca65 emits no
+#                                  import record for an .import nothing
+#                                  references, so with the flag off the object
+#                                  was linked and UNREACHABLE: it appears in
+#                                  no Imports-list entry of any of the five
+#                                  build/c64-https.map files, and od65
+#                                  --dump-imports on ecdsa_verify.o does not
+#                                  list it. It cost 299 B of CRYPTO_AUX_CODE +
+#                                  33 B of CRYPTO_RODATA + 2 B of BSS in every
+#                                  shipped image.
+#   src/crypto/p384_force_link.s   already inert: its entire body is
+#                                  `.ifdef USE_NISTCURVES_P384`, and nothing
+#                                  defines that symbol today (the CA65FLAGS
+#                                  line for it is commented out below). Zero
+#                                  bytes either way; gated here so the lane's
+#                                  file set lives in one place.
+#
+# What this does NOT do: it does not delete the P-384 lane. Both files stay in
+# tree, as does every other piece of P-384 plumbing, on the same policy the
+# retired EMBED_P256_OVERLAY follows. `ENABLE_P384_VERIFY=1` restores the
+# previous link line; the three onchip profiles' armed PRGs are byte-identical
+# to the pre-gating ones (b9f03169…, 3c271262…, cc555c19…).
+P384_SRCS := src/crypto/ecdsa_verify_384.s src/crypto/p384_force_link.s
 ifeq ($(ENABLE_P384_VERIFY),1)
 CA65FLAGS += -D ENABLE_P384_VERIFY=1
+else
+CRYPTO_SRCS_EFFECTIVE := $(filter-out $(P384_SRCS),$(CRYPTO_SRCS_EFFECTIVE))
 endif
 
 # Per-backend source + object selection.
