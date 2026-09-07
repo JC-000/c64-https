@@ -138,7 +138,20 @@ Variables:
     the slot by 1,536 B.
   - `ENABLE_P384_VERIFY=1` — re-arms the P-384 verify arm. **Unsafe on its
     own** (overwrites live code — see Crypto ABI); exists so
-    `tools/test_p384_overlay_hazard.py` can be mutation-tested.
+    `tools/test_p384_overlay_hazard.py` can be mutation-tested. It is also
+    the **only** thing that links `src/crypto/ecdsa_verify_384.s` and
+    `src/crypto/p384_force_link.s` at all, so it is the one command that
+    keeps `ecdsa_verify_384.s` honest:
+
+        make BACKEND=uci USE_NISTCURVES_ONCHIP=1 ENABLE_P384_VERIFY=1
+
+    **Assembling that file is worthless as coverage**: `.import` of a
+    symbol nothing defines is a LINK-time error in ca65, not an
+    assemble-time one, so `ca65 src/crypto/ecdsa_verify_384.s` succeeds
+    with every one of its imports unresolved. Only the armed link finds a
+    P-384 symbol that has gone away. The flag applies on all five profiles
+    since the hoist out of the `USE_NISTCURVES_ONCHIP` block — it used to
+    be silently dropped by the two REU-profile builds.
   - `HTTPS_HOST` / `HTTPS_PATH` / `HTTPS_SNI` / `HTTPS_PORT` /
     `HTTPS_BODY_TO_REU=1` — build-time target. Hosts >63 chars are a build
     error. The strings live in their own `HTTPS_TARGET_RODATA` segment
@@ -230,6 +243,19 @@ independent changes: the ClientHello no longer advertises `0x0503`, **and**
 The curve comes from the certificate, so the gate is what makes the
 advertisement change safe. No P-384 build target has ever completed (see
 Known issues); fix the build before re-wiring.
+
+The lane is now gated at the **link line** as well as in the source:
+`ecdsa_verify_384.o` used to be in every shipped image and reachable from
+none of them (ca65 emits no import record for an `.import` nothing
+references, so the wildcard pulled it in), costing 299 B of
+`CRYPTO_AUX_CODE` + 33 B of `CRYPTO_RODATA` everywhere. Both P-384-only
+objects now link only under `ENABLE_P384_VERIFY=1`. Measured consequence:
+exactly two symbols lose their only link-time consumer —
+`crypto_swap_to_p384_sha384` and `crypto_swap_to_p384_curve`. They are
+still exported unconditionally by `src/crypto/shared/crypto_swap.s` and
+still occupy bytes; nothing imports them in any of the five unarmed
+builds. That is the whole surface change, and it is measured from the
+`Imports list` of all five `build/c64-https.map` files, not estimated.
 
 Sibling-library memory requirements: code + rodata in `CRYPTO_HOT` /
 `CRYPTO_RESIDENT` ($6000-$9FFF), never crossing $A000 (boot zeroes
@@ -653,7 +679,8 @@ ip65 (`cfg/c64-https-ip65.cfg`):
   $2000-$3FFF  NET_CODE            ip65 blob + LOADER_OVERFLOW +
                                    CRYPTO_AUX_CODE2 + HTTPS_TARGET_RODATA
   $4000-$4F8B  NET_BSS             blob's BSS (live at runtime, EMPTY to ld65)
-  $4F8C-$5FFF  CRYPTO_OVERLAY      4,212 B: TLS_CODE + CRYPTO_AUX_CODE
+  $4F8C-$5FFF  CRYPTO_OVERLAY      4,212 B: TLS_CODE + CRYPTO_AUX_CODE +
+                                   HTTP_AUX_CODE + HTTP_AUX_CODE2
   $6000-$9FFF  CRYPTO_RESIDENT     code + rodata, never crossing $A000
   $A000-$BFFF  CRYPTO_COLD_SHADOW  BSS; `cert_buf` (1,536 B) pinned at $A000
                                    and unioned with LIB_NISTCURVES_P256_BSS
@@ -661,17 +688,23 @@ ip65 (`cfg/c64-https-ip65.cfg`):
                                    capped so growth is a link error)
   $C000-$CFFF  TCP_BUF             4 KB ring for the ip65 callback
 
-ip65 is essentially full. Measured at the v0.11.2 pin: 56 B NET_CODE tail
-(on top of the 20 B the default target strings already use), 40 B
-CRYPTO_RESIDENT, 22 B CRYPTO_OVERLAY, 21 B LOADER — the "~170-186 B /
-16 B LOADER" this file used to carry was stale. PRG size is not a headroom
-gauge. **CRYPTO_OVERLAY and CRYPTO_RESIDENT are ADJACENT ($4F8C-$5FFF and
-$6000-$9FFF), so they are one pool of 20,596 B, and no amount of shuffling
-segments between them creates space** — that is why the contiguous-region
-cfg restructure is only worth the 22 B of boundary fragmentation it
-recovers. The other two free blocks are not reachable from that pool:
-NET_CODE's tail is the `HTTPS_HOST`/`HTTPS_PATH` budget and the smallest
-segment in the pool is 169 B.
+ip65 is essentially full. Measured at the v0.14.0 pin, with the P-384
+objects gated out of the link: 56 B NET_CODE tail (on top of the 20 B the
+default target strings already use), 145 B CRYPTO_RESIDENT, 152 B
+CRYPTO_OVERLAY, 21 B LOADER, and a 43 B hole below TABLES_BSS in
+CRYPTO_COLD_SHADOW. PRG size is not a headroom gauge. **CRYPTO_OVERLAY and
+CRYPTO_RESIDENT are ADJACENT ($4F8C-$5FFF and $6000-$9FFF), so they are one
+pool of 20,596 B, and no amount of shuffling segments between them creates
+space** — that is why the contiguous-region cfg restructure is only worth
+the boundary fragmentation it recovers. That property is what settled the
+v0.14.0 bump: pre-gating content was 20,631 B against 20,596 B of capacity,
+35 B short *however* the segments were arranged, so ip65 could not be made
+to link by moving anything. Gating the unreachable `ecdsa_verify_384.o` out
+(332 B) is what created real space; `HTTP_AUX_CODE2` moving to
+CRYPTO_OVERLAY only rebalances the two halves of the pool, and does it to
+match what both UCI cfgs already do. The other free blocks are not
+reachable from the pool: NET_CODE's tail is the `HTTPS_HOST`/`HTTPS_PATH`
+budget and the smallest segment in the pool is 169 B.
 
   - `LOADER_OVERFLOW` carries ~125 B of `http.s` that outgrew LOADER.
   - `src/loadaddr.s` (PRG load address) and `src/exports.s` (promotes
