@@ -462,7 +462,12 @@ def test_the_handoff_boundary_is_four_changes_not_three() -> None:
 
     def stops_extending(changes: int, timeout: float = 0.15,
                         observe: float = 0.9) -> bool:
-        lock = DeviceLock("fake.invalid", lock_dir=Path(tempfile.mkdtemp()))
+        # heartbeat_interval=None: granting the lock at the end of the
+        # observation window would otherwise start a heartbeat thread
+        # that sleeps a full interval before noticing the lockfile is
+        # not there. No holder here is real, so none needs one.
+        lock = DeviceLock("fake.invalid", lock_dir=Path(tempfile.mkdtemp()),
+                          heartbeat_interval=None)
         identities = [1000 + i for i in range(changes + 1)]
         seen = {"i": 0}
 
@@ -471,15 +476,40 @@ def test_the_handoff_boundary_is_four_changes_not_three() -> None:
             seen["i"] += 1
             return True, identities[i]
 
+        # Never grant while we are observing; grant afterwards so the
+        # still-extending arm's thread ends instead of polling at 10 Hz
+        # for the life of the process. A test that leaks a daemon thread
+        # per call is cheap here and expensive in a suite that grows.
+        give_up_at = _time.monotonic() + observe + 0.2
         lock._holder_progress = scripted
-        lock._try_acquire_once = lambda: False
+        lock._try_acquire_once = lambda: _time.monotonic() >= give_up_at
         done = threading.Event()
         thread = threading.Thread(
             target=lambda: (lock.acquire(timeout=timeout), done.set()),
             daemon=True,
         )
         thread.start()
-        return done.wait(observe)
+        stopped = done.wait(observe)
+        thread.join(timeout=2.0)
+        assert not thread.is_alive(), (
+            "the probe thread outlived its acquire; the overrides no longer "
+            "control DeviceLock.acquire and this result means nothing"
+        )
+        return stopped
+
+    # A rename is caught by the hasattr checks above; a *signature* change
+    # is not -- the override would simply never be called the way acquire
+    # calls it, and the arm would fail through the boundary assertions with
+    # a message blaming the boundary. Call it once here so that failure
+    # names the real cause.
+    try:
+        stops_extending(0, observe=0.2)
+    except TypeError as exc:
+        raise AssertionError(
+            "DeviceLock._holder_progress / _try_acquire_once changed shape "
+            f"({exc}); this probe drives them directly, so re-measure the "
+            "handoff boundary rather than trusting either assertion below"
+        ) from exc
 
     assert not stops_extending(3), (
         "three identity changes stopped extending; the boundary moved to "
