@@ -53,6 +53,7 @@ SUITE_ORDER = (
     "finished_verify",
     "ecdh_zero_check",
     "hs_sequence",
+    "reu_row_abi",
 )
 
 # Suites that define run_tests() but are deliberately NOT dispatched here,
@@ -154,6 +155,10 @@ def run_test_suite(name, transport, labels, seed):
         elif name == "ecdh_zero_check":
             from test_ecdh_zero_check import run_tests as ecdh_zero_run
             passed, failed = ecdh_zero_run(transport, labels)
+
+        elif name == "reu_row_abi":
+            from test_reu_row_abi import run_tests as reu_row_abi_run
+            passed, failed = reu_row_abi_run(transport, labels)
 
         elif name == "hs_sequence":
             # Needs a TLS_STREAM_DEFRAME build; main() drops it from the
