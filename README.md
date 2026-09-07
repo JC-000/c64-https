@@ -359,16 +359,21 @@ out of the link:
 | `CRYPTO_RESIDENT` / `CRYPTO_HOT` | 145 B | 203 B | 93 B |
 | `CRYPTO_COLD_SHADOW` (gap below the `$BA00` `TABLES_BSS` pin) | 43 B | 1,577 B | 1,577 B |
 
-Every cell moved, and not by a common factor — **read them per profile and
-re-measure all three when you change one.** The UCI `NET_CODE` gain is the
+Where a cell moved it moved for its own reason, and the reasons do not
+generalise across profiles — **read them per profile, and re-measure all three
+when you change one.** The UCI `NET_CODE` gain is the
 299 B of `CRYPTO_AUX_CODE` that `ecdsa_verify_384.o` occupied in every image
 while being reachable from none; `uci-onchip`'s overlay lost ground because
 `LIB_NISTCURVES_P256_RODATA` moved there to absorb the v0.12.0 REU-settle
 call sites, while `uci-comb`'s `CRYPTO_HOT` fell to 93 B because its cfg
 already routed `CRYPTO_RODATA` to the overlay, so its share of the recovery
-landed there instead. The two `CRYPTO_COLD_SHADOW` cells also lose a byte to
-arithmetic: they used to be measured from the last *used* address rather than
-the first free one.
+landed there instead. Four cells did not move at all (`LOADER` and `NET_CODE`
+on ip65, `LOADER` on `uci-onchip`, both `NET_BSS_TAIL` cells), which is its own
+warning: an unchanged number here is not evidence that a region was left alone.
+The single byte off each `CRYPTO_COLD_SHADOW` cell is real segment growth, not
+a re-count of the old one — v0.14.0 adds a 3 B `LIB_NISTCURVES_BSS` while `BSS`
+shrinks by 2, which walks `CRYPTO_BSS`'s last address from `$B9D3` to `$B9D4`
+on ip65 and from `$B3D5` to `$B3D6` under UCI.
 
 So ip65 is still genuinely full — 152 B is its largest block now, and the
 56 B `NET_CODE` tail is still the budget a longer `HTTPS_HOST`/`HTTPS_PATH`
