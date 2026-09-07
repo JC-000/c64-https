@@ -39,6 +39,7 @@ sys.path.insert(0, "tools")
 # Adding a suite and forgetting to wire it here is a test failure, not a
 # silently smaller TOTAL (issue #169).
 SUITE_ORDER = (
+    "x25519_pin",
     "x509",
     "entropy",
     "net",
@@ -92,7 +93,18 @@ def run_test_suite(name, transport, labels, seed):
     passed = failed = 0
 
     try:
-        if name == "net":
+        if name == "x25519_pin":
+            # Host-side only: reads libs/x25519/src/lib_version.s off disk.
+            # No transport, no labels, no seed -- run_tests accepts them to
+            # match this runner's uniform signature and ignores all three.
+            # First in SUITE_ORDER because it is the cheapest suite here by
+            # orders of magnitude (milliseconds, no VICE round-trip) and
+            # because a submodule checkout that is not the reviewed pin is
+            # something to learn before spending half an hour on crypto.
+            from test_x25519_pin import run_tests as x25519_pin_run
+            passed, failed = x25519_pin_run(transport, labels, seed)
+
+        elif name == "net":
             from test_net import run_tests as net_run
             passed, failed = net_run(transport, labels)
 

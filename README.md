@@ -522,15 +522,16 @@ Progress:
 
 - **The handshake is slow, and the ECDSA P-256 verify dominates it.** Every figure here is quoted from the measurement record in `CLAUDE.md`. Except where noted they were taken at the **`libs/nistcurves` v0.6.0 pin**, and the pin is now v0.11.2, so treat them as a baseline rather than as current. The one profile re-measured at the current pin is comb: 46.986 / 24.440 / 16.402 s verify at 16 / 32 / 48 MHz (U64E, n=3, VIC blanking active). End-to-end handshake + GET against the local listener, U64E, master 2ceb5b1: **80.8 s** (REU profile, 48 MHz), **45.5 s** (onchip profile, 48 MHz), **1,157.7 s** (REU, stock 1 MHz). One point of that sweep has been carried forward: 48 MHz REU measures **82.1 s** at v0.9.1 and **82.4 s** at v0.10.1 (n=1 each, so the 0.4% step between them is noise; the 1.6% from v0.6.0 is the FIPS 186-5 public-key validation gate v0.7.0 added). No other clock or profile has been re-measured. On the REU-less stock-C64 path (ip65 + onchip, no REU, honest 1 MHz in VICE) the whole run measured **2,159.7 s = 36.0 min**, of which the verify stretch alone was 1,416.7 s. That is fine for the local listener, which holds the connection open; it exceeds a typical 10-30 s real-world server handshake window.
 - **P-384 is parked, and doubly gated — it is not merely "stubbed".** An earlier version of this entry said the dispatcher "advertises `ecdsa_secp384r1_sha384` (0x0503)". It does not, and has not since v0.4.1: `sig_algs_ext_data` in `src/tls_handshake.s` carries exactly one scheme, `ecdsa_secp256r1_sha256` (0x0403), and `src/crypto/ecdsa_verify.s` compiles its P-384 arm to a `sec` reject unless `ENABLE_P384_VERIFY=1`. Both gates matter, because the curve comes from the certificate rather than from what we advertised — that combination is what closed the v0.4.0 hang in which a P-384 certificate made the overlay swap DMA over live resident code. Separately, **no P-384 build target has ever completed**: `make p384-overlay` from a clean tree stops at `No rule to make target 'build/labels.txt'`, and once a main build has produced that file it stops at `Segment 'LIB_NISTCURVES_SHA384_TABLES' overflows memory area 'OVERLAY_REGION' by 1536 bytes`. Certificates requiring P-384 are rejected, not verified.
-- **`USE_X25519_SIBLING=1` now links under UCI, and still does not under ip65.** The duplicate-symbol failure this entry used to record — `ld65: Error: Duplicate external identifier: 'reu_mul_tables_init'`, on **both** backends — was closed by the `libs/nistcurves` v0.10.1 / `libs/x25519` v0.11.0 bump plus a build-time deferral: `tools/integration/build_nistcurves_p256.sh` passes `-D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH` through `CONTRACT_DEFINES`, so the library gates out its own copy of the SPEC §8.2 `reu_mul` provider that `src/boot.s` supplies itself. (This entry used to describe an archive-surgery workaround — dropping `reu_mul_init.o`. That is gone: the wrapper `cp`s the upstream archive unmodified, which is what §6.1 requires.) Re-measured at the current v0.11.2 pins, unchanged: `make clean && make BACKEND=uci USE_X25519_SIBLING=1` produces a 62,977 B PRG, and ip65 stops instead at `Segment 'X25519_RODATA' overflows memory area 'CRYPTO_OVERLAY' by 3584 bytes` — a placement problem (ip65's overlay slot is 4,212 B against UCI's 7,680 B), not a symbol collision. The flag remains **off by default** and no shipped artifact contains the sibling; the in-tree X25519 in `src/crypto/{x25519,fe25519}.s` is what every release PRG is built from. Flipping the default is a separate decision that wants a hardware handshake behind it.
+- **`USE_X25519_SIBLING=1` links under neither backend, and each backend dies on a different segment.** The duplicate-symbol failure this entry used to record — `ld65: Error: Duplicate external identifier: 'reu_mul_tables_init'`, on **both** backends — was closed by the `libs/nistcurves` v0.10.1 / `libs/x25519` v0.11.0 bump plus a build-time deferral: `tools/integration/build_nistcurves_p256.sh` passes `-D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH` through `CONTRACT_DEFINES`, so the library gates out its own copy of the SPEC §8.2 `reu_mul` provider that `src/boot.s` supplies itself. (This entry used to describe an archive-surgery workaround — dropping `reu_mul_init.o`. That is gone: the wrapper `cp`s the upstream archive unmodified, which is what §6.1 requires.) What replaced it is a placement problem, not a symbol collision. Measured at the `libs/x25519` **v0.16.0** pin and identical at v0.13.0, `make clean && make ... USE_X25519_SIBLING=1` stops with `Segment 'X25519_BSS' overflows memory area 'CRYPTO_OVERLAY' by 1536 bytes` under UCI and `Segment 'X25519_RODATA' overflows memory area 'CRYPTO_OVERLAY' by 3840 bytes` under ip65 (ip65's overlay slot is 4,212 B against UCI's 7,680 B). **An earlier version of this entry claimed the UCI link succeeded, and quoted 3,584 B for ip65. Both were wrong** — the UCI link has not produced a PRG, and 3,584 was a figure from a tree in which `HTTP_AUX_CODE` was not yet a `CRYPTO_OVERLAY` tenant. **Neither number is a total deficit, either:** ld65 warns once per memory area, at the first segment that tips it over, so everything placed after that segment is uncounted. ip65's real shortfall is **5,376 B**. The derivation, and the wrong explanation that fit the evidence first, are in `docs/engineering-notes.md` under "`USE_X25519_SIBLING=1` overflow — two relink experiments". The flag remains **off by default** and no shipped artifact contains the sibling; the in-tree X25519 in `src/crypto/{x25519,fe25519}.s` is what every release PRG is built from. Flipping the default is not a decision anyone can take on byte grounds today.
 - **Real-server reach is UCI/comb + turbo only, and has size limits.** The public-internet HTTPS above works on the comb profile at turbo; the stock-C64 ip65 path is far too slow for a real server's connection window (~36 min/handshake). Among real leaves, en.wikipedia.org's 1636 B leaf needs the 2048 B UCI `cert_buf` (fits); anything larger, or a server that ignores `max_fragment_length` and sends >548 B records (e.g. Cloudflare), is out of scope. Cloudflare additionally enforces a ~15 s connect-to-first-request deadline the C64 cannot meet and is deliberately unsupported.
 - **The wikipedia stall was a client bug, now fixed.** Historical note for anyone bisecting: TLS flights larger than the ~4 KB UCI receive ring used to stall permanently, because `net_poll` requested a fixed 512 B and its fill loop dropped bytes past the ring's current free space (discarded as "delivered"). Fixed by clamping the `SOCKET_READ` request to ring free space (`src/net/uci/net.s`). It was never a firmware bug; github/browserleaks/lwn flights are under 4 KB and were unaffected.
 - **VICE 3.9** previously appeared to crash on chained HMAC-SHA256 calls (backend-independent — affects the crypto-only test suites), but this was caused by hardcoded port numbers bypassing the test harness port allocator. With proper `ViceInstanceManager` usage (no hardcoded ports), all N=1..10 chained calls succeed reliably.
 
 ## Test Automation
 
-`tools/run_all_tests.py` dispatches **14 suites** (`SUITE_ORDER` in that file
-is the source of truth; `tools/test_runner_coverage.py` fails the build if a
+`tools/run_all_tests.py` dispatches every suite named in `SUITE_ORDER` (that
+tuple is the source of truth, and no count is quoted here because branches add
+suites; `tools/test_runner_coverage.py` fails the build if a
 `tools/test_*.py` defining `run_tests()` is missing from it). They use the
 [`c64-test-harness`](https://github.com/JC-000/c64-test-harness) package to
 drive VICE via its binary monitor protocol. VICE runs the **ip65 backend by
@@ -539,14 +540,16 @@ below). The runner allocates a fresh VICE instance per suite, with `-reu
 -reusize 512`, which the sibling P-256 code requires. All tests log VICE PID
 and port for multi-agent safety.
 
-Measured 2026-09-05 on an M-series Mac, plain `python3 tools/run_all_tests.py`
-(so: the default ip65 REU-profile build):
+Measured 2026-09-05 on an M-series Mac, on master and before this branch,
+plain `python3 tools/run_all_tests.py` (so: the default ip65 REU-profile
+build). Suites added since move the TOTAL, so re-run it rather than quoting
+this:
 
 ```
 TOTAL: 329/329 passed, 0 failed -- 1 suite(s) SKIPPED: hs_sequence
 ```
 
-**13 suites ran; `hs_sequence` did not.** It needs `tls_deframe_pump`, which
+**Every dispatched suite ran but one: `hs_sequence` did not.** It needs `tls_deframe_pump`, which
 only exists in a `TLS_STREAM_DEFRAME` (i.e. `BACKEND=uci`) build, so the runner
 skips it *loudly* and prints a warning that the aggregate does not certify it.
 Read the skip line, not just the TOTAL. The `x509` suite alone takes ~2 min and
@@ -555,6 +558,7 @@ sets the wall-clock floor for the whole run.
 | suite | assertions |
 |---|---:|
 | `x25519` | 73 |
+| `x25519_pin` | 2 (reads the submodule off disk) |
 | `net` | 65 |
 | `http` | 61 |
 | `crypto` | 22 |
@@ -589,6 +593,7 @@ python3 tools/test_keyschedule_steps.py # key schedule step-by-step (RFC 8448 ve
 python3 tools/test_entropy.py           # SID/CIA hardware init, DRBG seeding, output quality
 python3 tools/test_http.py              # HTTP/1.1 GET builder, response parser, status codes
 python3 tools/test_x25519.py            # fe25519 field ops, x25519_clamp, scalarmult + RFC 7748 vectors
+python3 tools/test_x25519_pin.py        # libs/x25519 checkout is the reviewed pin (host-side, milliseconds)
 python3 tools/test_finished_verify.py   # the server-Finished REJECTION path, driven over DMA
 python3 tools/test_ecdh_zero_check.py   # the all-zero X25519 shared secret must abort the handshake
 python3 tools/test_hs_sequence.py       # BACKEND=uci only — skipped by the runner on an ip65 build
