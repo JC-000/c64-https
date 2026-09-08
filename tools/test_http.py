@@ -85,8 +85,9 @@ def test_build_get_basic(transport, labels):
     req_len_bytes = read_bytes(transport, req_len, 2)
     actual_len = req_len_bytes[0] | (req_len_bytes[1] << 8)
 
-    # Read the string constants that ACME actually emitted to know what
-    # byte values we should expect (PETSCII vs ASCII depends on ACME config).
+    # Read the string constants back out of the loaded image rather than
+    # hardcoding them, so the expected bytes are whatever ca65 actually
+    # emitted for these labels.
     get_verb_addr = labels.address("http_get_verb")
     version_addr = labels.address("http_version")
     host_hdr_addr = labels.address("http_host_hdr")
