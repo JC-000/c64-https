@@ -71,6 +71,7 @@ from _device_lock_helper import (
 )
 
 from _memory_policy import build_policy_and_arbiter
+from _device_prep import DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
 
 
@@ -455,22 +456,49 @@ def main() -> int:
         enable_uci(client)
         uci_enabled = True
 
-        # REU preflight (issue #97). The REU-profile archive's fp_mul
-        # DMAs its multiply rows; with no REU it returns a*255*b mod p
-        # and every vector "verifies" as a REJECT with no diagnostic —
-        # a silently wrong benchmark, which is worse than a slow one.
+        # --- Device prep: reset-then-configure (issues #197, #187, #212) ---
+        # Configure the REU this profile needs rather than refusing a
+        # device that is merely at its factory default — which is what
+        # this script did, and was observed doing on a U64E at fw 3.15
+        # (#197). Boot at the first sweep speed while we are here: a
+        # comb-profile boot runs ec_precompute_256 (~30-50 s even at
+        # 64 MHz, ~40 min at stock), so booting at leftover config speed
+        # is not survivable, and it matches the C64U boot-at-speed rule.
+        # A benchmark also has the sharpest possible stake in #187's
+        # policy: a run at an unknown clock is not a slow measurement,
+        # it is a wrong one.
+        # As in rig_https_local: the device-state record lands with this
+        # run's artifacts, and gets a directory of its own when DEBUG_CAPTURE
+        # left none. A benchmark without a record of the clock and REU state
+        # it ran against is a number with no provenance.
+        # As in rig_https_local, the prune now also runs on a capture-off
+        # run, so such a run can rotate away the oldest of the kept 5
+        # trace dirs. Accepted: unbounded prep dirs would be worse.
+        if run_dir is None:
+            _prune_old(DEBUG_BASE_DIR, keep=5)
+            prep_dir = _create_run_dir(DEBUG_BASE_DIR)
+            print(f"Device-state record dir: {prep_dir} "
+                  "(device_state.json only; DEBUG_CAPTURE is off)")
+        else:
+            prep_dir = run_dir
+
+        try:
+            prepare_device(client, LABELS_PATH, turbo_mhz=MHZ_LIST[0],
+                           artifact_dir=prep_dir)
+        except DevicePrepError as exc:
+            print(str(exc), file=sys.stderr)
+            return 4
+
+        # REU preflight (issue #97), the backstop behind the prep. The
+        # REU-profile archive's fp_mul DMAs its multiply rows; with no REU
+        # it returns a*255*b mod p and every vector "verifies" as a REJECT
+        # with no diagnostic — a silently wrong benchmark, which is worse
+        # than a slow one.
         try:
             preflight_reu(client, LABELS_PATH)
         except ReuPreflightError as exc:
             print(str(exc), file=sys.stderr)
             return 4
-
-        # Boot at the first sweep speed: comb-profile boots run
-        # ec_precompute_256 (~30-50 s even at 64 MHz, ~40 min at stock),
-        # so booting at leftover config speed is not survivable. Also
-        # matches the C64U boot-at-speed rule (runtime-switch quirk).
-        set_turbo_mhz(client, MHZ_LIST[0])
-        time.sleep(0.5)
 
         print("Resetting machine...")
         client.reset()

@@ -44,12 +44,26 @@ holds, before the long run:
 
 What it deliberately does NOT do
 --------------------------------
-**It never enables the REU for you.** #97 offered that as an option and
-it is the wrong trade: the U64E is a queue-shared device across the
-c64-* projects, REST config writes persist until the next power cycle,
-and a test that silently reconfigures someone else's hardware turns a
-legible error into a mystery two runs later on a different branch. A
-clear refusal costs seconds; a silent reconfiguration costs trust.
+**This function never enables the REU for you** — but the rigs now do,
+before calling it (issue #197). The two are not in tension, and the
+distinction is worth keeping straight:
+
+* ``tools/uci/_device_prep.py::prepare_device`` is *setup*. It runs
+  first, under the same DeviceLock, and configures the REU the linked
+  profile needs. Device config on an Ultimate is runtime-only — a
+  re-flash restores factory defaults and we never write flash — so
+  ``RAM Expansion Unit: Disabled`` is the DEFAULT state, not another
+  lane's leftovers, and refusing it (which is what four of the five
+  callers here did, measured on a U64E at fw 3.15) is a rig failing to
+  do its own job rather than a device fault.
+* This preflight stays exactly where it was, as the *backstop* for the
+  case where prep was skipped, overridden, or did not take. It reads and
+  refuses; it writes nothing. That keeps its verdict a clean statement
+  about the state the run is about to use.
+
+What #97 rejected — and this still rejects — is *this* check silently
+reconfiguring hardware as a side effect of being asked a question. A
+guard that repairs what it is measuring cannot report on it.
 
 Detection
 ---------
@@ -98,6 +112,31 @@ _ONCHIP_SYMBOLS = ("gen_mul_row", "fe_gen_mul_row", "sqtab_reserved")
 _BANKS_EQUATE = "LIB_NISTCURVES_REU_BANKS_USED"
 
 SKIP_ENV = "C64_SKIP_REU_PREFLIGHT"
+
+#: Values that read as "off" for the three flags that share this parser:
+#: C64_SKIP_REU_PREFLIGHT, C64_SKIP_DEVICE_PREP and C64_FORCE_TURBO_WRITE.
+#: It is NOT what every ``C64_*`` switch in tools/uci/ does — ``C64_SKIP_
+#: TEMP_GC`` still tests ``== "1"`` / ``!= "1"`` (and does so inconsistently
+#: between its two call sites), and ``KEEP_DEBUG_ON_PASS`` is spelled three
+#: different ways across the rigs. Unifying those is worth doing and is not
+#: done here; do not read this constant as already covering them.
+_ENV_FALSE = frozenset({"", "0", "no", "false", "off"})
+
+
+def env_flag_enabled(name: str) -> bool:
+    """Whether the environment flag *name* is set to something truthy.
+
+    One parser for the three guard flags — ``C64_SKIP_REU_PREFLIGHT``,
+    ``C64_SKIP_DEVICE_PREP`` and ``C64_FORCE_TURBO_WRITE`` — because there
+    were two: this module tested ``!= "0"`` while
+    ``tools/uci/_device_prep.py`` also refused ``no``/``false``/``off``, so
+    ``C64_SKIP_REU_PREFLIGHT=false`` SKIPPED the guard while
+    ``C64_SKIP_DEVICE_PREP=false`` did not — with the two documented on one
+    line as if they behaved alike. Unified toward the stricter reading,
+    which is the fail-closed direction for the skip flags: spelling a flag
+    ``false`` now leaves the guard ON.
+    """
+    return os.environ.get(name, "").strip().lower() not in _ENV_FALSE
 
 
 class ReuPreflightError(RuntimeError):
@@ -274,7 +313,7 @@ def preflight_reu(
     """
     out = stream if stream is not None else sys.stdout
 
-    if os.environ.get(SKIP_ENV, "0") != "0":
+    if env_flag_enabled(SKIP_ENV):
         print(f"REU preflight: skipped ({SKIP_ENV} set)", file=out, flush=True)
         return "skipped"
 
@@ -439,9 +478,11 @@ def _failure_message(observed: str, reason: str) -> str:
         "-> Enabled\n"
         "     (a C64 Ultimate ships with this Disabled; the setting reverts "
         "on power\n"
-        "     cycle, so it may need redoing). This test will not set it for "
-        "you: the\n"
-        "     device is queue-shared and config writes persist.\n"
+        "     cycle, so it may need redoing). Reaching this message means "
+        "the rig's\n"
+        "     own prep did not run or did not take -- see "
+        "tools/uci/_device_prep.py,\n"
+        "     and check whether C64_SKIP_DEVICE_PREP is set.\n"
         "\n"
         "  2. Or build the on-chip profile, which needs no REU at all:\n"
         "       make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1\n"

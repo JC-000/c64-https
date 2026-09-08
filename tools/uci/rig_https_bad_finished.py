@@ -103,11 +103,8 @@ from c64_test_harness.backends.device_lock import DeviceLock, DeviceLockTimeout
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 from c64_test_harness.backends.ultimate64_helpers import (
-    set_turbo_mhz,
     runner_health_check,
     Ultimate64RunnerStuckError,
-    CAT_U64_SPECIFIC,
-    cpu_speed_enum,
 )
 from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
@@ -120,6 +117,7 @@ from _device_lock_helper import (  # noqa: E402
 from _memory_policy import (  # noqa: E402
     build_policy_and_arbiter_with_overlay_carveout,
 )
+from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
 from _sni_precondition import enforce_sni_precondition  # noqa: E402
 
@@ -560,32 +558,29 @@ def main() -> int:
             print(f"[fatal] runner wedged at {HOST}: {exc}", file=sys.stderr)
             return 3
 
-        # REU preflight (issue #97): a REU-profile build on a REU-less
-        # device fails its first AEAD tag and spins ~44 min. Both the good
-        # and bad Finished modes need a working handshake up to Finished,
-        # so this run is worthless either way without the REU.
+        # Device prep (issues #197, #187, #212): configure the REU this
+        # profile needs and set turbo BEFORE boot, both logged with the
+        # device's before- and after-state. A redundant turbo write is
+        # itself what glitches the UCI bridge on a C64U (see the long note
+        # in rig_https_local.py and the c64u_starlight_device memory), so an
+        # unreadable turbo state aborts rather than writing blind.
+        try:
+            prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ,
+                           artifact_dir=run_dir)
+        except DevicePrepError as exc:
+            print(str(exc), file=sys.stderr)
+            return 4
+
+        # REU preflight (issue #97), the backstop behind the prep: a
+        # REU-profile build on a REU-less device fails its first AEAD tag
+        # and spins ~44 min. Both the good and bad Finished modes need a
+        # working handshake up to Finished, so this run is worthless either
+        # way without the REU.
         try:
             preflight_reu(client, LABELS_PATH)
         except ReuPreflightError as exc:
             print(str(exc), file=sys.stderr)
             return 4
-
-        # Set turbo BEFORE boot, and skip a redundant write — the config write
-        # itself is what glitches the UCI bridge on a C64U (see the long note
-        # in rig_https_local.py and the c64u_starlight_device memory).
-        try:
-            cat = client.get_config_category(CAT_U64_SPECIFIC)
-            inner = cat.get(CAT_U64_SPECIFIC, cat)
-            cur_speed, cur_turbo = inner.get("CPU Speed"), inner.get("Turbo Control")
-        except Exception as exc:
-            print(f"  (turbo probe failed: {exc}; writing anyway)")
-            cur_speed = cur_turbo = None
-        if str(cur_speed) == str(cpu_speed_enum(TURBO_MHZ)) and cur_turbo == "Manual":
-            print(f"Turbo already {TURBO_MHZ} MHz — skipping config write")
-        else:
-            print(f"Setting turbo {cur_turbo}/{cur_speed} -> {TURBO_MHZ} MHz")
-            set_turbo_mhz(client, TURBO_MHZ)
-            time.sleep(float(os.environ.get("TURBO_SETTLE", "3.0")))
 
         print("Resetting machine...")
         client.reset()
