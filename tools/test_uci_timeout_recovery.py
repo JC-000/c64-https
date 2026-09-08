@@ -43,6 +43,26 @@ task.  No captured run pairs a send ``$89`` with a following ``$86``.
 The protocol defect stands on its own — an un-accepted, un-aborted
 transaction is wrong whatever it goes on to cause.
 
+Three further limits, none of which the checks below can see:
+
+  * **The modelled abort always completes.**  On the device it is
+    serviced by the *same* FreeRTOS task that services commands
+    (``command_intf.cc``'s ``run_task``), so a task blocked in
+    ``lwip_send`` — the likeliest reason ``uci_push_wait`` timed out at
+    all — cannot action the abort either.  Against that failure the
+    recovery achieves nothing except a second expired wait.  What is
+    pinned here is the transient-slowness class.
+  * **The 5 s budget is not validated.**  ``Memory`` advances a TOD tenth
+    on every ``$DC08`` read, so a bounded wait expires after ~50 loop
+    iterations while ``FW_LATENCY`` is 3.  That proves the code waits *at
+    all*; whether a real abort round trip fits inside 5 s is unmeasured
+    here and not reachable on demand.
+  * **Only the single-block reply shape is modelled** — state ``"11"``
+    (data, more) never occurs.  That is correct rather than a gap for
+    this routine: SOCKET_WRITE's reply is one block, so ``copy_result``'s
+    ``last_part`` always yields ``"10"``.  A caller with a multi-block
+    reply would need the model extended.
+
 WHY ABORT AND NOT DATA_ACC
 
 DATA_ACC is gated on ``state(1) = '1'`` in the same VHDL process, so on
@@ -153,6 +173,14 @@ class CommandInterface:
         # counters
         self.pushes_accepted = 0
         self.pushes_rejected = 0        # the error_busy branch: $86's setter
+        # The state a rejected push actually found, captured AT the
+        # rejection. Never reconstruct this from the state at assertion
+        # time: the modelled firmware keeps running (an abort in flight can
+        # complete during a later status read), so by the time a check
+        # looks, the interface may well be idle again — and a diagnostic
+        # that says "PUSH_CMD arrived while in state 00" describes a branch
+        # command_protocol.vhd does not have.
+        self.rejections = []
         self.accepts = 0                # DATA_ACC writes that did something
         self.acc_writes = 0             # DATA_ACC writes, effective or not
         self.abort_writes = 0
@@ -189,7 +217,10 @@ class CommandInterface:
                 self.status = bytes(status)
                 self.resp_ptr = self.stat_ptr = 0
                 self.new_command = False    # HANDSHAKE_ACCEPT_COMMAND
-                self.state = ST_DATA_LAST   # copy_result: 10 (no more data)
+                # copy_result -> "10". Always "10" and never "11" for the
+                # commands this module drives: SOCKET_WRITE's reply is a
+                # single block, so last_part holds. See the docstring.
+                self.state = ST_DATA_LAST
 
     # -- host reads ---------------------------------------------------------
     def read(self, addr):
@@ -242,6 +273,7 @@ class CommandInterface:
                 # the one setter of $DF1C bit 3
                 self.error_busy = True
                 self.pushes_rejected += 1
+                self.rejections.append(self.describe())
         if value & UCI_CTRL_DATA_ACC:
             self.acc_writes += 1
             if self.state & 0b10:               # gated on state(1)='1'
@@ -253,6 +285,13 @@ class CommandInterface:
         if value & UCI_CTRL_ABORT:
             self.abort_writes += 1
             self._abort_countdown = FW_LATENCY
+
+    def describe(self):
+        """This instant's state, in the VHDL's own spelling."""
+        names = {ST_IDLE: '"00" (idle)', ST_BUSY: '"01" (busy)',
+                 ST_DATA_LAST: '"10" (data, last)',
+                 ST_DATA_MORE: '"11" (data, more)'}
+        return "%s, CMD_BUSY=%d" % (names[self.state], int(self.new_command))
 
     @property
     def idle(self):
@@ -387,10 +426,8 @@ def _send(cpu, labels, budget=8_000_000):
 
 
 def _leftover_state(uci):
-    names = {ST_IDLE: '"00" (idle)', ST_BUSY: '"01" (busy)',
-             ST_DATA_LAST: '"10" (data, last)',
-             ST_DATA_MORE: '"11" (data, more)'}
-    return "%s, CMD_BUSY=%d" % (names[uci.state], int(uci.new_command))
+    """The state right now — for checks that are ABOUT the state right now."""
+    return uci.describe()
 
 
 # ---------------------------------------------------------------------------
@@ -487,14 +524,18 @@ def test_a_send_timeout_does_not_get_the_next_poll_rejected():
     before = uci.pushes_rejected
     cpu.call(labels["net_poll"], budget=8_000_000)
 
+    # The state named here is the one captured AT the rejection, not the
+    # one standing when this check runs — see CommandInterface.rejections.
     _check(uci.pushes_rejected == before, (
         "the SOCKET_READ push after a send timeout was REJECTED "
         "(%d rejection(s)): PUSH_CMD arrived while the interface was in "
         "state %s, which is the `else error_busy <= '1'` branch — the only "
         "setter of $DF1C bit 3, reported here as $86 UCI_ERR_READ_FAIL. "
-        "net_last_error ended at $%02X."
-        % (uci.pushes_rejected - before, _leftover_state(uci),
-           mem.read(labels["net_last_error"]))))
+        "By the time this check ran the interface was in state %s, and "
+        "net_last_error had ended at $%02X."
+        % (uci.pushes_rejected - before,
+           "; ".join(uci.rejections[before:]) or "(not captured)",
+           _leftover_state(uci), mem.read(labels["net_last_error"]))))
     _check(mem.read(labels["net_last_error"]) != UCI_ERR_READ_FAIL,
            "net_poll reported $86 UCI_ERR_READ_FAIL after a clean recovery")
 

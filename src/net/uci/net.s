@@ -856,6 +856,38 @@ net_tcp_send:
 ; other wait in this backend. Its carry is deliberately discarded: we
 ; already have a failure to report, and it can only set net_last_error to
 ; the UCI_ERR_WAIT_TIMEOUT that is already there.
+;
+; Two further points in ABORT's favour, both from the firmware side:
+; HANDSHAKE_RESET also rewinds command_pointer to the buffer base, which
+; DATA_ACC does not, so a partially-pushed command cannot be prepended to
+; the next one; and NetworkTarget::abort() (network_target.cc) only calls
+; discard_read_reply() — it closes no socket, close_all_sockets() being
+; reachable only from c64_reset() — so aborting here cannot desync our
+; socket id from the firmware's table.
+;
+; WHAT THIS DOES NOT RECOVER. The abort is serviced by the SAME task that
+; services commands (command_intf.cc's run_task). The likeliest reason
+; uci_push_wait timed out is that task being blocked inside lwip_send —
+; and a task blocked there cannot action an abort either. In that case
+; uci_wait_idle below also expires and we return with the interface still
+; dirty, having spent a second 5 s. This helps the transient-slowness
+; class only; a genuinely stuck server task still needs the boot-time
+; uci_abort in net_init.
+;
+; Cost of that, stated plainly: a bail can now block ~10 s where it
+; blocked ~5 s. It is one extra wait per net_tcp_send CALL, not per chunk
+; — @sb_bail returns from the whole routine — and no caller retries
+; (tls_send_record bcs @fail; http_get_plain bcs @plain_close_err), so
+; the exposure is bounded at one doubling per send.
+;
+; SCOPE. net_tcp_connect has four structurally identical dirty exits and
+; net_tcp_close one; they are knowingly untouched here and tracked as
+; #221. They cannot produce the $86 this exit is about — both open with
+; uci_wait_idle (mask $31) rather than net_poll's uci_wait_not_busy
+; (mask $01), so a left-open data phase stops them before PUSH_CMD — but
+; they can leave the interface unusable until reboot, every later connect
+; burning 5 s in uci_wait_idle and returning CONNECT_FAIL. @sb_bail is
+; the remedy to reuse there.
 ; -----------------------------------------------------------------------
 @sb_bail:
         jsr uci_abort
