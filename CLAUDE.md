@@ -325,15 +325,19 @@ drops a symbol fails the link by name on both backends. Surface:
     RED by design; `C64_NO_PEER_REGISTRY=1` is the loud opt-out (its **own**
     variable, deliberately not `C64_ALLOW_SKIP`, which also gates
     `test_build_flags_stamp.py`'s toolchain check). **Scope the guarantee
-    in both directions.** Under-coverage: both halves are text-level and
-    the **suite** recognises only `NAME = $hh`, `NAME = ddd` and
-    `.define NAME $hh`. ca65 evaluates an expression-valued code fine once
-    registered, so the real gap is an expression-valued code that is ALSO
-    never registered, plus a bare inline `lda #$8C` with no equate at all —
-    write literals.
+    in both directions.** Under-coverage is **three** things, and a code
+    reaches a blind spot only by being invisible to *both* halves: (1) an
+    expression-valued code that is ALSO never registered — the **suite**
+    reads only `NAME = $hh`, `NAME = ddd` and `.define NAME $hh`, while ca65
+    evaluates an expression fine once registered, so neither alone is the
+    gap; (2) a code named without the `_ERR_` infix that is ALSO never
+    registered — a gap the over-coverage gate below CREATED rather than
+    inherited, and the accepted cost of it; (3) a bare inline `lda #$8C`
+    with no equate at all, which no text guard sees (latent — no such site
+    exists). Write literals, name them `*_ERR_*`, register them.
     Over-coverage: the suite reads whole headers that also hold ordinary
-    constants, so it gates on the `_ERR_` infix every code uses; without
-    that a future `UCI_HOST_BUF_MAX = 64` would be reported as an ip65-family
+    constants, so it gates on that same `_ERR_` infix; without it a future
+    `UCI_HOST_BUF_MAX = 64` would be reported as an ip65-family
     error code needing allocation in c64-wireguard's registry. The
     `NET_FAMILY_*` bits in `src/net/net_families.inc` are the same cross-repo
     copy problem and are still unguarded.

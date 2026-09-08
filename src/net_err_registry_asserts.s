@@ -174,10 +174,19 @@ NET_ERR_ASSERT_UCI UCI_ERR_BAD_READ_HDR, "UCI_ERR_BAD_READ_HDR"
 ; test_snapshot_names_match_the_peer_registry respectively.
 .assert UCI_ERR_LONG_READ = NET_ERR_PEER_UCI_LONG_READ, error, "UCI_ERR_LONG_READ must mirror c64-wireguard's $8A exactly; it is their allocation, reserved and never emitted here (#184)"
 
-; It still claims its byte, so a SECOND name of ours on $8A is a build
-; error like any other duplicate. It cannot go through the macro above:
-; that one asserts the value differs from every peer code, and $8A is a
-; peer code — the whole point of this entry.
+; It still claims its byte. It cannot go through the macro above: that one
+; asserts the value differs from every peer code, and $8A IS a peer code —
+; the whole point of this entry.
+;
+; WHY KEEP THIS LINE, since it changes no outcome. It was checked: a second
+; name of ours on $8A trips the macro's own $8A peer-collision assert first
+; if it is registered, and test_our_codes_are_pairwise_distinct if it is
+; not, so deleting this claim would fail exactly nothing and no check would
+; notice. It stays because it makes the invariant total — EVERY code this
+; repo defines claims its byte, with no exceptions to carry in your head —
+; and a rule with one silent exception is the kind that rots. It is also
+; the one hand-maintained claim site, so if you add another code that
+; cannot go through a macro, it goes here beside this note.
 NET_ERR_CLAIM_VALUE UCI_ERR_LONG_READ
 
 ; PUBLISHED VALUES, PINNED. The registry's single rule is that a published

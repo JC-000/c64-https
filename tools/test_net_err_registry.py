@@ -133,8 +133,16 @@ OPT_OUT_ENV = "C64_NO_PEER_REGISTRY"
 # without `_ERR_` -- say `UCI_STATUS_FOO = $8C` -- is invisible to this
 # suite. The assemble-time half still catches it the moment it is
 # registered (NET_ERR_CLAIM_VALUE and the peer-collision asserts do not
-# look at names at all), and an unregistered one is invisible either way,
-# which is the pre-existing limit this does not widen.
+# look at names at all).
+#
+# THE GATE DOES WIDEN A GAP, and it is worth being exact about which. A
+# code that is BOTH non-`_ERR_`-named AND never registered is now invisible
+# to both halves. That is a NEW class, not a restatement of an old one: an
+# `_ERR_`-named unregistered code is caught here at every revision, and
+# before the gate this suite caught the non-`_ERR_` unregistered case three
+# ways (measured on the two commits either side of it -- 3 failures before,
+# 0 after). The decision above still stands; the cost is one new blind
+# spot, not zero.
 ERR_NAME_MARKER = "_ERR_"
 
 # snapshot name -> the peer's literal spelling, for rows whose name does not
@@ -147,9 +155,12 @@ class RegistryParseError(AssertionError):
     """A header is malformed in a way no individual check should own.
 
     AssertionError so pytest renders it as a plain failure and the
-    standalone runner's handler catches it -- but a NAMED one, so it is not
-    a bare `assert` that vanishes under `python -O` and misattributes to
-    whichever test happened to call the helper first.
+    standalone runner's handler catches it -- but a NAMED one, so it does
+    not vanish under `python -O` the way the bare `assert` it replaced did.
+
+    It is still raised from a helper, so it surfaces under EVERY test that
+    calls `_our_codes()` and none of them owns the problem. That is not
+    fixed; the message is self-identifying, which is why it is tolerable.
     """
 
 # Declaration spellings we recognise. See the docstring's scope block: an
