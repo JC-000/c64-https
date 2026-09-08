@@ -639,7 +639,8 @@ def main() -> int:
         # case and now aborts instead of writing blind (#187).
         try:
             prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ,
-                           reu_size=REQUIRED_REU_SIZE)
+                           reu_size=REQUIRED_REU_SIZE,
+                           artifact_dir=run_dir)
         except DevicePrepError as exc:
             print(str(exc), file=sys.stderr)
             return 4

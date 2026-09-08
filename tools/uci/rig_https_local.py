@@ -1594,8 +1594,22 @@ def main() -> int:
         # probe degrades the other way — there the write is the safe action.
         # Policy and its tests: tools/uci/_device_prep.py,
         # tools/test_device_prep.py.
+        # The device-state record belongs with the run's artifacts, not in
+        # a base directory the next run overwrites — so when DEBUG_CAPTURE
+        # is off and there is no run_dir yet, make one for it. One
+        # directory holding one JSON file is the honest cost of #212: the
+        # record has to exist for the run that failed, and that is the run
+        # nobody had debug capture on for.
+        if run_dir is None:
+            _prune_old_run_dirs(UCI_DEBUG_BASE_DIR, UCI_DEBUG_KEEP)
+            prep_dir = _create_run_dir(UCI_DEBUG_BASE_DIR)
+            print(f"Device-state record dir: {prep_dir}")
+        else:
+            prep_dir = run_dir
+
         try:
-            prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ)
+            prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ,
+                           artifact_dir=prep_dir)
         except DevicePrepError as exc:
             print(str(exc), file=sys.stderr)
             return 4

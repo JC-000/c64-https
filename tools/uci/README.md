@@ -46,8 +46,19 @@ DeviceLock, right after `enable_uci` and **before** `preflight_reu`:
 `rig_https_wiki.py`, `rig_https_bad_finished.py`.
 
 It configures the REU the linked profile needs, sets turbo before the
-reset, and prints the device's before- and after-state (also written to
-`$UCI_DEBUG_DIR/device_state.json`). Device config is runtime-only, so a
+reset, and prints the device's before- and after-state — also written as
+`device_state.json` into that run's own artifact directory, which every
+call site passes explicitly (the `$UCI_DEBUG_DIR` fallback would land in
+the shared base dir the next run overwrites, and is normally unset because
+each rig defaults it in Python).
+
+`rig_https_banner.py` is deliberately NOT on that list, and it is the rig
+whose documented failure IS #212's — it boots the PRG through the menu on a
+75 s budget while printing "comb boot precompute", with no turbo or REU
+write. It is owned by another lane; the exemption lives in
+`KNOWN_UNPREPPED` in `tools/test_device_prep.py`, which fails if the rig is
+fixed and the entry is left behind, and the rig list itself is discovered
+rather than hardcoded so a sixth rig cannot slip past. Device config is runtime-only, so a
 REU left Disabled is the factory *default*, not another lane's mess — a
 run configures what it needs rather than refusing.
 
@@ -58,11 +69,21 @@ The two probes fail in **opposite** directions, deliberately:
 | REU | write the configuration anyway | the write is the safe action; a wasted PUT costs nothing |
 | turbo | abort the run (after one retry) | the *write* is the hazard (`$88`), and skipping it runs the rig at an unknown clock |
 
+The REU *write* can fail for the same reason the read did — the harness's
+`set_reu` may PUT a third item, `Cartridge: "REU"`, which a C64 Ultimate
+rejects with HTTP 400 — so it is wrapped: exit 4 with the writemem-wedge
+ladder, never a traceback.
+
 `preflight_reu` stays where it is, as the backstop behind the prep, and
 still writes nothing itself.
 
-Overrides: `C64_SKIP_DEVICE_PREP=1` (prep off, preflight still fails
-closed), `C64_FORCE_TURBO_WRITE=1` (write turbo blind, accepting `$88`).
+Overrides: `C64_SKIP_DEVICE_PREP=1` — **the blunter and more dangerous
+hatch**: no turbo write at all, so the run inherits whatever clock the
+previous lane left, which is the outcome the turbo policy exists to refuse
+(the preflight still fails closed, but it says nothing about the clock);
+`C64_FORCE_TURBO_WRITE=1` (write turbo blind, accepting `$88`). Both, and
+`C64_SKIP_REU_PREFLIGHT`, share one env parser, so `=false` leaves the guard
+ON.
 Policy and tests: `tools/uci/_device_prep.py`, `tools/test_device_prep.py`
 (faked client, no hardware).
 

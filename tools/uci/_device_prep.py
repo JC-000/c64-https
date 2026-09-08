@@ -56,7 +56,11 @@ an unreadable read fall, and what does the fall cost?
       C64_FORCE_TURBO_WRITE=1 <your command>
 
   reinstates the old write-anyway degrade for someone who has decided the
-  ``$88`` risk is the one they want.
+  ``$88`` risk is the one they want. ``C64_SKIP_DEVICE_PREP=1`` is the
+  *blunter* hatch and the more dangerous one: it skips the turbo write
+  altogether, so the run proceeds at whatever clock the previous lane left —
+  the exact outcome the paragraph above argues is worth aborting over. It
+  says so when used.
 
 Nothing here resets a store. Baseline restoration is the harness's
 ``apply_factory_baseline()`` (opt-in with ``U64_BASELINE_ON_ENTRY=1``, run by
@@ -64,7 +68,16 @@ Nothing here resets a store. Baseline restoration is the harness's
 stores by design — the three network stores, ``SID Sockets Configuration``
 (its reset cuts SID socket power while reporting clean) and ``Clock
 Settings`` (its reset arms an RTC rollback). Neither REU store is in that
-set, and this module PUTs only the four items it names below.
+set.
+
+This module reads exactly the four items in :data:`STATE_ITEMS` and asks the
+harness to write three of them. **The harness may PUT a fifth**: ``set_reu``
+adds ``Cartridge: "REU"`` when its preset probe says the value is supported
+*or is inconclusive*, which is what a U64E on firmware 3.14 needs and what a
+C64 Ultimate rejects with HTTP 400. That is the harness's device-generation
+logic and calling it is the point of not hand-rolling the write here — but
+it means the write can fail, and it fails for the same reasons the read
+does, so it is wrapped (see :func:`_reu_write_failure_message`).
 
 What it does NOT do
 -------------------
@@ -97,6 +110,7 @@ from _reu_preflight import (
     ITEM_REU_SIZE,
     _read_config_value,
     detect_crypto_profile,
+    env_flag_enabled,
 )
 
 CAT_U64_SPECIFIC = "U64 Specific Settings"
@@ -118,7 +132,9 @@ SKIP_ENV = "C64_SKIP_DEVICE_PREP"
 #: rigs already use for their artifacts.
 DEBUG_DIR_ENV = "UCI_DEBUG_DIR"
 
-#: The only four config items this module reads or writes.
+#: The four config items this module reads. It asks the harness to write
+#: three of them; ``set_reu`` may add a fifth (``Cartridge``) of its own —
+#: see the module docstring.
 STATE_ITEMS: tuple[tuple[str, str], ...] = (
     (CAT_U64_SPECIFIC, ITEM_TURBO_CONTROL),
     (CAT_U64_SPECIFIC, ITEM_CPU_SPEED),
@@ -135,10 +151,9 @@ class DevicePrepError(RuntimeError):
     """Raised when the device cannot be brought to a state we can trust."""
 
 
-def _env_true(name: str) -> bool:
-    return os.environ.get(name, "0").strip().lower() not in (
-        "0", "", "no", "false", "off",
-    )
+# One env parser for both modules, defined next to the preflight's own skip
+# flag so the two cannot drift apart again (they had).
+_env_true = env_flag_enabled
 
 
 def read_device_state(client: Any) -> dict[str, str | None]:
@@ -260,6 +275,64 @@ def _turbo_failure_message(state: dict[str, str | None], mhz: int) -> str:
     )
 
 
+def _reu_write_failure_message(exc: Exception, reu_size: str,
+                               state: dict[str, str | None]) -> str:
+    """The REU-write abort text, carrying the same ladder the preflight has.
+
+    Deliberately *not* the preflight's "your device has no REU" message:
+    nothing here says the REU is missing. The device refused a write, and
+    the most common reason is that it is refusing everything.
+    """
+    return (
+        "\n"
+        "DEVICE PREP FAILED — the device refused the REU configuration write.\n"
+        "\n"
+        f"  wanted: {CAT_CART} / {ITEM_REU_ENABLED} = 'Enabled', "
+        f"{ITEM_REU_SIZE} = {reu_size!r}\n"
+        f"  got   : {exc.__class__.__name__}: {exc}\n"
+        f"  state : {format_state(state)}\n"
+        "\n"
+        "Reported as a failure with this ladder rather than as a traceback: "
+        "the\n"
+        "condition that makes the state unreadable is often the same one "
+        "that makes\n"
+        "the write fail, so this is the ordinary shape of 'REST is refusing', "
+        "not\n"
+        "an exotic one.\n"
+        "\n"
+        "Likely causes, most common first:\n"
+        "\n"
+        "  1. The device is unreachable, or REST is refusing. Check it with\n"
+        "     tools/uci/boot_check.py before concluding anything. REST "
+        "refusing\n"
+        "     instantly while ping still answers is the writemem exhaustion "
+        "wedge\n"
+        "     (GideonZ/1541ultimate#686) — tools/uci/_temp_gc.py. Do NOT jump "
+        "to\n"
+        "     'firmware corruption'; that verdict has been reached wrongly "
+        "and\n"
+        "     repeatedly on this project.\n"
+        "\n"
+        "  2. The firmware rejected one item of the write. `set_reu` may PUT "
+        "a\n"
+        "     THIRD item, `Cartridge: \"REU\"`, when its preset probe is\n"
+        "     inconclusive — and a C64 Ultimate rejects that with HTTP 400. "
+        "An\n"
+        "     inconclusive probe is itself a symptom of cause 1.\n"
+        "\n"
+        "  3. Another lane holds the device and is changing config under us. "
+        "Check\n"
+        "     the DeviceLock holder; never kill it.\n"
+        "\n"
+        "To run without configuring the REU (the preflight then decides "
+        "whether\n"
+        "the device can carry this build, and still fails closed):\n"
+        "\n"
+        f"       {SKIP_ENV}=1 <your command>\n"
+        "\n"
+    )
+
+
 def prepare_device(
     client: Any,
     labels_path: Path | str,
@@ -292,9 +365,13 @@ def prepare_device(
     :param artifact_dir: where ``device_state.json`` is written; defaults to
         ``$UCI_DEBUG_DIR`` when set, else nothing is written.
     :returns: the report dict (the same content as ``device_state.json``).
-    :raises DevicePrepError: the turbo state could not be read and
-        ``C64_FORCE_TURBO_WRITE`` is not set. Never raised for the REU, which
-        degrades toward writing what the run needs.
+    :raises DevicePrepError: two cases. (a) The turbo state could not be
+        read and ``C64_FORCE_TURBO_WRITE`` is not set. (b) The REU
+        configuration write was refused by the device — the *unreadable* REU
+        state still degrades toward writing, but the write itself can fail,
+        and it fails for the same reasons the read does, so it is reported
+        with a ladder instead of escaping as a traceback (every call site
+        catches this type and exits 4). Read failures alone never raise.
     """
     out = stream if stream is not None else sys.stdout
     profile, reason = detect_crypto_profile(labels_path)
@@ -313,8 +390,13 @@ def prepare_device(
     }
 
     if _env_true(SKIP_ENV):
-        print(f"device prep: skipped ({SKIP_ENV} set) — the REU preflight "
-              "still runs and still fails closed", file=out, flush=True)
+        print(f"device prep: skipped ({SKIP_ENV} set). WARNING: the clock "
+              f"is NOT managed — this run uses whatever CPU Speed the "
+              f"previous lane left, so any wall-clock number it produces is "
+              f"not attributable to a known clock, and a comb boot may not "
+              f"finish inside the rig's budget (#212). The REU preflight "
+              f"still runs and still fails closed, but it says nothing "
+              f"about the clock.", file=out, flush=True)
         report["skipped"] = True
         _write_artifact(report, artifact_dir, out)
         return report
@@ -344,7 +426,23 @@ def prepare_device(
             print(f"device prep: setting REU (Enabled, {reu_size}) — "
                   "runtime-only, REVERTS ON POWER CYCLE", file=out, flush=True)
             writer = set_reu if set_reu is not None else _harness_set_reu()
-            writer(client, True, size=reu_size)
+            try:
+                writer(client, True, size=reu_size)
+            except Exception as exc:         # noqa: BLE001 — becomes exit 4
+                # The write can fail for the SAME reason the probe was
+                # unreadable, which is why this is not theoretical: with
+                # REST refusing, the harness's own `_cartridge_preset_
+                # supported` probe also fails, returns None, and `set_reu`
+                # then INCLUDES the `Cartridge: "REU"` PUT — HTTP 400 on a
+                # C64U — while `set_config_items` catches nothing per item.
+                # Unwrapped, that escaped every call site (all five catch
+                # only DevicePrepError) and turned what master reported as
+                # exit 4 plus the diagnostic ladder into exit 1 and a raw
+                # traceback, on the one path this project has a documented
+                # habit of misdiagnosing as firmware corruption.
+                raise DevicePrepError(
+                    _reu_write_failure_message(exc, reu_size, before)
+                ) from exc
             report["wrote"].append("reu")
             time.sleep(float(os.environ.get("REU_SETTLE", "3.0")))
 
@@ -355,7 +453,11 @@ def prepare_device(
         match = _turbo_matches(before, want_speed)
         if match is None:
             # One retry: a single REST hiccup is not a reason to burn a
-            # device slot, and a second failure is not a hiccup.
+            # device slot, and a second failure is not a hiccup. The 1.0 s
+            # delay is a guess, not a measurement — nothing here characterises
+            # how long a transient REST refusal lasts. TURBO_PROBE_RETRY_DELAY
+            # overrides it; if a real distribution is ever measured, set it
+            # from that.
             time.sleep(float(os.environ.get("TURBO_PROBE_RETRY_DELAY", "1.0")))
             retry = read_device_state(client)
             report["turbo_retry"] = retry

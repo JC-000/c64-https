@@ -451,7 +451,8 @@ def main() -> int:
         # so the run's artifacts say what it ran against, and abort rather
         # than write blind if the turbo state cannot be read.
         try:
-            prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ)
+            prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ,
+                           artifact_dir=run_dir)
         except DevicePrepError as exc:
             print(str(exc), file=sys.stderr)
             return 4

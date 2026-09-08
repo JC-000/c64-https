@@ -1015,11 +1015,58 @@ against a named cost:
 
 A uniform policy in either direction is wrong in one of the two places,
 and `tools/test_device_prep.py` pins both halves — mutation-checked:
-reinstating the old `writing anyway` turbo degrade fails 3 of its 21
-cases, and extending the fail-closed to the REU fails 2 different ones.
+reinstating the old `writing anyway` turbo degrade fails 3 of its 30
+cases, and extending the fail-closed to the REU fails 3 different ones.
 
-The prep also prints and records (`$UCI_DEBUG_DIR/device_state.json`) the
-before- and after-state, which is #212's second half: the comb-boot
+**The "write anyway is safe" half only holds because the write is
+wrapped, and adversarial review is what established that.** The write can
+fail for *the same reason* the read did: with REST refusing, the harness's
+own `Cartridge` preset probe is also inconclusive, so `set_reu` includes a
+`Cartridge: "REU"` PUT that a C64 Ultimate answers with HTTP 400, and
+`set_config_items` catches nothing per item. Unwrapped, that escaped every
+call site (all five catch only `DevicePrepError`) and downgraded what
+master reported as **exit 4 plus the writemem-wedge ladder** into **exit 1
+and a raw traceback**, on precisely the path this project has a documented
+habit of misreading as firmware corruption. The general lesson is narrower
+than "wrap your writes": a degrade toward action is only as safe as the
+action, and the correlation between "cannot read" and "cannot write" is
+what makes the failure ordinary rather than exotic.
+
+Two smaller things the same review turned up, both worth keeping:
+
+  - `cpu_speed_enum(1)` returns `' 1'` with a **leading space**, and the
+    old unstripped comparison meant the skip could never fire at
+    `TURBO_MHZ=1` — so every 1 MHz run performed a redundant, `$88`-risking
+    turbo write. The shared prep strips both sides.
+  - `C64_SKIP_DEVICE_PREP` is the dangerous hatch, not `C64_FORCE_TURBO_WRITE`.
+    FORCE_TURBO is loud and takes a bounded risk that surfaces immediately;
+    SKIP_PREP silently inherits the previous lane's clock, which is the
+    outcome the turbo policy exists to refuse. It now says so.
+
+One accepted side effect, stated rather than discovered later: four more
+rigs now leave the device **REU-Enabled** after a REU-profile or comb run.
+An on-chip build still makes no REU call at all, so no rig *enables* the
+REU on behalf of an image that does not need one — but the setting persists
+until the next power cycle, so a subsequent on-chip run on the same device
+is no longer evidence that the on-chip products work on a REU-less machine.
+That claim needs a deliberately REU-disabled device (or
+`C64_VICE_NO_REU=1` in the emulator lane); it can no longer be picked up
+for free from whatever a shared device happened to be set to.
+
+Hardware confirmation (independent review run, U64E fw 3.15 commit
+`4011c97c`, fpga 125, taken through `acquire_device_lock()`): the device
+was found in exactly #212's leftover state — `Turbo Control='Manual'`,
+`CPU Speed='48'`, `RAM Expansion Unit='Disabled'` — the turbo write was
+correctly skipped, `set_reu(True, size="16 MB")` succeeded and read back
+with the `Cartridge` write correctly omitted on the 3.15 shape, and a
+second `prepare_device` reported `wrote=[] skipped_write=['reu','turbo']`,
+i.e. idempotent with zero PUTs. State restored, lock released.
+
+The prep also prints and records the before- and after-state as
+`device_state.json` in the run's own artifact directory (passed by every
+call site; the `$UCI_DEBUG_DIR` env fallback resolves to the shared base
+dir the next run overwrites, and is normally unset), which is #212's second
+half: the comb-boot
 misdiagnosis was avoided only because a prep happened to print
 `REU before: enabled=False`, and nothing guaranteed that line existed.
 

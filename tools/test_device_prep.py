@@ -127,15 +127,19 @@ class FakeClient:
 class Writers:
     """Records the two hazardous actions instead of performing them."""
 
-    def __init__(self):
+    def __init__(self, reu_raises=None):
         self.turbo = []
         self.reu = []
+        #: Exception the REU write raises, standing in for a device refusal.
+        self.reu_raises = reu_raises
 
     def set_turbo(self, client, mhz):
         self.turbo.append(mhz)
 
     def set_reu(self, client, enabled, size=None):
         self.reu.append((enabled, size))
+        if self.reu_raises is not None:
+            raise self.reu_raises
 
 
 def _speed_enum(mhz):
@@ -143,9 +147,10 @@ def _speed_enum(mhz):
     return f"{mhz:>2}"
 
 
-def _run(client, *, labels=LABELS_REU, turbo_mhz=48, env=None, artifact_dir=None):
+def _run(client, *, labels=LABELS_REU, turbo_mhz=48, env=None,
+         artifact_dir=None, reu_raises=None):
     """Call prepare_device with fake writers. Returns (report, writers, output)."""
-    writers = Writers()
+    writers = Writers(reu_raises=reu_raises)
     buf = io.StringIO()
     saved = {}
     env = env or {}
@@ -357,6 +362,56 @@ def test_onchip_build_never_writes_the_reu() -> None:
     assert "no REU configuration needed" in out
 
 
+# --------------------------------------------- the REU write can itself fail
+
+def test_a_refused_reu_write_is_exit_4_with_a_ladder_not_a_traceback() -> None:
+    """The degrade toward writing is only safe if the write cannot escape.
+
+    This is not a corner: the condition that makes the probe unreadable is
+    frequently the same condition that makes the write fail. With REST
+    refusing, the harness's own Cartridge-preset probe also fails, returns
+    the inconclusive `None`, and `set_reu` then INCLUDES a
+    `Cartridge: "REU"` PUT that a C64 Ultimate rejects with HTTP 400 —
+    while `set_config_items` catches nothing per item.
+
+    Unwrapped, that escapes every call site (all five catch only
+    DevicePrepError): master reported this device as exit 4 with the
+    writemem-wedge ladder, and an escaping exception would have downgraded
+    it to exit 1 and a raw traceback on the one path this project has a
+    documented habit of misreading as firmware corruption.
+    """
+    broken = dict(DEFAULT_STATE)
+    broken[f"{CAT_CART}/RAM Expansion Unit"] = _HarnessError("connection refused")
+    exc = _assert_raises_prep(
+        FakeClient([broken]), what="REU write refused",
+        reu_raises=_HarnessError("HTTP 400: 'REU' is not a valid choice "
+                                 "for Cartridge"),
+    )
+    text = str(exc)
+    assert "DEVICE PREP FAILED" in text
+    assert "HTTP 400" in text, f"the device's own words must survive:\n{text}"
+    assert "firmware corruption" in text, (
+        "the refused-write message must carry the diagnostic ladder, since "
+        f"this is the ordinary shape of 'REST is refusing':\n{text}"
+    )
+    assert "no REU" not in text, (
+        "this is a refused write, not a missing REU — it must not send the "
+        f"operator to the settings menu for a fact not in evidence:\n{text}"
+    )
+
+
+def test_a_refused_reu_write_does_not_reach_the_turbo_write() -> None:
+    """A device refusing config is not a device to keep writing to."""
+    exc = _assert_raises_prep(
+        FakeClient([DEFAULT_STATE]), what="REU refused, turbo pending",
+        reu_raises=_HarnessError("HTTP 500"),
+    )
+    assert exc.writers.turbo == [], (
+        f"turbo was written after the device refused a write: "
+        f"{exc.writers.turbo!r}"
+    )
+
+
 # ------------------------------------------------------------- the record
 
 def test_before_and_after_are_reported() -> None:
@@ -412,18 +467,133 @@ def test_skip_env_makes_no_device_call() -> None:
     assert "preflight still runs" in out
 
 
+def test_the_env_fallback_writes_when_no_artifact_dir_is_given() -> None:
+    """The documented `$UCI_DEBUG_DIR` fallback must actually work.
+
+    It was untested in both directions: the artifact test passed
+    `artifact_dir` explicitly while `_run` popped the env var, so the
+    fallback path this module and two docs advertise had never executed.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        report, writers, out = _run(FakeClient([DEFAULT_STATE, READY_STATE]),
+                                    env={dp.DEBUG_DIR_ENV: tmp})
+        assert (Path(tmp) / "device_state.json").exists(), (
+            f"the {dp.DEBUG_DIR_ENV} fallback wrote nothing:\n{out}"
+        )
+
+
+def test_nothing_is_written_when_neither_is_given() -> None:
+    """No dir, no file, no failure — and no silent claim that it was kept."""
+    report, writers, out = _run(FakeClient([DEFAULT_STATE, READY_STATE]))
+    assert "state recorded in" not in out, (
+        f"prep claimed to record state with nowhere to put it:\n{out}"
+    )
+
+
+def test_the_two_skip_flags_parse_env_values_identically() -> None:
+    """#5: `=false` must mean the same thing to both flags.
+
+    They disagreed: `_reu_preflight` tested `!= "0"`, so
+    `C64_SKIP_REU_PREFLIGHT=false` SKIPPED the guard, while
+    `C64_SKIP_DEVICE_PREP=false` did not skip the prep — with the two
+    documented on one line as though they behaved alike. Unified toward the
+    stricter reading, which leaves the guard ON.
+    """
+    import importlib.util as _ilu
+    _s = _ilu.spec_from_file_location("_reu_preflight_parity", UCI / "_reu_preflight.py")
+    pf = _ilu.module_from_spec(_s)
+    _s.loader.exec_module(pf)
+    saved = {k: os.environ.get(k) for k in (dp.SKIP_ENV, pf.SKIP_ENV)}
+    try:
+        for value, expected in (("1", True), ("true", True), ("yes", True),
+                                ("0", False), ("false", False), ("off", False),
+                                ("no", False), ("", False)):
+            os.environ[dp.SKIP_ENV] = value
+            os.environ[pf.SKIP_ENV] = value
+            got_prep = dp._env_true(dp.SKIP_ENV)
+            got_flight = pf.env_flag_enabled(pf.SKIP_ENV)
+            assert got_prep == got_flight == expected, (
+                f"{value!r}: prep={got_prep}, preflight={got_flight}, "
+                f"expected {expected}. Two flags on one documentation line "
+                "must not parse differently."
+            )
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_skipping_prep_warns_that_the_clock_is_unmanaged() -> None:
+    """#3: SKIP_DEVICE_PREP is the dangerous hatch, and must say so.
+
+    It skips the turbo write entirely, so the run proceeds at whatever clock
+    the previous lane left — the exact outcome this module argues is worth
+    aborting over. Saying only "the REU preflight still runs and still fails
+    closed" is true and irrelevant to the clock.
+    """
+    report, writers, out = _run(FakeClient([DEFAULT_STATE]),
+                                env={dp.SKIP_ENV: "1"})
+    assert "clock" in out.lower(), (
+        f"skipping prep must warn about the unmanaged clock:\n{out}"
+    )
+    assert "WARNING" in out, f"and it must read as a warning:\n{out}"
+
+
 # ------------------------------------------------------------- call sites
 
-#: Every rig that runs a crypto-path PRG on the device, with the turbo speed
-#: it manages. ``bench_ecdsa_u64e.py`` sets the first sweep speed; the four
-#: HTTPS rigs set TURBO_MHZ. All five must prepare before they check.
-PREP_CALL_SITES = (
-    "bench_ecdsa_u64e.py",
-    "rig_https_bad_finished.py",
-    "rig_https_live.py",
-    "rig_https_local.py",
-    "rig_https_wiki.py",
-)
+#: Rigs that are exempt from the prep contract, and why. An entry here is a
+#: statement that the gap is known and owned, not that it is harmless — each
+#: one is asserted below to still lack prep, so a fixed rig fails this file
+#: until its entry is removed. Same shape as `run_all_tests.UNDISPATCHED_SUITES`.
+KNOWN_UNPREPPED = {
+    "rig_https_banner.py": (
+        "owned by another lane (the #210 work) and must not be edited from "
+        "here; sequencing is with the coordinator. It is the rig whose "
+        "documented failure IS #212's: it boots the PRG through the menu on "
+        "a C64_INIT_WAIT of 75 s while printing 'comb boot precompute', "
+        "writes no turbo and no REU, and a comb boot at 1 MHz needs ~36 min "
+        "against that budget. `tests/rig_ip65_rrnet_hw.py` writes turbo at "
+        "stock 1 MHz, so 'RR-Net run, then banner run' reaches it live."
+    ),
+}
+
+
+def _crypto_path_rigs():
+    """Discover the rigs this contract covers, rather than listing them.
+
+    The rule: a module that boots the PRG on the device (``client.run_prg``)
+    AND knows about the comb profile. Those two together are exactly the
+    exposure — comb needs REU bank 2, and its boot precompute is ~45 s at
+    48 MHz against ~36 min at 1 MHz, so such a rig depends on both the REU
+    state and the clock whether or not it manages them.
+
+    Discovery rather than an allowlist because an allowlist cannot find a
+    sixth rig, and "a helper nothing calls is a convention, not a fix" cuts
+    both ways: a contract that only checks the files it already knows about
+    is one too.
+    """
+    found = []
+    for path in sorted(UCI.glob("*.py")):
+        text = path.read_text()
+        if "client.run_prg(" in text and "comb" in text.lower():
+            found.append(path)
+    return found
+
+
+def test_the_discovery_rule_finds_the_known_rigs() -> None:
+    """The rule must not quietly narrow to nothing (or to everything)."""
+    names = {p.name for p in _crypto_path_rigs()}
+    expected = {"bench_ecdsa_u64e.py", "rig_https_bad_finished.py",
+                "rig_https_live.py", "rig_https_local.py",
+                "rig_https_wiki.py", "rig_https_banner.py"}
+    assert names == expected, (
+        f"the discovery rule now selects {sorted(names)}, not "
+        f"{sorted(expected)}. If a rig was added or renamed that is fine — "
+        "update this list deliberately. If the rule stopped matching, the "
+        "contract below silently covers less than it claims."
+    )
 
 
 def _call_lines(tree, name):
@@ -443,22 +613,67 @@ def test_every_crypto_rig_prepares_before_it_checks() -> None:
     a convention, not a fix, and #197's defect was exactly four rigs holding
     a guard with no setup behind it.
     """
-    for name in PREP_CALL_SITES:
-        path = UCI / name
+    for path in _crypto_path_rigs():
         tree = ast.parse(path.read_text(), filename=str(path))
         prep = _call_lines(tree, "prepare_device")
         flight = _call_lines(tree, "preflight_reu")
+        if path.name in KNOWN_UNPREPPED:
+            continue
         assert prep, (
-            f"{name} never calls prepare_device: it reads the device state "
-            "and refuses instead of configuring it (issue #197)"
+            f"{path.name} boots the PRG and knows about the comb profile, "
+            "but never calls prepare_device: it depends on the device's REU "
+            "and clock state without configuring or recording either "
+            "(issue #197). Wire it up, or add it to KNOWN_UNPREPPED with the "
+            "reason and the owner."
         )
-        assert flight, f"{name} lost its preflight_reu backstop"
+        assert flight, f"{path.name} lost its preflight_reu backstop"
         assert min(prep) < min(flight), (
-            f"{name} calls preflight_reu (line {min(flight)}) before "
+            f"{path.name} calls preflight_reu (line {min(flight)}) before "
             f"prepare_device (line {min(prep)}). The preflight is the guard "
             "BEHIND the prep; in that order it refuses the device the prep "
             "was about to fix."
         )
+
+
+def test_known_unprepped_entries_are_still_unprepped() -> None:
+    """An exemption must expire on its own when the gap closes."""
+    for name, reason in KNOWN_UNPREPPED.items():
+        path = UCI / name
+        assert path.exists(), f"KNOWN_UNPREPPED names a missing file: {name}"
+        assert len(reason) > 80, f"{name}'s exemption needs a real reason"
+        tree = ast.parse(path.read_text(), filename=str(path))
+        assert not _call_lines(tree, "prepare_device"), (
+            f"{name} now calls prepare_device — remove its KNOWN_UNPREPPED "
+            "entry so the contract covers it for real."
+        )
+
+
+def test_every_prepping_rig_hands_over_its_run_artifact_dir() -> None:
+    """#212's record must land WITH the run's artifacts, not in a base dir.
+
+    Every rig writes its artifacts into a per-run timestamped directory; the
+    env fallback inside `_write_artifact` resolves to the *base* directory
+    the rigs derive that from, so a run relying on it would overwrite the
+    previous run's record — and with `UCI_DEBUG_DIR` normally unset (each rig
+    supplies its own Python-level default) it would write nothing at all.
+    So every call site passes `artifact_dir` explicitly.
+    """
+    for path in _crypto_path_rigs():
+        if path.name in KNOWN_UNPREPPED:
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name)
+                 and n.func.id == "prepare_device"]
+        for call in calls:
+            kwargs = {kw.arg for kw in call.keywords}
+            assert "artifact_dir" in kwargs, (
+                f"{path.name}:{call.lineno} calls prepare_device without "
+                "artifact_dir, so the device-state record falls back to "
+                "$UCI_DEBUG_DIR — normally unset, and when set it is the "
+                "rig's BASE dir, which the next run overwrites."
+            )
 
 
 def test_no_rig_still_degrades_toward_the_turbo_write() -> None:

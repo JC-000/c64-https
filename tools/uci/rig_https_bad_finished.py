@@ -565,7 +565,8 @@ def main() -> int:
         # in rig_https_local.py and the c64u_starlight_device memory), so an
         # unreadable turbo state aborts rather than writing blind.
         try:
-            prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ)
+            prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ,
+                           artifact_dir=run_dir)
         except DevicePrepError as exc:
             print(str(exc), file=sys.stderr)
             return 4

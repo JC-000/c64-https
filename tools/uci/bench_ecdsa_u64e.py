@@ -467,8 +467,20 @@ def main() -> int:
         # A benchmark also has the sharpest possible stake in #187's
         # policy: a run at an unknown clock is not a slow measurement,
         # it is a wrong one.
+        # As in rig_https_local: the device-state record lands with this
+        # run's artifacts, and gets a directory of its own when DEBUG_CAPTURE
+        # left none. A benchmark without a record of the clock and REU state
+        # it ran against is a number with no provenance.
+        if run_dir is None:
+            _prune_old(DEBUG_BASE_DIR, keep=5)
+            prep_dir = _create_run_dir(DEBUG_BASE_DIR)
+            print(f"Device-state record dir: {prep_dir}")
+        else:
+            prep_dir = run_dir
+
         try:
-            prepare_device(client, LABELS_PATH, turbo_mhz=MHZ_LIST[0])
+            prepare_device(client, LABELS_PATH, turbo_mhz=MHZ_LIST[0],
+                           artifact_dir=prep_dir)
         except DevicePrepError as exc:
             print(str(exc), file=sys.stderr)
             return 4

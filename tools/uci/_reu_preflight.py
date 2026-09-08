@@ -113,6 +113,24 @@ _BANKS_EQUATE = "LIB_NISTCURVES_REU_BANKS_USED"
 
 SKIP_ENV = "C64_SKIP_REU_PREFLIGHT"
 
+#: Values that read as "off" for every C64_* flag in tools/uci/.
+_ENV_FALSE = frozenset({"", "0", "no", "false", "off"})
+
+
+def env_flag_enabled(name: str) -> bool:
+    """Whether the environment flag *name* is set to something truthy.
+
+    One parser for every ``C64_*`` switch these rigs read, because there
+    were two: this module tested ``!= "0"`` while
+    ``tools/uci/_device_prep.py`` also refused ``no``/``false``/``off``, so
+    ``C64_SKIP_REU_PREFLIGHT=false`` SKIPPED the guard while
+    ``C64_SKIP_DEVICE_PREP=false`` did not — with the two documented on one
+    line as if they behaved alike. Unified toward the stricter reading,
+    which is the fail-closed direction for the skip flags: spelling a flag
+    ``false`` now leaves the guard ON.
+    """
+    return os.environ.get(name, "").strip().lower() not in _ENV_FALSE
+
 
 class ReuPreflightError(RuntimeError):
     """Raised when a REU-profile PRG would run on a device with no REU."""
@@ -288,7 +306,7 @@ def preflight_reu(
     """
     out = stream if stream is not None else sys.stdout
 
-    if os.environ.get(SKIP_ENV, "0") != "0":
+    if env_flag_enabled(SKIP_ENV):
         print(f"REU preflight: skipped ({SKIP_ENV} set)", file=out, flush=True)
         return "skipped"
 
