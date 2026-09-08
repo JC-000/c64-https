@@ -1,0 +1,143 @@
+; src/net_err_registry_asserts.s — mechanical guard over the fleet's shared
+; `net_last_error` number space (issue #184).
+;
+; WHAT THIS IS FOR. The ip65 family ($40-$7F) and the UCI family ($80-$BF)
+; are ONE namespace each, shared by every adapter in the fleet — c64-https
+; and c64-wireguard today. c64-lib-contract SPEC §13.2 used to hold the
+; cross-repo allocation table; it was retired wholesale at contract v1.0.0
+; and the registry moved to `c64-wireguard/src/net_abi.inc`, which declares
+; itself canonical for BOTH ranges. That file is the authority. This one is
+; a machine-checked snapshot of it.
+;
+; Until this TU existed, the shared codes were asserted NOWHERE: our two
+; headers listed the peer's allocations in prose only, so minting over one
+; produced a clean build and a byte that meant two different things in two
+; products. That has already happened twice in the fleet — $88 (four days
+; live) and wg#120's first commit, which minted $40-$44 over our $41-$45 and
+; was caught only by a human reviewer. Prose caught the second one. Nothing
+; caught the first.
+;
+; WHAT IT COSTS. Nothing. Every symbol below is an assemble-time equate and
+; every check is a `.assert`; this TU emits no bytes and claims no segment.
+; It is picked up by the Makefile's `$(wildcard src/*.s)`, so it assembles
+; into EVERY build, both backends, every profile — an ip65 build checks the
+; UCI codes and vice versa, which is the point: the collision this guards
+; against is cross-product, not cross-profile.
+;
+; WHY EQUATES HERE WHEN THE HEADERS DELIBERATELY USE COMMENTS. #185 kept the
+; peer's codes as comments in src/net/{uci/uci_errors.inc,ip65/ip65_errors.inc}
+; because an equate in OUR error namespace would read as "we emit this". The
+; `NET_ERR_PEER_*` names below are a separate, obviously-foreign namespace
+; whose only consumer is the assertions in this file; nothing emits them and
+; nothing may. This is the shape c64-wireguard already uses for their own
+; reserved $47 (`.export` + asserts, src/net/ip65/net.s), which
+; uci_errors.inc names as "the more durable shape" to copy.
+;
+; SCOPE, honestly. This file cannot see a code that is not written into it,
+; and it cannot see the peer repository. Two limits, one covered each:
+;   - a new equate added to our headers but not registered here is caught by
+;     tools/test_net_err_registry.py, which parses the headers themselves;
+;   - drift against the peer's live registry is caught by the same suite when
+;     a c64-wireguard checkout is present (C64_WIREGUARD_ROOT, or the
+;     sibling default). Absent one, it says so rather than passing quietly.
+;
+; MAINTENANCE. Adding a code: allocate it in c64-wireguard/src/net_abi.inc
+; FIRST, then in the emitting header here, then register it below. Never
+; reassign a published value — the whole registry rests on that one rule.
+
+.include "uci/uci_errors.inc"           ; -I src/net; UCI_ERR_*   ($80-$BF)
+.include "ip65/ip65_errors.inc"         ; -I src/net; NET_ERR_IP65_* ($40-$7F)
+
+; --- Family range bounds (retired SPEC §13.2, now the peer registry) -------
+NET_ERR_IP65_FAMILY_LO = $40
+NET_ERR_IP65_FAMILY_HI = $7F
+NET_ERR_UCI_FAMILY_LO  = $80
+NET_ERR_UCI_FAMILY_HI  = $BF
+
+; --- Codes owned by c64-wireguard. We emit NONE of these. -----------------
+; Snapshot of c64-wireguard/src/net_abi.inc @ cf7b41e (2026-09-07).
+NET_ERR_PEER_IP65_UDP_LISTEN   = $46
+NET_ERR_PEER_IP65_UDP_SEND     = $47   ; reserved there, never emitted
+NET_ERR_PEER_IP65_WAIT_TIMEOUT = $48
+NET_ERR_PEER_IP65_UDP_UNBIND   = $49
+NET_ERR_PEER_UCI_LONG_READ     = $8A   ; we mirror this one — see below
+NET_ERR_PEER_UCI_SEND_TOO_LONG = $8C
+NET_ERR_PEER_UCI_OPEN_REFUSED  = $8D
+NET_ERR_PEER_UCI_CMD_UNKNOWN   = $8E
+NET_ERR_PEER_UCI_SHORT_READ    = $8F
+
+; --- Assertions -----------------------------------------------------------
+; `error` scope, not `lderror`: every operand is a local assemble-time
+; equate, so ca65 settles these before ld65 is reached and a collision fails
+; the build at the offending object rather than at the link.
+
+.macro NET_ERR_ASSERT_IP65 val, name
+    .assert (val) >= NET_ERR_IP65_FAMILY_LO && (val) <= NET_ERR_IP65_FAMILY_HI, error, .concat(name, ": outside the ip65 family range $40-$7F (c64-wireguard/src/net_abi.inc registry, #184)")
+    .assert (val) <> NET_ERR_PEER_IP65_UDP_LISTEN,   error, .concat(name, ": collides with c64-wireguard's $46 NET_ERR_IP65_UDP_LISTEN - allocate in c64-wireguard/src/net_abi.inc first (#184)")
+    .assert (val) <> NET_ERR_PEER_IP65_UDP_SEND,     error, .concat(name, ": collides with c64-wireguard's $47 NET_ERR_IP65_UDP_SEND (reserved, never emitted) - allocate in c64-wireguard/src/net_abi.inc first (#184)")
+    .assert (val) <> NET_ERR_PEER_IP65_WAIT_TIMEOUT, error, .concat(name, ": collides with c64-wireguard's $48 NET_ERR_IP65_WAIT_TIMEOUT - allocate in c64-wireguard/src/net_abi.inc first (#184)")
+    .assert (val) <> NET_ERR_PEER_IP65_UDP_UNBIND,   error, .concat(name, ": collides with c64-wireguard's $49 NET_ERR_IP65_UDP_UNBIND - allocate in c64-wireguard/src/net_abi.inc first (#184)")
+.endmacro
+
+.macro NET_ERR_ASSERT_UCI val, name
+    .assert (val) >= NET_ERR_UCI_FAMILY_LO && (val) <= NET_ERR_UCI_FAMILY_HI, error, .concat(name, ": outside the UCI family range $80-$BF (c64-wireguard/src/net_abi.inc registry, #184)")
+    .assert (val) <> NET_ERR_PEER_UCI_LONG_READ,     error, .concat(name, ": collides with c64-wireguard's $8A UCI_ERR_LONG_READ - allocate in c64-wireguard/src/net_abi.inc first (#184)")
+    .assert (val) <> NET_ERR_PEER_UCI_SEND_TOO_LONG, error, .concat(name, ": collides with c64-wireguard's $8C UCI_ERR_SEND_TOO_LONG - allocate in c64-wireguard/src/net_abi.inc first (#184)")
+    .assert (val) <> NET_ERR_PEER_UCI_OPEN_REFUSED,  error, .concat(name, ": collides with c64-wireguard's $8D UCI_ERR_OPEN_REFUSED - allocate in c64-wireguard/src/net_abi.inc first (#184)")
+    .assert (val) <> NET_ERR_PEER_UCI_CMD_UNKNOWN,   error, .concat(name, ": collides with c64-wireguard's $8E UCI_ERR_CMD_UNKNOWN - allocate in c64-wireguard/src/net_abi.inc first (#184)")
+    .assert (val) <> NET_ERR_PEER_UCI_SHORT_READ,    error, .concat(name, ": collides with c64-wireguard's $8F UCI_ERR_SHORT_READ - allocate in c64-wireguard/src/net_abi.inc first (#184)")
+.endmacro
+
+; ip65 family — every code src/net/ip65/ip65_errors.inc defines.
+NET_ERR_ASSERT_IP65 NET_ERR_IP65_INIT,    "NET_ERR_IP65_INIT"
+NET_ERR_ASSERT_IP65 NET_ERR_IP65_DHCP,    "NET_ERR_IP65_DHCP"
+NET_ERR_ASSERT_IP65 NET_ERR_IP65_DNS,     "NET_ERR_IP65_DNS"
+NET_ERR_ASSERT_IP65 NET_ERR_IP65_CONNECT, "NET_ERR_IP65_CONNECT"
+NET_ERR_ASSERT_IP65 NET_ERR_IP65_SEND,    "NET_ERR_IP65_SEND"
+
+; UCI family — every code src/net/uci/uci_errors.inc defines EXCEPT
+; UCI_ERR_LONG_READ, handled immediately below.
+NET_ERR_ASSERT_UCI UCI_ERR_NOT_PRESENT,  "UCI_ERR_NOT_PRESENT"
+NET_ERR_ASSERT_UCI UCI_ERR_CMD_FAILED,   "UCI_ERR_CMD_FAILED"
+NET_ERR_ASSERT_UCI UCI_ERR_NO_IP,        "UCI_ERR_NO_IP"
+NET_ERR_ASSERT_UCI UCI_ERR_CONNECT_FAIL, "UCI_ERR_CONNECT_FAIL"
+NET_ERR_ASSERT_UCI UCI_ERR_SEND_FAIL,    "UCI_ERR_SEND_FAIL"
+NET_ERR_ASSERT_UCI UCI_ERR_READ_FAIL,    "UCI_ERR_READ_FAIL"
+NET_ERR_ASSERT_UCI UCI_ERR_SHORT_WRITE,  "UCI_ERR_SHORT_WRITE"
+NET_ERR_ASSERT_UCI UCI_ERR_NO_SOCKET,    "UCI_ERR_NO_SOCKET"
+NET_ERR_ASSERT_UCI UCI_ERR_WAIT_TIMEOUT, "UCI_ERR_WAIT_TIMEOUT"
+NET_ERR_ASSERT_UCI UCI_ERR_BAD_READ_HDR, "UCI_ERR_BAD_READ_HDR"
+
+; THE ONE DELIBERATE OVERLAP. UCI_ERR_LONG_READ = $8A is c64-wireguard's
+; allocation, mirrored here as a reserved-never-emitted equate so the name
+; is readable in our diagnostics (see the block in uci_errors.inc). It is
+; therefore the one code that must EQUAL a peer value instead of differing
+; from one — checked in that direction so the mirror cannot silently drift
+; off theirs, and named so nobody mistakes it for a missed collision.
+.assert UCI_ERR_LONG_READ = NET_ERR_PEER_UCI_LONG_READ, error, "UCI_ERR_LONG_READ must mirror c64-wireguard's $8A exactly; it is their allocation, reserved and never emitted here (#184)"
+
+; PUBLISHED VALUES, PINNED. The registry's single rule is that a published
+; value is never reassigned — not renumbered to close a gap, not reused
+; because a code turned out unreachable. These literals are that rule made
+; mechanical, and they also give the set pairwise distinctness for free.
+; Changing one of these numbers is not a refactor; it is a fleet-wide
+; incompatibility, and it must fail here.
+.assert NET_ERR_IP65_INIT    = $41, error, "NET_ERR_IP65_INIT is published as $41 and must never be reassigned (#184)"
+.assert NET_ERR_IP65_DHCP    = $42, error, "NET_ERR_IP65_DHCP is published as $42 and must never be reassigned (#184)"
+.assert NET_ERR_IP65_DNS     = $43, error, "NET_ERR_IP65_DNS is published as $43 and must never be reassigned (#184)"
+.assert NET_ERR_IP65_CONNECT = $44, error, "NET_ERR_IP65_CONNECT is published as $44 and must never be reassigned (#184)"
+.assert NET_ERR_IP65_SEND    = $45, error, "NET_ERR_IP65_SEND is published as $45 and must never be reassigned (#184)"
+.assert UCI_ERR_NOT_PRESENT  = $81, error, "UCI_ERR_NOT_PRESENT is published as $81 and must never be reassigned (#184)"
+.assert UCI_ERR_CMD_FAILED   = $82, error, "UCI_ERR_CMD_FAILED is published as $82 and must never be reassigned (#184)"
+.assert UCI_ERR_NO_IP        = $83, error, "UCI_ERR_NO_IP is published as $83 and must never be reassigned (#184)"
+.assert UCI_ERR_CONNECT_FAIL = $84, error, "UCI_ERR_CONNECT_FAIL is published as $84 and must never be reassigned (#184)"
+.assert UCI_ERR_SEND_FAIL    = $85, error, "UCI_ERR_SEND_FAIL is published as $85 and must never be reassigned (#184)"
+.assert UCI_ERR_READ_FAIL    = $86, error, "UCI_ERR_READ_FAIL is published as $86 and must never be reassigned (#184)"
+.assert UCI_ERR_SHORT_WRITE  = $87, error, "UCI_ERR_SHORT_WRITE is published as $87 and must never be reassigned (#184)"
+.assert UCI_ERR_NO_SOCKET    = $88, error, "UCI_ERR_NO_SOCKET is published as $88 and must never be reassigned (#184)"
+.assert UCI_ERR_WAIT_TIMEOUT = $89, error, "UCI_ERR_WAIT_TIMEOUT is published as $89 and must never be reassigned (#184)"
+.assert UCI_ERR_LONG_READ    = $8A, error, "UCI_ERR_LONG_READ is published as $8A and must never be reassigned (#184)"
+.assert UCI_ERR_BAD_READ_HDR = $8B, error, "UCI_ERR_BAD_READ_HDR is published as $8B and must never be reassigned (#184)"
+
+; $00 is "no error" in every family, fleet-wide, and is not allocatable.
+.assert UCI_ERR_OK = $00, error, "UCI_ERR_OK must stay $00 - 'no error' is fleet-wide, not a UCI allocation (#184)"

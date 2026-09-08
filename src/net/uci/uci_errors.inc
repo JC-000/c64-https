@@ -34,6 +34,24 @@
 ; them. Re-read their registry before allocating; this list is a snapshot,
 ; not the authority (#184).
 ;
+; THAT SNAPSHOT IS NOW MACHINE-CHECKED (#184). The list above is prose, and
+; prose does not fail a build, so two guards stand behind it:
+;
+;   src/net_err_registry_asserts.s   assembles into EVERY build, both
+;       backends, every profile, and emits no bytes. It carries the peer's
+;       codes as NET_ERR_PEER_* equates and `.assert`s that no code defined
+;       here lands on one, that each is in family range, and that no
+;       published value has been reassigned. Minting $8C fails ca65 with a
+;       named message instead of linking clean.
+;   tools/test_net_err_registry.py   parses THIS file rather than the
+;       asserts TU, so a new code that never gets registered there is still
+;       caught, and diffs our snapshot against the live
+;       c64-wireguard/src/net_abi.inc when a checkout is present.
+;
+; Adding a code: allocate in c64-wireguard/src/net_abi.inc, add the equate
+; here, then register it in src/net_err_registry_asserts.s. The suite fails
+; until all three agree.
+;
 ; One inconsistency, called out rather than hidden: $8A below IS a real
 ; equate, and is likewise reserved-never-emitted. It predates this block and
 ; stays — a published value is never reassigned, and removing the equate

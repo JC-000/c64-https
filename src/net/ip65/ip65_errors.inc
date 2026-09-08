@@ -30,6 +30,16 @@
 ; collision, caught in review three weeks after the $88 one. Remapped before
 ; merge. Comments only, deliberately: an equate here would imply we emit
 ; them. Their registry is the authority, not this snapshot (#184).
+;
+; THAT SNAPSHOT IS NOW MACHINE-CHECKED (#184), because prose does not fail a
+; build. src/net_err_registry_asserts.s assembles into every build on both
+; backends, emits no bytes, and `.assert`s that no code defined here lands
+; on a peer-owned value, that each is in the $40-$7F family range, and that
+; no published value has been reassigned. tools/test_net_err_registry.py
+; parses THIS file, so a code that never gets registered in that TU is
+; caught too, and diffs the snapshot against the live peer registry when a
+; c64-wireguard checkout is present. Adding a code means all three: their
+; registry, the equate here, the registration there.
 
 .ifndef IP65_ERRORS_INC_INCLUDED
 IP65_ERRORS_INC_INCLUDED = 1

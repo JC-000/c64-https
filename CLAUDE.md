@@ -271,9 +271,9 @@ Switching backend = a different cfg + different `src/net/<backend>/*.o`.
 SPEC §13, issue #70). **§13 was retired at contract v1.0.0; every §13.x
 number in this section resolves at tag `v0.17.1`, nowhere else.** No §13
 assert has a contract-derived counterparty, so no contract release can
-break a build — but the error codes below are asserted NOWHERE, and that
-is the live hazard (see the allocation note). `src/net_abi.inc` is the
-normative source now. `boot.s`, `http.s`, `tls_record_io.s` and `tls13.s`
+break a build. The error codes below used to be asserted NOWHERE; they
+are asserted now (#184) — see the allocation note. `src/net_abi.inc` is
+the normative source now. `boot.s`, `http.s`, `tls_record_io.s` and `tls13.s`
 `.include` it and import no `net_*` symbol directly, so a backend that
 drops a symbol fails the link by name on both backends. Surface:
 
@@ -304,6 +304,21 @@ drops a symbol fails the link by name on both backends. Surface:
     new code in `c64-wireguard/src/net_abi.inc`, which declares itself
     canonical for both ranges, then here. It owns `$8C-$8F` and `$46-$49`,
     which our two error headers used to present as free (#184).
+    **That is mechanically enforced now, in two halves (#184).**
+    `src/net_err_registry_asserts.s` is `$(wildcard src/*.s)`, so it
+    assembles into every build on both backends and emits **no bytes**: it
+    holds the peer's codes as `NET_ERR_PEER_*` equates and `.assert`s (scope
+    `error`, so ca65 settles it before ld65) that no code of ours lands on
+    one, that each is in family range, and that no published value has been
+    reassigned. Its blind spot — a code never registered in it — is closed
+    by `tools/test_net_err_registry.py`, which parses the two headers
+    instead, and which also diffs our snapshot against the live peer file
+    when a c64-wireguard checkout is present (`C64_WIREGUARD_ROOT`, else
+    `../c64-wireguard`, else `~/Documents/c64-wireguard`). Without one it
+    SKIPS, loudly — `pytest.ini` sets `addopts = -ra` so the reason prints
+    on every run. Adding a code takes all three edits and the suite is red
+    until they agree. The `NET_FAMILY_*` bits in `src/net/net_families.inc`
+    are the same cross-repo copy problem and are still unguarded.
   - Gone, per §13.1: `net_tcp_set_recv_cb` (stub), `net_recv_ready`,
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
     is now `print_local_ip` in `boot.s`, one copy for both backends.
