@@ -17,7 +17,7 @@ Keep it terse.
 ## Build
 
 Dependencies:
-  - `ca65`, `ld65` from cc65 (ACME is no longer required)
+  - `ca65`, `ld65` from cc65
   - GNU make
   - VICE (`x64sc`) only for `make run` / the test harness
 

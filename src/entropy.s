@@ -4,8 +4,9 @@
 ; Must be called before drbg_init_entropy. Sets SID voice 3 to noise
 ; waveform at maximum frequency, starts CIA1 Timer A in continuous mode.
 ;
-; Converted from entropy.asm (ACME) to ca65. Pure code, no ACME directives
-; other than the implicit segment — the whole file is a single routine.
+; Converted from entropy.asm (ACME, since removed) to ca65. Pure code, no
+; ACME directives other than the implicit segment — the whole file is a
+; single routine.
 ; =============================================================================
 
 .include "constants.inc"

@@ -118,7 +118,7 @@ def launch_vice_on_bridge(
         ethernet_mode="rrnet",
         ethernet_interface=tap,
         ethernet_driver="tuntap",
-        extra_args=["-reu", "-reusize", "512"],  # boot.asm uses REU for mul tables
+        extra_args=["-reu", "-reusize", "512"],  # boot.s uses REU for mul tables
     )
 
     proc = ViceProcess(config)

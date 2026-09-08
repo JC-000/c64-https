@@ -1,9 +1,19 @@
 ; src/net/ip65/ip65_blob.s — ca65 wrapper around the pre-built ip65 binary.
 ;
-; The ip65 library is built by the legacy ACME Makefile pipeline into
+; The blob is
 ;   ip65-build/ip65-c64.bin
-; which is a ~7KB blob pre-linked at $2000 (jump table + library code).
-; This wrapper incbin's that blob into the NET_CODE segment so ld65 places
+; a ~7KB image pre-linked at $2000 (jump table + library code), and it is
+; built by this repo's own Makefile with ca65 + ld65 — the `$(IP65_BIN)`
+; rule links `ip65_stub.o` against `ip65/ip65_tcp.lib` and
+; `drivers/ip65_c64.lib` from the ip65 submodule, plus cc65's own `c64.lib`.
+;
+; A plain `make` produces it on demand: `$(IP65_BIN)` is in `PRG_DEPS` and
+; this object declares an explicit dependency on it, so it is not a step you
+; have to remember. `make ip65-blob` builds just the blob, without going on
+; to link the PRG. What a plain `make` canNOT do is build the submodule's
+; `.lib` archives — that is `make ip65-libs`, once per clone.
+;
+; This wrapper incbin's the blob into the NET_CODE segment so ld65 places
 ; it at $2000 inside the final c64-https.prg image.
 ;
 ; Do NOT modify ip65-build/ or the ip65 submodule — they remain the source

@@ -52,7 +52,8 @@ from _skip_policy import cannot_run, not_applicable  # noqa: E402
 
 PRG_PATH = os.path.join(_REPO_ROOT, "build", "c64-https.prg")
 
-# Screen needles (from src/boot.asm string labels).
+# Screen needles (from the string labels in src/boot.s: `menu_msg`,
+# `dhcp_ok_msg`, `done_msg`, and the `*_fail_msg` set).
 MENU_NEEDLE = "Q=QUIT"
 DHCP_OK_NEEDLE = "DHCP OK"
 # Primary success indicator: the C64 prints this after the whole HTTPS

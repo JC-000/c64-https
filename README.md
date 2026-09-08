@@ -403,7 +403,7 @@ TLS 1.3 records can be up to 16,384 bytes. The ClientHello negotiates
 ## Building
 
 **Requirements:**
-- [cc65 toolchain](https://cc65.github.io/) — ca65 + ld65 (ACME is no longer used)
+- [cc65 toolchain](https://cc65.github.io/) — ca65 + ld65
 - GNU Make
 - VICE (`x64sc`) — only for `make run` and the test harness
 

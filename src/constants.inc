@@ -1,8 +1,9 @@
 ; =============================================================================
 ; constants.inc - System equates, zero page, hardware addresses
 ;
-; Converted from constants.asm (ACME) to ca65 include file. Pure equates,
-; no code or data — included by every .s module that needs the symbols.
+; Converted from constants.asm (ACME, since removed) to ca65 include file.
+; Pure equates, no code or data — included by every .s module that needs
+; the symbols.
 ; ACME `=` assignments are syntactically identical in ca65.
 ; =============================================================================
 

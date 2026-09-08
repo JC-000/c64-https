@@ -38,9 +38,10 @@ from _skip_policy import cannot_run, not_applicable  # noqa: E402
 
 PRG_PATH = os.path.join(_REPO_ROOT, "build", "c64-https.prg")
 
-# Exact literal from src/boot.asm (menu_msg @ line 424-426).
+# Exact literal from the tail of `menu_msg` in src/boot.s
+# ("I=INIT  H=HTTP  G=HTTPS  Q=QUIT").
 MENU_NEEDLE = "Q=QUIT"
-# dhcp_ok_msg @ boot.asm:448 is "DHCP OK - IP: ". Match the load-bearing prefix.
+# `dhcp_ok_msg` in src/boot.s is "DHCP OK - IP: ". Match the load-bearing prefix.
 DHCP_OK_NEEDLE = "DHCP OK"
 
 MENU_TIMEOUT = 90.0

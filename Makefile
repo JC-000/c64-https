@@ -1,7 +1,5 @@
 # Makefile — ca65/ld65 build for c64-https
 #
-# Replaces the original ACME-based build. ACME is no longer required.
-#
 # Targets:
 #   make              — default, produces build/c64-https.prg + build/labels.txt
 #   make clean        — remove build artifacts
