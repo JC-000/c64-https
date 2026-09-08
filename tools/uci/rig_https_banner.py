@@ -32,9 +32,13 @@ chunk — by `tools/http_body_checks.py`, which mirrors `src/http.s`'s
 hardware-free red case per branch (`tools/test_http_body_checks_unit.py`)
 and a mutation runner (`tools/mutate_http_body_checks.py`).
 
+Device state is `_device_prep.prepare_device` (48 MHz, plus the REU when
+the build needs one), with `preflight_reu` behind it — the same two steps,
+in the same order, as the other five crypto-path rigs.
+
 Exit: 0 pass, 1 fail, 78 inconclusive (framing that says nothing about
 length, or a poll budget that expired mid-body — never promoted to a
-pass), 2 fatal, 3 DeviceLock timeout. The codes come from
+pass), 2 fatal, 3 DeviceLock timeout, 4 device prep / REU preflight. The codes come from
 `http_body_checks.decide_exit`, which also decides which one applies; this
 file does not compute an exit code of its own.
 
@@ -51,16 +55,21 @@ from c64_test_harness.backends.device_lock import (
     DeviceLock, DeviceLockTimeout,
 )
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
-from c64_test_harness.backends.ultimate64_helpers import (
-    CAT_U64_SPECIFIC, cpu_speed_enum, set_turbo_mhz,
-)
 from c64_test_harness.uci_network import disable_uci, enable_uci
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _device_lock_helper import (  # noqa: E402
     LockTimeoutConfigError, acquire_device_lock,
 )
+from _device_prep import DevicePrepError, prepare_device  # noqa: E402
+from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
 from boot_check import decode_screen, screen_text  # noqa: E402
+# Run-dir helpers, imported rather than copied: `rig_https_wiki.py` already
+# takes them from here, and a third copy of "make a timestamped directory"
+# is a third thing to drift.
+from rig_https_local import (  # noqa: E402
+    _create_run_dir, _prune_old_run_dirs,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from http_body_checks import (  # noqa: E402
@@ -71,17 +80,27 @@ from ip65_hw_checks import check_shadow_ram_readable  # noqa: E402
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 PRG_PATH = Path(__file__).resolve().parents[2] / "build" / "c64-https.prg"
+LABELS_PATH = PRG_PATH.parent / "labels.txt"
 EXPECT_HOST = os.environ.get("HTTPS_HOST", "en.wikipedia.org").upper()
+
+#: This rig runs no bus capture, so unlike `rig_https_local` it has no run
+#: directory of its own to put `device_state.json` in — it always creates
+#: one, which is `bench_ecdsa_u64e.py`'s capture-off branch without the
+#: branch. Same base directory as the local/wiki rigs so a session's
+#: artifacts stay together, same 5-deep rotation.
+DEBUG_BASE_DIR = Path(os.environ.get("UCI_DEBUG_DIR", "/tmp/uci_https_debug"))
+DEBUG_KEEP = 5
 #: The rig used to inherit whatever CPU speed the previous lane left in the
 #: device config, and got away with it because its only verdict was the
 #: banner, which is clock-independent. A COMPLETENESS verdict is not: a
 #: 1 MHz U64E needs ~35 min to reach the first body byte, so an inherited
 #: 1 MHz would report a truncated fetch that is merely a slow one. Measured
 #: 2026-09-07: the device was at ' 1' and the first run of this rig timed
-#: out at "tcp connected". So the clock is now set, not assumed, and the
-#: budgets below scale with it. NOT every literal in this file does: the
-#: 40 s banner-capture window after 'G' is a screen-scrape race against
-#: scrolling, not a work budget, and is deliberately left alone.
+#: out at "tcp connected". So the clock is now set, not assumed — through
+#: `_device_prep.prepare_device`, not inline — and the budgets below scale
+#: with it. NOT every literal in this file does: the 40 s banner-capture
+#: window after 'G' is a screen-scrape race against scrolling, not a work
+#: budget, and is deliberately left alone.
 TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
 _SCALE = max(1.0, 48.0 / float(TURBO_MHZ))
 
@@ -167,38 +186,52 @@ def main() -> int:
             except Exception as exc:
                 print(f"WARNING: /Temp GC skipped: {exc}")
 
-        # Set turbo BEFORE the reset, and skip a redundant write. The
-        # config WRITE itself perturbs the UCI bridge and the next pushed
-        # command is silently lost (UCI_ERR_NO_SOCKET) — it fires on a
-        # write that changes nothing, and it survives the reset. Same
-        # reasoning and same shape as rig_https_local.py; read its comment
-        # for the 3/3 C64U reproduction behind it.
+        # --- Device prep: reset-then-configure (#197, #187, #212) -------
+        # This rig used to probe `CPU Speed` / `Turbo Control` inline and,
+        # when the read failed, perform the write regardless — the #187
+        # degrade, reintroduced by composition: the turbo handling arrived
+        # in #227 while #225's KNOWN_UNPREPPED still exempted this file on
+        # the grounds that it had no device-state handling at all. It does
+        # now, so it goes through the one home for that policy like the
+        # other five crypto-path rigs. An unreadable turbo state ABORTS here
+        # (C64_FORCE_TURBO_WRITE=1 to override); an unreadable REU state
+        # degrades toward the write, which is the safe direction there.
+        #
+        # 48 MHz, asserted rather than inherited. The clock is load-bearing
+        # for this rig specifically: its completeness verdict is what a
+        # 1 MHz device turns into a false TRUNCATED, and a comb boot at
+        # 1 MHz needs ~36 min against C64_INIT_WAIT — #212's own failure.
+        prep_dir = _create_run_dir(DEBUG_BASE_DIR)
+        _prune_old_run_dirs(DEBUG_BASE_DIR, keep=DEBUG_KEEP)
+        print(f"Device-state record dir: {prep_dir} (device_state.json)")
         try:
-            cat = client.get_config_category(CAT_U64_SPECIFIC)
-            inner = cat.get(CAT_U64_SPECIFIC, cat)
-            cur_speed, cur_turbo = inner.get("CPU Speed"), inner.get("Turbo Control")
-        except Exception as exc:                      # probe is best-effort
-            print(f"  (turbo state probe failed: {exc}; writing anyway)")
-            cur_speed = cur_turbo = None
-        # str() and strip() BOTH sides of both comparisons: the REST
-        # value's type and padding are the firmware's business ('CPU Speed'
-        # comes back as ' 1'), and an asymmetric compare here fails safe but
-        # silently — it would just always write, restoring the bridge glitch
-        # this skip exists to avoid.
-        if str(cur_speed).strip() == str(cpu_speed_enum(TURBO_MHZ)).strip() \
-                and str(cur_turbo).strip() == "Manual":
-            print(f"Turbo already {TURBO_MHZ} MHz (Manual) — skipping the write")
-        else:
-            print(f"Setting turbo to {TURBO_MHZ} MHz (from {cur_turbo}/{cur_speed})...")
-            try:
-                set_turbo_mhz(client, TURBO_MHZ)
-            except ValueError as exc:
-                # An unsupported TURBO_MHZ is an operator error, and the
-                # rig's own code for that is 2 (fatal), not 1 (a check
-                # failed) and not a traceback.
-                print(f"[fatal] TURBO_MHZ={TURBO_MHZ}: {exc}", file=sys.stderr)
-                return 2
-            time.sleep(float(os.environ.get("TURBO_SETTLE", "3.0")))
+            prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ,
+                           artifact_dir=prep_dir)
+        except DevicePrepError as exc:
+            print(str(exc), file=sys.stderr)
+            return 4
+        except ValueError as exc:
+            # NOT a second copy of the turbo policy: prepare_device calls
+            # the harness's set_turbo_mhz uncaught, and an unsupported
+            # speed raises ValueError rather than DevicePrepError. That is
+            # an operator typo in TURBO_MHZ, and this rig's code for that
+            # is 2 (fatal), not a traceback at exit 1. Worth pushing into
+            # _device_prep so all six call sites agree; owned by another
+            # lane, so it is reported rather than edited from here.
+            print(f"[fatal] TURBO_MHZ={TURBO_MHZ}: {exc}", file=sys.stderr)
+            return 2
+
+        # The #97 preflight stays as the backstop BEHIND the prep, and it
+        # matters more here than it used to: this rig is now a completeness
+        # oracle with a 900 s default budget, so a comb PRG on a
+        # REU-disabled device (the documented factory default) would spin
+        # far longer before failing than it did when the rig only read a
+        # banner.
+        try:
+            preflight_reu(client, LABELS_PATH)
+        except ReuPreflightError as exc:
+            print(str(exc), file=sys.stderr)
+            return 4
 
         client.reset()
         time.sleep(2.5)

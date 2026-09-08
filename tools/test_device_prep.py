@@ -547,17 +547,16 @@ def test_skipping_prep_warns_that_the_clock_is_unmanaged() -> None:
 #: statement that the gap is known and owned, not that it is harmless — each
 #: one is asserted below to still lack prep, so a fixed rig fails this file
 #: until its entry is removed. Same shape as `run_all_tests.UNDISPATCHED_SUITES`.
-KNOWN_UNPREPPED = {
-    "rig_https_banner.py": (
-        "owned by another lane (the #210 work) and must not be edited from "
-        "here; sequencing is with the coordinator. It is the rig whose "
-        "documented failure IS #212's: it boots the PRG through the menu on "
-        "a C64_INIT_WAIT of 75 s while printing 'comb boot precompute', "
-        "writes no turbo and no REU, and a comb boot at 1 MHz needs ~36 min "
-        "against that budget. `tests/rig_ip65_rrnet_hw.py` writes turbo at "
-        "stock 1 MHz, so 'RR-Net run, then banner run' reaches it live."
-    ),
-}
+#: Rigs knowingly not yet wired to `prepare_device`, with the reason.
+#: EMPTY, and the last entry is worth remembering: `rig_https_banner.py`
+#: sat here because it had no device-state handling at all, which stopped
+#: being true one PR later — #227 gave it a turbo probe, and the exemption
+#: (which covers PREP) did not cover PROBING, so it reintroduced #187's
+#: "writing anyway" degrade in the one file this contract had excused.
+#: Neither PR was wrong alone; both were green alone. An entry here is a
+#: statement about a file at a moment, so re-read it whenever that file
+#: changes.
+KNOWN_UNPREPPED: dict[str, str] = {}
 
 
 def _crypto_path_rigs():
