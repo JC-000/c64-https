@@ -17,38 +17,62 @@ four days, and wg#120's first commit minting $40-$44 over our $41-$45,
 caught by a human reviewer. Until #184 nothing mechanical checked either
 range in this repo.
 
-WHAT IS CHECKED, AND WHERE THE OTHER HALF LIVES.
-``src/net_err_registry_asserts.s`` is the link-time half: it fails the ca65
-assemble of every profile, both backends, if a code it knows about lands on
-a peer-owned value or a published value is reassigned. It costs no bytes.
-Its blind spot is a code that never gets registered in it, and it cannot see
-the peer repository at all. This suite covers exactly those two gaps:
+TWO HALVES. ``src/net_err_registry_asserts.s`` is the assemble-time half: it
+fails ca65 on every profile, both backends, if a code it knows about lands
+on a peer-owned value or a published value is reassigned, and it costs no
+bytes. Its blind spot is a code that is never registered in it, and it
+cannot see the peer repository at all. This suite covers exactly those two
+gaps, and adds the intra-repo checks the assembler cannot express.
 
-  1-3. Structural, always run. Every error code defined in our two headers
-       is in its family range, is registered in the asserts TU, and does not
-       sit on a peer-owned value. (3) is the assembler's check repeated from
-       the headers' side, which is the point: (2)+(3) together mean a new
-       code cannot dodge the assembler by simply not being registered.
-  4.   Snapshot integrity: the NET_ERR_PEER_* table in the asserts TU agrees
-       with the prose lists in the two headers.
-  5-7. Cross-repo drift, against the live peer registry. SKIPPED when no
-       c64-wireguard checkout is found — pytest.ini sets ``addopts = -ra``,
-       so the skip and its reason are printed on every run rather than
-       vanishing into a green count. Point it at a checkout with
-       ``C64_WIREGUARD_ROOT=/path/to/c64-wireguard``; the sibling default
-       is ``../c64-wireguard`` relative to this repo, then
-       ``~/Documents/c64-wireguard``.
+=============================================================================
+WHAT THIS GUARD DOES **NOT** COVER — read before trusting a green run
+=============================================================================
 
-WHAT IT DELIBERATELY DOES NOT DO. It never edits, and never asserts
-anything about, the peer repository's own correctness. A code of ours that
-their registry has claimed is reported as a finding for a human to take
-cross-repo; this suite's job is to make it impossible to not notice.
+**Only three declaration spellings are recognised**, because this is a text
+parser and not ca65:
+
+    NAME = $8C          recognised
+    NAME = 140          recognised
+    .define NAME $8C    recognised
+
+An **expression-valued** equate is NOT recognised and will pass every check
+here while colliding:
+
+    UCI_ERR_NEW = UCI_ERR_NO_SOCKET + 4      NOT COVERED
+
+Evaluating that needs an assembler, not a regex. It is declared out of
+scope rather than half-handled: a parser that silently mis-evaluates one of
+these would be worse than one that visibly does not try. If you are adding
+a code, write it as a literal — every existing code in both headers does.
+
+**The assembler half covers only registered codes.** Check 2 below is what
+makes that safe, by failing when a code in the headers has no
+``NET_ERR_ASSERT_*`` line. The two halves are only jointly complete for the
+spellings listed above.
+
+**Nothing here validates c64-wireguard.** A code of ours their registry has
+claimed is reported as a finding for a human to take cross-repo. This suite
+never edits, and never asserts the correctness of, the peer repository.
+
+=============================================================================
+
+THE CROSS-REPO CHECKS NEED A PEER CHECKOUT, and a missing one is an
+INVOLUNTARY skip under ``tools/_skip_policy.py``: the drift checks verify
+nothing without it, so they FAIL rather than pass quietly (#158/#165/#178).
+Point the suite at a checkout with ``C64_WIREGUARD_ROOT=/path``; the
+defaults are ``../c64-wireguard`` then ``~/Documents/c64-wireguard``. A lane
+that genuinely has no peer checkout opts out loudly with
+``C64_ALLOW_SKIP=1``, which still prints the full vacuity warning. The six
+structural checks run either way.
 """
 
 import os
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _skip_policy import VoluntarySkip, require  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 UCI_HEADER = REPO / "src" / "net" / "uci" / "uci_errors.inc"
@@ -58,16 +82,23 @@ ASSERTS_TU = REPO / "src" / "net_err_registry_asserts.s"
 IP65_FAMILY = (0x40, 0x7F)
 UCI_FAMILY = (0x80, 0xBF)
 
+TOTAL_CHECKS = 10
+CERTIFIES = ("agreement between this repo's net_last_error allocations and "
+             "c64-wireguard's canonical registry")
+
 # The one code we define that is a c64-wireguard allocation: mirrored here,
 # reserved, never emitted, so the name is readable in our diagnostics. It is
 # checked in the opposite direction from every other code (it must EQUAL
 # theirs), and is excluded from the collision sweep by name, never by value.
 MIRRORED = "UCI_ERR_LONG_READ"
 
-# `NAME = $hh` where hh lands in either family range. Two hex digits only:
-# a four-digit $DFxx is a register, not an error code, and the sub-$40
-# values in these files ($00 = OK) are not allocatable.
-_EQUATE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\$([0-9A-Fa-f]{2})\s*(?:;.*)?$")
+# Declaration spellings we recognise. See the docstring's scope block: an
+# expression-valued equate is deliberately out of scope.
+#   NAME = $hh   |   NAME = ddd   |   .define NAME $hh / ddd
+_EQUATE_RE = re.compile(
+    r"^\s*(?:\.define\s+([A-Za-z_][A-Za-z0-9_]*)\s+|"
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*)"
+    r"(?:\$([0-9A-Fa-f]{1,2})|([0-9]{1,3}))\s*(?:;.*)?$")
 
 # `NET_ERR_PEER_NAME = $hh` in the asserts TU.
 _PEER_RE = re.compile(r"^\s*(NET_ERR_PEER_[A-Za-z0-9_]+)\s*=\s*\$([0-9A-Fa-f]{2})\b")
@@ -90,14 +121,15 @@ def _read(path):
 
 
 def _our_codes():
-    """{name: value} for every error code our two headers define."""
+    """{name: (value, path, family)} for every error code our headers define."""
     codes = {}
     for path, family in ((UCI_HEADER, UCI_FAMILY), (IP65_HEADER, IP65_FAMILY)):
         for line in _read(path):
             m = _EQUATE_RE.match(line)
             if not m:
                 continue
-            name, value = m.group(1), int(m.group(2), 16)
+            name = m.group(1) or m.group(2)
+            value = int(m.group(3), 16) if m.group(3) else int(m.group(4), 10)
             if not (_in(value, IP65_FAMILY) or _in(value, UCI_FAMILY)):
                 continue
             assert name not in codes, f"{name} defined twice across the headers"
@@ -111,6 +143,20 @@ def _peer_snapshot():
             for m in (_PEER_RE.match(l) for l in _read(ASSERTS_TU)) if m}
 
 
+def _peer_snapshot_expected_name(snapshot_name):
+    """The peer's own spelling implied by a NET_ERR_PEER_* name.
+
+    NET_ERR_PEER_UCI_SEND_TOO_LONG  -> UCI_ERR_SEND_TOO_LONG
+    NET_ERR_PEER_IP65_UDP_LISTEN    -> NET_ERR_IP65_UDP_LISTEN
+    """
+    rest = snapshot_name[len("NET_ERR_PEER_"):]
+    if rest.startswith("UCI_"):
+        return "UCI_ERR_" + rest[len("UCI_"):]
+    if rest.startswith("IP65_"):
+        return "NET_ERR_IP65_" + rest[len("IP65_"):]
+    return rest
+
+
 def _registered_names():
     """Names the asserts TU actually puts through a collision macro."""
     names = set()
@@ -119,6 +165,23 @@ def _registered_names():
         if m:
             names.add(m.group(1))
     return names
+
+
+def _macro_peer_refs():
+    """{'IP65': {peer names asserted}, 'UCI': {...}} from the macro bodies."""
+    refs = {"IP65": set(), "UCI": set()}
+    current = None
+    for line in _read(ASSERTS_TU):
+        m = re.match(r"^\s*\.macro\s+NET_ERR_ASSERT_(IP65|UCI)\b", line)
+        if m:
+            current = m.group(1)
+            continue
+        if re.match(r"^\s*\.endmacro\b", line):
+            current = None
+            continue
+        if current:
+            refs[current].update(re.findall(r"\bNET_ERR_PEER_[A-Za-z0-9_]+", line))
+    return refs
 
 
 def _wireguard_root():
@@ -157,7 +220,7 @@ def _peer_registry(root):
 
 
 # --------------------------------------------------------------------------
-# 1-4: structural, no peer checkout needed.
+# 1-6: structural. No peer checkout needed; these always run.
 # --------------------------------------------------------------------------
 
 def test_every_code_is_in_its_family_range():
@@ -178,6 +241,26 @@ def test_every_code_is_registered_in_the_asserts_tu():
         f"link-time collision guard silently does not cover them (#184).")
 
 
+def test_our_codes_are_pairwise_distinct():
+    """Two of our own names on one byte is the same defect, intra-repo.
+
+    The assembler cannot express this: its literal pins cover the codes
+    that existed when they were written, and a NEW duplicate passes every
+    macro check (range ok, no peer collision) because the value is already
+    legitimately ours. Caught here instead.
+    """
+    by_value = {}
+    for name, (value, _path, _family) in sorted(_our_codes().items()):
+        by_value.setdefault(value, []).append(name)
+    dupes = {f"${v:02X}": names for v, names in sorted(by_value.items())
+             if len(names) > 1}
+    assert not dupes, (
+        f"one value, several names — our own allocations collide: {dupes}. "
+        f"A published value is never reassigned, and it is never doubled up "
+        f"either: net_last_error carries one byte and a post-mortem cannot "
+        f"tell these apart (#184).")
+
+
 def test_no_code_of_ours_sits_on_a_peer_owned_value():
     peer = _peer_snapshot()
     by_value = {}
@@ -195,13 +278,28 @@ def test_no_code_of_ours_sits_on_a_peer_owned_value():
         + ". Allocate in c64-wireguard/src/net_abi.inc first (#184).")
 
 
-def test_the_mirrored_code_tracks_the_peer_value():
-    codes = _our_codes()
-    peer = _peer_snapshot()
-    assert MIRRORED in codes, f"{MIRRORED} vanished from uci_errors.inc"
-    assert peer.get("NET_ERR_PEER_UCI_LONG_READ") == codes[MIRRORED][0], (
-        f"{MIRRORED} must mirror c64-wireguard's $8A exactly; it is their "
-        f"allocation, reserved and never emitted here (#184).")
+def test_every_snapshot_entry_is_asserted_by_a_macro():
+    """A NET_ERR_PEER_* equate with no .assert is a peer code nothing checks.
+
+    The macro bodies are hand-written, so adding a row to the table without
+    adding the matching assert line would leave the assembler half quietly
+    not covering it.
+    """
+    snapshot = _peer_snapshot()
+    refs = _macro_peer_refs()
+    missing = []
+    for name, value in sorted(snapshot.items(), key=lambda kv: kv[1]):
+        family = "IP65" if _in(value, IP65_FAMILY) else "UCI"
+        if name == "NET_ERR_PEER_UCI_LONG_READ":
+            continue        # the mirror: asserted for equality outside the macro
+        if name not in refs[family]:
+            missing.append(f"{name} (${value:02X}) missing from "
+                           f"NET_ERR_ASSERT_{family}")
+    assert not missing, (
+        "peer codes in the NET_ERR_PEER_* table that no macro asserts "
+        "against: " + "; ".join(missing)
+        + ". Add the .assert line, or the assembler does not actually check "
+          "that value (#184).")
 
 
 def test_header_prose_lists_match_the_snapshot_table():
@@ -228,29 +326,27 @@ def test_header_prose_lists_match_the_snapshot_table():
 
 
 # --------------------------------------------------------------------------
-# 5-7: cross-repo drift. Needs a c64-wireguard checkout.
+# 7-10: cross-repo drift. Needs a c64-wireguard checkout; a missing one is an
+# involuntary skip, i.e. a failure, unless C64_ALLOW_SKIP=1.
 # --------------------------------------------------------------------------
 
 def _require_peer():
     root = _wireguard_root()
-    if root is None:
-        try:
-            import pytest
-        except ImportError:
-            return None
-        pytest.skip(
-            "no c64-wireguard checkout found, so the snapshot in "
-            "src/net_err_registry_asserts.s is UNVERIFIED against the "
-            "canonical registry. Set C64_WIREGUARD_ROOT=/path/to/c64-wireguard "
-            "(or place it at ../c64-wireguard) to cover this (#184).")
+    require(
+        root is not None,
+        "no c64-wireguard checkout found, so this repo's snapshot of the "
+        "canonical net_last_error registry is UNVERIFIED. Set "
+        "C64_WIREGUARD_ROOT=/path/to/c64-wireguard, or place it at "
+        "../c64-wireguard",
+        executed=6, total=TOTAL_CHECKS,
+        certifies=CERTIFIES,
+        opt_out_env="C64_ALLOW_SKIP",
+    )
     return root
 
 
-def test_snapshot_matches_the_peer_registry():
+def test_snapshot_values_match_the_peer_registry():
     root = _require_peer()
-    if root is None:
-        print("SKIP: no c64-wireguard checkout")
-        return
     registry = _peer_registry(root)
     theirs = {v for v, (_n, owner) in registry.items() if owner == "c64-wireguard"}
     snapshot = set(_peer_snapshot().values())
@@ -263,12 +359,33 @@ def test_snapshot_matches_the_peer_registry():
         f"Update src/net_err_registry_asserts.s and both headers (#184).")
 
 
+def test_snapshot_names_match_the_peer_registry():
+    """Values alone are not enough: a RENAME upstream leaves every value
+    check green while our snapshot, our headers and our diagnostics all
+    carry a name that no longer exists. That includes the $8A mirror, whose
+    whole purpose is to carry their name."""
+    root = _require_peer()
+    registry = _peer_registry(root)
+    wrong = []
+    for name, value in sorted(_peer_snapshot().items(), key=lambda kv: kv[1]):
+        row = registry.get(value)
+        if row is None:
+            continue                    # a value drift; the check above owns it
+        expected = _peer_snapshot_expected_name(name)
+        if row[0] != expected:
+            wrong.append(f"${value:02X}: we call it {expected} "
+                         f"(as {name}), they now call it {row[0]}")
+    assert not wrong, (
+        "c64-wireguard has RENAMED codes our snapshot mirrors: "
+        + "; ".join(wrong)
+        + f". Registry: {root}/src/net_abi.inc. Rename ours to match — the "
+          "value is the contract, the name is how a post-mortem reads it "
+          "(#184).")
+
+
 def test_no_code_of_ours_is_claimed_by_the_peer_registry():
     """The finding this whole ticket exists to make impossible to miss."""
     root = _require_peer()
-    if root is None:
-        print("SKIP: no c64-wireguard checkout")
-        return
     registry = _peer_registry(root)
     bad = []
     for name, (value, _path, _family) in sorted(_our_codes().items()):
@@ -286,9 +403,6 @@ def test_no_code_of_ours_is_claimed_by_the_peer_registry():
 
 def test_every_code_of_ours_appears_in_the_peer_registry():
     root = _require_peer()
-    if root is None:
-        print("SKIP: no c64-wireguard checkout")
-        return
     registry = _peer_registry(root)
     unlisted = sorted(
         f"{name} = ${value:02X}"
@@ -302,19 +416,35 @@ def test_every_code_of_ours_appears_in_the_peer_registry():
 
 
 def main():
-    failures = 0
+    """Standalone lane.
+
+    `require()` raises SkipPolicyError (an AssertionError) on a missing
+    peer checkout, so it lands in the FAIL bucket — an involuntary skip is
+    a failure. With C64_ALLOW_SKIP=1 it raises VoluntarySkip instead, which
+    is a plain Exception and MUST be named before any broad handler; see
+    _skip_policy.VoluntarySkip. Catching only AssertionError here is what
+    let a pytest.skip() BaseException kill this runner mid-suite.
+    """
+    failures = skipped = 0
     for name, fn in sorted(globals().items()):
         if not name.startswith("test_") or not callable(fn):
             continue
         try:
             fn()
             print(f"PASS  {name}")
+        except VoluntarySkip as exc:
+            skipped += 1
+            print(f"SKIP  {name}\n      {exc}")
         except AssertionError as exc:
             failures += 1
             print(f"FAIL  {name}\n      {exc}")
     root = _wireguard_root()
-    print(f"\npeer registry: {root or 'NOT FOUND (cross-repo checks skipped)'}")
-    print(f"{'FAILED' if failures else 'OK'} — {failures} failure(s)")
+    print(f"\npeer registry: {root or 'NOT FOUND'}")
+    if skipped:
+        print(f"{skipped} check(s) skipped by explicit C64_ALLOW_SKIP=1 opt-out "
+              f"— this run certifies NOTHING about {CERTIFIES}")
+    print(f"{'FAILED' if failures else 'OK'} — {failures} failure(s), "
+          f"{skipped} skipped")
     return 1 if failures else 0
 
 

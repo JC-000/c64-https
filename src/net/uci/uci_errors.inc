@@ -49,8 +49,20 @@
 ;       c64-wireguard/src/net_abi.inc when a checkout is present.
 ;
 ; Adding a code: allocate in c64-wireguard/src/net_abi.inc, add the equate
-; here, then register it in src/net_err_registry_asserts.s. The suite fails
-; until all three agree.
+; here, then register it in src/net_err_registry_asserts.s.
+;
+; WHAT THAT PAIR DOES NOT COVER — the guarantee is real but narrow:
+;   - **Write the value as a literal.** Both guards recognise `NAME = $hh`,
+;     `NAME = ddd` and `.define NAME $hh`. An expression — say
+;     `UCI_ERR_NEW = UCI_ERR_NO_SOCKET + 4` — is invisible to a text
+;     parser and passes BOTH halves while colliding. Every code below is a
+;     literal; keep it that way.
+;   - The cross-repo half needs a c64-wireguard checkout. Without one those
+;     checks fail (an involuntary skip is a failure) rather than passing;
+;     `C64_ALLOW_SKIP=1` is the loud opt-out.
+;   - Nothing here re-verifies c64-wireguard. A collision found against
+;     their registry is a cross-repo finding for a human, not something
+;     either repo may renumber unilaterally.
 ;
 ; One inconsistency, called out rather than hidden: $8A below IS a real
 ; equate, and is likewise reserved-never-emitted. It predates this block and

@@ -312,13 +312,20 @@ drops a symbol fails the link by name on both backends. Surface:
     one, that each is in family range, and that no published value has been
     reassigned. Its blind spot — a code never registered in it — is closed
     by `tools/test_net_err_registry.py`, which parses the two headers
-    instead, and which also diffs our snapshot against the live peer file
-    when a c64-wireguard checkout is present (`C64_WIREGUARD_ROOT`, else
-    `../c64-wireguard`, else `~/Documents/c64-wireguard`). Without one it
-    SKIPS, loudly — `pytest.ini` sets `addopts = -ra` so the reason prints
-    on every run. Adding a code takes all three edits and the suite is red
-    until they agree. The `NET_FAMILY_*` bits in `src/net/net_families.inc`
-    are the same cross-repo copy problem and are still unguarded.
+    instead; it also catches two of our own names on one byte (which the
+    assembler cannot express) and diffs our snapshot's **values and names**
+    against the live peer file when a c64-wireguard checkout is present
+    (`C64_WIREGUARD_ROOT`, else `../c64-wireguard`, else
+    `~/Documents/c64-wireguard`). A missing checkout is an **involuntary
+    skip**, so those four checks FAIL rather than pass quietly
+    (`tools/_skip_policy.py`, #178); `C64_ALLOW_SKIP=1` is the loud opt-out
+    and still prints the vacuity block. **Scope the guarantee correctly:
+    both halves are text-level, and recognise only `NAME = $hh`,
+    `NAME = ddd` and `.define NAME $hh`** — an expression-valued equate
+    (`UCI_ERR_NEW = UCI_ERR_NO_SOCKET + 4`) passes both while colliding, and
+    is documented out of scope rather than half-handled. Write literals. The
+    `NET_FAMILY_*` bits in `src/net/net_families.inc` are the same cross-repo
+    copy problem and are still unguarded.
   - Gone, per §13.1: `net_tcp_set_recv_cb` (stub), `net_recv_ready`,
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
     is now `print_local_ip` in `boot.s`, one copy for both backends.

@@ -33,13 +33,27 @@
 ; reserved $47 (`.export` + asserts, src/net/ip65/net.s), which
 ; uci_errors.inc names as "the more durable shape" to copy.
 ;
-; SCOPE, honestly. This file cannot see a code that is not written into it,
-; and it cannot see the peer repository. Two limits, one covered each:
-;   - a new equate added to our headers but not registered here is caught by
-;     tools/test_net_err_registry.py, which parses the headers themselves;
-;   - drift against the peer's live registry is caught by the same suite when
-;     a c64-wireguard checkout is present (C64_WIREGUARD_ROOT, or the
-;     sibling default). Absent one, it says so rather than passing quietly.
+; SCOPE, honestly — this file is NOT a complete guard on its own, and the
+; pair is not complete either. What each half cannot do:
+;
+;   - This file cannot see a code that is not written into it. Registration
+;     is manual, and a code with no NET_ERR_ASSERT_* line is simply not
+;     checked here. tools/test_net_err_registry.py covers that by parsing
+;     the HEADERS instead of this file.
+;   - This file cannot see two of OUR names on one byte. The literal pins
+;     below give distinctness only among the codes that existed when they
+;     were written; a new duplicate passes every macro check, because the
+;     value is already legitimately ours. Covered by the suite's
+;     test_our_codes_are_pairwise_distinct.
+;   - This file cannot see the peer repository. Value and name drift there
+;     are covered by the suite, and only when a checkout is present — a
+;     missing one is an involuntary skip, so those checks FAIL rather than
+;     pass quietly (tools/_skip_policy.py; C64_ALLOW_SKIP=1 to opt out).
+;   - NEITHER half evaluates ca65. The suite recognises `NAME = $hh`,
+;     `NAME = ddd` and `.define NAME $hh`; an EXPRESSION-valued equate
+;     (`UCI_ERR_NEW = UCI_ERR_NO_SOCKET + 4`) is out of scope and passes
+;     both halves while colliding. Declare codes as literals — every code
+;     in both headers does.
 ;
 ; MAINTENANCE. Adding a code: allocate it in c64-wireguard/src/net_abi.inc
 ; FIRST, then in the emitting header here, then register it below. Never
@@ -56,6 +70,13 @@ NET_ERR_UCI_FAMILY_HI  = $BF
 
 ; --- Codes owned by c64-wireguard. We emit NONE of these. -----------------
 ; Snapshot of c64-wireguard/src/net_abi.inc @ cf7b41e (2026-09-07).
+;
+; MAINTENANCE: adding a row here is TWO edits. The macros below reference
+; these names one `.assert` at a time — they are hand-written, and ca65
+; cannot iterate a table — so a row added here with no matching assert line
+; is a peer code the assembler silently does not check. That pairing is
+; itself checked, by test_every_snapshot_entry_is_asserted_by_a_macro in
+; tools/test_net_err_registry.py; the suite goes red, not the build.
 NET_ERR_PEER_IP65_UDP_LISTEN   = $46
 NET_ERR_PEER_IP65_UDP_SEND     = $47   ; reserved there, never emitted
 NET_ERR_PEER_IP65_WAIT_TIMEOUT = $48
@@ -112,8 +133,17 @@ NET_ERR_ASSERT_UCI UCI_ERR_BAD_READ_HDR, "UCI_ERR_BAD_READ_HDR"
 ; allocation, mirrored here as a reserved-never-emitted equate so the name
 ; is readable in our diagnostics (see the block in uci_errors.inc). It is
 ; therefore the one code that must EQUAL a peer value instead of differing
-; from one — checked in that direction so the mirror cannot silently drift
-; off theirs, and named so nobody mistakes it for a missed collision.
+; from one — checked in that direction, and named so nobody mistakes it for
+; a missed collision.
+;
+; SCOPE of that check: it pins the VALUE against this file's snapshot. It
+; cannot see a change in the peer repo at all — neither a renumber (which
+; the snapshot would have to be updated for anyway) nor a RENAME, which
+; moves nothing here and would leave our diagnostics printing a name that
+; no longer exists upstream. Both are caught only by
+; tools/test_net_err_registry.py, against a live checkout:
+; test_snapshot_values_match_the_peer_registry and
+; test_snapshot_names_match_the_peer_registry respectively.
 .assert UCI_ERR_LONG_READ = NET_ERR_PEER_UCI_LONG_READ, error, "UCI_ERR_LONG_READ must mirror c64-wireguard's $8A exactly; it is their allocation, reserved and never emitted here (#184)"
 
 ; PUBLISHED VALUES, PINNED. The registry's single rule is that a published

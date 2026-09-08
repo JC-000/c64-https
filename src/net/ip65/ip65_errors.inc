@@ -40,6 +40,13 @@
 ; caught too, and diffs the snapshot against the live peer registry when a
 ; c64-wireguard checkout is present. Adding a code means all three: their
 ; registry, the equate here, the registration there.
+;
+; Narrow, though, and worth knowing before trusting a green run: both
+; guards read `NAME = $hh` / `NAME = ddd` / `.define NAME $hh` and nothing
+; else, so an EXPRESSION-valued equate passes both while colliding — write
+; literals, as every code below does. The cross-repo half needs a peer
+; checkout and FAILS without one rather than passing quietly
+; (`C64_ALLOW_SKIP=1` opts out loudly).
 
 .ifndef IP65_ERRORS_INC_INCLUDED
 IP65_ERRORS_INC_INCLUDED = 1
