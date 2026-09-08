@@ -151,7 +151,13 @@ lib_preflight_fail() {
     local what="$1"
     local head;  head="$(git -C "$LIB_DIR" rev-parse HEAD 2>/dev/null || true)"
     local found; found="$(git -C "$LIB_DIR" describe --tags --always 2>/dev/null || echo '<unknown>')"
-    local pin;   pin="$(git -C "$PROJECT_ROOT" ls-tree HEAD libs/nistcurves 2>/dev/null | awk '{print $3}')"
+    # `|| true` is load-bearing, exactly as on the two lines above: under
+    # `set -eo pipefail` a non-repo PROJECT_ROOT makes `git ls-tree` exit 128,
+    # pipefail carries that through `awk`, and the shell dies here — killing
+    # the very diagnostic this function exists to print (#217). The caller
+    # then sees a bare `Error 128`. An empty `pin` is a state the message
+    # below already handles.
+    local pin;   pin="$(git -C "$PROJECT_ROOT" ls-tree HEAD libs/nistcurves 2>/dev/null | awk '{print $3}' || true)"
     local diagnosis
     # The tag for the PINNED sha, resolved rather than hardcoded: this line
     # used to carry a literal "(v0.11.2)" that had to be edited by hand at
@@ -160,7 +166,29 @@ lib_preflight_fail() {
     # the checkout cannot resolve it (which is itself one of the states this
     # message is printed in), and the sha still identifies the pin.
     local pintag; pintag="$(git -C "$LIB_DIR" describe --tags --exact-match "$pin" 2>/dev/null || true)"
-    if [ -z "$head" ]; then
+    # An empty $pin gets its own branch, and it must come FIRST. Without
+    # it, a non-repo PROJECT_ROOT whose libs/nistcurves IS populated (a
+    # symlink into a real checkout, as the test farms use) leaves head
+    # non-empty and pin empty, so `[ "$head" != "$pin" ]` is trivially true
+    # and the message blames a stale submodule and prescribes a
+    # `git submodule update` that cannot run there. Say what is actually
+    # unknown instead — and only that. The reachable shapes are not just a
+    # non-repo root: a real checkout whose HEAD has no libs/nistcurves
+    # gitlink reaches this branch too (an unborn HEAD, a commit predating
+    # the submodule, or another repo entirely as PROJECT_ROOT), and there
+    # `.git` is present. Naming a cause we did not establish is the defect
+    # this branch exists to fix, one layer up.
+    local remedy="submodule-update"
+    if [ -z "$pin" ]; then
+        remedy="no-gitlink"
+        diagnosis="This repo's gitlink for libs/nistcurves could not be read, so there is
+nothing to compare the checkout against: either $PROJECT_ROOT is not a git
+checkout, or its HEAD carries no libs/nistcurves gitlink."
+        # Independent condition, and the actionable one in the #217 Farm
+        # case where both are true. Do not let the pin branch swallow it.
+        [ -z "$head" ] && diagnosis="$diagnosis
+The submodule is not checked out at all, either."
+    elif [ -z "$head" ]; then
         diagnosis="The submodule is not checked out at all."
     elif [ "$head" != "$pin" ]; then
         diagnosis="The submodule working tree is NOT the commit this repo pins."
@@ -180,7 +208,20 @@ ERROR: libs/nistcurves checkout is unusable for this build (c64-https#124).
   submodule checkout : $found
   this repo pins     : ${pin:0:12}${pintag:+ ($pintag)}
 
-$diagnosis Fix it with:
+$diagnosis
+EOF
+    if [ "$remedy" = "no-gitlink" ]; then
+        cat >&2 <<EOF
+Fix it wherever this tree's libs/nistcurves comes from, with:
+
+    git submodule update --init --recursive
+
+Running that against THIS root will not help: there is no gitlink here to
+update, whatever the reason.
+EOF
+    else
+        cat >&2 <<EOF
+Fix it with:
 
     git submodule update --init --recursive
 
@@ -191,11 +232,13 @@ If that reports nothing and the build still fails, force it:
 Note that tools/check_upstream_pins.py will NOT show this by default -- it
 reads the pinned gitlink, not your working checkout. Use its --worktree mode.
 EOF
+    fi
     exit 1
 }
 
 [ -f "$LIB_SRC/zp_config.s" ] || lib_preflight_fail \
-    "libs/nistcurves/src/zp_config.s is missing — the submodule is not checked out,\n  or that file was removed from it."
+    "libs/nistcurves/src/zp_config.s is missing — the submodule is not checked out,
+  or that file was removed from it."
 
 grep -qE '^[[:space:]]*\.ifndef[[:space:]]+nistcurves_zp_ptr2[[:space:]]*$' "$LIB_SRC/zp_config.s" \
     || lib_preflight_fail \
@@ -387,7 +430,23 @@ mkdir -p "$OUT_DIR"
 # that reads a different artifact than the one shipped is the wrong shape
 # regardless, and a variant-gated slot could someday differ between variants'
 # ZP TUs. Listing an archive is not extracting it, so §6.1 stays clean.
-ZP_MEMBER="$( "$AR65" t "$UPSTREAM_ARCHIVE" | grep '^zp_config' )"
+#
+# `|| true` on the ZP_MEMBER assignment below is load-bearing for the same
+# reason as in lib_preflight_fail (#217): under `set -eo pipefail` a grep that matches
+# nothing exits 1, the assignment/substitution dies, and the `0)` arm written
+# for exactly that case never runs — the caller gets a bare exit 1 with no
+# message. A silently-dropped zp_config member is the #124 runtime-corruption
+# class (zp_ptr2 reverts to $fd and collides with zp_temp/zp_count, with no
+# link error), so this is the one diagnostic here that most needs to survive.
+#
+# The `case` word below needs NO such guard, and that asymmetry is the point:
+# `grep -c .` also exits 1 on a zero count, but a command substitution in a
+# `case` word has its status discarded, so `set -e` never sees it. Measured
+# both ways -- with the ZP_MEMBER assignment guarded and this line bare, the
+# `0)` arm still runs and prints. It is the ASSIGNMENT that is fatal, not the pipeline
+# shape. Do not add `|| true` here on the strength of the line above, and do
+# not copy this line's bare form into an assignment.
+ZP_MEMBER="$( "$AR65" t "$UPSTREAM_ARCHIVE" | grep '^zp_config' || true )"
 case "$(printf '%s\n' "$ZP_MEMBER" | grep -c .)" in
     1) ;;
     0) echo "ERROR: no zp_config member in $(basename "$UPSTREAM_ARCHIVE")" >&2; exit 1 ;;
@@ -397,8 +456,11 @@ esac
 
 check_zp_slot() {
     local name="$1" want="$2" got
+    # `|| true`: without it a failing od65 kills the script under
+    # `set -eo pipefail` and the `${got:-<absent>}` empty case below — the
+    # message written for precisely that state — is unreachable (#217).
     got=$("${OD65:-od65}" --dump-exports "$LIB_BUILD/$ZP_MEMBER" \
-          | awk -v n="\"$name\"" '$1=="Name:" && $2==n {f=1; next} f && $1=="Value:" {print $2; exit}')
+          | awk -v n="\"$name\"" '$1=="Name:" && $2==n {f=1; next} f && $1=="Value:" {print $2; exit}' || true)
     if [ "$got" != "$want" ]; then
         echo "ERROR: $ZP_MEMBER exports $name = ${got:-<absent>}, expected $want (CONTRACT_ZP_DEFINES did not take)" >&2
         exit 1
