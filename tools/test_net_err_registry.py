@@ -22,7 +22,7 @@ fails ca65 on every profile, both backends, if a code it knows about lands
 on a peer-owned value or a published value is reassigned, and it costs no
 bytes. Its blind spot is a code that is never registered in it, and it
 cannot see the peer repository at all. This suite covers exactly those two
-gaps, and adds the intra-repo checks the assembler cannot express.
+gaps, and adds the intra-repo checks that reach beyond it.
 
 =============================================================================
 WHAT THIS GUARD DOES **NOT** COVER — read before trusting a green run
@@ -35,24 +35,45 @@ parser and not ca65:
     NAME = 140          recognised
     .define NAME $8C    recognised
 
-An **expression-valued** equate is NOT recognised and will pass every check
-here while colliding:
+An **expression-valued** equate is NOT recognised HERE:
 
-    UCI_ERR_NEW = UCI_ERR_NO_SOCKET + 4      NOT COVERED
+    UCI_ERR_NEW = UCI_ERR_NO_SOCKET + 4      not seen by this suite
 
-Evaluating that needs an assembler, not a regex. It is declared out of
-scope rather than half-handled: a parser that silently mis-evaluates one of
-these would be worse than one that visibly does not try. If you are adding
-a code, write it as a literal — every existing code in both headers does.
+Evaluating that needs an assembler, not a regex, and a parser that silently
+mis-evaluated one would be worse than one that visibly does not try. But
+the assembler half is not so limited: ca65 evaluates whatever
+NET_ERR_ASSERT_* is handed, so a REGISTERED expression-valued code fires
+the collision assert exactly like a literal (measured). The residual gap is
+therefore narrow: an expression-valued code that is also never registered
+in the asserts TU escapes both halves, because the registration check that
+would have caught it is the one in this file, and this file cannot see the
+code. Write literals and the question does not arise — every existing code
+in both headers is one.
 
 **The assembler half covers only registered codes.** Check 2 below is what
 makes that safe, by failing when a code in the headers has no
 ``NET_ERR_ASSERT_*`` line. The two halves are only jointly complete for the
 spellings listed above.
 
+**Inline immediates are invisible to both halves.** A `lda #$8C / sta
+net_last_error` with no equate behind it is text neither guard looks at. No
+such site exists today — every write goes through a named code — so this is
+latent, not live. It is named here because a guard's silence about a shape
+it cannot see is indistinguishable from a pass.
+
 **Nothing here validates c64-wireguard.** A code of ours their registry has
 claimed is reported as a finding for a human to take cross-repo. This suite
 never edits, and never asserts the correctness of, the peer repository.
+
+THE OTHER DIRECTION — this guard CAN go red on something that is not an
+error code. It reads two headers that also hold ordinary constants, and a
+value in $40-$BF is not by itself evidence of an allocation. `UCI_STATUS_MAX
+= 16` is out of range today, but buffer sizes favour 64 and 128, which are
+$40 and $80 — the first byte of each family. ERR_NAME_MARKER is the gate
+that keeps such a constant out, and the comment on it says what the gate in
+turn lets through. If this suite ever tells you to allocate something in
+c64-wireguard's registry that is plainly not an error code, that is this
+class, and the fix is the gate, not the constant.
 
 =============================================================================
 
@@ -62,7 +83,7 @@ nothing without it, so they FAIL rather than pass quietly (#158/#165/#178).
 Point the suite at a checkout with ``C64_WIREGUARD_ROOT=/path``; the
 defaults are ``../c64-wireguard`` then ``~/Documents/c64-wireguard``. A lane
 that genuinely has no peer checkout opts out loudly with
-``C64_ALLOW_SKIP=1``, which still prints the full vacuity warning. The six
+``C64_NO_PEER_REGISTRY=1``, which still prints the full vacuity warning. The six
 structural checks run either way.
 """
 
@@ -91,6 +112,45 @@ CERTIFIES = ("agreement between this repo's net_last_error allocations and "
 # checked in the opposite direction from every other code (it must EQUAL
 # theirs), and is excluded from the collision sweep by name, never by value.
 MIRRORED = "UCI_ERR_LONG_READ"
+
+# The env var that opts out of the cross-repo checks. DELIBERATELY NOT the
+# repo-wide C64_ALLOW_SKIP: that one also gates test_build_flags_stamp.py's
+# "is ca65 on PATH" prerequisite, and someone exporting it in a shell
+# profile or CI config to quiet THIS suite would silently quiet a genuinely
+# missing toolchain too. One hatch, one door.
+OPT_OUT_ENV = "C64_NO_PEER_REGISTRY"
+
+# N2 -- the false-positive gate. Both headers name every error code with an
+# `_ERR_` infix (UCI_ERR_*, NET_ERR_IP65_*) and every non-code constant
+# without one (UCI_DATA_QUEUE_MAX, UCI_READ_CHUNK_MAX, UCI_STATUS_MAX,
+# IP65_ERRORS_INC_INCLUDED). Without this gate an innocent, correctly
+# written `UCI_HOST_BUF_MAX = 64` reads as an error code in the ip65 family
+# and produces three red checks telling the author to allocate a buffer
+# size in c64-wireguard's error registry. Buffer sizes favour exactly the
+# values ($40, $80) that land in these ranges, so that is a when, not an if.
+#
+# WHAT THE GATE LETS THROUGH, stated plainly: a real error code named
+# without `_ERR_` -- say `UCI_STATUS_FOO = $8C` -- is invisible to this
+# suite. The assemble-time half still catches it the moment it is
+# registered (NET_ERR_CLAIM_VALUE and the peer-collision asserts do not
+# look at names at all), and an unregistered one is invisible either way,
+# which is the pre-existing limit this does not widen.
+ERR_NAME_MARKER = "_ERR_"
+
+# snapshot name -> the peer's literal spelling, for rows whose name does not
+# follow either convention _peer_snapshot_expected_name() derives. Empty
+# today; every one of the nine current rows derives cleanly.
+PEER_NAME_OVERRIDES = {}
+
+
+class RegistryParseError(AssertionError):
+    """A header is malformed in a way no individual check should own.
+
+    AssertionError so pytest renders it as a plain failure and the
+    standalone runner's handler catches it -- but a NAMED one, so it is not
+    a bare `assert` that vanishes under `python -O` and misattributes to
+    whichever test happened to call the helper first.
+    """
 
 # Declaration spellings we recognise. See the docstring's scope block: an
 # expression-valued equate is deliberately out of scope.
@@ -132,7 +192,12 @@ def _our_codes():
             value = int(m.group(3), 16) if m.group(3) else int(m.group(4), 10)
             if not (_in(value, IP65_FAMILY) or _in(value, UCI_FAMILY)):
                 continue
-            assert name not in codes, f"{name} defined twice across the headers"
+            if ERR_NAME_MARKER not in name:
+                continue        # not an error code -- see N2 note above
+            if name in codes:
+                raise RegistryParseError(
+                    f"{name} is defined in both headers; a net_last_error "
+                    f"code has exactly one home (#184)")
             codes[name] = (value, path, family)
     return codes
 
@@ -148,7 +213,14 @@ def _peer_snapshot_expected_name(snapshot_name):
 
     NET_ERR_PEER_UCI_SEND_TOO_LONG  -> UCI_ERR_SEND_TOO_LONG
     NET_ERR_PEER_IP65_UDP_LISTEN    -> NET_ERR_IP65_UDP_LISTEN
+
+    The two rewrites fit all nine rows today. A future peer name fitting
+    neither shape would otherwise force a contorted snapshot name or a
+    spurious red, so PEER_NAME_OVERRIDES is the escape hatch: put the
+    peer's literal spelling there and keep our name readable.
     """
+    if snapshot_name in PEER_NAME_OVERRIDES:
+        return PEER_NAME_OVERRIDES[snapshot_name]
     rest = snapshot_name[len("NET_ERR_PEER_"):]
     if rest.startswith("UCI_"):
         return "UCI_ERR_" + rest[len("UCI_"):]
@@ -244,10 +316,17 @@ def test_every_code_is_registered_in_the_asserts_tu():
 def test_our_codes_are_pairwise_distinct():
     """Two of our own names on one byte is the same defect, intra-repo.
 
-    The assembler cannot express this: its literal pins cover the codes
-    that existed when they were written, and a NEW duplicate passes every
-    macro check (range ok, no peer collision) because the value is already
-    legitimately ours. Caught here instead.
+    The assembler DOES catch this for any registered code, via
+    NET_ERR_CLAIM_VALUE in src/net_err_registry_asserts.s -- a duplicate is
+    a ca65 redefinition error and fails the build on all five profiles.
+    (An earlier revision of this file claimed the assembler could not
+    express it. That was wrong, and it foreclosed the better guard for a
+    round.) What remains true, and is why this check stays: the literal
+    pins give distinctness only among the codes that existed when they were
+    written, and the peer-collision asserts never look at our own set, so
+    NEITHER of those catches a new duplicate. And an UNREGISTERED duplicate
+    reaches no macro at all, so the claim never runs -- that case is this
+    check's alone.
     """
     by_value = {}
     for name, (value, _path, _family) in sorted(_our_codes().items()):
@@ -327,7 +406,7 @@ def test_header_prose_lists_match_the_snapshot_table():
 
 # --------------------------------------------------------------------------
 # 7-10: cross-repo drift. Needs a c64-wireguard checkout; a missing one is an
-# involuntary skip, i.e. a failure, unless C64_ALLOW_SKIP=1.
+# involuntary skip, i.e. a failure, unless C64_NO_PEER_REGISTRY=1.
 # --------------------------------------------------------------------------
 
 def _require_peer():
@@ -340,7 +419,7 @@ def _require_peer():
         "../c64-wireguard",
         executed=6, total=TOTAL_CHECKS,
         certifies=CERTIFIES,
-        opt_out_env="C64_ALLOW_SKIP",
+        opt_out_env=OPT_OUT_ENV,
     )
     return root
 
@@ -420,7 +499,7 @@ def main():
 
     `require()` raises SkipPolicyError (an AssertionError) on a missing
     peer checkout, so it lands in the FAIL bucket — an involuntary skip is
-    a failure. With C64_ALLOW_SKIP=1 it raises VoluntarySkip instead, which
+    a failure. With C64_NO_PEER_REGISTRY=1 it raises VoluntarySkip instead, which
     is a plain Exception and MUST be named before any broad handler; see
     _skip_policy.VoluntarySkip. Catching only AssertionError here is what
     let a pytest.skip() BaseException kill this runner mid-suite.
@@ -441,7 +520,7 @@ def main():
     root = _wireguard_root()
     print(f"\npeer registry: {root or 'NOT FOUND'}")
     if skipped:
-        print(f"{skipped} check(s) skipped by explicit C64_ALLOW_SKIP=1 opt-out "
+        print(f"{skipped} check(s) skipped by explicit {OPT_OUT_ENV}=1 opt-out "
               f"— this run certifies NOTHING about {CERTIFIES}")
     print(f"{'FAILED' if failures else 'OK'} — {failures} failure(s), "
           f"{skipped} skipped")

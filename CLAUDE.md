@@ -310,20 +310,31 @@ drops a symbol fails the link by name on both backends. Surface:
     holds the peer's codes as `NET_ERR_PEER_*` equates and `.assert`s (scope
     `error`, so ca65 settles it before ld65) that no code of ours lands on
     one, that each is in family range, and that no published value has been
-    reassigned. Its blind spot — a code never registered in it — is closed
-    by `tools/test_net_err_registry.py`, which parses the two headers
-    instead; it also catches two of our own names on one byte (which the
-    assembler cannot express) and diffs our snapshot's **values and names**
-    against the live peer file when a c64-wireguard checkout is present
+    reassigned. **Two of our own names on one byte also fails the build**:
+    `NET_ERR_CLAIM_VALUE` defines `.ident(.sprintf("NET_ERR_TAKEN_%02X",
+    val))`, so a second claim on a byte is a ca65 redefinition error naming
+    the BYTE (`Symbol 'NET_ERR_TAKEN_88' is already defined`) — O(n), no
+    list to maintain, still zero bytes. It covers only codes passed through
+    the macros. Its blind spot — a code never registered — is closed by
+    `tools/test_net_err_registry.py`, which parses the two headers instead
+    and diffs our snapshot's **values and names** against the live peer file
     (`C64_WIREGUARD_ROOT`, else `../c64-wireguard`, else
     `~/Documents/c64-wireguard`). A missing checkout is an **involuntary
     skip**, so those four checks FAIL rather than pass quietly
-    (`tools/_skip_policy.py`, #178); `C64_ALLOW_SKIP=1` is the loud opt-out
-    and still prints the vacuity block. **Scope the guarantee correctly:
-    both halves are text-level, and recognise only `NAME = $hh`,
-    `NAME = ddd` and `.define NAME $hh`** — an expression-valued equate
-    (`UCI_ERR_NEW = UCI_ERR_NO_SOCKET + 4`) passes both while colliding, and
-    is documented out of scope rather than half-handled. Write literals. The
+    (`tools/_skip_policy.py`, #178) — a fresh clone with no peer checkout is
+    RED by design; `C64_NO_PEER_REGISTRY=1` is the loud opt-out (its **own**
+    variable, deliberately not `C64_ALLOW_SKIP`, which also gates
+    `test_build_flags_stamp.py`'s toolchain check). **Scope the guarantee
+    in both directions.** Under-coverage: both halves are text-level and
+    the **suite** recognises only `NAME = $hh`, `NAME = ddd` and
+    `.define NAME $hh`. ca65 evaluates an expression-valued code fine once
+    registered, so the real gap is an expression-valued code that is ALSO
+    never registered, plus a bare inline `lda #$8C` with no equate at all —
+    write literals.
+    Over-coverage: the suite reads whole headers that also hold ordinary
+    constants, so it gates on the `_ERR_` infix every code uses; without
+    that a future `UCI_HOST_BUF_MAX = 64` would be reported as an ip65-family
+    error code needing allocation in c64-wireguard's registry. The
     `NET_FAMILY_*` bits in `src/net/net_families.inc` are the same cross-repo
     copy problem and are still unguarded.
   - Gone, per §13.1: `net_tcp_set_recv_cb` (stub), `net_recv_ready`,

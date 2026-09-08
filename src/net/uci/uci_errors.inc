@@ -41,25 +41,36 @@
 ;       backends, every profile, and emits no bytes. It carries the peer's
 ;       codes as NET_ERR_PEER_* equates and `.assert`s that no code defined
 ;       here lands on one, that each is in family range, and that no
-;       published value has been reassigned. Minting $8C fails ca65 with a
-;       named message instead of linking clean.
+;       published value has been reassigned; NET_ERR_CLAIM_VALUE
+;       additionally makes two of our own names on one byte a ca65
+;       redefinition error. Minting $8C fails the build with a named
+;       message instead of linking clean.
 ;   tools/test_net_err_registry.py   parses THIS file rather than the
 ;       asserts TU, so a new code that never gets registered there is still
-;       caught, and diffs our snapshot against the live
-;       c64-wireguard/src/net_abi.inc when a checkout is present.
+;       caught, and diffs our snapshot's values AND names against the live
+;       c64-wireguard/src/net_abi.inc.
 ;
 ; Adding a code: allocate in c64-wireguard/src/net_abi.inc, add the equate
 ; here, then register it in src/net_err_registry_asserts.s.
 ;
 ; WHAT THAT PAIR DOES NOT COVER — the guarantee is real but narrow:
-;   - **Write the value as a literal.** Both guards recognise `NAME = $hh`,
-;     `NAME = ddd` and `.define NAME $hh`. An expression — say
-;     `UCI_ERR_NEW = UCI_ERR_NO_SOCKET + 4` — is invisible to a text
-;     parser and passes BOTH halves while colliding. Every code below is a
-;     literal; keep it that way.
+;   - **Write the value as a literal.** The suite recognises `NAME = $hh`,
+;     `NAME = ddd` and `.define NAME $hh` and nothing else. An expression —
+;     say `UCI_ERR_NEW = UCI_ERR_NO_SOCKET + 4` — is invisible to it.
+;     ca65 evaluates such a code fine ONCE REGISTERED, so the gap is the
+;     narrow one: an expression-valued code that is also never registered
+;     in src/net_err_registry_asserts.s escapes both halves. Every code
+;     below is a literal; keep it that way.
+;   - An inline immediate (`lda #$8C / sta net_last_error`) with no equate
+;     behind it is invisible to both. No such site exists today.
 ;   - The cross-repo half needs a c64-wireguard checkout. Without one those
-;     checks fail (an involuntary skip is a failure) rather than passing;
-;     `C64_ALLOW_SKIP=1` is the loud opt-out.
+;     checks FAIL — an involuntary skip is a failure — rather than passing
+;     quietly; `C64_NO_PEER_REGISTRY=1` is the loud opt-out.
+;   - It can also go red the OTHER way: the suite reads this whole file, so
+;     an ordinary constant that happens to land in $80-$BF would look like
+;     an allocation. It is kept out by the `_ERR_` infix every code here
+;     uses — so name a new code `UCI_ERR_*`, and expect no help from the
+;     suite if you do not.
 ;   - Nothing here re-verifies c64-wireguard. A collision found against
 ;     their registry is a cross-repo finding for a human, not something
 ;     either repo may renumber unilaterally.

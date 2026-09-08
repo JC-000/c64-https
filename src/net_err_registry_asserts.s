@@ -40,20 +40,28 @@
 ;     is manual, and a code with no NET_ERR_ASSERT_* line is simply not
 ;     checked here. tools/test_net_err_registry.py covers that by parsing
 ;     the HEADERS instead of this file.
-;   - This file cannot see two of OUR names on one byte. The literal pins
-;     below give distinctness only among the codes that existed when they
-;     were written; a new duplicate passes every macro check, because the
-;     value is already legitimately ours. Covered by the suite's
+;   - Two of OUR names on one byte IS caught here, by NET_ERR_CLAIM_VALUE
+;     below — but only for codes that go through the macros. The literal
+;     pins give distinctness only among the codes that existed when they
+;     were written, and the peer-collision asserts do not look at our own
+;     set at all, so a new duplicate passes both of those; the claim is
+;     what catches it. An UNREGISTERED duplicate is still the suite's
 ;     test_our_codes_are_pairwise_distinct.
 ;   - This file cannot see the peer repository. Value and name drift there
 ;     are covered by the suite, and only when a checkout is present — a
 ;     missing one is an involuntary skip, so those checks FAIL rather than
-;     pass quietly (tools/_skip_policy.py; C64_ALLOW_SKIP=1 to opt out).
-;   - NEITHER half evaluates ca65. The suite recognises `NAME = $hh`,
-;     `NAME = ddd` and `.define NAME $hh`; an EXPRESSION-valued equate
-;     (`UCI_ERR_NEW = UCI_ERR_NO_SOCKET + 4`) is out of scope and passes
-;     both halves while colliding. Declare codes as literals — every code
-;     in both headers does.
+;     pass quietly (tools/_skip_policy.py; C64_NO_PEER_REGISTRY=1 to
+;     opt out).
+;   - EXPRESSION-valued equates: this file handles them FINE — ca65
+;     evaluates whatever the macro is handed, so a registered
+;     `UCI_ERR_NEW = UCI_ERR_NO_SOCKET + 4` fires the $8C collision assert
+;     like any literal (measured, not assumed). The suite is the half that
+;     cannot: it recognises `NAME = $hh`, `NAME = ddd` and
+;     `.define NAME $hh` only. So the residual gap is narrow and specific —
+;     an expression-valued code that is ALSO never registered here is
+;     invisible to both, because the suite's registration check is what
+;     would otherwise have caught it. Declare codes as literals and the
+;     question does not arise; every code in both headers does.
 ;
 ; MAINTENANCE. Adding a code: allocate it in c64-wireguard/src/net_abi.inc
 ; FIRST, then in the emitting header here, then register it below. Never
@@ -92,7 +100,26 @@ NET_ERR_PEER_UCI_SHORT_READ    = $8F
 ; equate, so ca65 settles these before ld65 is reached and a collision fails
 ; the build at the offending object rather than at the link.
 
+; ONE VALUE, ONE NAME — enforced at assemble time, O(n), no list to keep.
+; Each claimed value defines a symbol named after the value itself, so a
+; second claim on the same byte is a ca65 redefinition error:
+;
+;   Error: Symbol 'NET_ERR_TAKEN_88' is already defined
+;
+; That message names the BYTE, not the pair, so read it as "something else
+; already owns $88" and grep both headers for it. The symbol is a constant
+; equate, so this costs no bytes like everything else here.
+;
+; This covers every code passed through the two macros below, plus the $8A
+; mirror which claims its byte explicitly. It does NOT cover a code that was
+; never registered at all — that stays
+; tools/test_net_err_registry.py::test_every_code_is_registered_in_the_asserts_tu.
+.macro NET_ERR_CLAIM_VALUE val
+    .ident(.sprintf("NET_ERR_TAKEN_%02X", val)) = 1
+.endmacro
+
 .macro NET_ERR_ASSERT_IP65 val, name
+    NET_ERR_CLAIM_VALUE val
     .assert (val) >= NET_ERR_IP65_FAMILY_LO && (val) <= NET_ERR_IP65_FAMILY_HI, error, .concat(name, ": outside the ip65 family range $40-$7F (c64-wireguard/src/net_abi.inc registry, #184)")
     .assert (val) <> NET_ERR_PEER_IP65_UDP_LISTEN,   error, .concat(name, ": collides with c64-wireguard's $46 NET_ERR_IP65_UDP_LISTEN - allocate in c64-wireguard/src/net_abi.inc first (#184)")
     .assert (val) <> NET_ERR_PEER_IP65_UDP_SEND,     error, .concat(name, ": collides with c64-wireguard's $47 NET_ERR_IP65_UDP_SEND (reserved, never emitted) - allocate in c64-wireguard/src/net_abi.inc first (#184)")
@@ -101,6 +128,7 @@ NET_ERR_PEER_UCI_SHORT_READ    = $8F
 .endmacro
 
 .macro NET_ERR_ASSERT_UCI val, name
+    NET_ERR_CLAIM_VALUE val
     .assert (val) >= NET_ERR_UCI_FAMILY_LO && (val) <= NET_ERR_UCI_FAMILY_HI, error, .concat(name, ": outside the UCI family range $80-$BF (c64-wireguard/src/net_abi.inc registry, #184)")
     .assert (val) <> NET_ERR_PEER_UCI_LONG_READ,     error, .concat(name, ": collides with c64-wireguard's $8A UCI_ERR_LONG_READ - allocate in c64-wireguard/src/net_abi.inc first (#184)")
     .assert (val) <> NET_ERR_PEER_UCI_SEND_TOO_LONG, error, .concat(name, ": collides with c64-wireguard's $8C UCI_ERR_SEND_TOO_LONG - allocate in c64-wireguard/src/net_abi.inc first (#184)")
@@ -145,6 +173,12 @@ NET_ERR_ASSERT_UCI UCI_ERR_BAD_READ_HDR, "UCI_ERR_BAD_READ_HDR"
 ; test_snapshot_values_match_the_peer_registry and
 ; test_snapshot_names_match_the_peer_registry respectively.
 .assert UCI_ERR_LONG_READ = NET_ERR_PEER_UCI_LONG_READ, error, "UCI_ERR_LONG_READ must mirror c64-wireguard's $8A exactly; it is their allocation, reserved and never emitted here (#184)"
+
+; It still claims its byte, so a SECOND name of ours on $8A is a build
+; error like any other duplicate. It cannot go through the macro above:
+; that one asserts the value differs from every peer code, and $8A is a
+; peer code — the whole point of this entry.
+NET_ERR_CLAIM_VALUE UCI_ERR_LONG_READ
 
 ; PUBLISHED VALUES, PINNED. The registry's single rule is that a published
 ; value is never reassigned — not renumbered to close a gap, not reused
