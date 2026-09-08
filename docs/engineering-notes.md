@@ -992,6 +992,37 @@ they decline instead of configuring and running. **The #97 preflight is
 the right backstop for a rig that forgot; it is not a substitute for
 setup.**
 
+**Closed (#197 / #187 / #212, branch `fix/rig-device-state-prep`).** All
+five now call `_device_prep.prepare_device()` before `preflight_reu`, and
+`ensure_reu_16mb` became that helper rather than being deleted — its
+degrade direction was the correct one and is preserved verbatim.
+
+The one thing worth carrying forward from the fix is that the *right*
+degrade is per item, not per module, and both answers are defensible only
+against a named cost:
+
+  - **REU probe unreadable → write anyway.** The write is the
+    configuration the run needs; a redundant one costs a REST PUT.
+  - **Turbo probe unreadable → abort, after one retry.** Here the write
+    is the hazard: even a redundant turbo write glitches the UCI bridge
+    and loses the next pushed command (`$88`), which is the whole reason
+    the probe was added. Skipping the write is *not* the safe fallback
+    either — the rig then runs at whatever clock the previous lane left,
+    which invalidates every wall-clock number it produces, and is exactly
+    how a 1 MHz comb boot got read as a code defect. Two unsafe degrades
+    means the honest answer is to stop, with `C64_FORCE_TURBO_WRITE=1`
+    as the named way back to the old behaviour.
+
+A uniform policy in either direction is wrong in one of the two places,
+and `tools/test_device_prep.py` pins both halves — mutation-checked:
+reinstating the old `writing anyway` turbo degrade fails 3 of its 21
+cases, and extending the fail-closed to the REU fails 2 different ones.
+
+The prep also prints and records (`$UCI_DEBUG_DIR/device_state.json`) the
+before- and after-state, which is #212's second half: the comb-boot
+misdiagnosis was avoided only because a prep happened to print
+`REU before: enabled=False`, and nothing guaranteed that line existed.
+
 Two traps worth keeping. First, **`boot_check.py` does not call
 `preflight_reu`** (see the deliberate exclusion above), so it cannot
 exercise this path — the cheapest hardware check that does is a

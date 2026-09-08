@@ -24,8 +24,9 @@ deliberate — see "Why not pytest" below.
 | `bench_ecdsa_u64e.py` | ECDSA-P256 verify wall-clock across a clock sweep |
 
 Files with a leading underscore are helper modules, not entry points:
-`_device_lock_helper.py`, `_memory_policy.py`, `_reu_preflight.py`,
-`_sni_precondition.py`, `_ecdsa_vectors.py`, `_analyze_ecdsa_trace.py`.
+`_device_lock_helper.py`, `_memory_policy.py`, `_device_prep.py`,
+`_reu_preflight.py`, `_sni_precondition.py`, `_ecdsa_vectors.py`,
+`_analyze_ecdsa_trace.py`.
 `_sni_precondition.py` is pure logic and carries its own checks:
 
 ```sh
@@ -36,6 +37,34 @@ Three of the rigs delegate rather than duplicate: `rig_https_print_body.py`
 and `rig_https_local_p384.py` both import `rig_https_local` and override a
 narrow slice of it (the response body, and the cert/key pair
 respectively), so a change to the shared flow lands in all three.
+
+## Device prep, and the two failure policies (#197, #187, #212)
+
+Every crypto-path rig calls `_device_prep.prepare_device()` under the
+DeviceLock, right after `enable_uci` and **before** `preflight_reu`:
+`bench_ecdsa_u64e.py`, `rig_https_local.py`, `rig_https_live.py`,
+`rig_https_wiki.py`, `rig_https_bad_finished.py`.
+
+It configures the REU the linked profile needs, sets turbo before the
+reset, and prints the device's before- and after-state (also written to
+`$UCI_DEBUG_DIR/device_state.json`). Device config is runtime-only, so a
+REU left Disabled is the factory *default*, not another lane's mess — a
+run configures what it needs rather than refusing.
+
+The two probes fail in **opposite** directions, deliberately:
+
+| probe unreadable | what happens | why |
+| --- | --- | --- |
+| REU | write the configuration anyway | the write is the safe action; a wasted PUT costs nothing |
+| turbo | abort the run (after one retry) | the *write* is the hazard (`$88`), and skipping it runs the rig at an unknown clock |
+
+`preflight_reu` stays where it is, as the backstop behind the prep, and
+still writes nothing itself.
+
+Overrides: `C64_SKIP_DEVICE_PREP=1` (prep off, preflight still fails
+closed), `C64_FORCE_TURBO_WRITE=1` (write turbo blind, accepting `$88`).
+Policy and tests: `tools/uci/_device_prep.py`, `tools/test_device_prep.py`
+(faked client, no hardware).
 
 ## Running them
 

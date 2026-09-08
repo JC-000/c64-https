@@ -409,9 +409,21 @@ stdout.
 
 Traps: `decode_screen()` returns **lowercase** rows (only `screen_text()`
 uppercases); at 48 MHz the handshake scrolls the screen, so read it
-immediately. Crypto-path rigs call `preflight_reu()` (#97): a REU-profile
-build on a REU-disabled device exits 4 in ~2 s instead of spinning ~44 min;
-it never writes device config. `C64_SKIP_REU_PREFLIGHT=1` bypasses.
+immediately. Crypto-path rigs call `_device_prep.prepare_device()` and then
+`preflight_reu()` — **that order is the contract** (#197): prep is setup,
+the preflight is the backstop behind it, and `tools/test_device_prep.py`
+asserts the ordering at all five call sites. Prep configures the REU the
+linked profile needs (device config is runtime-only, so REU-Disabled is the
+factory default, not another lane's leftovers), sets turbo before the reset,
+and logs the device's before/after state to stdout and
+`$UCI_DEBUG_DIR/device_state.json` (#212). **The two probes degrade in
+opposite directions on purpose** (#187): an unreadable REU state writes
+anyway (the write is the safe action), an unreadable turbo state aborts
+after one retry (the write is the `$88` hazard, and skipping it runs the rig
+at an unknown clock). Overrides: `C64_SKIP_DEVICE_PREP=1`,
+`C64_FORCE_TURBO_WRITE=1`. `preflight_reu()` itself (#97) still writes no
+config: a REU-profile build on a REU-disabled device exits 4 in ~2 s instead
+of spinning ~44 min. `C64_SKIP_REU_PREFLIGHT=1` bypasses.
 **It fails closed (#179)**: a REU setting that cannot be read — a raise, an
 unrecognised shape, an empty value — exits 4 too, not a warning.
 `c64-test-harness` is an **editable** install from a sibling working tree,
