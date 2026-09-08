@@ -815,12 +815,7 @@ net_tcp_send:
 
 @sb_push:
         jsr uci_push_wait
-        bcc :+
-        ; FPGA wedged waiting for SOCKET_WRITE response — net_last_error is
-        ; already UCI_ERR_WAIT_TIMEOUT. Bail with C=1.
-        sec
-        rts
-:
+        bcs @sb_bail            ; wedged waiting for the SOCKET_WRITE response
 
         jsr uci_check_err
         bcc @sb_no_err
@@ -828,11 +823,75 @@ net_tcp_send:
         lda #UCI_ERR_SEND_FAIL
         sta net_last_error
         jsr uci_drain_resp
-        bcs @sb_err_drain_to        ; drain wedged — preserve SEND_FAIL exit
+        bcs @sb_bail            ; drain wedged — preserve the C=1 exit
         jsr uci_drain_status
-        bcs @sb_err_drain_to
+        bcs @sb_bail
         jsr uci_ack
-@sb_err_drain_to:
+        sec
+        rts
+
+; -----------------------------------------------------------------------
+; @sb_bail — leave a half-finished SOCKET_WRITE transaction (issue #194).
+;
+; Every branch here is a bounded wait that expired mid-transaction, so
+; net_last_error is already UCI_ERR_WAIT_TIMEOUT and the caller gets C=1
+; exactly as before. What changes is the state the command interface is
+; left in: these paths used to return without ever accepting or aborting
+; the transaction, so the interface stayed wherever the firmware had put
+; it, and only the next boot's net_init cleared it (uci_abort had exactly
+; one call site).
+;
+; ABORT, not DATA_ACC, is the primitive that applies. In
+; command_protocol.vhd the DATA_ACC bit is gated on `state(1) = '1'`, so
+; after a uci_push_wait timeout — where the firmware has not replied and
+; state is still "01" — writing it does nothing at all. The abort bit
+; sets handshake_in(2) unconditionally; command_intf.cc's task then runs
+; the target's abort() and writes HANDSHAKE_RESET (0x87), whose bit 7
+; hits the `state <= "00"` arm of the same VHDL file's
+; c_cif_io_handshake_out case.
+;
+; That reset is done by a FreeRTOS task, not by the FPGA, so uci_abort's
+; own settle (32 iterations — shorter than a single uci_fence) cannot
+; cover it. Wait for idle afterwards, on the same 5 s wall clock as every
+; other wait in this backend. Its carry is deliberately discarded: we
+; already have a failure to report, and it can only set net_last_error to
+; the UCI_ERR_WAIT_TIMEOUT that is already there.
+;
+; Two further points in ABORT's favour, both from the firmware side:
+; HANDSHAKE_RESET also rewinds command_pointer to the buffer base, which
+; DATA_ACC does not, so a partially-pushed command cannot be prepended to
+; the next one; and NetworkTarget::abort() (network_target.cc) only calls
+; discard_read_reply() — it closes no socket, close_all_sockets() being
+; reachable only from c64_reset() — so aborting here cannot desync our
+; socket id from the firmware's table.
+;
+; WHAT THIS DOES NOT RECOVER. The abort is serviced by the SAME task that
+; services commands (command_intf.cc's run_task). The likeliest reason
+; uci_push_wait timed out is that task being blocked inside lwip_send —
+; and a task blocked there cannot action an abort either. In that case
+; uci_wait_idle below also expires and we return with the interface still
+; dirty, having spent a second 5 s. This helps the transient-slowness
+; class only; a genuinely stuck server task still needs the boot-time
+; uci_abort in net_init.
+;
+; Cost of that, stated plainly: a bail can now block ~10 s where it
+; blocked ~5 s. It is one extra wait per net_tcp_send CALL, not per chunk
+; — @sb_bail returns from the whole routine — and no caller retries
+; (tls_send_record bcs @fail; http_get_plain bcs @plain_close_err), so
+; the exposure is bounded at one doubling per send.
+;
+; SCOPE. net_tcp_connect has four structurally identical dirty exits and
+; net_tcp_close one; they are knowingly untouched here and tracked as
+; #221. They cannot produce the $86 this exit is about — both open with
+; uci_wait_idle (mask $31) rather than net_poll's uci_wait_not_busy
+; (mask $01), so a left-open data phase stops them before PUSH_CMD — but
+; they can leave the interface unusable until reboot, every later connect
+; burning 5 s in uci_wait_idle and returning CONNECT_FAIL. @sb_bail is
+; the remedy to reuse there.
+; -----------------------------------------------------------------------
+@sb_bail:
+        jsr uci_abort
+        jsr uci_wait_idle
         sec
         rts
 
@@ -847,15 +906,10 @@ net_tcp_send:
         jsr uci_read_resp_bytes
 
         jsr uci_drain_resp
-        bcs @sb_ok_drain_to         ; drain wedged post-SOCKET_WRITE — bail
+        bcs @sb_bail                ; drain wedged post-SOCKET_WRITE — bail
         jsr uci_drain_status
-        bcs @sb_ok_drain_to
+        bcs @sb_bail
         jsr uci_ack
-        jmp @sb_continue
-@sb_ok_drain_to:
-        ; net_last_error already UCI_ERR_WAIT_TIMEOUT from the drain.
-        sec
-        rts
 @sb_continue:
 
         ; Sanity: if written != requested-for-this-chunk, flag short-write.
