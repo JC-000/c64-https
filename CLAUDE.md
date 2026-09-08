@@ -308,8 +308,10 @@ drops a symbol fails the link by name on both backends. Surface:
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
     is now `print_local_ip` in `boot.s`, one copy for both backends.
   - Byte accounting on ip65 (the tight one): LOADER went from 16 B free to
-    58 B **at the time of #142**; it is **21 B** at the v0.14.0 pin, which
-    is the number the Memory layout section carries and the one to use.
+    58 B **at the time of #142**; it is **17 B** at the v0.14.0 pin with
+    #211's fix in (21 B before it — the 4 B is `http.o`'s `CODE` growth in
+    that fix, measured), which is the number the
+    Memory layout section carries and the one to use.
     `print_local_ip` rides LOADER_OVERFLOW, so the NET_CODE tail that is
     `HTTPS_HOST`/`HTTPS_PATH`'s ip65 budget shrank from 170 to ~60 B beyond
     the default strings (56 B measured; wikipedia's +46 B still builds on
@@ -556,9 +558,10 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     (server-name validation took the comb tail from 714 to 223 B and broke
     `rig_https_wiki.py`, which now drives the menu instead; that tail is
     **126 B today** — see the margin note under Known issues, and do not
-    quote the 223 as current). Those are the
-    numbers from that episode; the comb tail is **153 B** at the v0.14.0
-    pin — see the memory map below, and never size rig scratch from this
+    quote the 223 as current). The 714 and the 223 are the
+    numbers from that episode; the comb tail is **126 B** at the v0.14.0
+    pin, re-measured off `build/c64-https.map` — see the memory map
+    below, and never size rig scratch from this
     bullet's historical figures. The harness write guard raises
     `MemoryPolicyError` before the wire.
   - `CRYPTO_HOT` margin under UCI is **per profile, and the one number this
@@ -608,8 +611,16 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     `LOADER_OVERFLOW`.** #211's verdict routine (~27 B) was placed twice
     before it landed, and both wrong homes linked cleanly on the default
     target:
-      - inline in `CODE` took ip65's LOADER from 21 B free to **zero** —
-        it fit exactly, so the *next* byte anyone added would not link;
+      - inline in `CODE` took ip65's LOADER from the 21 B free it had
+        *then* to **zero** — it fit exactly, so the *next* byte anyone
+        added would not link. The routine landed in `HTTP_AUX_CODE2`
+        instead, and LOADER measures **17 B** free today. The 4 B is
+        `http.o`'s own `CODE` growth in that same fix: rebuilding
+        ip65-onchip with only `src/http.s` reverted to `60022de` moves
+        `http.o`'s `CODE` from $35E to $35A and the whole `CODE` segment
+        from $17E2 to $17DE, putting LOADER back at 21 B. Attribution is
+        to the module and the commit; nobody has disassembled *which*
+        four bytes;
       - `LOADER_OVERFLOW` lands in `NET_CODE`, whose tail is a **joint
         budget with `HTTPS_TARGET_RODATA`**, and 27 B there took the
         wikipedia-target margin from 14 B to **−13 B**, breaking
@@ -752,11 +763,15 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
                                    build: TLS_DEFRAME_CODE (~1.4 KB),
                                    CERT_BUF_BSS (2,048 B), HTTPS_TARGET_RODATA,
                                    x509_name; comb adds RODATA/LIMLEE_BSS
-                                   (**153 B** tail free measured at the
+                                   (**126 B** tail free, re-measured at the
                                    v0.14.0 pin with the P-384 objects gated
-                                   out; it was 120 B before gating returned
-                                   33 B of CRYPTO_RODATA here, and the
-                                   ~223 B this file used to claim was stale
+                                   out: last tenant
+                                   `LIB_NISTCURVES_MUL_CODE` ends $5F81,
+                                   region ends $5FFF, $5FFF-$5F81 = $7E.
+                                   It was 153 B before #211's fix, and
+                                   120 B before gating returned 33 B of
+                                   `CRYPTO_RODATA` here; the ~223 B this
+                                   file used to claim was stale
                                    — it was 159 B at v0.11.2). Also the slot
                                    for the
                                    (broken) overlay-embed flags.
@@ -795,11 +810,17 @@ deriving the others by arithmetic — the deltas are not uniform, because a
 segment recovered in one profile can land in a different region in another
 (comb's `CRYPTO_RODATA` is the worked example: see the 33 B note above).
 
-ip65 is essentially full. Measured at the v0.14.0 pin, with the P-384
-objects gated out of the link: 56 B NET_CODE tail (on top of the 20 B the
-default target strings already use), 145 B CRYPTO_RESIDENT, 152 B
-CRYPTO_OVERLAY, 21 B LOADER, and a 43 B hole below TABLES_BSS in
-CRYPTO_COLD_SHADOW. PRG size is not a headroom gauge. **CRYPTO_OVERLAY and
+ip65 is essentially full. Measured on **ip65-onchip** — the shipped
+product — at the v0.14.0 pin, with the P-384 objects gated out of the
+link and #211's fix in: 56 B NET_CODE tail (on top of the 20 B the
+default target strings already use), 145 B CRYPTO_RESIDENT, 125 B
+CRYPTO_OVERLAY, 17 B LOADER, and a 43 B hole
+below TABLES_BSS in
+CRYPTO_COLD_SHADOW. The unshipped ip65 REU profile matches on three of
+those (LOADER, CRYPTO_OVERLAY, NET_CODE) but **not** on CRYPTO_RESIDENT,
+where it has 231 B free: `LIB_NISTCURVES_MUL_CODE` is $27 there against
+$A2 onchip, so the onchip figure is the conservative one and the one to
+size against. PRG size is not a headroom gauge. **CRYPTO_OVERLAY and
 CRYPTO_RESIDENT are ADJACENT ($4F8C-$5FFF and $6000-$9FFF), so they are one
 pool of 20,596 B, and no amount of shuffling segments between them creates
 space** — that is why the contiguous-region cfg restructure is only worth
@@ -812,9 +833,15 @@ CRYPTO_OVERLAY only rebalances the two halves of the pool, and does it to
 match what both UCI cfgs already do. The other free blocks are not
 reachable from the pool: NET_CODE's tail is the `HTTPS_HOST`/`HTTPS_PATH`
 budget, and the smallest segment in the pool is `LIB_NISTCURVES_MUL_CODE`
-at 162 B (not `HTTP_AUX_CODE2`'s 169 B, which this file used to name).
+at 162 B (not `HTTP_AUX_CODE2`, which this file used to name; that one
+is 196 B today, and was 169 B before #211).
 
-  - `LOADER_OVERFLOW` carries ~125 B of `http.s` that outgrew LOADER.
+  - `LOADER_OVERFLOW` is 332 B and `http.s` is **not** in it. Measured
+    tenants (ip65-onchip map, per module): `boot.o` 110 B, `vic.o` 18 B,
+    `crypto_swap.o` 204 B. W4 moved `http.s`'s share out to
+    `HTTP_AUX_CODE` (`src/http.s`, grep "W4: moved from LOADER_OVERFLOW"),
+    so the segment has no `http.s` tenant at all and this line's old
+    "~125 B of `http.s`" named a module that had already left.
   - `src/loadaddr.s` (PRG load address) and `src/exports.s` (promotes
     equates to `labels.txt`, incl. `cert_buf_size` — rigs must read it, not
     hardcode 2048/1536) are intentional stubs; ip65-only exports live in
