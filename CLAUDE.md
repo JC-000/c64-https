@@ -271,9 +271,9 @@ Switching backend = a different cfg + different `src/net/<backend>/*.o`.
 SPEC §13, issue #70). **§13 was retired at contract v1.0.0; every §13.x
 number in this section resolves at tag `v0.17.1`, nowhere else.** No §13
 assert has a contract-derived counterparty, so no contract release can
-break a build — but the error codes below are asserted NOWHERE, and that
-is the live hazard (see the allocation note). `src/net_abi.inc` is the
-normative source now. `boot.s`, `http.s`, `tls_record_io.s` and `tls13.s`
+break a build. The error codes below used to be asserted NOWHERE; they
+are asserted now (#184) — see the allocation note. `src/net_abi.inc` is
+the normative source now. `boot.s`, `http.s`, `tls_record_io.s` and `tls13.s`
 `.include` it and import no `net_*` symbol directly, so a backend that
 drops a symbol fails the link by name on both backends. Surface:
 
@@ -304,6 +304,43 @@ drops a symbol fails the link by name on both backends. Surface:
     new code in `c64-wireguard/src/net_abi.inc`, which declares itself
     canonical for both ranges, then here. It owns `$8C-$8F` and `$46-$49`,
     which our two error headers used to present as free (#184).
+    **That is mechanically enforced now, in two halves (#184).**
+    `src/net_err_registry_asserts.s` is `$(wildcard src/*.s)`, so it
+    assembles into every build on both backends and emits **no bytes**: it
+    holds the peer's codes as `NET_ERR_PEER_*` equates and `.assert`s (scope
+    `error`, so ca65 settles it before ld65) that no code of ours lands on
+    one, that each is in family range, and that no published value has been
+    reassigned. **Two of our own names on one byte also fails the build**:
+    `NET_ERR_CLAIM_VALUE` defines `.ident(.sprintf("NET_ERR_TAKEN_%02X",
+    val))`, so a second claim on a byte is a ca65 redefinition error naming
+    the BYTE (`Symbol 'NET_ERR_TAKEN_88' is already defined`) — O(n), no
+    list to maintain, still zero bytes. It covers only codes passed through
+    the macros. Its blind spot — a code never registered — is closed by
+    `tools/test_net_err_registry.py`, which parses the two headers instead
+    and diffs our snapshot's **values and names** against the live peer file
+    (`C64_WIREGUARD_ROOT`, else `../c64-wireguard`, else
+    `~/Documents/c64-wireguard`). A missing checkout is an **involuntary
+    skip**, so those four checks FAIL rather than pass quietly
+    (`tools/_skip_policy.py`, #178) — a fresh clone with no peer checkout is
+    RED by design; `C64_NO_PEER_REGISTRY=1` is the loud opt-out (its **own**
+    variable, deliberately not `C64_ALLOW_SKIP`, which also gates
+    `test_build_flags_stamp.py`'s toolchain check). **Scope the guarantee
+    in both directions.** Under-coverage is **three** things, and a code
+    reaches a blind spot only by being invisible to *both* halves: (1) an
+    expression-valued code that is ALSO never registered — the **suite**
+    reads only `NAME = $hh`, `NAME = ddd` and `.define NAME $hh`, while ca65
+    evaluates an expression fine once registered, so neither alone is the
+    gap; (2) a code named without the `_ERR_` infix that is ALSO never
+    registered — a gap the over-coverage gate below CREATED rather than
+    inherited, and the accepted cost of it; (3) a bare inline `lda #$8C`
+    with no equate at all, which no text guard sees (latent — no such site
+    exists). Write literals, name them `*_ERR_*`, register them.
+    Over-coverage: the suite reads whole headers that also hold ordinary
+    constants, so it gates on that same `_ERR_` infix; without it a future
+    `UCI_HOST_BUF_MAX = 64` would be reported as an ip65-family
+    error code needing allocation in c64-wireguard's registry. The
+    `NET_FAMILY_*` bits in `src/net/net_families.inc` are the same cross-repo
+    copy problem and are still unguarded.
   - Gone, per §13.1: `net_tcp_set_recv_cb` (stub), `net_recv_ready`,
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
     is now `print_local_ip` in `boot.s`, one copy for both backends.
