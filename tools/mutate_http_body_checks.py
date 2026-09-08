@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""tools/mutate_http_body_checks.py — break the #210 oracle on purpose.
+
+`tools/test_http_body_checks_unit.py` claims that every branch of the body
+completeness verdict alarms on a known-bad input, and that the banner rig
+cannot go back to computing a verdict it drops. This is the thing that
+CHECKS those claims: it copies the module, the suite and the rig into a
+scratch mirror, applies one textual mutation at a time, and requires the
+suite to go red.
+
+Why it matters more here than usual: the check being replaced —
+`ok = total >= 125_000`, assigned and never read — passed every run it was
+ever part of. "It went green on hardware" is precisely the evidence that
+cannot distinguish a working oracle from that one. A mutant that SURVIVES
+means the same thing has happened again.
+
+Modelled on `tools/mutate_ip65_hw_checks.py`, including its methodology
+trap: Python caches bytecode on (mtime, size), and a harness that rewrites
+the same path many times in one second will silently run a previous
+mutant's bytecode when two files happen to be the same length. The
+subprocess therefore runs with PYTHONDONTWRITEBYTECODE=1.
+
+    python3 tools/mutate_http_body_checks.py [--keep]
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+MODULE = "tools/http_body_checks.py"
+RIG = "tools/uci/rig_https_banner.py"
+SRC = "src/http.s"
+
+FAIL_ARM = '    if any(v is None or v.status == "fail" for v in checks):'
+
+#: (description, file to mutate, text to find, text to replace it with).
+#: Each mutation is a plausible weaker implementation, not a random edit.
+MUTANTS = [
+    ("check_body_complete accepts a body short of its Content-Length",
+     MODULE,
+     "        if state.body_total == state.content_length:",
+     "        if state.body_total <= state.content_length:"),
+    ("check_body_complete keeps the retired >= 125_000 threshold",
+     MODULE,
+     "        if state.body_total == state.content_length:",
+     "        if state.body_total >= 125_000:"),
+    ("check_body_complete ignores an over-read past the declared length",
+     MODULE,
+     "        return Verdict(False,\n"
+     "                       f\"OVER-READ: {state.body_total:,} B consumed against a \"",
+     "        return Verdict(True,\n"
+     "                       f\"OVER-READ: {state.body_total:,} B consumed against a \""),
+    ("check_body_complete accepts a chunked body with no terminal chunk",
+     MODULE,
+     "        if state.chunk_state == CHUNK_STATE_TERMINAL:",
+     "        if state.chunk_state >= 0:"),
+    ("check_body_complete believes a parser that never reached the body",
+     MODULE,
+     "    if state.parse_state < PARSE_STATE_BODY:\n"
+     "        return Verdict(False,\n"
+     "                       f\"the response never reached the body \"",
+     "    if False and state.parse_state < PARSE_STATE_BODY:\n"
+     "        return Verdict(False,\n"
+     "                       f\"the response never reached the body \""),
+    ("an unframed response is promoted from inconclusive to a pass",
+     MODULE,
+     "                   \"stale literal #210 removed\", ev, status=\"inconclusive\")",
+     "                   \"stale literal #210 removed\", ev)"),
+    ("check_body_complete prefers chunked over Content-Length "
+     "(the PRG's order reversed)",
+     MODULE,
+     "    if state.cl_valid:\n        if state.body_total == state.content_length:",
+     "    if state.cl_valid and not state.chunked:\n"
+     "        if state.body_total == state.content_length:"),
+    ("check_http_status accepts any status",
+     MODULE,
+     "    if state.status != expect:",
+     "    if False and state.status != expect:"),
+    ("decode_body_state reads the 24-bit counts as 16-bit",
+     MODULE,
+     '    "http_body_total": 3,       # 24-bit CONSUMED count',
+     '    "http_body_total": 2,       # 24-bit CONSUMED count'),
+    ("decode_body_state zero-extends a short DMA read",
+     MODULE,
+     "        if len(bytes(raw[name])) != width:",
+     "        if False and len(bytes(raw[name])) != width:"),
+    # --- the exit-code decision. All five of these were found by an
+    # --- adversarial review of the AST guard that used to be the only
+    # --- thing testing this logic; every one of them kept that guard
+    # --- green. They are module-side mutants now because the logic
+    # --- moved into decide_exit, where the suite EXECUTES it.
+    ("M15: decide_exit's fail arm uses all() instead of any() "
+     "(exit 0 on a truncated body - #210 restored)",
+     MODULE,
+     FAIL_ARM,
+     FAIL_ARM.replace("if any(", "if all(")),
+    ("M16: decide_exit's fail arm returns EXIT_PASS (#210 restored)",
+     MODULE,
+     FAIL_ARM + "\n        return EXIT_FAIL, lines + [",
+     FAIL_ARM + "\n        return EXIT_PASS, lines + ["),
+    ("M17: decide_exit's fail arm is dead",
+     MODULE,
+     FAIL_ARM,
+     FAIL_ARM.replace("if any(", "if False and any(")),
+    ("M18: the body verdict is sliced out of decide_exit's checks list",
+     MODULE,
+     "    checks = [shadow, status, body]",
+     "    checks = [shadow, status, body][:2]"),
+    ("M23: decide_exit's still-growing gate is dead "
+     "(cry-wolf restored)",
+     MODULE,
+     "    if settled.inconclusive:",
+     "    if settled.inconclusive and False:"),
+    ("the rig decides its own exit code again instead of delegating",
+     RIG,
+     "        code, report = decide_exit(banner_ok=banner_ok, shadow=shadow,\n"
+     "                                   settled=settled, status=status, body=body)",
+     "        code, report = (0, ['PASS'])"),
+    # --- Round-2 review wrote these six against decide_exit WITHOUT
+    # --- looking at this list, and all six were caught. Folded in so
+    # --- they stay caught: an independent set that lands is worth more
+    # --- than the same set re-run, and it only stays worth something
+    # --- if it is here.
+    ("R2-a: decide_exit stops treating a never-evaluated verdict as a failure",
+     MODULE,
+     FAIL_ARM,
+     '    if any(v.status == "fail" for v in checks if v is not None):'),
+    ("R2-b: decide_exit widens the fail test to != \"pass\" (inconclusive becomes FAIL)",
+     MODULE,
+     FAIL_ARM,
+     FAIL_ARM.replace('== "fail"', '!= "pass"')),
+    ("R2-c: decide_exit's inconclusive arm returns EXIT_PASS",
+     MODULE,
+     "    if any(v.inconclusive for v in checks):\n        return EXIT_INCONCLUSIVE, lines + [",
+     "    if any(v.inconclusive for v in checks):\n        return EXIT_PASS, lines + ["),
+    ("R2-d: decide_exit's still-growing arm stays live but is ranked behind the fail arm",
+     MODULE,
+     "    if settled.inconclusive:",
+     "    if settled.inconclusive and not any(v is None or v.status == 'fail'\n                                    for v in checks):"),
+    ("R2-e: decide_exit drops the `settled is None` guard",
+     MODULE,
+     "    if settled is None:",
+     "    if False:"),
+    ("R2-f: decide_exit's banner arm returns EXIT_INCONCLUSIVE instead of failing",
+     MODULE,
+     "    if not banner_ok:\n        return EXIT_FAIL, lines + [",
+     "    if not banner_ok:\n        return EXIT_INCONCLUSIVE, lines + ["),
+    ("the rig passes decide_exit's verdicts positionally, so a "
+     "settled/status transposition is invisible to every guard",
+     RIG,
+     "        code, report = decide_exit(banner_ok=banner_ok, shadow=shadow,\n                                   settled=settled, status=status, body=body)",
+     "        code, report = decide_exit(banner_ok, shadow, status, settled, body)"),
+    # --- the 6502 side. The reviewer reversed these two arms in
+    # --- src/http.s and every host-side test stayed green, 8/8.
+    ("the 6502 verdict tests http_chunked before http_cl_valid "
+     "(the precedence this module copies)",
+     SRC,
+     "        lda http_cl_valid\n        beq @to_unframed",
+     "        lda http_chunked\n        beq @to_unframed"),
+    ("the 6502 chunked arm starts reading http_chunk_state "
+     "(the documented divergence goes stale)",
+     SRC,
+     "@to_unframed:\n        lda http_chunked",
+     "@to_unframed:\n        lda http_chunk_state\n        lda http_chunked"),
+    ("check_fetch_settled calls a still-growing fetch settled",
+     MODULE,
+     "    if progressing:",
+     "    if False and progressing:"),
+    ("a check_* is renamed away (the RED_CASES registry goes stale)",
+     MODULE,
+     "def check_http_status(", "def renamed_check_http_status("),
+]
+
+#: Mutants that CANNOT be detected, with the reason. Reported, never hidden.
+KNOWN_EQUIVALENT: dict = {}
+
+#: HOW THE RIG-SIDE GAP WAS CLOSED, since the shape of it is the lesson.
+#: The exit-code decision used to live in `rig_https_banner.py` and was
+#: tested only by an AST guard. An adversarial review found FIVE
+#: one-token mutants that kept that guard green -- `any(` -> `all(`,
+#: `return EXIT_FAIL` -> `EXIT_PASS`, a `[:2]` slice, and two dead
+#: conjuncts -- two of which restore #210 exactly. Name-taint over an
+#: AST cannot see polarity, list membership, or which constant is
+#: returned, and no strengthening of it would have. The logic moved to
+#: `decide_exit` in the module instead, so those five are ordinary
+#: mutants the suite EXECUTES. What remains in the rig is a call, and
+#: the guard now checks only that it is still a call, by keyword.
+#:
+#: NAME THE TRADE RATHER THAN CALLING THE SEAM CLOSED. It is smaller in
+#: CONSEQUENCE and marginally larger in SURFACE: the highest-consequence
+#: part -- the decision itself -- left the seam and is executed now, and
+#: five untestable decision mutants were traded for one untestable
+#: BINDING mutant (transposing decide_exit's arguments), which passing by
+#: keyword removes. What is unchanged and still untested is the rest of
+#: the rig between the DMA read and the call: `read_state`'s slicing, the
+#: `span_lo`/`span_hi` arithmetic, the `last_moved` tracking and the
+#: `grace` computation. `tools/uci/` rigs need hardware and this one is
+#: not importable without the sibling harness -- the same restructure
+#: `tools/test_rig_skip_contract.py` records as owed for the macOS
+#: bridge rig.
+
+
+def stage(root: Path) -> None:
+    (root / "tools" / "uci").mkdir(parents=True)
+    (root / "src").mkdir(parents=True)
+    for rel in (MODULE, RIG,
+                "tools/test_http_body_checks_unit.py",
+                "tools/ip65_hw_checks.py"):
+        shutil.copy(REPO / rel, root / rel)
+    # The suite reads the real 6502 source: src/http.s for the verdict
+    # shape, src/data.s for the symbol widths. src/http.s is MUTATED
+    # below, so the mirror copy is what the suite must see.
+    for rel in (SRC, "src/data.s"):
+        shutil.copy(REPO / rel, root / rel)
+
+
+def run_suite(root: Path):
+    """The suite, against the mirror. Bytecode caching OFF — see the docstring."""
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    r = subprocess.run(
+        [sys.executable, str(root / "tools" / "test_http_body_checks_unit.py")],
+        capture_output=True, text=True, env=env)
+    failed = [ln.strip() for ln in r.stdout.splitlines()
+              if ln.strip().startswith(("FAIL", "ERROR"))]
+    return r.returncode, failed
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--keep", action="store_true",
+                    help="leave the scratch mirror in place for inspection")
+    args = ap.parse_args()
+
+    tmp = Path(tempfile.mkdtemp(prefix="httpbody-mutate-"))
+    try:
+        stage(tmp)
+        rc, failed = run_suite(tmp)
+        if rc != 0:
+            print(f"BASELINE IS ALREADY RED ({len(failed)} failures) — fix that "
+                  "first; mutation results mean nothing against a red baseline")
+            print("\n".join(failed))
+            return 2
+        print(f"baseline: {len(MUTANTS)} mutations to apply, suite green")
+
+        pristine = {rel: (tmp / rel).read_text()
+                    for rel in (MODULE, RIG, SRC)}
+        survived, unexpected = [], []
+        for name, rel, old, new in MUTANTS:
+            target = tmp / rel
+            if old not in pristine[rel]:
+                print(f"  !! NOT APPLICABLE  {name}\n     (the anchor text is "
+                      "gone — the mutation no longer describes the code, so "
+                      "this proves nothing; update it)")
+                unexpected.append(name)
+                continue
+            target.write_text(pristine[rel].replace(old, new, 1))
+            rc, failed = run_suite(tmp)
+            target.write_text(pristine[rel])
+            if rc == 0:
+                if name in KNOWN_EQUIVALENT:
+                    print(f"  equivalent  {name}\n              "
+                          f"{KNOWN_EQUIVALENT[name]}")
+                else:
+                    print(f"  SURVIVED    {name}")
+                    survived.append(name)
+                continue
+            who = ", ".join(sorted({f.split(":")[0].split()[-1]
+                                    for f in failed}))
+            print(f"  caught      {name}\n              by {who}")
+
+        detectable = [m for m in MUTANTS if m[0] not in KNOWN_EQUIVALENT]
+        caught = len(detectable) - len(survived) - len(unexpected)
+        print(f"\n{caught}/{len(detectable)} detectable mutants caught, "
+              f"{len(KNOWN_EQUIVALENT)} known-equivalent")
+        if survived or unexpected:
+            print("A surviving mutant means the suite passes whether or not "
+                  "the checker works.")
+            return 1
+        return 0
+    finally:
+        if args.keep:
+            print(f"mirror kept at {tmp}")
+        else:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

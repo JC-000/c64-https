@@ -402,7 +402,10 @@ stdout.
   rig_https_banner.py                       — the ONLY rig that executes
                                               `do_https_get` (walks the menu,
                                               reads $0400) — every other HTTPS
-                                              rig enters via the trampoline
+                                              rig enters via the trampoline.
+                                              Also the only completeness
+                                              oracle: `tools/http_body_checks.py`
+                                              (exit 78 = inconclusive, #210)
   rig_https_bad_finished.py                 — forged server Finished must abort
                                               (`FINISHED_MODE=good` control first)
   bench_ecdsa_u64e.py                       — verify wall-clock sweeps
@@ -460,8 +463,23 @@ returns `carry=0`/`http_status=200` on bodies tens of KB short of their
 offline against a local listener with no chunking, and live at
 117,192 / 89,526 / 73,720 B against a same-day 125,703 B anchor. It can also
 hang outright. **Do not treat any large-body fetch as complete until #211
-closes**; it went unnoticed because the only rig on that path cannot go red
-on a short body (#210). The handshake results above are unaffected. The
+closes**; it went unnoticed because the only rig on that path could not go
+red on a short body (#210, now fixed: `rig_https_banner.py` derives the
+expected size from the response's own framing and gates its exit code on
+it). That rig also **sets the CPU clock instead of inheriting it** — a
+completeness verdict is clock-sensitive where the banner verdict was not,
+and a device left at 1 MHz makes a slow fetch look like a truncated one.
+**#211 reproduces on the shipped path.** Two runs of ONE artifact — PRG
+`44e6c0dd605db65682131d6621fc9ad7b8b03cb0d22b0b241691abd3c35ed32a`,
+`BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_HOST=en.wikipedia.org
+HTTPS_PATH=/wiki/Commodore_64`, U64E @ 48 MHz, `FETCH_TIMEOUT=900`, same
+host, same day: one **PASS** (754,413 B consumed == Content-Length, HTTP
+200) and one **FAIL** (frozen at 299,123 B, 455,290 B short). One of each:
+treat neither as the norm, and do not quote the PASS on its own. The stall is
+**abrupt** — the counter freezes and stays frozen for hundreds of seconds,
+which is what #219's fast-expiry path predicts — not a trickle. 754,413 B
+is the *rendered page* at that path and is not the 125,703 B raw-article
+figure quoted above; they are different resources. The handshake results above are unaffected. The
 local-listener handshake works on both backends (UCI at 48 MHz and 1 MHz;
 ip65 in VICE at honest 1 MHz, ~36 min).
 
@@ -859,7 +877,11 @@ vacuously (zero checks = fail; any `SKIP_*` = `PARTIAL VERIFICATION`).
 
   tools/test_entropy.py, test_hkdf.py, test_chained_hmac.py,
   test_keyschedule_steps.py, test_tls_handshake.py, test_http.py,
-  test_x509.py, test_x509_name.py (**its vector count is conditional —
+  test_x509.py, test_http_body_checks_unit.py (pytest testpaths; the #210
+  body-completeness oracle plus `decide_exit`, the rig's whole exit-code
+  decision, one red case per branch; mutation-proven by
+  `tools/mutate_http_body_checks.py` — **run it rather than quoting its
+  count here**, and note it mutates `src/http.s` too), test_x509_name.py (**its vector count is conditional —
   never quote one without the condition.** 11 synthetic vectors always run
   (5 accept / 6 reject); +6 against live CA leaves fetched from wikipedia /
   github / lwn, which `X509_NAME_OFFLINE=1` or being offline drops; +6
