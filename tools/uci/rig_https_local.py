@@ -94,13 +94,10 @@ from c64_test_harness.backends.device_lock import DeviceLock, DeviceLockTimeout
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 from c64_test_harness.backends.ultimate64_helpers import (
-    set_turbo_mhz,
     set_debug_stream_mode,
     runner_health_check,
     Ultimate64RunnerStuckError,
     DEBUG_MODE_6510,
-    CAT_U64_SPECIFIC,
-    cpu_speed_enum,
 )
 from c64_test_harness.backends.u64_debug_capture import (
     DebugCapture,
@@ -117,6 +114,7 @@ from _memory_policy import (
     build_policy_and_arbiter,
     build_policy_and_arbiter_with_overlay_carveout,
 )
+from _device_prep import DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
 from _sni_precondition import enforce_sni_precondition
 
@@ -1568,77 +1566,54 @@ def main() -> int:
             )
             return 3
 
-        # --- REU preflight (issue #97) ---
+        # --- Device prep: reset-then-configure (issues #197, #187, #212) ---
+        # Device config on an Ultimate is runtime-only — a re-flash restores
+        # factory defaults and we never write flash — so `RAM Expansion Unit:
+        # Disabled` and a 1 MHz clock are the DEFAULT state, not an anomaly.
+        # A run therefore configures what it needs rather than hoping the
+        # previous lane reverted its changes, and records the before- and
+        # after-state so its artifacts say which device state produced the
+        # result (#212: a peer lane leaving 1 MHz + no REU produced a comb
+        # boot failure that read exactly like a code defect).
+        #
+        # Turbo is set BEFORE booting the PRG. C64 Ultimate quirk (firmware
+        # 1.1.0, core 1.49): a runtime CPU speed change via the REST config
+        # API can glitch the UCI bridge so the next pushed command is
+        # silently lost — observed as UCI_ERR_NO_SOCKET on the first
+        # TCP_CONNECT after a 1->64 MHz switch (2x reproduced; 1->48 happened
+        # to survive). Sharper finding (2026-07-29, C64U): the glitch is
+        # caused by the config WRITE itself and SURVIVES the reset below. It
+        # also fires on a REDUNDANT write: 3/3 attempts wrote "64" while the
+        # device was already at 64 MHz and every one lost its first
+        # TCP_CONNECT, while the identical PRG at the identical speed passed
+        # via a script that performs no config write before its reset.
+        #
+        # So the probe exists to SKIP the write, and prepare_device therefore
+        # refuses to degrade toward performing it: an unreadable turbo state
+        # aborts (after one retry) instead of writing blind (#187). The REU
+        # probe degrades the other way — there the write is the safe action.
+        # Policy and its tests: tools/uci/_device_prep.py,
+        # tools/test_device_prep.py.
+        try:
+            prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ)
+        except DevicePrepError as exc:
+            print(str(exc), file=sys.stderr)
+            return 4
+
+        # --- REU preflight (issue #97), the backstop BEHIND the prep ---
         # A REU-profile PRG on a device with the REU disabled does not
         # fail: it derives a wrong X25519 shared secret from silently
         # no-op'd DMA and then spins ~44 minutes on the first encrypted
         # record. Check the one setting that decides it, in one REST call,
         # before committing to the run. On-chip builds need no REU and are
-        # not checked at all. This never writes device config — see the
-        # module docstring for why.
+        # not checked at all. It still writes no device config itself — the
+        # prep above owns that — so it stays a clean verdict on the state
+        # the run is about to use.
         try:
             preflight_reu(client, LABELS_PATH)
         except ReuPreflightError as exc:
             print(str(exc), file=sys.stderr)
             return 4
-
-        # --- Set turbo BEFORE booting the PRG ---
-        # C64 Ultimate quirk (firmware 1.1.0, core 1.49): a runtime CPU
-        # speed change via the REST config API can glitch the UCI bridge
-        # so that the next pushed command is silently lost — observed as
-        # UCI_ERR_NO_SOCKET on the first TCP_CONNECT after a 1->64 MHz
-        # switch (2x reproduced; 1->48 happened to survive). Booting at
-        # the target speed avoids the mid-session switch entirely and
-        # also makes boot speed deterministic (it used to be whatever
-        # the previous run left in the device config).
-        # Sharper finding (2026-07-29, C64U): the glitch is caused by the
-        # config WRITE itself and SURVIVES the reset below — it is not
-        # limited to mid-session switches. It also fires on a REDUNDANT
-        # write: 3/3 attempts wrote "64" while the device was already at
-        # 64 MHz and every one lost its first TCP_CONNECT
-        # (UCI_ERR_NO_SOCKET, no SYN on the wire), while the identical PRG
-        # at the identical speed passed via a script that performs no
-        # config write before its reset. At 48 MHz the same pattern costs
-        # only the first attempt.
-        #
-        # So: read the current state and skip the write entirely when it
-        # already matches, and give a genuine change a wider settle.
-        # Shape note: the REST config responses wrap their items in a
-        # `<Category>` key and put each value directly under the ITEM name
-        # — there is no per-item "value" key (an earlier attempt here read
-        # `.get("value")` and silently got None/None on a C64U, which made
-        # the skip unreachable). Mirror the harness's own get_reu_config:
-        # fetch the category, unwrap, index by item name. One request
-        # covers both items. `.get(CAT, cat)` tolerates either shape.
-        try:
-            cat = client.get_config_category(CAT_U64_SPECIFIC)
-            inner = cat.get(CAT_U64_SPECIFIC, cat)
-            cur_speed = inner.get("CPU Speed")
-            cur_turbo = inner.get("Turbo Control")
-        except Exception as exc:                      # probe is best-effort
-            print(f"  (turbo state probe failed: {exc}; writing anyway)")
-            cur_speed = cur_turbo = None
-
-        # str() both sides: cpu_speed_enum returns a str ("48"), but the
-        # REST value's type is the firmware's business, not ours — a silent
-        # int/str mismatch here would make the skip never fire and quietly
-        # restore the old always-write behaviour.
-        want_speed = str(cpu_speed_enum(TURBO_MHZ))
-        if str(cur_speed) == want_speed and cur_turbo == "Manual":
-            print(
-                f"Turbo already {TURBO_MHZ} MHz (Manual) — skipping config "
-                "write (avoids the C64U bridge glitch; see comment above)"
-            )
-        else:
-            print(
-                f"Setting turbo to {TURBO_MHZ} MHz "
-                f"(from {cur_turbo}/{cur_speed})..."
-            )
-            set_turbo_mhz(client, TURBO_MHZ)
-            # Wider settle than the historical 0.5 s: the write is what
-            # perturbs the bridge, and the first TCP_CONNECT is what pays
-            # for it. Overridable for experiments.
-            time.sleep(float(os.environ.get("TURBO_SETTLE", "3.0")))
 
         print("Resetting machine...")
         client.reset()

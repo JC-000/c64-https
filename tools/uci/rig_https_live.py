@@ -85,11 +85,8 @@ from c64_test_harness.backends.device_lock import DeviceLock, DeviceLockTimeout
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 from c64_test_harness.backends.ultimate64_helpers import (
-    set_turbo_mhz,
     runner_health_check,
     Ultimate64RunnerStuckError,
-    CAT_U64_SPECIFIC,
-    cpu_speed_enum,
 )
 from c64_test_harness.uci_network import enable_uci, disable_uci
 from c64_test_harness.keyboard import send_text
@@ -99,6 +96,7 @@ from _device_lock_helper import (
     LockTimeoutConfigError, acquire_device_lock,
 )
 from _memory_policy import build_policy_and_arbiter_with_overlay_carveout
+from _device_prep import DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
 from _temp_gc import gc_temp
 
@@ -445,37 +443,28 @@ def main() -> int:
                   file=sys.stderr)
             return 3
 
-        # REU preflight (issue #97) — under the DeviceLock, right after
-        # enable_uci, before anything long-running. The comb build claims
-        # REU bank 2, so this is not optional for the sprint's own PRG.
+        # --- Device prep (issues #197, #187, #212) ---
+        # Reset-then-configure: device config is runtime-only, so a REU
+        # left Disabled and a clock left at 1 MHz are the DEFAULT state,
+        # not an anomaly. Configure the REU this profile needs and set
+        # turbo BEFORE reset/run_prg, log both the before- and after-state
+        # so the run's artifacts say what it ran against, and abort rather
+        # than write blind if the turbo state cannot be read.
+        try:
+            prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ)
+        except DevicePrepError as exc:
+            print(str(exc), file=sys.stderr)
+            return 4
+
+        # REU preflight (issue #97) — the backstop BEHIND the prep, for the
+        # case where prep was skipped, overridden, or did not take. The comb
+        # build claims REU bank 2, so this is not optional for the sprint's
+        # own PRG.
         try:
             preflight_reu(client, LABELS_PATH)
         except ReuPreflightError as exc:
             print(str(exc), file=sys.stderr)
             return 4
-
-        # --- Set turbo BEFORE reset/run_prg, skipping a redundant write ---
-        # (the config WRITE itself glitches the UCI bridge and drops the
-        # next TCP_CONNECT — see rig_https_local's comment block; the shape
-        # of the REST response is also documented there).
-        try:
-            cat = client.get_config_category(CAT_U64_SPECIFIC)
-            inner = cat.get(CAT_U64_SPECIFIC, cat)
-            cur_speed = inner.get("CPU Speed")
-            cur_turbo = inner.get("Turbo Control")
-        except Exception as exc:                      # probe is best-effort
-            print(f"  (turbo state probe failed: {exc}; writing anyway)")
-            cur_speed = cur_turbo = None
-
-        want_speed = str(cpu_speed_enum(TURBO_MHZ))
-        if str(cur_speed) == want_speed and cur_turbo == "Manual":
-            print(f"Turbo already {TURBO_MHZ} MHz (Manual) — skipping "
-                  "config write")
-        else:
-            print(f"Setting turbo to {TURBO_MHZ} MHz "
-                  f"(from {cur_turbo}/{cur_speed})...")
-            set_turbo_mhz(client, TURBO_MHZ)
-            time.sleep(float(os.environ.get("TURBO_SETTLE", "3.0")))
 
         print("Resetting machine...")
         client.reset()

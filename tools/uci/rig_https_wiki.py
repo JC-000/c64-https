@@ -56,7 +56,10 @@ Environment variables:
   PHASE_TIMING      — screen-scrape phase table (default 0 here: the
                       run is long and body progress is the signal)
   UCI_DEBUG_DIR     — artifact dir (default /tmp/uci_https_wiki_debug)
-  C64_SKIP_TEMP_GC / C64_SKIP_REU_PREFLIGHT — bypass those steps
+  C64_SKIP_TEMP_GC / C64_SKIP_REU_PREFLIGHT / C64_SKIP_DEVICE_PREP —
+                      bypass those steps
+  C64_FORCE_TURBO_WRITE — write turbo blind when its state cannot be
+                      read (accepts the $88 risk; see _device_prep.py)
   WIKI_SELFCHECK_OFFLINE — set 1 to skip the live reference fetch in
                       --selfcheck
 
@@ -66,9 +69,13 @@ Hardware conventions honored (CLAUDE.md "UCI rig scripts"):
     write only on mismatch (any config write can drop the next UCI
     command), settle after a real write. The write is runtime-only and
     REVERTS ON POWER CYCLE — the rig prints exactly what it changed.
-  * preflight_reu() kept as well: it checks presence/enabled against
-    the build profile, not size.
-  * turbo set BEFORE reset with the read-skip-write pattern;
+    Both this and the turbo write are now _device_prep.prepare_device,
+    shared with the other four crypto-path rigs (#197), which also logs
+    the device's before- and after-state (#212);
+  * preflight_reu() kept as well, as the backstop behind the prep: it
+    checks presence/enabled against the build profile, not size.
+  * turbo set BEFORE reset with the read-skip-write pattern — and an
+    unreadable turbo read now aborts rather than writing blind (#187);
   * /Temp GC after enable_uci (fw <= 3.14d writemem leak);
   * every DMA address from build_policy_and_arbiter_with_overlay_
     carveout() — nothing hardcoded;
@@ -100,13 +107,8 @@ from c64_test_harness.backends.device_lock import DeviceLock, DeviceLockTimeout
 from c64_test_harness.backends.ultimate64 import Ultimate64Transport
 from c64_test_harness.backends.ultimate64_client import Ultimate64Client
 from c64_test_harness.backends.ultimate64_helpers import (
-    CAT_U64_SPECIFIC,
     Ultimate64RunnerStuckError,
-    cpu_speed_enum,
-    get_reu_config,
     runner_health_check,
-    set_reu,
-    set_turbo_mhz,
 )
 from c64_test_harness.keyboard import send_text
 from c64_test_harness.labels import Labels
@@ -117,6 +119,7 @@ from _device_lock_helper import (
 )
 from _memory_policy import (build_policy,
                             build_policy_and_arbiter_with_overlay_carveout)
+from _device_prep import REQUIRED_REU_SIZE, DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
 from _temp_gc import gc_temp
 
@@ -163,7 +166,9 @@ TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
 _TIMEOUT_SCALE = max(1.0, 48.0 / float(TURBO_MHZ))
 WIKI_TIMEOUT = float(os.environ.get("WIKI_TIMEOUT", "600")) * _TIMEOUT_SCALE
 
-REQUIRED_REU_SIZE = "16 MB"          # article sink base is REU bank $10
+# REQUIRED_REU_SIZE ("16 MB") is _device_prep's, because the article sink
+# writes REU bank $10 and that requirement is now every crypto rig's default
+# rather than this one's local exception.
 RESP_PREFIX_BYTES = 512              # contract: first 512 body bytes
 PROGRESS_PRINT_INTERVAL = 10.0       # print at most every 10 s
 POLL_INTERVAL = 1.0                  # readmem cadence (reads are safe)
@@ -462,29 +467,6 @@ def verify_against_reference(c64_status: int, body_total: int,
 
 
 # --------------------------------------------------------------------------- #
-# Device REU config (16 MB, before reset, read-skip-write)                    #
-# --------------------------------------------------------------------------- #
-
-def ensure_reu_16mb(client: Ultimate64Client) -> None:
-    """Force (Enabled, 16 MB) — the sink writes REU bank $10, beyond the
-    flash-saved 512 KB. Runtime-only; reverts on power cycle."""
-    try:
-        enabled, size = get_reu_config(client)
-    except Exception as exc:                 # probe best-effort, then write
-        print(f"  (REU state probe failed: {exc}; writing anyway)")
-        enabled, size = False, "?"
-    if enabled and size == REQUIRED_REU_SIZE:
-        print(f"REU already (Enabled, {REQUIRED_REU_SIZE}) — "
-              "skipping config write")
-        return
-    print(f"REU config was (enabled={enabled}, size={size!r}); writing "
-          f"(Enabled, {REQUIRED_REU_SIZE}) — runtime-only, REVERTS ON "
-          "POWER CYCLE")
-    set_reu(client, True, size=REQUIRED_REU_SIZE)
-    time.sleep(float(os.environ.get("REU_SETTLE", "3.0")))
-
-
-# --------------------------------------------------------------------------- #
 # Main hardware run                                                           #
 # --------------------------------------------------------------------------- #
 
@@ -642,35 +624,33 @@ def main() -> int:
                   file=sys.stderr)
             return 3
 
-        # REU to (Enabled, 16 MB) — required, see header. Before reset,
-        # like every config write in this rig.
-        ensure_reu_16mb(client)
+        # --- Device prep: reset-then-configure (issues #197, #187, #212) ---
+        # REU to (Enabled, 16 MB) — required, see header: the article sink
+        # writes REU bank $10, beyond the flash-saved 512 KB. Turbo before
+        # reset, like every config write in this rig. Runtime-only; both
+        # revert on power cycle, and both are logged with the device's
+        # before- and after-state.
+        #
+        # This rig used to carry its own ensure_reu_16mb(), which was the
+        # ONE correct REU prep in the tree (#197). Its shape is preserved in
+        # _device_prep.prepare_device rather than lost: an unreadable REU
+        # probe still writes the configuration the run needs, because there
+        # the write is the safe direction. The turbo probe is the opposite
+        # case and now aborts instead of writing blind (#187).
+        try:
+            prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ,
+                           reu_size=REQUIRED_REU_SIZE)
+        except DevicePrepError as exc:
+            print(str(exc), file=sys.stderr)
+            return 4
 
-        # Presence/profile preflight kept too (issue #97 pattern).
+        # Presence/profile preflight kept too (issue #97 pattern), as the
+        # backstop behind the prep.
         try:
             preflight_reu(client, LABELS_PATH)
         except ReuPreflightError as exc:
             print(str(exc), file=sys.stderr)
             return 4
-
-        # Turbo BEFORE reset, read-skip-write (rig_https_live pattern).
-        try:
-            cat = client.get_config_category(CAT_U64_SPECIFIC)
-            inner = cat.get(CAT_U64_SPECIFIC, cat)
-            cur_speed = inner.get("CPU Speed")
-            cur_turbo = inner.get("Turbo Control")
-        except Exception as exc:
-            print(f"  (turbo state probe failed: {exc}; writing anyway)")
-            cur_speed = cur_turbo = None
-        want_speed = str(cpu_speed_enum(TURBO_MHZ))
-        if str(cur_speed) == want_speed and cur_turbo == "Manual":
-            print(f"Turbo already {TURBO_MHZ} MHz (Manual) — skipping "
-                  "config write")
-        else:
-            print(f"Setting turbo to {TURBO_MHZ} MHz "
-                  f"(from {cur_turbo}/{cur_speed})...")
-            set_turbo_mhz(client, TURBO_MHZ)
-            time.sleep(float(os.environ.get("TURBO_SETTLE", "3.0")))
 
         print("Resetting machine...")
         client.reset()
