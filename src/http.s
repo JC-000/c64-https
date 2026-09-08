@@ -173,9 +173,16 @@ http_get:
         ; its own close sequence with progress prints.
         jsr http_recv_body
 
+        ; Propagate the receive verdict (issue #211).  This used to be an
+        ; unconditional `clc`, so even a http_recv_body that reported a
+        ; short body could not reach the caller — two independent reasons
+        ; a caller could not tell a complete body from a truncated one.
+        ; php/plp carries the carry across the two closes, neither of
+        ; which has a return value of its own.
+        php
         jsr tls_close
         jsr net_tcp_close
-        clc
+        plp
         rts
 
 @tls_error:
@@ -259,7 +266,11 @@ http_recv_body:
         bne @recv_loop
         inc @recv_timeout+1
         bne @recv_loop
-        ; Timeout — accept whatever we have
+        ; Tick budget exhausted.  The budget expiring is NOT evidence that
+        ; the body ended (issue #211) — http_recv_timeout_verdict decides.
+        ; It sits in HTTP_AUX_CODE2, not here: see its header for why
+        ; neither this segment nor LOADER_OVERFLOW can afford it on ip65.
+        jmp http_recv_timeout_verdict
 
 @recv_complete:
         ; Sink finalize is idempotent (http_sink_flushed latch): on the
@@ -271,6 +282,71 @@ http_recv_body:
         rts
 
 @recv_timeout: .word 0
+
+; -----------------------------------------------------------------------------
+; http_recv_timeout_verdict - decide the carry when http_recv_body's tick
+;   budget expires (issue #211).  Tail-called, never returns to the caller.
+;
+;   The budget used to fall straight through into @recv_complete's `clc`,
+;   so a body tens of kilobytes short of its Content-Length reached the
+;   caller as a complete HTTP 200 — with http_cl_valid, the 24-bit
+;   http_body_total and http_body_done_check all in scope and none of them
+;   consulted.  The response's own framing decides instead:
+;
+;     headers never finished  -> C=1.  Nothing was received, or the status
+;       line / header block was cut mid-way; either way there is no body to
+;       have completed.  (Without this, a fetch that received ZERO bytes
+;       returned C=0 with http_status=0 through the unframed arm below.)
+;     Content-Length seen     -> http_body_done_check: C=0 iff the 24-bit
+;       consumed count equals it.
+;     chunked, no terminal chunk -> C=1.
+;     neither framing         -> C=0.  The historical "accept whatever we
+;       have" is still right for a Connection: close stream with no length
+;       and no chunking, which is what the budget exists to terminate.
+;
+;   http_body_finish runs on every arm, so a caller can inspect the partial
+;   body (and a sink body gets its final blit) whatever the verdict.
+;
+;   HTTP_AUX_CODE2, and the placement took two tries — ip65 has no slack
+;   in either of the obvious homes:
+;
+;     CODE (inline, where it started) took ip65's LOADER region from 21
+;       bytes free to ZERO.  It linked only because it fit exactly; the
+;       next byte added to ip65 CODE would have been a link failure.
+;     LOADER_OVERFLOW lands in NET_CODE, whose tail is a JOINT BUDGET
+;       with HTTPS_TARGET_RODATA — that tail is where HTTPS_HOST and
+;       HTTPS_PATH live on ip65.  Moving ~27 B there cut the margin from
+;       14 B to -13 B and broke `HTTPS_HOST=en.wikipedia.org` on both
+;       ip65 profiles: a target that builds today.  Measured, not
+;       predicted (ld65: "overflows memory area NET_CODE by 13 bytes").
+;
+;   HTTP_AUX_CODE2 is the segment this routine belongs in anyway: it is
+;   documented as the home for http.s's jsr-only helpers, and
+;   http_body_done_check — the routine tail-called below — is already
+;   here.  It lands in CRYPTO_OVERLAY on ip65 (152 B free) and under UCI.
+;   Before moving anything else into NET_CODE on ip65, re-check the
+;   wikipedia target; PRG size and "bytes free" in one region will not
+;   tell you.
+;   Clobbers: A, and whatever http_body_finish / http_body_done_check do.
+; -----------------------------------------------------------------------------
+        .segment "HTTP_AUX_CODE2"
+http_recv_timeout_verdict:
+        jsr http_body_finish    ; idempotent — http_sink_flushed latch
+        lda http_parse_state
+        cmp #2                  ; 2 = body; 0/1 = status line / headers
+        bcc @to_short           ; never reached the body: not a response
+        lda http_cl_valid
+        beq @to_unframed
+        jmp http_body_done_check    ; tail call: C=0 iff total == length
+@to_unframed:
+        lda http_chunked
+        bne @to_short           ; chunked: terminal chunk never arrived
+        clc
+        rts
+@to_short:
+        sec
+        rts
+        .segment "CODE"
 
 ; =============================================================================
 ; http_in_byte - fetch the next input byte for http_recv_response
@@ -576,9 +652,13 @@ http_recv_response:
         lda #0
         sta http_hdr_match
         sta http_line_idx
-        ; Reset the per-response header-derived state (Content-Length
-        ; sentinel to $FFFF "unknown", chunked flag + chunk parser state
-        ; to 0).  Lives in HTTP_AUX_CODE — LOADER is packed on ip65.
+        ; Reset the per-response header-derived state (http_cl_valid to
+        ; 0 = "Content-Length absent until seen", chunked flag + chunk
+        ; parser state to 0).  There is NO $FFFF Content-Length sentinel
+        ; — this comment claimed one long after W4 replaced it with the
+        ; flag byte, and that stale claim is what made "some layer treats
+        ; $FFFF as end-of-stream" look like a live hypothesis for #211.
+        ; Lives in HTTP_AUX_CODE — LOADER is packed on ip65.
         jsr http_hdr_init
         jmp @state_headers
 

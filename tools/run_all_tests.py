@@ -55,6 +55,7 @@ SUITE_ORDER = (
     "ecdh_zero_check",
     "hs_sequence",
     "reu_row_abi",
+    "body_truncation",
 )
 
 # Suites that define run_tests() but are deliberately NOT dispatched here,
@@ -177,6 +178,18 @@ def run_test_suite(name, transport, labels, seed):
         elif name == "ecdh_zero_check":
             from test_ecdh_zero_check import run_tests as ecdh_zero_run
             passed, failed = ecdh_zero_run(transport, labels)
+
+        elif name == "body_truncation":
+            # Issue #211. Backend-agnostic: it patches net_poll to RTS and
+            # replaces tls_recv with a host-written stub, so no transport
+            # is in the loop and the ip65 build that build() produces is a valid
+            # subject -- measured red on ip65 AND on uci before the fix,
+            # green on both after. It carries a control case that is green
+            # in both directions, so a run where the rig silently stopped
+            # driving the parser cannot read as a pass, and its cases are
+            # proved distinct by mutation rather than by inspection.
+            from test_body_truncation import run_tests as body_trunc_run
+            passed, failed = body_trunc_run(transport, labels)
 
         elif name == "reu_row_abi":
             from test_reu_row_abi import run_tests as reu_row_abi_run
