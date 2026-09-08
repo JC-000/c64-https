@@ -71,10 +71,14 @@ Settings`` (its reset arms an RTC rollback). Neither REU store is in that
 set.
 
 This module reads exactly the four items in :data:`STATE_ITEMS` and asks the
-harness to write three of them. **The harness may PUT a fifth**: ``set_reu``
-adds ``Cartridge: "REU"`` when its preset probe says the value is supported
-*or is inconclusive*, which is what a U64E on firmware 3.14 needs and what a
-C64 Ultimate rejects with HTTP 400. That is the harness's device-generation
+harness to write three of them. **The harness may add one more to the REU
+write** — ``Cartridge: "REU"``, making it a THREE-item PUT batch and the
+FIFTH distinct config item this module is responsible for; the docs say
+"third" because they are counting the batch, and this paragraph says "fifth"
+because it is counting the module's whole surface. ``set_reu`` adds it when
+its preset probe says the value is supported *or is inconclusive*, which is
+what a U64E on firmware 3.14 needs and what a C64 Ultimate rejects with
+HTTP 400. That is the harness's device-generation
 logic and calling it is the point of not hand-rolling the write here — but
 it means the write can fail, and it fails for the same reasons the read
 does, so it is wrapped (see :func:`_reu_write_failure_message`).
@@ -85,9 +89,13 @@ It does not replace ``preflight_reu``. Prep is setup; the preflight stays
 where it is, **after** prep, as the guard for the case where prep was
 skipped, overridden, or did not take. Both are cheap.
 
-An on-chip build makes **no REU call at all** — the point of that profile is
-that it needs none, and a preparation step must not start blocking the
-configuration we recommend to REU-less users.
+An on-chip build is never given an REU: no ``set_reu``, no size write,
+nothing. It does still *read* the two REU items, because the before/after
+record is the point of #212 and reads are not the hazard — so this is a
+weaker statement than the identically-worded one in ``_reu_preflight``,
+where "no REU call at all" means literally zero REST calls. Same words, two
+meanings, one module apart; the shared half is that a preparation step must
+not start blocking the configuration we recommend to REU-less users.
 
 Every device read goes through ``_reu_preflight._read_config_value``, so the
 harness-shape tolerance argued in issue #179 (``get_config_value`` preferred,
@@ -290,7 +298,15 @@ def _reu_write_failure_message(exc: Exception, reu_size: str,
         f"  wanted: {CAT_CART} / {ITEM_REU_ENABLED} = 'Enabled', "
         f"{ITEM_REU_SIZE} = {reu_size!r}\n"
         f"  got   : {exc.__class__.__name__}: {exc}\n"
-        f"  state : {format_state(state)}\n"
+        f"  state before the attempted write: {format_state(state)}\n"
+        "  (that snapshot predates the write. `set_config_items` is one PUT "
+        "per\n"
+        "   item and explicitly non-atomic — earlier writes are left in "
+        "place — so\n"
+        "   on a firmware where the `Cartridge` item is written first, the "
+        "device\n"
+        "   may be half-configured now. Re-read it before acting on the "
+        "snapshot.)\n"
         "\n"
         "Reported as a failure with this ladder rather than as a traceback: "
         "the\n"

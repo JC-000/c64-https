@@ -570,9 +570,25 @@ def _crypto_path_rigs():
     state and the clock whether or not it manages them.
 
     Discovery rather than an allowlist because an allowlist cannot find a
-    sixth rig, and "a helper nothing calls is a convention, not a fix" cuts
-    both ways: a contract that only checks the files it already knows about
-    is one too.
+    sixth rig *at all*, and "a helper nothing calls is a convention, not a
+    fix" cuts both ways: a contract that only checks the files it already
+    knows about is one too.
+
+    **Know what this does and does not catch.** It is a text match, so it
+    finds a sixth rig written to the same shape as the existing five — and
+    misses one that is not. A rig naming its client `u64` instead of
+    `client`, or never using the word "comb", is not selected and the whole
+    suite stays green; both were constructed and both pass 30/0. That is the
+    **silent** direction, and `test_the_discovery_rule_finds_the_known_rigs`
+    cannot see it either, because a module the rule misses never enters the
+    set being compared.
+
+    Over-selection is the loud direction: a helper containing
+    `client.run_prg(` and the word "combines" produces two reds, one of them
+    absurdly demanding that a *helper* call `prepare_device`. That is
+    annoying and safe. If you hit it under time pressure, add an exemption
+    to :data:`KNOWN_UNPREPPED` with a reason — do not weaken the rule, which
+    would trade a loud false positive for a silent false negative.
     """
     found = []
     for path in sorted(UCI.glob("*.py")):

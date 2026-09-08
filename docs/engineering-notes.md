@@ -1044,14 +1044,20 @@ Two smaller things the same review turned up, both worth keeping:
     outcome the turbo policy exists to refuse. It now says so.
 
 One accepted side effect, stated rather than discovered later: four more
-rigs now leave the device **REU-Enabled** after a REU-profile or comb run.
-An on-chip build still makes no REU call at all, so no rig *enables* the
-REU on behalf of an image that does not need one — but the setting persists
-until the next power cycle, so a subsequent on-chip run on the same device
-is no longer evidence that the on-chip products work on a REU-less machine.
-That claim needs a deliberately REU-disabled device (or
-`C64_VICE_NO_REU=1` in the emulator lane); it can no longer be picked up
-for free from whatever a shared device happened to be set to.
+rigs now leave the device **REU-Enabled and REU Size = 16 MB** after a
+REU-profile or comb run. Both halves matter, and the size half is the one
+that bites twice. The harness's own `get_reu_config` docstring records that
+a RAM-versus-flash size divergence is exactly the pair that confused a
+previous reporter: config PUTs live in memory until `save_config_to_flash`,
+which we never call, so the device reports 16 MB while its flash still holds
+the item default — until a reboot or power cycle silently restores the
+smaller one mid-session. An on-chip build is never given an REU, so no rig
+enables one on behalf of an image that does not need it; but the runtime
+setting persists, so a subsequent on-chip run on the same device is no
+longer evidence that the on-chip products work on a REU-less machine. That
+claim needs a deliberately REU-disabled device (or `C64_VICE_NO_REU=1` in
+the emulator lane); it can no longer be picked up for free from whatever a
+shared device happened to be set to.
 
 Hardware confirmation (independent review run, U64E fw 3.15 commit
 `4011c97c`, fpga 125, taken through `acquire_device_lock()`): the device

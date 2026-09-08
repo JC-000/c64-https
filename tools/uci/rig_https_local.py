@@ -1600,10 +1600,19 @@ def main() -> int:
         # directory holding one JSON file is the honest cost of #212: the
         # record has to exist for the run that failed, and that is the run
         # nobody had debug capture on for.
+        # Two consequences of doing this on a capture-OFF run, both
+        # accepted and neither silent: the prune now runs on such a run
+        # too (it did not before), so a capture-off run can rotate away
+        # the oldest of the kept 5 capture dirs; and a PASS with capture
+        # off leaves this directory behind holding only device_state.json,
+        # because the run_info.txt/cleanup block below is nested under
+        # `if run_dir is not None`. Unbounded prep dirs would be worse
+        # than either.
         if run_dir is None:
             _prune_old_run_dirs(UCI_DEBUG_BASE_DIR, UCI_DEBUG_KEEP)
             prep_dir = _create_run_dir(UCI_DEBUG_BASE_DIR)
-            print(f"Device-state record dir: {prep_dir}")
+            print(f"Device-state record dir: {prep_dir} "
+                  "(device_state.json only; DEBUG_CAPTURE is off)")
         else:
             prep_dir = run_dir
 

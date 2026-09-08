@@ -471,10 +471,14 @@ def main() -> int:
         # run's artifacts, and gets a directory of its own when DEBUG_CAPTURE
         # left none. A benchmark without a record of the clock and REU state
         # it ran against is a number with no provenance.
+        # As in rig_https_local, the prune now also runs on a capture-off
+        # run, so such a run can rotate away the oldest of the kept 5
+        # trace dirs. Accepted: unbounded prep dirs would be worse.
         if run_dir is None:
             _prune_old(DEBUG_BASE_DIR, keep=5)
             prep_dir = _create_run_dir(DEBUG_BASE_DIR)
-            print(f"Device-state record dir: {prep_dir}")
+            print(f"Device-state record dir: {prep_dir} "
+                  "(device_state.json only; DEBUG_CAPTURE is off)")
         else:
             prep_dir = run_dir
 

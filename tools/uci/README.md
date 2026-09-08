@@ -58,7 +58,11 @@ whose documented failure IS #212's — it boots the PRG through the menu on a
 write. It is owned by another lane; the exemption lives in
 `KNOWN_UNPREPPED` in `tools/test_device_prep.py`, which fails if the rig is
 fixed and the entry is left behind, and the rig list itself is discovered
-rather than hardcoded so a sixth rig cannot slip past. Device config is runtime-only, so a
+rather than hardcoded, so a sixth rig **written to the same shape** cannot
+slip past. The rule is a text match (`client.run_prg(` plus a mention of
+the comb profile): over-selection fails loudly, under-selection is silent —
+a rig naming its client something else, or never saying "comb", is simply
+not selected. Add exemptions rather than weakening the rule. Device config is runtime-only, so a
 REU left Disabled is the factory *default*, not another lane's mess — a
 run configures what it needs rather than refusing.
 

@@ -113,14 +113,21 @@ _BANKS_EQUATE = "LIB_NISTCURVES_REU_BANKS_USED"
 
 SKIP_ENV = "C64_SKIP_REU_PREFLIGHT"
 
-#: Values that read as "off" for every C64_* flag in tools/uci/.
+#: Values that read as "off" for the three flags that share this parser:
+#: C64_SKIP_REU_PREFLIGHT, C64_SKIP_DEVICE_PREP and C64_FORCE_TURBO_WRITE.
+#: It is NOT what every ``C64_*`` switch in tools/uci/ does — ``C64_SKIP_
+#: TEMP_GC`` still tests ``== "1"`` / ``!= "1"`` (and does so inconsistently
+#: between its two call sites), and ``KEEP_DEBUG_ON_PASS`` is spelled three
+#: different ways across the rigs. Unifying those is worth doing and is not
+#: done here; do not read this constant as already covering them.
 _ENV_FALSE = frozenset({"", "0", "no", "false", "off"})
 
 
 def env_flag_enabled(name: str) -> bool:
     """Whether the environment flag *name* is set to something truthy.
 
-    One parser for every ``C64_*`` switch these rigs read, because there
+    One parser for the three guard flags — ``C64_SKIP_REU_PREFLIGHT``,
+    ``C64_SKIP_DEVICE_PREP`` and ``C64_FORCE_TURBO_WRITE`` — because there
     were two: this module tested ``!= "0"`` while
     ``tools/uci/_device_prep.py`` also refused ``no``/``false``/``off``, so
     ``C64_SKIP_REU_PREFLIGHT=false`` SKIPPED the guard while
