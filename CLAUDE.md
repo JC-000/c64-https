@@ -554,7 +554,9 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
   - **CRYPTO_OVERLAY vs rig scratch**: new resident tenants in
     `$4200-$5FFF` shrink what the rigs' `MemoryArbiter` can hand out
     (server-name validation took the comb tail from 714 to 223 B and broke
-    `rig_https_wiki.py`, which now drives the menu instead). Those are the
+    `rig_https_wiki.py`, which now drives the menu instead; that tail is
+    **126 B today** — see the margin note under Known issues, and do not
+    quote the 223 as current). Those are the
     numbers from that episode; the comb tail is **153 B** at the v0.14.0
     pin — see the memory map below, and never size rig scratch from this
     bullet's historical figures. The harness write guard raises
@@ -574,10 +576,58 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     93 B because its cfg already routes `CRYPTO_RODATA` to `CRYPTO_OVERLAY`,
     so its 33 B came back there instead — see the memory map below.
     Watch it on every pin bump, and measure all three.
-  - `http_recv_response`: `Content-Length` (single-SP matcher, 16-bit
-    sentinel `$FFFF`) and chunked (`http_state_body_chunked`,
-    `HTTP_AUX_CODE`; chunks >64 KB desync) supported; body rendered via
-    `ascii_chrout` (case folded, #28); `http_resp_buf` keeps raw ASCII.
+  - `http_recv_response`: `Content-Length` (single-SP matcher, **24-bit,
+    with a separate `http_cl_valid` flag byte**) and chunked
+    (`http_state_body_chunked`, `HTTP_AUX_CODE`; chunks >64 KB desync)
+    supported; body rendered via `ascii_chrout` (case folded, #28);
+    `http_resp_buf` keeps raw ASCII. The **`$FFFF` Content-Length sentinel
+    this line used to describe no longer exists** — W4 widened the count to
+    24 bits and `http_hdr_init` replaced the magic value with `http_cl_valid`,
+    precisely so it could not collide with a real length. Do not read the
+    two `$FFFF`s as related: the surviving one is the SOCKET_READ no-data
+    sentinel (Networking backend ABI), and nothing in `http.s`, `tls13.s`
+    or `tls_record*.s` treats any `$FFFF` as end-of-stream. That confusion
+    was a live lead on #211 and cost a diagnosis round.
+  - `http_recv_body`'s tick budget is **not** a completion signal (#211).
+    Its `@recv_no_data` counter used to fall through into the success exit,
+    so a body short of its `Content-Length` returned `C=0` with
+    `http_status=200`; `http_get` discarded the carry on top of that. Both
+    are fixed and pinned by `tools/test_body_truncation.py`. The budget is
+    still 65,536 consecutive ticks, which costs ~0.1 s against a socket
+    `net_poll` has flagged `NET_TCP_ERROR` (UCI: a non-CONNECTED socket
+    makes `net_poll` a 6-cycle RTS) and ~87 minutes against a healthy but
+    silent one — one predicate, two costs, and the reason the same defect
+    was seen both as a fast false success and as a hang.
+    **The verdict is only visible to a caller that checks it, and no
+    shipped in-PRG caller does**: `http_get` has no in-PRG caller at all
+    and `boot.s` ignores `http_recv_body`'s carry, so the menu path still
+    renders a truncated body as a normal result. The fix is what lets a
+    rig go red; wiring the UI to it is separate, unfinished work. It also
+    recovers no lost bytes — the truncation has its own cause.
+  - **New tails in `http.s` go in `HTTP_AUX_CODE2`, not `CODE` and not
+    `LOADER_OVERFLOW`.** #211's verdict routine (~27 B) was placed twice
+    before it landed, and both wrong homes linked cleanly on the default
+    target:
+      - inline in `CODE` took ip65's LOADER from 21 B free to **zero** —
+        it fit exactly, so the *next* byte anyone added would not link;
+      - `LOADER_OVERFLOW` lands in `NET_CODE`, whose tail is a **joint
+        budget with `HTTPS_TARGET_RODATA`**, and 27 B there took the
+        wikipedia-target margin from 14 B to **−13 B**, breaking
+        `HTTPS_HOST=en.wikipedia.org` on *both* ip65 profiles (ld65:
+        "overflows memory area `NET_CODE` by 13 bytes").
+    `HTTP_AUX_CODE2` is the documented home for `http.s`'s jsr-only
+    helpers and lands in `CRYPTO_OVERLAY` on both backends, which has the
+    room. **Before adding to ip65 `NET_CODE`, build the wikipedia target
+    — the default target's "bytes free" will not tell you**, and neither
+    will PRG size.
+  - Region margins measured at #211's fix (they drift, so re-measure
+    rather than cite): ip65 **17 B** LOADER, **56 B** NET_CODE tail
+    (14 B with the wikipedia target), **125 B** CRYPTO_OVERLAY. UCI comb
+    **126 B** CRYPTO_OVERLAY, down from 153 B — that tail is what the
+    rigs' `MemoryArbiter` hands out, so re-check `rig_https_wiki.py`
+    scratch after any tenant lands there. The "~223 B" comb figure
+    elsewhere in this file predates the crypto-lib bump and was already
+    153 B before #211 touched anything.
   - `net_tcp_set_recv_cb` is an RTS stub. Boot banner: `rr-net` under ip65,
     `UCI NETWORKING` under UCI — `boot_check.py` asserts both.
 
