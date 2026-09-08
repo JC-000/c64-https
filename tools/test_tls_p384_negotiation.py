@@ -3,14 +3,16 @@
 
 Phase 4b originally verified that the TLS layer OFFERS ecdsa_secp384r1_sha384
 (0x0503). That assertion is inverted now: advertising 0x0503 was the bug, since
-the client answers it destructively. This file verifies
-alongside ecdsa_secp256r1_sha256 (0x0403) in the ClientHello, and that the
+the client answers it destructively. This file verifies that the ClientHello
+advertises ecdsa_secp256r1_sha256 (0x0403) and NOT 0x0503, and that the
 CertificateVerify handler accepts a 0x0503 signature_scheme by routing
 through the ecdsa_verify dispatcher with curve_id=1.
 
-This test does NOT require a successful P-384 verification; the
-ecdsa_verify dispatcher's P-384 branch is still a `sec / rts` stub that
-Phase 4a fills in.  Successful negotiation = the carry-set return came
+This test does NOT require a successful P-384 verification.  Phase 4a's
+dispatcher landed but is gated off: with ENABLE_P384_VERIFY unset (the
+default, and the only configuration anyone ships) ecdsa_verify's P-384
+branch is a bare `sec`, and src/crypto/ecdsa_verify_384.s is filtered out
+of the link.  Successful negotiation = the carry-set return came
 out of the dispatcher (curve_id was set to 1, cv_sig_scheme was set to
 1, the routine entered the short-circuit branch).
 
@@ -21,14 +23,22 @@ Two sub-tests:
   [1b] tls_handle_cert_verify with a synthesized CertificateVerify
        handshake message whose signature_scheme = 0x0503 sets
        cv_sig_scheme = 1, ecdsa_curve_id = 1, and returns C=1.
-       Pre-Phase-4a this came from the `sec / rts` stub in
-       ecdsa_verify; post-Phase-4a (commit-this-PR) it comes from
-       ecdsa_verify_384_tls's DER parse rejecting the 48-zero-byte
-       dummy signature (first byte must be 0x30 SEQUENCE; rejection
-       still propagates C=1).  The negotiation contract under test
-       (cv_sig_scheme=1, ecdsa_curve_id=1, dispatcher reached) is
-       unchanged.  Phase 5 will replace this synthetic test with a
-       real-signature test once a SHA-384 transcript path lands.
+       In the build this test actually runs against, that C=1 comes
+       from the `sec` in ecdsa_verify's gated-off P-384 arm --
+       ENABLE_P384_VERIFY is off by default, so the arm assembles as
+       a single `sec` (38) followed by the shared `jmp @done`, with no
+       call anywhere in it, and the Makefile
+       filters src/crypto/ecdsa_verify_384.s out of the link
+       entirely.  ecdsa_verify_384_tls is never called, and appears
+       in no shipped PRG's Imports list.  Only under
+       ENABLE_P384_VERIFY=1 does the arm become
+       `jsr ecdsa_verify_384_tls`, where the C=1 would instead come
+       from that routine's DER parse rejecting the 48-zero-byte dummy
+       signature (first byte must be 0x30 SEQUENCE).  Either way the
+       negotiation contract under test (cv_sig_scheme=1,
+       ecdsa_curve_id=1, dispatcher reached) is unchanged.  Phase 5
+       will replace this synthetic test with a real-signature test
+       once a SHA-384 transcript path lands.
 
 Usage:
     /Users/someone/.local/share/c64-test-harness/venv/bin/python \\
@@ -236,17 +246,24 @@ def test_cert_verify_p384_dispatch(transport, labels):
     signature_scheme = 0x0503, calls tls_handle_cert_verify, and asserts:
       - cv_sig_scheme = 1
       - ecdsa_curve_id = 1
-      - C=1 (carry set).  Post-Phase-4a this comes from the dispatcher's
-        DER parse rejecting the 48-byte all-zero dummy signature (the
-        first byte must be the DER SEQUENCE tag 0x30); pre-Phase-4a it
-        came from the `sec / rts` stub in ecdsa_verify.  Either path
-        proves cv_sig_scheme=1, ecdsa_curve_id=1, and dispatcher
-        reachability -- the contract this subtest exercises.
+      - C=1 (carry set).  In the unarmed build this test runs against,
+        that carry is set by the `sec` in ecdsa_verify's P-384 arm,
+        which is what `.ifdef ENABLE_P384_VERIFY` compiles to when the
+        flag is off (the default); ecdsa_verify_384_tls is not called
+        and src/crypto/ecdsa_verify_384.s is not even linked.  Under
+        ENABLE_P384_VERIFY=1 the arm becomes
+        `jsr ecdsa_verify_384_tls` and the C=1 would come from that
+        routine's DER parse rejecting the 48-byte all-zero dummy
+        signature (first byte must be the DER SEQUENCE tag 0x30).
+        Either path proves cv_sig_scheme=1, ecdsa_curve_id=1, and
+        dispatcher reachability -- the contract this subtest
+        exercises.
 
     The signature payload itself is irrelevant for the negotiation
     plumbing under test -- a real-signature P-384 verify needs both a
     real ECDSA-P384 cert + signature AND a SHA-384 transcript hash
-    (Phase 5).  Phase 4a's dispatcher composes the dual-overlay swap
+    (Phase 5).  When armed, Phase 4a's dispatcher composes the
+    dual-overlay swap
     (sha384 -> curve) + sibling ecdsa_verify_384, but the SHA-384
     transcript source is a 32 B SHA-256 placeholder zero-padded to
     48 B until Phase 5 wires up tls_transcript_384.
@@ -273,7 +290,8 @@ def test_cert_verify_p384_dispatch(transport, labels):
     #   [4..5]   signature_scheme = 0x0503
     #   [6..7]   signature length (16-bit BE; high byte must be 0)
     #   [8..]    signature bytes (untouched by the P-384 short-circuit)
-    sig = bytes(48)  # 48 dummy bytes — value irrelevant under the stub
+    sig = bytes(48)  # 48 dummy bytes — never read: the gated-off arm
+                     # rejects on curve_id alone, before any signature parse
     msg = bytearray()
     msg.append(0x0F)                          # handshake type
     msg.extend(b"\x00\x00\x00")               # 24-bit length placeholder
@@ -316,17 +334,19 @@ def test_cert_verify_p384_dispatch(transport, labels):
         print(f"       FAIL: ecdsa_curve_id = {curve_id:#x}, expected 0x01")
         ok = False
     if carry != 1:
-        # Phase 4a's dispatcher should also reject a 48-zero-byte sig at
-        # the DER parse step (first byte must be 0x30 SEQUENCE).  Phase 5
-        # will replace this with a real-signature test once SHA-384
-        # transcript wiring lands.
+        # C=1 is set by the `sec` in ecdsa_verify's gated-off P-384 arm.
+        # If this fires, that arm was not reached or no longer sets the
+        # carry -- NOT a DER-parse question: ecdsa_verify_384_tls's DER
+        # rejection is reachable only under ENABLE_P384_VERIFY=1, which
+        # nothing ships.  Phase 5 will replace this with a
+        # real-signature test once SHA-384 transcript wiring lands.
         print(f"       FAIL: carry = {carry}, expected 1 "
-              f"(DER rejection / stub rejection)")
+              f"(gated-off P-384 arm should `sec`)")
         ok = False
 
     if ok:
         print("       PASS: cv_sig_scheme=1, ecdsa_curve_id=1, "
-              "C=1 (Phase 4a dispatcher reached)")
+              "C=1 (ecdsa_verify dispatcher reached)")
         return 1, 0
     return 0, 1
 
