@@ -107,6 +107,7 @@ from c64_test_harness import (
     read_bytes, write_bytes, jsr, wait_for_text,
 )
 from _vice_helpers import default_vice_config
+from _skip_policy import verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -679,7 +680,8 @@ def main() -> int:
         print(f"\n  [-] Body truncation: {failed} TEST(S) FAILED")
     print("=" * 60)
 
-    return 0 if failed == 0 else 1
+    return verdict(passed, failed,
+                   certifies="http_recv_body's truncation verdict (#211)")
 
 
 if __name__ == "__main__":

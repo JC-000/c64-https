@@ -27,6 +27,7 @@ from c64_test_harness import (
     jsr,
     wait_for_text,
 )
+from _skip_policy import verdict  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -423,7 +424,7 @@ def main():
         print(f"\n  [-] Key Schedule Steps: {failed} TEST(S) FAILED")
     print("=" * 60)
 
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(verdict(passed, failed, certifies="the TLS 1.3 key schedule"))
 
 
 if __name__ == "__main__":

@@ -625,7 +625,9 @@ def main() -> int:
         else:
             print(f"  ok    {fn.__name__}")
     print(f"\n{len(tests) - len(failures)}/{len(tests)} passed")
-    return 1 if failures else 0
+    from _skip_policy import verdict
+    return verdict(len(tests) - len(failures), len(failures),
+                   certifies="the reserved test host")
 
 
 if __name__ == "__main__":

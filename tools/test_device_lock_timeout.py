@@ -553,7 +553,9 @@ def _main(tests=None) -> int:
         else:
             print(f"ok   {name}")
     print("FAILED" if failures else "PASS")
-    return 1 if failures else 0
+    from _skip_policy import verdict
+    return verdict(len(tests) - failures, failures,
+                   certifies="the device-lock acquire budget")
 
 
 if __name__ == "__main__":

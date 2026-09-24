@@ -106,8 +106,10 @@ LABELS = REPO / "build" / "labels.txt"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_uci_data_acc import CPU, CPUError          # noqa: E402  (the interpreter)
+from _skip_policy import VoluntarySkip, cannot_run, require, verdict  # noqa: E402
 
 OPT_OUT_ENV = "C64_UCI_TESTS_OPTIONAL"
+CERTIFIES = "net_tcp_send's timeout exits (#194)"
 
 # --- register bits (uci_regs.inc) ------------------------------------------
 UCI_STAT_DATA_AV = 0x80
@@ -143,10 +145,6 @@ FW_LATENCY = 3
 BUDGET_TENTHS = 50
 
 ENDLESS = object()      # a response queue that never runs dry
-
-
-class VoluntarySkip(Exception):
-    pass
 
 
 class Unavailable(Exception):
@@ -410,14 +408,10 @@ def _require(fn, *args):
     except Unavailable as exc:
         if os.environ.get(OPT_OUT_ENV) != "1":
             raise
-        reason = ("EXPLICIT SKIP (%s=1 is set in this environment): %s "
-                  "0 of %d checks ran; this exit-0 certifies NOTHING about "
-                  "net_tcp_send's timeout exits (#194)."
-                  % (OPT_OUT_ENV, exc, len(TESTS)))
-        pytest = sys.modules.get("pytest")
-        if pytest is None:
-            raise VoluntarySkip(reason)
-        pytest.skip(reason, allow_module_level=False)
+        # See test_uci_data_acc._require: the opt-out goes through
+        # _skip_policy.require() rather than a hand-rolled pytest.skip.
+        require(False, str(exc), executed=0, total=len(TESTS),
+                certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV)
 
 
 def _send(cpu, labels, budget=8_000_000):
@@ -592,12 +586,10 @@ def _cannot_run(reason):
 
 def main():
     if not PRG.is_file() or not LABELS.is_file():
-        if os.environ.get(OPT_OUT_ENV) == "1":
-            print("EXPLICIT SKIP (%s=1): no build in build/; "
-                  "test_uci_timeout_recovery.py did NOT run." % OPT_OUT_ENV)
-            return EXIT_OK
-        return _cannot_run("no build to test. Run `make clean && make "
-                           "BACKEND=uci USE_NISTCURVES_ONCHIP=1`")
+        return cannot_run("no build to test. Run `make clean && make "
+                          "BACKEND=uci USE_NISTCURVES_ONCHIP=1`",
+                          executed=0, total=len(TESTS), certifies=CERTIFIES,
+                          opt_out_env=OPT_OUT_ENV)
 
     failures = 0
     executed = 0
@@ -626,7 +618,7 @@ def main():
         print("\nEXPLICIT SKIP (%s=1): %d of %d checks did NOT run."
               % (OPT_OUT_ENV, len(skipped), len(TESTS)))
         if executed == 0:
-            return EXIT_OK
+            return verdict(0, 0, skipped=len(skipped), certifies=CERTIFIES)
 
     if failures:
         print("\n%d/%d checks failed (%d assertions executed)"

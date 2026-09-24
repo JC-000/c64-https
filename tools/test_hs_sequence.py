@@ -114,6 +114,7 @@ from _vice_helpers import default_vice_config  # noqa: E402
 # entry point than the deframer suite does — which is the exact mistake this
 # rewrite exists to correct.
 import test_tls_deframe as D  # noqa: E402
+from _skip_policy import verdict  # noqa: E402
 
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
@@ -430,7 +431,8 @@ def main() -> int:
         print(f"\n  [-] Handshake sequence: {failed} TEST(S) FAILED")
     print("=" * 60)
 
-    return 0 if failed == 0 else 1
+    return verdict(passed, failed,
+                   certifies="the handshake message-sequence gate (#152)")
 
 
 if __name__ == "__main__":

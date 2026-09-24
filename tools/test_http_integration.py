@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import time
+from _skip_policy import cannot_run, verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -97,19 +98,11 @@ def main():
         # C64_NET_TESTS_OPTIONAL=1 is the explicit, deliberate skip — the
         # other half of the audit rule (7497e48): explicit skips are allowed,
         # but never silent.
-        if os.environ.get("C64_NET_TESTS_OPTIONAL") == "1":
-            print("EXPLICIT SKIP (C64_NET_TESTS_OPTIONAL=1): "
-                  "test_http_integration.py did NOT run.\n  0 of 5 HTTP "
-                  "assertions executed; this exit 0 certifies nothing about "
-                  "the HTTP path.")
-            sys.exit(0)
-        print("CANNOT RUN: test_http_integration.py needs the TAP network "
-              "rig (tap-c64 + x64sc + dnsmasq).\n"
-              "  0 of 5 HTTP assertions executed — this run certifies "
-              "nothing.\n"
-              "  Set C64_NET_TESTS_OPTIONAL=1 to make skipping it a "
-              "deliberate, exit-0 choice.", file=sys.stderr)
-        sys.exit(2)
+        sys.exit(cannot_run(
+            "test_http_integration.py needs the TAP network rig "
+            "(tap-c64 + x64sc + dnsmasq)",
+            executed=0, total=5, certifies="the end-to-end HTTP path",
+            opt_out_env="C64_NET_TESTS_OPTIONAL"))
 
     # Late imports -- only needed if prerequisites are met
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -342,7 +335,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"RESULTS: {passed}/{total} passed, {failed}/{total} failed")
     print(f"{'='*60}")
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(verdict(passed, failed, certifies="the end-to-end HTTP path"))
 
 
 if __name__ == "__main__":

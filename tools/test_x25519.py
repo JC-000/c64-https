@@ -38,6 +38,7 @@ from c64_test_harness import (
 )
 
 from _vice_helpers import default_vice_config
+from _skip_policy import verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -874,7 +875,7 @@ def main():
               "fe25519 in this link). The RFC 7748 end-to-end vectors did, "
               "and are the whole of this run's evidence.")
     print(f"{'='*60}")
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(verdict(passed, failed, certifies="X25519"))
 
 
 if __name__ == "__main__":

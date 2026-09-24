@@ -384,7 +384,7 @@ def test_exclusions_are_live_and_explained() -> None:
 
 def main() -> int:
     print("=== run_all_tests.py suite coverage ===")
-    failed = 0
+    passed = failed = 0
     for name, fn in sorted(globals().items()):
         if not name.startswith("test_") or not callable(fn):
             continue
@@ -394,9 +394,12 @@ def main() -> int:
             failed += 1
             print(f"  FAIL {name}\n       {exc}")
         else:
+            passed += 1
             print(f"  ok   {name}")
     print(f"\n{'FAILED' if failed else 'PASSED'}: {failed} failure(s)")
-    return 1 if failed else 0
+    from _skip_policy import verdict
+    return verdict(passed, failed,
+                   certifies="run_all_tests.py suite coverage")
 
 
 if __name__ == "__main__":

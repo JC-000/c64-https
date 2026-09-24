@@ -245,7 +245,8 @@ def main() -> int:
     test_parse_build_info_records(SAMPLE_BUILD_INFO)
     print(f"\n{'=' * 60}")
     print(f"{PASSED} passed, {FAILED} failed")
-    return 1 if FAILED else 0
+    from _skip_policy import verdict
+    return verdict(PASSED, FAILED, certifies="the release-gate verdict")
 
 
 if __name__ == "__main__":

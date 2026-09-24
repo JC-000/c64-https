@@ -93,7 +93,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _skip_policy import VoluntarySkip, require  # noqa: E402
+from _skip_policy import VoluntarySkip, require, verdict  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 UCI_HEADER = REPO / "src" / "net" / "uci" / "uci_errors.inc"
@@ -515,12 +515,13 @@ def main():
     _skip_policy.VoluntarySkip. Catching only AssertionError here is what
     let a pytest.skip() BaseException kill this runner mid-suite.
     """
-    failures = skipped = 0
+    passed = failures = skipped = 0
     for name, fn in sorted(globals().items()):
         if not name.startswith("test_") or not callable(fn):
             continue
         try:
             fn()
+            passed += 1
             print(f"PASS  {name}")
         except VoluntarySkip as exc:
             skipped += 1
@@ -535,7 +536,7 @@ def main():
               f"— this run certifies NOTHING about {CERTIFIES}")
     print(f"{'FAILED' if failures else 'OK'} — {failures} failure(s), "
           f"{skipped} skipped")
-    return 1 if failures else 0
+    return verdict(passed, failures, skipped=skipped, certifies=CERTIFIES)
 
 
 if __name__ == "__main__":

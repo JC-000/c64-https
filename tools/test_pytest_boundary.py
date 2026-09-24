@@ -713,10 +713,11 @@ def _skip_guard_scan():
 # #161), so each count is pinned at roughly half its measured value: loose
 # enough that ordinary churn does not trip it, tight enough that a broken
 # glob or a matcher that stopped recognising `sys.exit` does.
-#   measured on the pre-fix tree: files 64, sites 72, vacuity_checked 50,
-#   policy_calls 89.
-SKIP_GUARD_FLOORS = {"files": 32, "sites": 36, "vacuity_checked": 25,
-                     "policy_calls": 44}
+#   measured after the #178 sweep: files 64, sites 32, vacuity_checked 15,
+#   policy_calls 159. (Before it: sites 72, vacuity_checked 50 -- the sweep
+#   turned 40 literal verdicts into verdict() calls, which are not sites.)
+SKIP_GUARD_FLOORS = {"files": 32, "sites": 16, "vacuity_checked": 7,
+                     "policy_calls": 80}
 
 
 def test_skip_guard_scan_is_not_vacuous() -> None:
@@ -871,7 +872,7 @@ def test_skip_guard_passes_every_legitimate_shape() -> None:
 
 def main() -> int:
     print("=== pytest collection boundary ===")
-    failed = 0
+    passed = failed = 0
     for name, fn in sorted(globals().items()):
         if not name.startswith("test_") or not callable(fn):
             continue
@@ -881,9 +882,12 @@ def main() -> int:
             failed += 1
             print(f"  FAIL {name}\n       {exc}")
         else:
+            passed += 1
             print(f"  ok   {name}")
     print(f"\n{'FAILED' if failed else 'PASSED'}: {failed} failure(s)")
-    return 1 if failed else 0
+    from _skip_policy import verdict
+    return verdict(passed, failed,
+                   certifies="the pytest collection boundary and the skip-policy guard")
 
 
 if __name__ == "__main__":

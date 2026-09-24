@@ -226,9 +226,10 @@ def run_tests(transport=None, labels=None, seed=None):
 
 def main() -> int:
     print("=== libs/x25519 submodule pin ===")
-    _, failed = _run()
+    passed, failed = _run()
     print(f"\n{'FAILED' if failed else 'PASSED'}: {failed} failure(s)")
-    return 1 if failed else 0
+    from _skip_policy import verdict
+    return verdict(passed, failed, certifies="the libs/x25519 pin")
 
 
 if __name__ == "__main__":

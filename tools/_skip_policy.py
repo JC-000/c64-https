@@ -70,6 +70,16 @@ Usage (script lane)::
             certifies="the UCI dual-overlay swap dispatcher",
         )
 
+Usage (end of a run)::
+
+    from _skip_policy import verdict
+
+    sys.exit(verdict(passed, failed, certifies="the HTTP response parser"))
+
+``verdict()`` is the end-of-run half of the same rule: ``0 if failed == 0
+else 1`` exits 0 when NOTHING ran, which is how a suite whose every group
+skipped used to report success (#178's test_http.py finding).
+
 Usage (pytest lane)::
 
     from _skip_policy import require
@@ -99,6 +109,7 @@ __all__ = [
     "cannot_run",
     "not_applicable",
     "require",
+    "verdict",
 ]
 
 EXIT_PASS = 0
@@ -321,3 +332,55 @@ def require(
             raise VoluntarySkip(f"{text} [{opt_out_env}=1 set]")
         pytest.skip(f"{text} [{opt_out_env}=1 set]")
     raise SkipPolicyError(text)
+
+
+def verdict(
+    passed: int,
+    failed: int,
+    *,
+    skipped: int = 0,
+    certifies: Optional[str] = None,
+    out: Optional[TextIO] = None,
+) -> int:
+    """Turn a finished run's tallies into the 0/1/2 exit code.
+
+    * any failure                         -> ``EXIT_FAIL`` (1)
+    * at least one pass, no failure       -> ``EXIT_PASS`` (0)
+    * nothing passed, nothing failed,
+      ``skipped`` > 0                     -> ``EXIT_PASS`` (0), with a block
+      saying nothing was verified.  ``skipped`` must count VOLUNTARY skips
+      only -- checks an explicit opt-out declined to run.  An involuntary
+      skip is a failure and belongs in ``failed``, or in a ``cannot_run()``
+      the caller already returned.
+    * nothing at all                      -> ``cannot_run()`` -> ``EXIT_CANNOT_RUN``
+      (2).  There is no opt-out here: a run that got as far as its verdict
+      and executed nothing is not a configuration anyone chose.
+
+    This replaces ``sys.exit(0 if failed == 0 else 1)``, which exits 0 on a
+    run in which every check was skipped.
+    """
+    if failed:
+        return EXIT_FAIL
+    if passed > 0:
+        return EXIT_PASS
+    if skipped > 0:
+        _print_block(
+            "NOTHING VERIFIED (explicit opt-out)",
+            f"{skipped} check(s) skipped by explicit opt-out, 0 executed",
+            [
+                f"this run certifies NOTHING about "
+                f"{certifies or 'the behaviour under test'}",
+                "exit 0 because the skip was chosen, NOT because anything "
+                "passed",
+            ],
+            out,
+        )
+        return EXIT_PASS
+    return cannot_run(
+        "no check executed -- every group skipped, or none was collected",
+        executed=0,
+        total=None,
+        certifies=certifies,
+        opt_out_env=None,
+        out=out,
+    )

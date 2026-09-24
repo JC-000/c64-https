@@ -91,6 +91,7 @@ from c64_test_harness import (
 )
 
 from _vice_helpers import default_vice_config, no_reu_requested
+from _skip_policy import verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -468,7 +469,8 @@ def main():
         print(f"\n  [-] reu_fetch_mul_row entry convention: {failed} "
               f"CHECK(S) FAILED")
     print(f"{'=' * 60}")
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(verdict(passed, failed,
+                     certifies="reu_fetch_mul_row's entry convention"))
 
 
 if __name__ == "__main__":

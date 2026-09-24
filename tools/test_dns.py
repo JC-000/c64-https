@@ -22,6 +22,7 @@ LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from net_test_env import NetworkTestEnv, skip_if_no_network
+from _skip_policy import cannot_run, verdict  # noqa: E402
 
 # ip65_dns_ip_addr: 4 bytes storing the resolved IP address
 IP65_DNS_IP_ADDR = 0x4073
@@ -118,18 +119,11 @@ def main():
         # network suites out of the way makes that choice EXPLICIT — the
         # other half of the audit rule (7497e48): an explicit skip is
         # allowed, but must never be silent.
-        if os.environ.get("C64_NET_TESTS_OPTIONAL") == "1":
-            print("EXPLICIT SKIP (C64_NET_TESTS_OPTIONAL=1): test_dns.py did "
-                  "NOT run.\n  0 of 4 DNS assertions executed; this exit 0 "
-                  "certifies nothing about DNS.")
-            sys.exit(0)
-        print("CANNOT RUN: test_dns.py needs the TAP network rig "
-              "(tools/rig-up-macos.sh or the Linux tap-c64 setup).\n"
-              "  0 of 4 DNS assertions executed — this run certifies "
-              "nothing.\n"
-              "  Set C64_NET_TESTS_OPTIONAL=1 to make skipping it a "
-              "deliberate, exit-0 choice.", file=sys.stderr)
-        sys.exit(2)
+        sys.exit(cannot_run(
+            "test_dns.py needs the TAP network rig "
+            "(tools/rig-up-macos.sh or the Linux tap-c64 setup)",
+            executed=0, total=4, certifies="DNS resolution",
+            opt_out_env="C64_NET_TESTS_OPTIONAL"))
 
     # Late imports -- only needed if prerequisites are met
     from c64_test_harness import (
@@ -279,7 +273,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"RESULTS: {passed}/{total} passed, {failed}/{total} failed")
     print(f"{'='*60}")
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(verdict(passed, failed, certifies="DNS resolution over ip65"))
 
 
 if __name__ == "__main__":
