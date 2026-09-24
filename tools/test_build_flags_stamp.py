@@ -101,6 +101,18 @@ UCI = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP=1")
 PRG = "build/c64-https.prg"
 STAMP = "build/flags.stamp"
 
+# Everything one link writes (LD65FLAGS' -o/-Ln/-m/--dbgfile). Issue #220:
+# an invalidation that deletes only the PRG leaves the other three describing
+# an image that no longer exists — and every margin figure in CLAUDE.md is
+# read off the .map.
+LINK_OUTPUTS = (PRG, "build/labels.txt", "build/c64-https.map",
+                "build/c64-https.dbg")
+
+# Goals that touch nothing under build/, and so must not invalidate it
+# (#220). `clean` is exempt too but deletes build/ itself, so it proves
+# nothing here.
+MAINTENANCE_GOALS = ("ip65-libs", "ip65-blob")
+
 # Invocations that must NOT mutate the tree. The bare short forms are the
 # ones #174 reported; the COMBINED forms are what keep the guard from being
 # "simplified" back into that bug.
@@ -178,7 +190,10 @@ def _require_toolchain():
 
 
 class Farm:
-    """A disposable tree that builds the repo without writing to it."""
+    """A disposable tree whose build/ is private. src/cfg/tools/libs/ip65/
+    ip65-build are symlinks into the real checkout, so the libs/ sub-make
+    (libs/nistcurves/build/), `make ip65-libs` and `make ip65-blob`'s
+    ca65/ld65 recipe write there."""
 
     def __init__(self):
         self.dir = Path(tempfile.mkdtemp(prefix="c64-flags-stamp-"))
@@ -328,6 +343,130 @@ def test_backend_flip_removes_the_other_backends_prg():
             "a BACKEND flip left UCI-flavoured objects in place; the next "
             "ip65 link would have reused them (mixed link)."
         )
+
+
+def test_flags_invalidation_removes_every_link_output():
+    """Issue #220: the .map / labels.txt / .dbg must go with the PRG.
+
+    Every margin figure in CLAUDE.md is read off build/c64-https.map, and
+    rigs read addresses out of build/labels.txt. Before #220 the flag-stamp
+    invalidation deleted `$(ALL_OBJS) $(PRG)` only, so all three sidecars
+    survived describing an image that no longer existed — and a stale map
+    still parses fine. Same invocation as the backend-flip case: a real
+    build that links nothing, so whatever exists afterwards is a survivor.
+    """
+    _require_toolchain()
+    with Farm() as farm:
+        farm.make(*UCI)
+        missing = [p for p in LINK_OUTPUTS if not farm.exists(p)]
+        assert not missing, f"the baseline link did not write {missing} — vacuous"
+        farm.make("BACKEND=ip65", STAMP, check=False)
+        stale = [p for p in LINK_OUTPUTS if farm.exists(p)]
+        assert not stale, (
+            f"a flag change deleted the objects but left {stale} behind. They "
+            "describe a UCI image that no longer exists; the .map is what "
+            "every CLAUDE.md margin figure is measured from."
+        )
+
+
+def test_https_host_invalidation_removes_every_link_output():
+    """Issue #220, the second block: build/https_host.inc had the same gap.
+
+    Its grain must stay #128's (boot.o + http.o only) — only the link
+    outputs join it, and the rest of the objects must survive.
+    """
+    _require_toolchain()
+    with Farm() as farm:
+        farm.make(*UCI)
+        before = farm.mtimes()
+        missing = [p for p in LINK_OUTPUTS if not farm.exists(p)]
+        assert not missing, f"the baseline link did not write {missing} — vacuous"
+        # The goal is the generated include itself: already rewritten at
+        # parse time, so this is a real invocation that links nothing.
+        farm.make(*UCI, "HTTPS_HOST=en.wikipedia.org", "build/https_host.inc",
+                  check=False)
+        stale = [p for p in LINK_OUTPUTS if farm.exists(p)]
+        assert not stale, (
+            f"a target-string change deleted the PRG but left {stale} behind, "
+            "describing the previous target's image."
+        )
+        lost = set(before) - set(farm.mtimes())
+        assert lost == {"build/boot.o", "build/http.o"}, (
+            "the https_host.inc invalidation grain changed; #128 wants "
+            f"exactly boot.o + http.o, got {sorted(lost)}"
+        )
+
+
+def test_maintenance_goals_do_not_invalidate():
+    """Issue #220: a goal that builds nothing under build/ must not clear it.
+
+    The compare runs at parse time, before goal selection, so a flagless
+    `make ip65-libs` or `make ip65-blob` after a UCI build used to rewrite
+    the stamp to the ip65 defaults and delete every object and the PRG of a
+    build it never touched. Skipping is exact, not a guess: nothing under
+    build/ changes, so the stamp still describes the objects beside it —
+    which the last step checks by requiring a real rebuild of the original
+    flags to be a no-op.
+
+    The goal's own exit status is not asserted: on a fresh clone without
+    `make ip65-libs`, `ip65-blob` fails in the ip65 link, and the tree must
+    survive that too.
+    """
+    _require_toolchain()
+    # A NON-default target string, so the flagless goal also differs from
+    # build/https_host.inc: without it, the https_host.inc block's skip goes
+    # untested (reverting only that guard left this suite green).
+    targeted = UCI + ("HTTPS_HOST=en.wikipedia.org",)
+    for goal in MAINTENANCE_GOALS:
+        with Farm() as farm:
+            farm.make(*targeted)
+            objs = farm.mtimes()
+            prg_sha = farm.sha()
+            stamp = farm.path(STAMP).read_text()
+            sidecars = {p: farm.sha(p) for p in LINK_OUTPUTS}
+            assert objs, "the baseline build produced no objects — vacuous"
+
+            farm.make(goal, check=False)                # flagless, on purpose
+
+            lost = sorted(set(objs) - set(farm.mtimes()))
+            assert not lost, (
+                f"`make {goal}` deleted {len(lost)} object(s), e.g. {lost[:3]}. "
+                "It builds nothing under build/, so it has no business "
+                "invalidating a build it never touched."
+            )
+            gone = [p for p in LINK_OUTPUTS if not farm.exists(p)]
+            assert not gone, f"`make {goal}` deleted {gone}"
+            assert {p: farm.sha(p) for p in LINK_OUTPUTS} == sidecars, (
+                f"`make {goal}` rewrote a link output"
+            )
+            assert farm.sha() == prg_sha
+            assert farm.path(STAMP).read_text() == stamp, (
+                f"`make {goal}` rewrote {STAMP}; it would then describe a "
+                "flag set whose objects were never built."
+            )
+            proc = farm.make(*targeted)
+            assert farm.mtimes() == objs and farm.sha() == prg_sha, (
+                f"after `make {goal}`, a real rebuild of the SAME flags "
+                "re-assembled objects:\n" + proc.stdout
+            )
+
+
+def test_maintenance_goal_beside_a_real_goal_still_invalidates():
+    """The exemption applies only when EVERY goal is a maintenance goal.
+
+    `make ip65-libs <anything else>` may build under build/, so it must
+    take the ordinary path — the safe direction for an unlisted goal.
+    """
+    _require_toolchain()
+    with Farm() as farm:
+        farm.make(*UCI)
+        assert farm.exists(PRG)
+        farm.make("BACKEND=ip65", "ip65-libs", STAMP, check=False)
+        assert not farm.exists(PRG), (
+            "`make ip65-libs build/flags.stamp` with changed flags skipped the "
+            "invalidation: the exemption leaked past a non-maintenance goal."
+        )
+        assert not farm.exists("build/tls13.o")
 
 
 def test_dry_run_options_do_not_touch_the_tree():
