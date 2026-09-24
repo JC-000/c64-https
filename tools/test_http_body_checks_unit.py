@@ -333,6 +333,11 @@ def test_stall_tracker_and_early_stop_step() -> None:
     stop, why = hbc.early_stop_step(t, frozen, ab, dead,
                                     stall_abort=ab, shadow_ok=True)
     assert stop and reads == [1], why
+    # The reported freeze is the MEASURED one, not the threshold: at 3*ab
+    # the report must say 3*ab, or the operator reads the margin as data.
+    stop, why = hbc.early_stop_step(t, frozen, 3 * ab, dead,
+                                    stall_abort=ab, shadow_ok=True)
+    assert stop and f"for {3 * ab:.0f}s" in why, why
 
     # The margin actually passed is the one used (the rig passes the
     # _SCALE'd value): at 4*ab, a 3*ab freeze keeps polling.
@@ -396,6 +401,20 @@ def test_stall_config_error_red_green() -> None:
         assert msg and "STALL_GRACE" in msg, grace
     assert hbc.stall_config_error(hbc.STALL_ABORT,
                                   hbc.STALL_ABORT - 1) is None
+    # Non-finite: NaN compares False against everything, so it would pass
+    # both tests above and stop the loop at 0 s frozen.
+    nan, inf = float("nan"), float("inf")
+    for abort, grace in ((nan, hbc.STALL_GRACE), (inf, hbc.STALL_GRACE),
+                         (hbc.STALL_ABORT, nan), (hbc.STALL_ABORT, -inf)):
+        msg = hbc.stall_config_error(abort, grace)
+        assert msg and "finite" in msg, (abort, grace)
+    try:
+        hbc.should_stop_early(state(body_total=1), hbc.NET_TCP_ERROR, 0.0,
+                              stall_abort=nan)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("should_stop_early accepted stall_abort=nan")
 
 
 def _call_named(tree, name):
@@ -470,11 +489,80 @@ def test_the_banner_rig_uses_the_early_stop_decision() -> None:
     assert any(isinstance(x, ast.Return) and _src(x.value) == "2"
                for x in guard.body), "a bad stall config must exit 2"
 
+    # ---- Exact expressions, by AST (round-2 review: substring greps passed
+    # on a comment, and one-token edits walked through) -------------------
+    def assigns(name):
+        return [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == name
+                        for tg in n.targets
+                        for t in (tg.elts if isinstance(tg, ast.Tuple)
+                                  else [tg]))]
+
+    def fdef(name):
+        return next(n for n in ast.walk(fn)
+                    if isinstance(n, ast.FunctionDef) and n.name == name)
+
+    # net_tcp_state's address comes from labels.txt and nowhere else, and
+    # the read is exactly one byte AT it (tcp_addr + 1 is net_send_len,
+    # which could stop the loop on a live socket).
+    assert sorted(_src(a.value) for a in assigns("tcp_addr")) == [
+        "None", "label_addr('net_tcp_state')"], [
+        _src(a) for a in assigns("tcp_addr")]
+    assert _src(fdef("read_tcp_state")) == (
+        "def read_tcp_state():\n"
+        "    if tcp_addr is None:\n"
+        "        return None\n"
+        "    return bytes(client.read_mem(tcp_addr, 1))[0]"), _src(
+        fdef("read_tcp_state"))
+    assert _src(fdef("read_shadow_ok")) == (
+        "def read_shadow_ok():\n"
+        "    return check_shadow_ram_readable(bytes(client.read_mem(40960, "
+        "16))).ok"), _src(fdef("read_shadow_ok"))
+
+    # The close wait's extra exit is exactly close_confirmed's answer.
+    # `... or 'x'` would end the wait on its first poll over a CONNECTED
+    # socket, release the lock, and let the next lane reset over it.
+    also = [k.value for c in _call_named(tree, "wait_for")
+            for k in c.keywords if k.arg == "also"]
+    assert [_src(a) for a in also] == [
+        "lambda: close_confirmed(stopped_early, read_shadow_ok, "
+        "read_tcp_state)"], [_src(a) for a in also]
+
+    # `stop` and `stopped_early` have exactly the bindings the feature needs:
+    # stop only from early_stop_step; stopped_early False before the loop
+    # and True inside the stop branch -- nothing that silently disables it.
+    assert [_src(a) for a in assigns("stop")] == [
+        "stop, why = " + _src(step)], [_src(a) for a in assigns("stop")]
+    assert sorted(_src(a) for a in assigns("stopped_early")) == [
+        "stopped_early = False", "stopped_early = True"]
+    assert [_src(a) for a in assigns("bad_stall")] == [
+        "bad_stall = stall_config_error(STALL_ABORT_S, STALL_GRACE_S)"]
+    # Only early_stop_step feeds the tracker.
+    assert not [c for c in ast.walk(fn) if isinstance(c, ast.Call)
+                and getattr(c.func, "attr", "") == "observe"], (
+        "the rig calls tracker.observe itself; early_stop_step owns that")
+
     # The 'Q' that lets do_https_get reach net_tcp_close must follow the
     # loop unconditionally -- an early stop may not skip it (lease
     # poisoning if the next lane resets over a live socket).
     loop = next(n for n in ast.walk(tree) if isinstance(n, ast.While)
                 and step in list(ast.walk(n)))
+    # The stop branch: exactly `if stop:` directly in the loop body, and it
+    # is what sets stopped_early and breaks.
+    ifs = [s for s in loop.body if isinstance(s, ast.If)
+           and any(isinstance(x, ast.Break) for x in s.body)
+           and any(_src(x) == "stopped_early = True" for x in s.body)]
+    assert len(ifs) == 1 and _src(ifs[0].test) == "stop", [
+        _src(s.test) for s in ifs]
+    # The deadline path (the while's else): `settled` is computed from the
+    # tracker against the grace. A constant there turns every still-growing
+    # expiry into FAIL instead of 78 -- #210's cry-wolf.
+    dl = [s for s in loop.orelse if isinstance(s, ast.Assign)
+          and _src(s.targets[0]) == "settled"]
+    assert [_src(s.value) for s in dl] == [
+        "check_fetch_settled(tracker.frozen_for(now) < STALL_GRACE_S, "
+        "now - started, FETCH_TIMEOUT)"], [_src(s.value) for s in dl]
+    assert "now = time.monotonic()" in [_src(s) for s in loop.orelse]
     parent = next(p for p in ast.walk(tree)
                   if isinstance(getattr(p, "body", None), list)
                   and loop in p.body)

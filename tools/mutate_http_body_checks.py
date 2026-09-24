@@ -306,6 +306,72 @@ MUTANTS = [
      MODULE,
      "    if stall_abort < STALL_ABORT_MIN:\n        return (",
      "    if False:\n        return ("),
+    # --- #226 round 2: the twelve that survived commit eeb5fd1's suite
+    # --- (substring greps passed on a comment) plus the NaN knob.
+    ("#226 R2: the rig's stop branch is dead (`if False:`)",
+     RIG,
+     "            if stop:\n                print(f\"  {state.summary()}\")",
+     "            if False:\n                print(f\"  {state.summary()}\")"),
+    ("#226 R2: the rig overwrites the step's answer (`stop = False`)",
+     RIG,
+     "            if stop:\n                print(f\"  {state.summary()}\")",
+     "            stop = False\n            if stop:\n"
+     "                print(f\"  {state.summary()}\")"),
+    ("#226 R2: the rig never marks the stop (`stopped_early = False`)",
+     RIG,
+     "                stopped_early = True\n",
+     "                stopped_early = False\n"),
+    ("#226 R2: read_tcp_state reads net_send_len (tcp_addr + 1)",
+     RIG,
+     "return bytes(client.read_mem(tcp_addr, 1))[0]",
+     "return bytes(client.read_mem(tcp_addr + 1, 1))[0]"),
+    ("#226 R2: tcp_addr hardcoded, the label only in a comment",
+     RIG,
+     "tcp_addr = label_addr(\"net_tcp_state\")",
+     "tcp_addr = 0xB3BF  # label_addr('net_tcp_state')"),
+    ("#226 R2: the post-'Q' shadow re-check is `... .ok or True`",
+     RIG,
+     "bytes(client.read_mem(0xA000, 16))).ok",
+     "bytes(client.read_mem(0xA000, 16))).ok or True"),
+    ("#226 R2: the deadline path's settled is a constant, the expression "
+     "left in a comment (78 -> FAIL, #210 cry-wolf)",
+     RIG,
+     "            now = time.monotonic()\n            settled = check_fetch_settled(\n"
+     "                tracker.frozen_for(now) < STALL_GRACE_S,",
+     "            now = time.monotonic()\n"
+     "            # tracker.frozen_for(now) < STALL_GRACE_S\n"
+     "            settled = check_fetch_settled(\n                False,"),
+    ("#226 R2: the rig feeds the tracker itself as well",
+     RIG,
+     "            stop, why = early_stop_step(",
+     "            tracker.observe(state.body_total, now)\n"
+     "            stop, why = early_stop_step("),
+    ("#226 R2: the pre-lock verdict is discarded after it is printed",
+     RIG,
+     "    if bad_stall:\n        print(f\"[fatal] {bad_stall}\", file=sys.stderr)\n"
+     "        return 2",
+     "    if bad_stall:\n        print(f\"[fatal] {bad_stall}\", file=sys.stderr)\n"
+     "        return 2\n    bad_stall = None"),
+    ("#226 R2: the close wait's extra exit always fires (`... or 'x'`: "
+     "lock released over a CONNECTED socket)",
+     RIG,
+     "also=lambda: close_confirmed(stopped_early, read_shadow_ok,\n"
+     "                                         read_tcp_state))",
+     "also=lambda: close_confirmed(stopped_early, read_shadow_ok,\n"
+     "                                         read_tcp_state) or 'x')"),
+    ("#226 R2: early_stop_step reports the threshold as the freeze",
+     MODULE,
+     "    return should_stop_early(state, read_tcp_state(), frozen,",
+     "    return should_stop_early(state, read_tcp_state(), stall_abort,"),
+    ("#226 R2: stall_config_error accepts a non-finite knob (NaN stops "
+     "the loop at 0 s)",
+     MODULE,
+     "        if not math.isfinite(v):",
+     "        if False and not math.isfinite(v):"),
+    ("#226 R2: should_stop_early accepts stall_abort=nan",
+     MODULE,
+     "    if not math.isfinite(stall_abort) or stall_abort < STALL_ABORT_MIN:",
+     "    if stall_abort < STALL_ABORT_MIN:"),
     ("a check_* is renamed away (the RED_CASES registry goes stale)",
      MODULE,
      "def check_http_status(", "def renamed_check_http_status("),

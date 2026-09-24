@@ -101,6 +101,7 @@ that suite can go red.
 """
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -404,7 +405,7 @@ def should_stop_early(state: BodyState, tcp_state, frozen_for: float,
     what keeps a slow fetch from being cut short; a stall on a CONNECTED
     socket still runs to the budget, as before.
     """
-    if stall_abort < STALL_ABORT_MIN:
+    if not math.isfinite(stall_abort) or stall_abort < STALL_ABORT_MIN:
         raise ValueError(f"stall_abort={stall_abort}s is below the "
                          f"{STALL_ABORT_MIN:.0f}s floor")
     if not shadow_ok:
@@ -499,7 +500,14 @@ def stall_config_error(stall_abort: float, stall_grace: float):
     the poll loop, past nothing that sends 'Q'. And an early stop records
     the fetch as not-progressing, which the deadline path agrees with only
     if the grace is shorter than the abort margin.
+
+    Non-finite values are refused first: NaN compares False against
+    everything, so `STALL_ABORT=nan` would pass both tests below and then
+    stop the loop at 0 s frozen.
     """
+    for name, v in (("STALL_ABORT", stall_abort), ("STALL_GRACE", stall_grace)):
+        if not math.isfinite(v):
+            return f"{name}={v} is not a finite number of seconds"
     if stall_abort < STALL_ABORT_MIN:
         return (f"STALL_ABORT={stall_abort:.0f}s is below the "
                 f"{STALL_ABORT_MIN:.0f}s floor")
