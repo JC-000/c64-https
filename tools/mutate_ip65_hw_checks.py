@@ -39,10 +39,12 @@ KNOWN-EQUIVALENT MUTANTS are reported as survivors-with-a-reason, never
 suppressed, and the list is kept short on purpose: a growing one is how a
 mutation score stops meaning anything. Every entry is a branch whose
 removal leaves `ok`, `status` and every asserted evidence field unchanged
-for EVERY input — the branch exists for its message. Removing
-`check_http_response`'s length test is the original example:
-`got = resp_buf[:resp_len]` already has the wrong length whenever
-`resp_len` is wrong, so the exact-content compare subsumes it.
+for EVERY input — the branch exists for its message. The first entry
+ever listed here, `check_http_response`'s length test, turned out NOT to
+be equivalent (slicing clamps an over-long `resp_len`, and a negative one
+slices from the end), and is now killed by a red case. That is the
+reason every entry has to be argued for all inputs, not the inputs the
+suite happened to use.
 
 ANCHORS MUST BE UNIQUE. A mutation whose anchor text appears more than
 once in the module would mutate whichever copy comes first, which may not
@@ -102,7 +104,7 @@ MUTANTS = [
     ("check_shadow_ram_readable loses the ROM-prefix arm",
      "    if bytes_at_a000.startswith(BASIC_ROM_A000_PREFIX) or \\",
      "    if False and bytes_at_a000.startswith(BASIC_ROM_A000_PREFIX) or \\"),
-    ("check_http_response drops the length test (KNOWN EQUIVALENT)",
+    ("check_http_response drops the length test",
      "    if resp_len != len(expected_body):",
      "    if False and resp_len != len(expected_body):"),
     ("check_http_response compares only a prefix of the body",
@@ -247,8 +249,17 @@ MUTANTS = [
      "    corpora: list[bytes] = [bytes(f.raw) for f in frames]",
      "    corpora: list[bytes] = []"),
     ("check_body_not_on_wire searches frames only, not reassembled streams",
-     "        corpora.extend(s for s in tcp_streams(frames, eth_src=src) if s)",
-     "        pass"),
+     *_off("            if st:")),
+    ("check_body_not_on_wire runs the partial search on frames only, "
+     "not on reassembled streams",
+     "        if run >= partial_min:",
+     "        if run >= partial_min and i < n_frame_corpora:"),
+    ("PARTIAL_RUN_MIN raised from 8 to 9",
+     "PARTIAL_RUN_MIN = 8", "PARTIAL_RUN_MIN = 9"),
+    ("PARTIAL_RUN_MIN raised from 8 to 12",
+     "PARTIAL_RUN_MIN = 8", "PARTIAL_RUN_MIN = 12"),
+    ("PARTIAL_RUN_MIN lowered from 8 to 7",
+     "PARTIAL_RUN_MIN = 8", "PARTIAL_RUN_MIN = 7"),
     ("check_body_not_on_wire drops the PETSCII shifted form (#202)",
      '("petscii-shifted", petscii_shifted_form(secret))',
      '("petscii-shifted", bytes(secret))'),
@@ -330,6 +341,27 @@ MUTANTS = [
     ("check_ip65_config_written ASSERTS the netmask (fails a healthy /24)",
      '"cfg_netmask": (cfg_netmask, IP65_DEFAULT_CFG_NETMASK, 4, False),',
      '"cfg_netmask": (cfg_netmask, IP65_DEFAULT_CFG_NETMASK, 4, True),'),
+    ("check_ip65_config_written accepts all-zero cfg_ip / cfg_mac",
+     *_off("    if zeroed:")),
+    ("check_ip65_config_written accepts an all-zero cfg_mac",
+     '(("cfg_ip", cfg_ip), ("cfg_mac", cfg_mac))',
+     '(("cfg_ip", cfg_ip),)'),
+    ("check_ip65_config_written accepts an all-zero cfg_ip",
+     '(("cfg_ip", cfg_ip), ("cfg_mac", cfg_mac))',
+     '(("cfg_mac", cfg_mac),)'),
+    ("check_ip65_config_written ignores every expected value",
+     *_off("    if wrong:")),
+    ("check_ip65_config_written never compares against expect_*",
+     *_off("        if want is not None and bytes(got) != bytes(want):")),
+    ("check_ip65_config_written ignores expect_ip",
+     '    for name, got, want in (("cfg_ip", cfg_ip, expect_ip),',
+     '    for name, got, want in ('),
+    ("check_ip65_config_written ignores expect_gateway",
+     '                            ("cfg_gateway", cfg_gateway, expect_gateway),',
+     ''),
+    ("check_ip65_config_written ignores expect_mac",
+     '                            ("cfg_mac", cfg_mac, expect_mac)):',
+     '                            ):'),
     ("read_ip65_config follows a pointer that cannot be ip65's",
      *_off("        if not lo <= ptr <= hi - size:")),
     ("read_ip65_config lets a field run past the end of ip65's range",
@@ -350,9 +382,6 @@ MUTANTS = [
 #: Each one leaves `ok`, `status` and every evidence field a caller branches
 #: on unchanged for EVERY input; the branch is kept for its message.
 KNOWN_EQUIVALENT = {
-    "check_http_response drops the length test (KNOWN EQUIVALENT)":
-        "resp_buf[:resp_len] already has the wrong length when resp_len is "
-        "wrong, so the exact-content compare subsumes this test",
     "check_client_hello_on_wire skips the empty-stream test (KNOWN EQUIVALENT)":
         "parse_tls_records(b'') is [], so the no-records branch fails the "
         "same input with the same status",

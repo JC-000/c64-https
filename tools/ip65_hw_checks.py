@@ -587,15 +587,15 @@ def check_mac_on_wire(frames: Sequence[Frame], c64_mac: bytes | None,
     (illegal as a source address), and ip65's build-time cfg_mac default,
     which is the ABSENCE of a MAC rather than a MAC to check.
 
-    The rig passes the MAC READ BACK FROM THE DEVICE (ip65's `cfg_mac`,
-    through `read_ip65_config`), not the constant in the rig script -- the
-    memory-versus-wire agreement check c64-wireguard's `--mac observe` mode
-    performs (#202). Before that change it was fed the constant, every
-    value-rejection above was statically false, and it could not fail unless
-    `check_c64_originated` failed too. Now a device whose `cfg_mac` is the
-    build-time default, or differs from the address the cartridge actually
-    transmits from, fails here even when the constant-keyed checks pass.
-    `None` (the field was never read) fails closed.
+    WHAT IT ADDS, AS THE RIG CALLS IT (#202), and no more: the rig passes
+    ip65's `cfg_mac` READ FROM THE DEVICE (via `read_ip65_config`), not the
+    rig-script constant. `check_ip65_config_written` asserts that value
+    equals the constant, and `check_c64_originated` asserts the constant is
+    a source on the cable; this one closes the triangle directly -- the MAC
+    in the 6510's memory is itself an Ethernet source here. The value
+    rejections above duplicate what `check_ip65_config_written` already
+    refuses for that same field, so on a run they are a second line, not
+    independent evidence. `None` (never read) fails closed.
     """
     ev = {"c64_mac": None if c64_mac is None else fmt_mac(c64_mac),
           "host_mac": fmt_mac(host_mac)}
@@ -836,8 +836,11 @@ def read_ip65_config(read_memory) -> tuple:
 
 def check_ip65_config_written(cfg_ip: bytes | None, cfg_netmask: bytes | None,
                               cfg_gateway: bytes | None,
-                              cfg_mac: bytes | None) -> Verdict:
-    """None of ip65's decisive config fields still holds its build-time constant.
+                              cfg_mac: bytes | None, *,
+                              expect_ip: bytes | None = None,
+                              expect_gateway: bytes | None = None,
+                              expect_mac: bytes | None = None) -> Verdict:
+    """ip65's config fields were written at run time -- with the RIGHT values.
 
     Ported from c64-wireguard (#202). ip65/ip65/config.s ships every field
     non-zero:
@@ -858,6 +861,16 @@ def check_ip65_config_written(cfg_ip: bytes | None, cfg_netmask: bytes | None,
     `check_dhcp_lease` already judges cfg_ip's copy in `net_local_ip`; the
     field is judged again here because it is read from ip65's own storage,
     not from our adapter's copy of it.
+
+    "NOT THE DEFAULT" IS NOT "WRITTEN". `dhcp_init` ZEROES cfg_ip before it
+    sends anything (ip65/ip65/dhcp.s, `dhcp_init`), so a DHCP exchange that
+    fails after the OFFER leaves cfg_ip 0.0.0.0 -- not the default -- and
+    all-zero RAM passes a defaults-only test outright. So cfg_ip and cfg_mac
+    are rejected when all-zero unconditionally, and the caller that knows
+    the right answers passes them: `expect_ip`, `expect_gateway`,
+    `expect_mac` (bytes; None = not asserted). The rig knows all three
+    (the pinned lease, the Mac as router, the RR-Net's MAC). The netmask
+    stays unasserted.
     """
     table = {
         "cfg_ip": (cfg_ip, IP65_DEFAULT_CFG_IP, 4, True),
@@ -886,6 +899,30 @@ def check_ip65_config_written(cfg_ip: bytes | None, cfg_netmask: bytes | None,
                        f"{', '.join(still_default)} still hold ip65's BUILD-TIME "
                        "constants (ip65/ip65/config.s), so the code that was "
                        "supposed to overwrite them did not run", ev)
+    zeroed = [name for name, got in (("cfg_ip", cfg_ip), ("cfg_mac", cfg_mac))
+              if not any(got)]
+    ev["zeroed"] = zeroed
+    if zeroed:
+        return Verdict(False,
+                       f"{', '.join(zeroed)} read all-zero: cfg_ip is what "
+                       "dhcp_init leaves when DHCP does not finish, and an "
+                       "all-zero MAC was never programmed", ev)
+    wrong = []
+    for name, got, want in (("cfg_ip", cfg_ip, expect_ip),
+                            ("cfg_gateway", cfg_gateway, expect_gateway),
+                            ("cfg_mac", cfg_mac, expect_mac)):
+        if want is not None and bytes(got) != bytes(want):
+            wrong.append({"field": name, "got": ev[name],
+                          "want": fmt_mac(want) if len(want) == 6 else fmt_ip(want)})
+    ev["wrong_value"] = wrong
+    ev["asserted"] = [n for n, w in (("cfg_ip", expect_ip),
+                                     ("cfg_gateway", expect_gateway),
+                                     ("cfg_mac", expect_mac)) if w is not None]
+    if wrong:
+        return Verdict(False, "written, but not with the values this rig "
+                              "serves: " + "; ".join(
+                                  f"{w['field']} is {w['got']}, expected "
+                                  f"{w['want']}" for w in wrong), ev)
     note = ""
     if ambiguous:
         note = (f" ({', '.join(ambiguous)} equals the shipped default, which is "
@@ -1118,9 +1155,20 @@ def check_body_not_on_wire(frames: Sequence[Frame], secret: bytes,
         return Verdict(False, "the capture holds no frames; 'not found' over an "
                               "empty corpus is not an absence result", ev,
                        status="inconclusive")
+    # `where[i]` says what corpus i IS, so a hit can be attributed: a
+    # Mac-sourced hit (the listener sending cleartext) and a C64-sourced one
+    # (the client leaking) are different findings.
     corpora: list[bytes] = [bytes(f.raw) for f in frames]
+    where: list = [{"kind": "frame", "frame": f.index,
+                    "eth_src": fmt_mac(f.eth_src)} for f in frames]
+    n_frame_corpora = len(corpora)
     for src in sorted({bytes(f.eth_src) for f in frames}):
-        corpora.extend(s for s in tcp_streams(frames, eth_src=src) if s)
+        for st in tcp_streams(frames, eth_src=src):
+            if st:
+                corpora.append(st)
+                where.append({"kind": "stream", "eth_src": fmt_mac(src)})
+    ev["frame_corpora"] = n_frame_corpora
+    ev["stream_corpora"] = len(corpora) - n_frame_corpora
     forms = secret_forms(secret)
     ev["forms_searched"] = [name for name, _p in forms]
     control_hits = [i for i, c in enumerate(corpora) if control in c]
@@ -1129,14 +1177,17 @@ def check_body_not_on_wire(frames: Sequence[Frame], secret: bytes,
     for i, c in enumerate(corpora):
         found = [name for name, pat in forms if pat in c]
         if found:
-            full_hits.append({"corpus": i, "forms": found})
+            full_hits.append({"corpus": i, "forms": found, **where[i]})
             continue
         run, form = max((longest_run(c, pat)[0], name) for name, pat in forms)
         if run >= partial_min:
-            partial_hits.append({"corpus": i, "form": form, "run": run})
+            partial_hits.append({"corpus": i, "form": form, "run": run,
+                                 **where[i]})
     ev["control_hits"] = len(control_hits)
     ev["secret_hits"] = len(full_hits)
     ev["secret_hit_forms"] = sorted({f for h in full_hits for f in h["forms"]})
+    ev["secret_hit_detail"] = full_hits[:8]
+    ev["leak_sources"] = sorted({h["eth_src"] for h in full_hits + partial_hits})
     ev["partial_hits"] = len(partial_hits)
     ev["partial_longest"] = max((p["run"] for p in partial_hits), default=0)
     ev["partial_detail"] = partial_hits[:8]
@@ -1144,14 +1195,16 @@ def check_body_not_on_wire(frames: Sequence[Frame], secret: bytes,
         return Verdict(False,
                        f"the response body appears IN CLEARTEXT in "
                        f"{len(full_hits)} places on the wire (forms: "
-                       f"{', '.join(ev['secret_hit_forms'])}) -- those bytes were "
+                       f"{', '.join(ev['secret_hit_forms'])}; Ethernet source "
+                       f"{', '.join(ev['leak_sources'])}) -- those bytes were "
                        "not encrypted", ev)
     if partial_hits:
         return Verdict(False,
                        f"{ev['partial_longest']} of the {len(secret)} body bytes "
                        f"appear contiguously IN CLEARTEXT ({len(partial_hits)} "
-                       f"places, floor {partial_min}) -- a partial leak is still "
-                       "a leak", ev)
+                       f"places, floor {partial_min}; Ethernet source "
+                       f"{', '.join(ev['leak_sources'])}) -- a partial leak is "
+                       "still a leak", ev)
     if not control_hits:
         return Verdict(False,
                        f"the control needle ({control[:32]!r}) was NOT found "

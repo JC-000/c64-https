@@ -637,8 +637,12 @@ def stage_boot_and_dhcp(tr, labels: dict) -> bool:
                              else hw.fmt_mac(cfg["cfg_mac"]))
     RES.verdict(
         hw.check_ip65_config_written(cfg["cfg_ip"], cfg["cfg_netmask"],
-                                     cfg["cfg_gateway"], cfg["cfg_mac"]),
-        "ip65's cfg_ip / cfg_gateway / cfg_mac were overwritten at run time")
+                                     cfg["cfg_gateway"], cfg["cfg_mac"],
+                                     expect_ip=hw.ip4_bytes(C64_IP),
+                                     expect_gateway=hw.ip4_bytes(HOST_IP),
+                                     expect_mac=bytes(C64_MAC)),
+        f"ip65's cfg_ip / cfg_gateway / cfg_mac hold {C64_IP} / {HOST_IP} / "
+        f"{hw.fmt_mac(C64_MAC)} (read from its own RAM)")
     return lease_ok
 
 

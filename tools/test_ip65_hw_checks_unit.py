@@ -742,6 +742,64 @@ def test_body_partial_leak_is_found() -> None:
         "petscii-shifted", v.evidence
 
 
+def test_partial_run_floor_is_eight_bytes() -> None:
+    """The floor as a LITERAL, not read back from the module.
+
+    The floor case above uses `hw.PARTIAL_RUN_MIN`, so it moves with the
+    constant and cannot tell 8 from 9 or 12. This pins the number
+    c64-wireguard chose and #202 ported: 7 contiguous body bytes pass, 8
+    fail, at the default floor.
+    """
+    now = time.time()
+    body = _rand_body(24)
+    for n, leaks in ((7, False), (8, True)):
+        frames = hw.parse_pcap(_pcap(
+            [f.raw for f in _good_capture(now, body)]
+            + [_udp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, 9, 9,
+                          b"\x00" + body[3:3 + n] + b"\x00")], ts0=now))
+        v = hw.check_body_not_on_wire(frames, body, SNI.encode())
+        assert v.ok is not leaks, (n, v.reason)
+
+
+def test_body_partial_leak_split_across_segments_is_found() -> None:
+    """A partial run that exists only in the REASSEMBLED stream is found.
+
+    12 body bytes split 6 + 6 across two TCP segments of one connection:
+    each frame holds 6 (under the floor), the stream holds 12. Only the
+    partial search over stream corpora can report it.
+    """
+    now = time.time()
+    body = _rand_body(24)
+    leak = body[4:16]
+    frames = hw.parse_pcap(_pcap(
+        [f.raw for f in _good_capture(now, body)] + [
+            _tcp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, PORT, 1025, 50000,
+                       leak[:6]),
+            _tcp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, PORT, 1025, 50006,
+                       leak[6:])], ts0=now))
+    assert not any(longest > 6 for longest in (
+        hw.longest_run(f.raw, body)[0] for f in frames)), "a frame alone crosses the floor"
+    v = hw.check_body_not_on_wire(frames, body, SNI.encode())
+    assert not v.ok and v.evidence["partial_longest"] == 12, v.evidence
+    assert v.evidence["partial_detail"][0]["kind"] == "stream", v.evidence
+
+
+def test_leak_evidence_names_the_source() -> None:
+    """Now that a hit FAILS without the control, the evidence has to say
+    WHO put it on the cable: a listener sending cleartext and a C64 leaking
+    its own buffer are different defects."""
+    now = time.time()
+    body = _rand_body(22)
+    for src, dst in ((HOST_MAC, C64_MAC), (C64_MAC, HOST_MAC)):
+        frames = hw.parse_pcap(_pcap(
+            [f.raw for f in _good_capture(now, body)]
+            + [_udp_frame(src, dst, C64_IP, HOST_IP, 9, 9, body)], ts0=now))
+        v = hw.check_body_not_on_wire(frames, body, SNI.encode())
+        assert not v.ok and v.evidence["leak_sources"] == [hw.fmt_mac(src)], \
+            v.evidence
+        assert v.evidence["secret_hit_detail"][0]["kind"] == "frame"
+
+
 def test_body_leak_fails_even_with_no_control_hit() -> None:
     """A FOUND leak is a FAIL, not INCONCLUSIVE, whatever the control did.
 
@@ -937,6 +995,49 @@ def test_ip65_config_written_red_green() -> None:
         assert not v.ok and v.evidence["unread"] == [name], (name, v.evidence)
         v = _cfg(**{name: bytes(range(1, size))})
         assert not v.ok and v.evidence["unread"] == [name], (name, v.evidence)
+
+
+def test_ip65_config_written_asserts_the_values_it_is_given() -> None:
+    """Not-the-default is not written. All-zero RAM and a failed DHCP both
+    pass a defaults-only test; the expected values close that.
+
+    `dhcp_init` zeroes cfg_ip before sending anything (ip65/ip65/dhcp.s),
+    so a DHCP exchange that dies after the OFFER leaves 0.0.0.0 there --
+    with the gateway already written from the OFFER's router option.
+    """
+    expect = {"expect_ip": hw.ip4_bytes(C64_IP),
+              "expect_gateway": hw.ip4_bytes(HOST_IP),
+              "expect_mac": C64_MAC}
+
+    def cfg(**over):
+        d = dict(_HEALTHY_CFG)
+        d.update(over)
+        return hw.check_ip65_config_written(d["cfg_ip"], d["cfg_netmask"],
+                                            d["cfg_gateway"], d["cfg_mac"],
+                                            **expect)
+
+    assert cfg().ok and cfg().evidence["asserted"] == [
+        "cfg_ip", "cfg_gateway", "cfg_mac"]
+    # All-zero memory, even with NO expectations supplied.
+    z = hw.check_ip65_config_written(bytes(4), bytes(4), bytes(4), bytes(6))
+    assert not z.ok and z.evidence["zeroed"] == ["cfg_ip", "cfg_mac"], z.evidence
+    # Each zeroed field on its own, no expectations.
+    assert _cfg(cfg_ip=bytes(4)).evidence["zeroed"] == ["cfg_ip"]
+    assert not _cfg(cfg_ip=bytes(4)).ok
+    assert _cfg(cfg_mac=bytes(6)).evidence["zeroed"] == ["cfg_mac"]
+    assert not _cfg(cfg_mac=bytes(6)).ok
+    # A gateway of 0.0.0.0 is only wrong for a caller that knows better.
+    assert _cfg(cfg_gateway=bytes(4)).ok
+    # Wrong but plausible values, one field at a time: only the expectation
+    # can reject them.
+    for name, bad in (("cfg_ip", hw.ip4_bytes("10.0.66.42")),
+                      ("cfg_gateway", hw.ip4_bytes("10.0.66.254")),
+                      ("cfg_gateway", bytes(4)),
+                      ("cfg_mac", bytes.fromhex("000e3a646465"))):
+        assert _cfg(**{name: bad}).ok, name          # defaults-only: passes
+        v = cfg(**{name: bad})
+        assert not v.ok and [w["field"] for w in v.evidence["wrong_value"]] \
+            == [name], (name, v.evidence)
 
 
 def _fake_memory(image: dict):
@@ -1164,6 +1265,13 @@ def test_http_response_guards_isolated() -> None:
     assert not hw.check_http_response(200, 0, b"", b"").ok
     # Status and length read, buffer not: must be a FAIL verdict, not a raise.
     assert not hw.check_http_response(200, len(body), None, body).ok
+    # The length test is NOT subsumed by the content compare (it used to be
+    # listed as known-equivalent): slicing clamps an over-long resp_len, and
+    # a negative one slices from the end, so both of these leave `got` equal
+    # to the body. A C64 that recorded 30 bytes for a 22-byte body, or a
+    # length read as garbage, must not pass on content alone.
+    assert not hw.check_http_response(200, len(body) + 8, body, body).ok
+    assert not hw.check_http_response(200, -1, body + b"X", body).ok
 
 
 def test_net_last_error_names_a_defined_code() -> None:
