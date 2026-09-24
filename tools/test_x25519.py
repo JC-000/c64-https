@@ -723,13 +723,24 @@ def a24_trap(h):
     return (((h + 1) << 256) - r) // 121665
 
 
-A24_TRAP_HS = (50000, 40000, 30000, 60000)
+# Which fold wraps depends on H: bytes 32..34 of the product are H, and the
+# fold stages add them x38 at offsets 0, 1, 2. The large H values wrap at
+# the byte-33 stage; H = 70 and 103 (byte 33 = 0) wrap at the byte-32
+# stage. Both entries into @a24_wrap38 are peer-forceable with canonical
+# input. The byte-34 entry is not (a*121665 < 2^272 for a < 2^255) and is
+# kept only as a defensive fold, so it has no vector here.
+A24_TRAP_HS = (50000, 40000, 30000, 60000, 70, 103)
 # u = a24_trap(50000) / 4 mod p, and X25519(ISSUE_242_PRIV, u) from the
 # `cryptography` package (RFC 7748). Unfixed code returns 67c65d3c...
 A24_TRAP_U = bytes.fromhex(
     "566921b9502455f0956529a6c75c428d42b3b613a7d438bfc111c979a9604d5a")
 A24_TRAP_EXPECTED = bytes.fromhex(
     "81de4f2b4753ba75f04b1f1740966d3c53506a4d696ecca7be36fb9e0c44ba56")
+# Same for H = 70, which wraps at the byte-32 fold stage instead.
+A24_TRAP_U_B32 = bytes.fromhex(
+    "77df4be5d2bb505fcdbcbf0c15ec79a87baff978ea36cd47b411a220ab8f0960")
+A24_TRAP_EXPECTED_B32 = bytes.fromhex(
+    "bcd4697ebed243e33f5517d73fe54c6b31b645c04bdadbe309fdf25987802e08")
 
 
 def test_fe_mul_a24_fold_carry(transport, labels):
@@ -755,17 +766,19 @@ def test_fe_mul_a24_fold_carry(transport, labels):
 def test_x25519_a24_trap_u(transport, labels):
     """X25519 with a peer-chosen u that hits the fe_mul_a24 fold at bit 254."""
     passed = failed = 0
-    print("    a24 trap u...", end="", flush=True)
-    result = c64_x25519_scalarmult(transport, labels, ISSUE_242_PRIV,
-                                   A24_TRAP_U)
-    if result == A24_TRAP_EXPECTED:
-        passed += 1
-        print(" PASS")
-    else:
-        failed += 1
-        print(" FAIL")
-        print(f"    expected: {A24_TRAP_EXPECTED.hex()}")
-        print(f"    got:      {result.hex()}")
+    for name, u, want in (("H=50000 (b33 fold)", A24_TRAP_U, A24_TRAP_EXPECTED),
+                          ("H=70 (b32 fold)", A24_TRAP_U_B32,
+                           A24_TRAP_EXPECTED_B32)):
+        print(f"    a24 trap u {name}...", end="", flush=True)
+        result = c64_x25519_scalarmult(transport, labels, ISSUE_242_PRIV, u)
+        if result == want:
+            passed += 1
+            print(" PASS")
+        else:
+            failed += 1
+            print(" FAIL")
+            print(f"    expected: {want.hex()}")
+            print(f"    got:      {result.hex()}")
     return passed, failed
 
 

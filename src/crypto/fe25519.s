@@ -1152,7 +1152,8 @@ fe_mul_a24:
         inx
         cpx #32
         bcc @prop_b34
-        jsr @a24_wrap38         ; ripple ran off byte 31 (#244 review)
+        jsr @a24_wrap38         ; defensive: unreachable for a < 2^255
+                                ; (a*121665 < 2^272), kept for symmetry
 
 @r_done_a24:
         ; Copy to (fe_dst)
