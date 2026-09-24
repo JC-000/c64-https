@@ -577,7 +577,7 @@ def check_c64_originated(frames: Sequence[Frame], c64_mac: bytes,
                          "the Mac", ev)
 
 
-def check_mac_on_wire(frames: Sequence[Frame], c64_mac: bytes,
+def check_mac_on_wire(frames: Sequence[Frame], c64_mac: bytes | None,
                       host_mac: bytes, *, min_frames: int = 1) -> Verdict:
     """The C64's MAC is on the CABLE, not merely in a field we read back.
 
@@ -587,31 +587,34 @@ def check_mac_on_wire(frames: Sequence[Frame], c64_mac: bytes,
     (illegal as a source address), and ip65's build-time cfg_mac default,
     which is the ABSENCE of a MAC rather than a MAC to check.
 
-    CONTRIBUTES NO INDEPENDENT INFORMATION AS THE RIG CALLS IT TODAY, and
-    that is worth knowing before anyone counts it as a separate result.
-    `tests/rig_ip65_rrnet_hw.py` passes `c64_mac` as a CONSTANT read from
-    the rig script, so all six value-rejections above are statically false
-    on every run; the only branch that can fire is the frame count, against
-    the same threshold and the same corpus as `check_c64_originated`. It
-    cannot fail unless that one fails too. It is kept, not deleted, because
-    the value-rejections become live the moment a caller passes a MAC read
-    back from the DEVICE — which is the stronger memory-versus-wire
-    agreement check c64-wireguard's `--mac observe` mode performs, and the
-    obvious next step for this rig. Until then, count the independent
-    verdicts as one, not two.
+    The rig passes the MAC READ BACK FROM THE DEVICE (ip65's `cfg_mac`,
+    through `read_ip65_config`), not the constant in the rig script -- the
+    memory-versus-wire agreement check c64-wireguard's `--mac observe` mode
+    performs (#202). Before that change it was fed the constant, every
+    value-rejection above was statically false, and it could not fail unless
+    `check_c64_originated` failed too. Now a device whose `cfg_mac` is the
+    build-time default, or differs from the address the cartridge actually
+    transmits from, fails here even when the constant-keyed checks pass.
+    `None` (the field was never read) fails closed.
     """
-    ev = {"c64_mac": fmt_mac(c64_mac), "host_mac": fmt_mac(host_mac)}
+    ev = {"c64_mac": None if c64_mac is None else fmt_mac(c64_mac),
+          "host_mac": fmt_mac(host_mac)}
+    if c64_mac is None:
+        return Verdict(False, "the C64's MAC was never read back from the "
+                              "device; there is no address to look for", ev)
     mac = bytes(c64_mac)
     if len(mac) != 6:
         return Verdict(False, f"MAC is {len(mac)} bytes, expected 6", ev)
     if mac == b"\x00" * 6:
         return Verdict(False, "the C64's MAC is 00:00:00:00:00:00 -- never programmed",
                        ev)
-    if mac == b"\xff" * 6:
-        return Verdict(False, "the C64's MAC is the broadcast address", ev)
+    # Broadcast (ff:ff:ff:ff:ff:ff) is not a separate branch: it has the
+    # group bit set, so this one catches it, and a dedicated test ahead of it
+    # could only ever change the message (#201).
     if mac[0] & 0x01:
-        return Verdict(False, f"{fmt_mac(mac)} has the multicast bit set; it "
-                              "cannot be a station's source address", ev)
+        return Verdict(False, f"{fmt_mac(mac)} has the group (multicast/"
+                              "broadcast) bit set; it cannot be a station's "
+                              "source address", ev)
     if tuple(mac) == IP65_DEFAULT_CFG_MAC:
         return Verdict(False, f"the C64's MAC is {fmt_mac(mac)}, ip65's BUILD-TIME "
                               "DEFAULT (ip65/ip65/config.s) -- eth_init never ran, "
@@ -756,11 +759,12 @@ def check_dhcp_lease(local_ip: bytes | None, *, subnet: str | None = None,
                        ev)
     if octets[0] == 127:
         return Verdict(False, f"the C64's IP is loopback {fmt_ip(octets)}", ev)
-    if octets == (255, 255, 255, 255):
-        return Verdict(False, "the C64's IP is the broadcast address", ev)
+    # 255.255.255.255 is not a separate branch: its first octet is >= 224,
+    # so this one catches it, and a dedicated test ahead of it could only
+    # ever change the message (#201).
     if octets[0] >= 224:
-        return Verdict(False, f"the C64's IP is multicast/reserved {fmt_ip(octets)}",
-                       ev)
+        return Verdict(False, f"the C64's IP is multicast/reserved/broadcast "
+                              f"{fmt_ip(octets)}", ev)
     if octets[0] == 169 and octets[1] == 254:
         return Verdict(False, f"the C64's IP is link-local {fmt_ip(octets)}; the C64 "
                               "does not do IPv4LL, so this is not a DHCP lease", ev)
@@ -780,6 +784,116 @@ def check_dhcp_lease(local_ip: bytes | None, *, subnet: str | None = None,
                        "rather than an error and stops every capture keyed on the "
                        "pinned address from lining up", ev)
     return Verdict(True, f"the C64 holds a lease: {fmt_ip(octets)}", ev)
+
+
+#: The ip65 blob's variable-pointer table: `ip65_vt = ip65_base + 33` in
+#: src/net/ip65/ip65_symbols.inc, laid down by ip65-build/ip65_stub.s as
+#: `.word cfg_mac, cfg_ip, cfg_netmask, cfg_gateway, ...`. It is part of the
+#: blob, not of our build, so it is the same in every profile and needs no
+#: labels.txt entry -- and reading the fields THROUGH it, rather than at
+#: addresses copied from a map, means a rebuilt blob that moves config.s
+#: cannot silently point the read at unrelated RAM.
+IP65_BLOB_BASE = 0x2000
+IP65_VT_ADDR = IP65_BLOB_BASE + 33
+#: (field, byte offset of its pointer in the table, field length). The order
+#: is pinned against ip65_symbols.inc by the unit suite.
+IP65_VT_FIELDS = (("cfg_mac", 0, 6), ("cfg_ip", 2, 4),
+                  ("cfg_netmask", 4, 4), ("cfg_gateway", 6, 4))
+#: Where a pointer out of that table may legitimately land: the blob and its
+#: BSS (NET_CODE + NET_BSS in cfg/c64-https-ip65.cfg, $2000-$4F8B). Anything
+#: else means the table was not there to read -- no PRG, a torn load, or a
+#: build on the other backend -- and the field is reported UNREAD.
+IP65_VT_TARGET_RANGE = (0x2000, 0x4F8C)
+
+
+def read_ip65_config(read_memory) -> tuple:
+    """ip65's four config fields, read from the C64 through the blob's table.
+
+    `read_memory(addr, n) -> bytes` is the transport; this function makes
+    no judgment beyond refusing a pointer that cannot be ip65's. Returns
+    `(fields, pointers)`: `fields[name]` is the bytes read, or None when the
+    pointer was out of range or the read came back short, so
+    `check_ip65_config_written` reports it as never read rather than
+    judging bytes from the wrong address.
+    """
+    table = bytes(read_memory(IP65_VT_ADDR, 8))
+    fields: dict = {}
+    pointers: dict = {}
+    lo, hi = IP65_VT_TARGET_RANGE
+    for name, off, size in IP65_VT_FIELDS:
+        if len(table) < off + 2:
+            fields[name], pointers[name] = None, None
+            continue
+        ptr = table[off] | (table[off + 1] << 8)
+        pointers[name] = ptr
+        if not lo <= ptr <= hi - size:
+            fields[name] = None
+            continue
+        got = bytes(read_memory(ptr, size))
+        fields[name] = got if len(got) == size else None
+    return fields, pointers
+
+
+def check_ip65_config_written(cfg_ip: bytes | None, cfg_netmask: bytes | None,
+                              cfg_gateway: bytes | None,
+                              cfg_mac: bytes | None) -> Verdict:
+    """None of ip65's decisive config fields still holds its build-time constant.
+
+    Ported from c64-wireguard (#202). ip65/ip65/config.s ships every field
+    non-zero:
+
+        cfg_mac      00:80:10:00:51:00
+        cfg_ip       192.168.1.64        (the zeroed variant is COMMENTED OUT)
+        cfg_netmask  255.255.255.0
+        cfg_gateway  192.168.1.1         (likewise)
+
+    so "the field is populated" is true of a machine that never brought the
+    network up. A cfg_mac still reading the default means `eth_init` never
+    ran -- the absence of a MAC, not a MAC. A cfg_gateway still reading
+    192.168.1.1 means dhcp.s never reached its router-option store, which
+    on this rig (dnsmasq sends `option:router` = the Mac) it must.
+
+    255.255.255.0 is ALSO the correct leased netmask on this /24, so the
+    netmask alone can never be evidence: it is reported, never asserted.
+    `check_dhcp_lease` already judges cfg_ip's copy in `net_local_ip`; the
+    field is judged again here because it is read from ip65's own storage,
+    not from our adapter's copy of it.
+    """
+    table = {
+        "cfg_ip": (cfg_ip, IP65_DEFAULT_CFG_IP, 4, True),
+        "cfg_netmask": (cfg_netmask, IP65_DEFAULT_CFG_NETMASK, 4, False),
+        "cfg_gateway": (cfg_gateway, IP65_DEFAULT_CFG_GATEWAY, 4, True),
+        "cfg_mac": (cfg_mac, IP65_DEFAULT_CFG_MAC, 6, True),
+    }
+    ev: dict = {}
+    still_default, unread, ambiguous = [], [], []
+    for name, (got, default, size, decisive) in table.items():
+        if got is None or len(got) != size:
+            unread.append(name)
+            ev[name] = None if got is None else bytes(got).hex()
+            continue
+        ev[name] = fmt_mac(got) if size == 6 else fmt_ip(got)
+        if tuple(got) == tuple(default):
+            (still_default if decisive else ambiguous).append(name)
+    ev["still_default"] = still_default
+    ev["default_but_not_decisive"] = ambiguous
+    ev["unread"] = unread
+    if unread:
+        return Verdict(False, f"never read (or read at the wrong width) from the "
+                              f"C64: {', '.join(unread)}", ev)
+    if still_default:
+        return Verdict(False,
+                       f"{', '.join(still_default)} still hold ip65's BUILD-TIME "
+                       "constants (ip65/ip65/config.s), so the code that was "
+                       "supposed to overwrite them did not run", ev)
+    note = ""
+    if ambiguous:
+        note = (f" ({', '.join(ambiguous)} equals the shipped default, which is "
+                "also the correct value on this /24, so it is reported and not "
+                "asserted)")
+    return Verdict(True, "ip65's config fields were written at run time: "
+                         f"ip {ev['cfg_ip']}, gateway {ev['cfg_gateway']}, "
+                         f"mac {ev['cfg_mac']}" + note, ev)
 
 
 # ===========================================================================
@@ -883,8 +997,87 @@ def check_tls_traffic_both_ways(frames: Sequence[Frame], c64_mac: bytes,
                          f"{len(host_app)} from the host", ev)
 
 
+#: A run of the secret shorter than this, inside one corpus, is not reported
+#: as a partial leak. c64-wireguard's floor, for their reason: below ~8 bytes
+#: the report is noise from short common substrings, and a checker that cries
+#: wolf gets switched off. The rig's body is 24 bytes, so anything from a
+#: third of it up to all-but-one byte is reported.
+PARTIAL_RUN_MIN = 8
+
+
+def petscii_form(needle: bytes) -> bytes:
+    """The bytes a C64 would put on the wire for this ASCII text.
+
+    Ported from c64-wireguard (#202). PETSCII folds ASCII a-z (0x61-0x7A)
+    onto 0x41-0x5A, so a LOWERCASE plaintext leaves the machine as different
+    bytes from the ones the host staged, and a search for the host-side
+    ASCII form looks straight past it. Uppercase and digits are unchanged.
+    """
+    out = bytearray(needle)
+    for i, b in enumerate(out):
+        if 0x61 <= b <= 0x7A:
+            out[i] = b - 0x20
+    return bytes(out)
+
+
+def petscii_shifted_form(needle: bytes) -> bytes:
+    """The SHIFTED-letter block: the other encoding the same letters take.
+
+    Ported from c64-wireguard (#202), whose docstring says this form "must
+    not be lost when that tool moves onto this library" -- and it was lost
+    once. A C64 emits letters in one of two PETSCII blocks depending on the
+    case mode in force: $41-$5A, and $C1-$DA for the shifted set. The rig's
+    body (`RESPONSE_BODY` in tests/rig_ip65_rrnet_hw.py) is uppercase,
+    digits and spaces, so `petscii_form` returns it unchanged and adds
+    nothing; a leak that left the machine in the shifted block would be
+    found by no other form.
+    """
+    folded = petscii_form(needle)
+    return bytes((b + 0x80) if 0x41 <= b <= 0x5A else b for b in folded)
+
+
+def secret_forms(secret: bytes) -> list:
+    """(form name, bytes) for every DISTINCT encoding of `secret` searched.
+
+    A form whose bytes equal one already listed is dropped, so the evidence
+    names only the forms that did independent work.
+    """
+    out = [("exact", bytes(secret))]
+    for name, pat in (("petscii", petscii_form(secret)),
+                      ("petscii-shifted", petscii_shifted_form(secret))):
+        if all(pat != p for _n, p in out):
+            out.append((name, pat))
+    return out
+
+
+def longest_run(hay: bytes, needle: bytes) -> tuple:
+    """(length, offset-in-needle) of the longest substring of `needle` in `hay`.
+
+    Ported from c64-wireguard's `_longest_run` (#202). For each start
+    offset, a binary search on the length: `needle[start:start+k] in hay`
+    is monotone in k, so the largest k that matches is found in log steps.
+    """
+    best, best_at = 0, -1
+    n = len(needle)
+    for start in range(n):
+        if n - start <= best:
+            break
+        lo, hi = best + 1, n - start
+        found = 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if needle[start:start + mid] in hay:
+                found, lo = mid, mid + 1
+            else:
+                hi = mid - 1
+        if found > best:
+            best, best_at = found, start
+    return best, best_at
+
+
 def check_body_not_on_wire(frames: Sequence[Frame], secret: bytes,
-                           control: bytes) -> Verdict:
+                           control: bytes, *,
+                           partial_min: int = PARTIAL_RUN_MIN) -> Verdict:
     """The response body never appears in cleartext, and the search WORKS.
 
     An absence claim over a corpus nothing was ever found in is worth
@@ -894,12 +1087,27 @@ def check_body_not_on_wire(frames: Sequence[Frame], secret: bytes,
     through the same decoder as the secret would. No control hit, no
     verdict: the result is INCONCLUSIVE, which fails closed.
 
-    Searched per frame AND over each reassembled direction, so a secret
+    Searched per frame AND over each reassembled connection, so a secret
     split across two segments is still found, without inventing matches
     across the junction between unrelated frames.
+
+    WHAT COUNTS AS THE SECRET (#202, ported from c64-wireguard):
+      * every distinct form in `secret_forms` -- the staged bytes, their
+        PETSCII fold, and the PETSCII shifted block. The rig's body is
+        uppercase, so the shifted form is the one doing real work there.
+      * a PARTIAL run: the longest run of any form inside ONE corpus, when
+        at least `partial_min` bytes. A whole-needle `in` test reads a
+        23-of-24-byte leak as absent, which is a false negative in the one
+        check whose job is an absence claim. Per corpus, never across
+        corpora, so two unrelated frames cannot be joined into a match.
+
+    A leak that IS found fails whether or not the control was found: the
+    hit is itself proof the searcher works, and "our bytes are on the
+    cable" must not be downgraded to "could not tell" (c64-wireguard's
+    order, for the same reason).
     """
     ev = {"secret_len": len(secret), "control_len": len(control),
-          "frames": len(frames)}
+          "frames": len(frames), "partial_min": partial_min}
     if not secret:
         return Verdict(False, "no secret was supplied; the search would be vacuous",
                        ev)
@@ -913,10 +1121,37 @@ def check_body_not_on_wire(frames: Sequence[Frame], secret: bytes,
     corpora: list[bytes] = [bytes(f.raw) for f in frames]
     for src in sorted({bytes(f.eth_src) for f in frames}):
         corpora.extend(s for s in tcp_streams(frames, eth_src=src) if s)
+    forms = secret_forms(secret)
+    ev["forms_searched"] = [name for name, _p in forms]
     control_hits = [i for i, c in enumerate(corpora) if control in c]
-    secret_hits = [i for i, c in enumerate(corpora) if secret in c]
+    full_hits: list = []
+    partial_hits: list = []
+    for i, c in enumerate(corpora):
+        found = [name for name, pat in forms if pat in c]
+        if found:
+            full_hits.append({"corpus": i, "forms": found})
+            continue
+        run, form = max((longest_run(c, pat)[0], name) for name, pat in forms)
+        if run >= partial_min:
+            partial_hits.append({"corpus": i, "form": form, "run": run})
     ev["control_hits"] = len(control_hits)
-    ev["secret_hits"] = len(secret_hits)
+    ev["secret_hits"] = len(full_hits)
+    ev["secret_hit_forms"] = sorted({f for h in full_hits for f in h["forms"]})
+    ev["partial_hits"] = len(partial_hits)
+    ev["partial_longest"] = max((p["run"] for p in partial_hits), default=0)
+    ev["partial_detail"] = partial_hits[:8]
+    if full_hits:
+        return Verdict(False,
+                       f"the response body appears IN CLEARTEXT in "
+                       f"{len(full_hits)} places on the wire (forms: "
+                       f"{', '.join(ev['secret_hit_forms'])}) -- those bytes were "
+                       "not encrypted", ev)
+    if partial_hits:
+        return Verdict(False,
+                       f"{ev['partial_longest']} of the {len(secret)} body bytes "
+                       f"appear contiguously IN CLEARTEXT ({len(partial_hits)} "
+                       f"places, floor {partial_min}) -- a partial leak is still "
+                       "a leak", ev)
     if not control_hits:
         return Verdict(False,
                        f"the control needle ({control[:32]!r}) was NOT found "
@@ -924,14 +1159,10 @@ def check_body_not_on_wire(frames: Sequence[Frame], secret: bytes,
                        "to be capable of finding anything. Reporting the body as "
                        "absent from a corpus like that would be a claim about the "
                        "searcher, not about the wire", ev, status="inconclusive")
-    if secret_hits:
-        return Verdict(False,
-                       f"the response body appears IN CLEARTEXT in "
-                       f"{len(secret_hits)} places on the wire -- those bytes were "
-                       "not encrypted", ev)
     return Verdict(True, f"the {len(secret)} byte response body appears nowhere in "
-                         f"cleartext, in a capture where the control needle was "
-                         f"found {len(control_hits)} times", ev)
+                         f"cleartext in any of {len(forms)} forms, nor any run of "
+                         f"{partial_min}+ bytes of it, in a capture where the "
+                         f"control needle was found {len(control_hits)} times", ev)
 
 
 # ===========================================================================
