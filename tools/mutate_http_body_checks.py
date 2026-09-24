@@ -212,7 +212,8 @@ def stage(root: Path) -> None:
     (root / "src").mkdir(parents=True)
     for rel in (MODULE, RIG,
                 "tools/test_http_body_checks_unit.py",
-                "tools/ip65_hw_checks.py"):
+                "tools/ip65_hw_checks.py",
+                "tools/_skip_policy.py"):  # imported by the suite (#178)
         shutil.copy(REPO / rel, root / rel)
     # The suite reads the real 6502 source: src/http.s for the verdict
     # shape, src/data.s for the symbol widths. src/http.s is MUTATED

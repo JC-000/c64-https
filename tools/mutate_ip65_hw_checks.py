@@ -113,7 +113,10 @@ def stage(root: Path) -> None:
     (root / "tools").mkdir(parents=True)
     (root / "src" / "net" / "ip65").mkdir(parents=True)
     (root / "build").mkdir(parents=True)
+    # _skip_policy.py: the suite imports it (#178); without it the mirror's
+    # baseline dies at import and every mutation reads as "caught".
     for rel in ("tools/ip65_hw_checks.py", "tools/test_ip65_hw_checks_unit.py",
+                "tools/_skip_policy.py",
                 "tools/rig-up-rrnet-macos.sh", "src/net/ip65/ip65_errors.inc"):
         shutil.copy(REPO / rel, root / rel)
     if (REPO / "build" / "labels.txt").exists():
