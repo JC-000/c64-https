@@ -188,6 +188,12 @@ UCI_WAIT_IDLE_BUDGET_TENTHS = 50      ; 5 seconds at 10 Hz
 ; (copy_result, state "10"), THEN the reset lands. If the task never
 ; returns, neither does the reset, and this times out.
 ;
+; "Bit 2 clear" means A reset landed, not that every queued abort item was
+; serviced: a C64 reset queues a spurious CMD_ABORT_DATA item on its own
+; (ResetInterruptHandlerCmdIf), and its reset can land first, leaving ours
+; still queued behind. The gap is theoretical: our next access is a fenced
+; command-byte write, and a later RESET only rewinds an empty buffer.
+;
 ; Output: C=0 reset landed; C=1 5 s timeout (net_last_error = $89).
 ; Clobbers: A
 ; =============================================================================

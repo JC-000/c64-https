@@ -202,6 +202,7 @@ class AbortModel(CommandInterface):
             # copy_result: state "00", nothing staged, no VALIDATE ever.
             self.parsed.append((buf, "noreply"))
             self.new_command = False
+            self.abort_pending = False          # 0x87 clears bits 0-2 too
             self.state = ST_IDLE
             self.response = self.status = b""
             self.resp_ptr = self.stat_ptr = 0
