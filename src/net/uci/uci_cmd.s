@@ -13,7 +13,9 @@
 ;   uci_wait_not_busy  — spin until CMD_BUSY==0; TOD-bounded
 ;   uci_begin_cmd      — A = target id; writes target to UCI_CMD_DATA
 ;   uci_put_byte       — A = parameter byte; writes to UCI_CMD_DATA
-;   uci_push_wait      — writes PUSH_CMD, then uci_wait_not_busy
+;   uci_push_wait      — writes PUSH_CMD, then uci_wait_reply
+;   uci_wait_reply     — spin until the reply is staged (state "1x") or
+;                        the push was rejected (ERROR); TOD-bounded
 ;   uci_check_err      — returns C=1 if error bit set, clears it; C=0 otherwise
 ;   uci_read_resp_bytes— drain DATA_AV bytes to caller-provided buffer
 ;                        (caller fills uci_resp_dst/uci_resp_max beforehand;
@@ -276,13 +278,16 @@ uci_put_byte:
         rts
 
 ; =============================================================================
-; uci_push_wait — commit pushed bytes as a command, then wait for CMD_BUSY=0
+; uci_push_wait — commit pushed bytes as a command, then wait for the reply
 ;
-; At turbo speeds the FPGA may not have latched PUSH_CMD by the time the
-; CPU starts polling CMD_BUSY. A plain uci_fence after the write gives only
-; ≈ 2 µs at 48 MHz — insufficient for the FPGA to assert CMD_BUSY. We add
-; a short delay loop ($40 iterations ≈ 6 µs at 48 MHz, ≈ 300 µs at 1 MHz)
-; before polling, ensuring CMD_BUSY has been asserted by the time we check.
+; Returns once the reply is staged or the push was rejected — NOT when
+; CMD_BUSY clears (#230 part b). See uci_wait_reply for why those differ.
+;
+; The settle loop below predates that: it made sure CMD_BUSY was asserted
+; before a CMD_BUSY poll could read it clear. The reply wait cannot be
+; fooled that way (bits $28 stay clear until the firmware acts), so the
+; loop is now only a harmless delay, left in place to keep this change
+; to the wait itself.
 ;
 ; Clobbers: A, X
 ; =============================================================================
@@ -299,7 +304,66 @@ uci_push_wait:
 @pw_settle:
         dex
         bne @pw_settle
-        jmp uci_wait_not_busy
+        ; fall through into uci_wait_reply
+
+; =============================================================================
+; uci_wait_reply — spin until STATE bit 5 (reply valid) OR ERROR, bounded
+;
+; CMD_BUSY ($01) is handshake_in(0), the new-command flag. The firmware
+; clears it with HANDSHAKE_ACCEPT_COMMAND *before* copy_result stages the
+; reply and writes VALIDATE (command_intf.cc run_task: ACCEPT, then
+; copy_result). In between, STATE reads "01" and DATA_AV/STAT_AV read low,
+; so a caller that waited only for CMD_BUSY=0 can see "no data" for a
+; reply that is a moment from valid. In net_poll that took the no-data
+; exit, and its DATA_ACC was a no-op (the VHDL gates it on state(1)); the
+; reply then went valid, the NEXT poll's PUSH hit a non-idle interface
+; (error_busy, $86 UCI_ERR_READ_FAIL) and its error path drained the late
+; reply away — bytes the firmware counted as delivered.
+;
+; STATE bit 5 is state(1), set only by VALIDATE ("10"/"11"), which follows
+; the copies. ERROR ($08) is included because a PUSH while not idle sets
+; only error_busy and leaves STATE as it was (possibly "01", which would
+; otherwise hold us here for the whole budget). Every command this adapter
+; pushes gets a reply: the firmware skips copy_result only for targets
+; with CMD_IF_NO_REPLY ($80) set, and we only ever send UCI_TARGET_NETWORK.
+;
+; Same CIA1 TOD budget and error code as uci_wait_idle (the template).
+; Output: C=0 reply valid or push rejected (caller runs uci_check_err),
+;         C=1 on timeout (net_last_error = UCI_ERR_WAIT_TIMEOUT).
+; Clobbers: A
+; =============================================================================
+uci_wait_reply:
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        sta @wr_last_tenths
+        lda #$00
+        sta @wr_elapsed
+@wr_loop:
+        lda UCI_STATUS
+        uci_fence                   ; settle read before testing bits
+        and #(UCI_STAT_REPLY_VALID | UCI_STAT_ERROR)   ; $28
+        bne @wr_done
+
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        cmp @wr_last_tenths
+        beq @wr_loop_long           ; no change — keep spinning
+        sta @wr_last_tenths
+        inc @wr_elapsed
+        lda @wr_elapsed
+        cmp #UCI_WAIT_IDLE_BUDGET_TENTHS
+        bcc @wr_loop_long           ; under budget — continue
+        lda #UCI_ERR_WAIT_TIMEOUT
+        sta net_last_error
+        sec
+        rts
+@wr_loop_long:
+        jmp @wr_loop                ; long branch: fence too wide for BCC/BEQ
+@wr_done:
+        clc
+        rts
+@wr_last_tenths: .byte 0
+@wr_elapsed:     .byte 0
 
 ; =============================================================================
 ; uci_check_err — test UCI_STAT_ERROR
