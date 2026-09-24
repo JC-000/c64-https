@@ -1005,8 +1005,8 @@ runner**: suites take
 `(transport, labels, seed)` positionally. `pytest.ini` pins `testpaths` to
 the pure-logic modules — **that list is the enumeration; read it there, not
 here** — and `tools/test_pytest_boundary.py` proves it is exactly the set
-pytest can run, in both directions. It also AST-guards #178 tree-wide: a skip or
-verdict exits via `tools/_skip_policy.py` (`cannot_run`/`require`/`verdict`), never a literal 0.
+pytest can run, in both directions; its section 5 also shape-checks #178
+(skips and verdicts via `tools/_skip_policy.py`, blind spots listed there).
 Both rig dirs (`tests/`, `tools/uci/`)
 are `rig_*.py` and in `norecursedirs`, and each exits 5 on its own. A bare
 `pytest` at the root is green; the total is not quotable, because it tracks

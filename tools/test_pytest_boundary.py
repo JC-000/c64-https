@@ -217,41 +217,63 @@ def test_testpaths_lists_nothing_pytest_cannot_run() -> None:
 # tools/_skip_policy.py is the callable form of that rule. A helper on its
 # own is just another convention to miss -- which is how #157 reintroduced
 # the class one day after #158 swept it -- so this guard is what stops the
-# wrong shape from being merged. It reads every suite and rig by AST and
-# finds each place a run can EXIT SUCCESSFULLY, then asks two questions of
-# the conditions that lead there:
+# wrong shape from being merged. It reads every suite, rig, the aggregate
+# runner and the mutation harnesses by AST, finds each place a run can EXIT
+# SUCCESSFULLY, and asks two questions of the conditions that lead there:
 #
 #   PREREQ   Is this success exit reached from a prerequisite branch -- a
 #            condition that inspects the environment (os.environ, which(),
-#            a path's existence, the platform, a *prereq*/*available*
-#            helper, an ImportError handler) rather than a result? Then the
-#            exit code must BE a _skip_policy call (`return cannot_run(...)`,
-#            `return not_applicable(...)`, `require(...)`), never a literal.
-#            A bare `return 0`, `sys.exit(0)` or pytest-test `return` there
-#            is the #158/#165/#177 shape -- and so is calling cannot_run()
-#            for its printout and then returning 0 anyway, which is why a
-#            policy call elsewhere in the branch earns no exemption.
+#            a path's existence, the platform, a helper whose NAME says
+#            prereq/available/missing/supported/installed, an ImportError
+#            handler) rather than a result? Then the exit code must BE a
+#            _skip_policy call (`return cannot_run(...)`, `require(...)`),
+#            never a literal. A bare `return 0`, `sys.exit(0)` or
+#            pytest-test `return` there is the #158/#165/#177 shape -- and
+#            so is calling cannot_run() for its printout and then returning
+#            0 anyway, which is why a policy call elsewhere in the branch
+#            earns no exemption. A site that ALSO carries evidence that a
+#            check ran (see VACUOUS) is a verdict, not a skip, and is not
+#            PREREQ.
 #
 #   VACUOUS  Is this success exit justified ONLY by the absence of failures
 #            (`0 if failed == 0 else 1`, `1 if failed else 0`, `if failed:
 #            return 1` then `return 0`) with nothing, on any path to it,
-#            showing that a check actually ran (`total > 0`, a preceding
-#            `if total == 0: <exit non-zero>`)? Then zero checks exits 0.
-#            That is test_http.py's #178 verdict.
+#            showing that a check actually ran? Evidence is a positive test
+#            on, or a fall-through past a zero test on, an identifier whose
+#            underscore-separated words include one of EVIDENCE_WORDS
+#            (`total`, `passed`, `executed`, `ran`, ...). Whole words, not
+#            substrings: `transport` and `truncate` are not evidence, and
+#            neither is a list of COLLECTED tests (`assert tests`), which
+#            says nothing about how many passed. test_http.py's #178
+#            verdict was this shape.
 #
-# And, anywhere: a raw pytest.skip / skipif / importorskip / skipTest /
-# unittest.skip outside _skip_policy is RAWSKIP. require() is the one
-# sanctioned route, because it puts the vacuity warning in the reason
-# string -- the only channel -ra keeps.
+#   RAWSKIP  pytest.skip / skipif / importorskip / skipTest / unittest.skip,
+#            `raise unittest.SkipTest`, or the same under an alias (`import
+#            pytest as pt`, `from pytest import skip`) outside _skip_policy.
+#            require() is the one sanctioned route, because it puts the
+#            vacuity warning in the reason string -- the only channel -ra
+#            keeps.
 #
-# What it cannot see, stated rather than hidden: an exit code held in a
-# variable (`return rc`), a zero guard nested in a different block from the
-# verdict it protects, a helper that exits on the caller's behalf, and any
-# success condition that names a result it never checks (`0 if all_ok`).
-# It is a shape guard. It proves the shapes it names are absent; it does
-# not prove every suite is honest.
+# KNOWN BLIND SPOTS -- stated rather than hidden. This is a shape guard: it
+# proves the shapes above are absent, not that every suite is honest.
+#   * an exit code held in a variable (`rc = 0 ... return rc`);
+#   * a zero guard in a different block from the verdict it protects, or in
+#     a helper the verdict calls;
+#   * a helper that exits on its caller's behalf (`def done(): sys.exit(0)`
+#     called from a prerequisite branch);
+#   * a success condition that names a result it never counts (`0 if all_ok
+#     else 1`, `if ok_body: return 0`) -- a verdict on an observation is
+#     not this rule's business, so it is not flagged either way;
+#   * an evidence-named identifier that does not count what its name says
+#     (`total = len(TESTS)` is treated as evidence);
+#   * `getattr(sys, "exit")(0)`, `exec`, and any dynamic spelling;
+#   * exit functions other than main/_main that are only reached via
+#     `sys.exit(fn())` in ANOTHER module;
+#   * a prerequisite condition built from a name the helper-word list does
+#     not know (`if not can_build(): return 0`).
 
-SKIP_GUARD_GLOBS = ("tools/test_*.py", "tests/rig_*.py", "tools/uci/rig_*.py")
+SKIP_GUARD_GLOBS = ("tools/test_*.py", "tests/rig_*.py", "tools/uci/rig_*.py",
+                    "tools/run_all_tests.py", "tools/mutate_*.py")
 
 # The only module allowed to spell the raw pytest skip: it is the wrapper.
 SKIP_GUARD_EXEMPT_MODULES = ("tools/_skip_policy.py",)
@@ -263,28 +285,76 @@ SKIP_GUARD_EXEMPT_MODULES = ("tools/_skip_policy.py",)
 POLICY_VERBS = frozenset({"cannot_run", "not_applicable", "require",
                           "verdict"})
 
-# (repo-relative path, function name, kind) -> why the shape is legitimate.
-# Every entry must still match a finding, or the guard fails: a stale
-# exemption is a hole waiting for the next edit to fall into.
+# (path, function, kind, signature) -> why the shape is legitimate. The
+# signature is the flagged statement plus its gating conditions (see
+# _signature), so an entry exempts exactly ONE site: a new vacuous exit in
+# the same function has a different signature, or makes the count exceed
+# one, and is reported. Every entry must still match, or the guard fails.
 SKIP_GUARD_ALLOWLIST = {
     # Offline self-checks of two hardware rigs. Each is straight-line: a
     # dozen-plus UNCONDITIONAL check() calls run before the verdict, so no
     # path reaches `return 0` without them. `failures` is a list the local
     # check() appends to, and nothing counts passes, so the shape reads as
     # VACUOUS to an AST that cannot see that every check is unconditional.
-    ("tools/uci/rig_https_live.py", "_selfcheck", "VACUOUS"):
+    ("tools/uci/rig_https_live.py", "_selfcheck", "VACUOUS",
+     "return 0 <- not(failures)"):
         "straight-line: every check() above the verdict is unconditional",
-    ("tools/uci/rig_https_wiki.py", "_selfcheck", "VACUOUS"):
+    ("tools/uci/rig_https_wiki.py", "_selfcheck", "VACUOUS",
+     "return 0 <- not(failures)"):
         "straight-line: every check() above the verdict is unconditional",
 }
 
-_EXIT_ATTRS = {("sys", "exit"), ("os", "_exit")}
-_EXIT_NAMES = {"exit", "quit"}
 _RAW_SKIP_ATTRS = {"skip", "skipif", "importorskip", "skipTest",
                    "skipIf", "skipUnless"}
-_ENV_HELPER_WORDS = ("prereq", "available", "missing", "supported",
-                     "ready", "have_", "has_", "skip_if", "installed")
+_RAW_SKIP_EXC = {"SkipTest", "Skipped"}
+# Whole words of a helper's name that make its call a prerequisite probe.
+_PREREQ_WORDS = {"prereq", "prereqs", "prerequisite", "prerequisites",
+                 "available", "missing", "supported", "installed"}
+_PREREQ_PREFIXES = ("have_", "has_", "skip_if")
 _PATH_PROBES = {"exists", "is_file", "is_dir", "isfile", "isdir", "access"}
+# Whole words of an identifier that make it a count of what RAN.
+EVIDENCE_WORDS = {"total", "passed", "passes", "executed", "ran", "run",
+                  "runs", "succeeded", "successes"}
+_NON_EVIDENCE_WORDS = {"fail", "failed", "failure", "failures", "fails",
+                       "err", "error", "errors", "skip", "skipped", "skips"}
+
+
+class _Aliases:
+    """How THIS module spells sys/os/pytest/unittest and their functions."""
+
+    def __init__(self, tree=None):
+        self.sys = {"sys"}
+        self.os = {"os"}
+        self.pytest = {"pytest"}
+        self.unittest = {"unittest"}
+        self.exit_funcs = {"exit", "quit"}      # builtins + `from sys import`
+        self.skip_funcs = set()                 # `from pytest import skip`
+        self.skip_excs = set(_RAW_SKIP_EXC)     # `from unittest import SkipTest`
+        for node in ast.walk(tree) if tree is not None else ():
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    root, bound = a.name.split(".")[0], a.asname or a.name
+                    for mod, bucket in (("sys", self.sys), ("os", self.os),
+                                        ("pytest", self.pytest),
+                                        ("unittest", self.unittest)):
+                        if root == mod:
+                            bucket.add(bound.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                root = node.module.split(".")[0]
+                for a in node.names:
+                    bound = a.asname or a.name
+                    if root == "sys" and a.name == "exit":
+                        self.exit_funcs.add(bound)
+                    if root == "os" and a.name == "_exit":
+                        self.exit_funcs.add(bound)
+                    if root == "pytest" and a.name in _RAW_SKIP_ATTRS:
+                        self.skip_funcs.add(bound)
+                    if root in ("pytest", "_pytest", "unittest") and \
+                            a.name in _RAW_SKIP_EXC:
+                        self.skip_excs.add(bound)
+
+
+_ALIASES = _Aliases()
 
 
 def _call_name(call):
@@ -301,14 +371,23 @@ def _is_exit_call(node):
         return False
     f = node.func
     if isinstance(f, ast.Name):
-        return f.id in _EXIT_NAMES
-    return (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
-            and (f.value.id, f.attr) in _EXIT_ATTRS)
+        return f.id in _ALIASES.exit_funcs
+    if not (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)):
+        return False
+    return ((f.value.id in _ALIASES.sys and f.attr == "exit")
+            or (f.value.id in _ALIASES.os and f.attr == "_exit"))
 
 
-def _is_raise_systemexit(node):
-    return (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
-            and _call_name(node.exc) == "SystemExit")
+def _systemexit_arg(node):
+    """(True, arg-or-None) if `node` is `raise SystemExit[(...)]`."""
+    if not isinstance(node, ast.Raise) or node.exc is None:
+        return False, None
+    exc = node.exc
+    if isinstance(exc, ast.Name) and exc.id == "SystemExit":
+        return True, None                              # bare: code 0
+    if isinstance(exc, ast.Call) and _call_name(exc) == "SystemExit":
+        return True, exc.args[0] if exc.args else None
+    return False, None
 
 
 def _zero_names(tree):
@@ -340,11 +419,31 @@ def _exit_code_functions(tree):
         arg = None
         if _is_exit_call(node) and node.args:
             arg = node.args[0]
-        elif _is_raise_systemexit(node) and node.exc.args:
-            arg = node.exc.args[0]
+        else:
+            is_raise, raised = _systemexit_arg(node)
+            if is_raise:
+                arg = raised
         if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name):
             names.add(arg.func.id)
     return names
+
+
+def _pytest_test_functions(tree):
+    """Functions pytest would collect: module-level test_* and test_*
+    methods of `class Test*` or of a TestCase subclass."""
+    found = [n for n in tree.body if _is_function(n)
+             and n.name.startswith("test_") and not _requests_fixtures(n)]
+    for cls in tree.body:
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        bases = [b.attr if isinstance(b, ast.Attribute) else
+                 getattr(b, "id", "") for b in cls.bases]
+        if not (cls.name.startswith("Test")
+                or any(b.endswith("TestCase") for b in bases)):
+            continue
+        found += [n for n in cls.body
+                  if _is_function(n) and n.name.startswith("test_")]
+    return found
 
 
 def _terminates(body):
@@ -381,19 +480,8 @@ def _disjuncts(test):
     return [test]
 
 
-_COUNT_WORDS = ("total", "pass", "executed", "ran", "run", "count", "check",
-                "test", "case", "assert", "result", "vector", "n_", "num")
-
-
-def _countish(expr):
-    """Does `expr` name a count of things that RAN (not failed, not skipped)?
-
-    Evidence has to be about how much executed. Without this, falling
-    through `if not os.path.exists(PRG): exit(1)` -- a `not X` like any
-    other -- would certify a verdict that nothing ever counted.
-    """
-    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
-        return _countish(expr.left) or _countish(expr.right)  # passed + failed
+def _words(expr):
+    """Lower-cased underscore-separated words of a Name/Attribute, or None."""
     if isinstance(expr, ast.Call) and _call_name(expr) == "len" and expr.args:
         expr = expr.args[0]
     if isinstance(expr, ast.Name):
@@ -401,11 +489,24 @@ def _countish(expr):
     elif isinstance(expr, ast.Attribute):
         ident = expr.attr
     else:
+        return None
+    return {w for w in ident.lower().split("_") if w}
+
+
+def _countish(expr):
+    """Does `expr` name a count of things that RAN (not failed, not skipped)?
+
+    Whole-word match on EVIDENCE_WORDS. `passed + failed` counts, because
+    one operand does. Without the evidence requirement, falling through
+    `if not os.path.exists(PRG): exit(1)` -- a `not X` like any other --
+    would certify a verdict that nothing ever counted.
+    """
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+        return _countish(expr.left) or _countish(expr.right)
+    words = _words(expr)
+    if not words or words & _NON_EVIDENCE_WORDS:
         return False
-    ident = ident.lower()
-    if any(bad in ident for bad in ("fail", "err", "skip")):
-        return False
-    return any(w in ident for w in _COUNT_WORDS)
+    return bool(words & EVIDENCE_WORDS)
 
 
 def _failure_count(expr):
@@ -415,13 +516,8 @@ def _failure_count(expr):
     that exits 0 on an observation (`if ok_body`, `if status == 200`) is
     judging a result, not counting, and is not this rule's business.
     """
-    if isinstance(expr, ast.Call) and _call_name(expr) == "len" and expr.args:
-        expr = expr.args[0]
-    if isinstance(expr, ast.Name):
-        return "fail" in expr.id.lower()
-    if isinstance(expr, ast.Attribute):
-        return "fail" in expr.attr.lower()
-    return False
+    words = _words(expr)
+    return bool(words) and any(w.startswith("fail") for w in words)
 
 
 def _positive_operand(test):
@@ -449,7 +545,7 @@ def _classify(test, taken):
         parts = _conjuncts(test)
         if any(_countish(_positive_operand(p)) or _countish(p)
                for p in parts):
-            return "evidence"      # `failed == 0 and total > 0`, `assert tests`
+            return "evidence"      # `failed == 0 and total > 0`, `if passed`
         zeroed = [_zero_check_operand(p) for p in parts]
         if any(_failure_count(z) or _countish(z) for z in zeroed):
             return "absence"       # `0 if failed == 0`, `if executed == 0`
@@ -467,17 +563,18 @@ def _classify(test, taken):
 def _is_prereq_test(test):
     """Does this condition inspect the environment rather than a result?"""
     for node in ast.walk(test):
-        if isinstance(node, ast.Attribute):
-            if isinstance(node.value, ast.Name) and (
-                    (node.value.id == "os" and node.attr in ("environ", "getenv"))
-                    or (node.value.id == "sys" and node.attr == "platform")
-                    or node.value.id in ("shutil", "platform", "importlib")):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            base, attr = node.value.id, node.attr
+            if ((base in _ALIASES.os and attr in ("environ", "getenv"))
+                    or (base in _ALIASES.sys and attr == "platform")
+                    or base in ("shutil", "platform", "importlib")):
                 return True
         if isinstance(node, ast.Call):
             name = _call_name(node).lower()
             if name in _PATH_PROBES or name in ("which", "getenv", "find_spec"):
                 return True
-            if any(w in name for w in _ENV_HELPER_WORDS):
+            if (set(name.split("_")) & _PREREQ_WORDS
+                    or name.startswith(_PREREQ_PREFIXES)):
                 return True
     return False
 
@@ -531,7 +628,7 @@ class _Site:
 
 
 def _collect_sites(tree):
-    """Every success exit in `tree`, with its gating conditions.
+    """(success-exit sites, count of ALL exit statements) in `tree`.
 
     Gating conditions are (test, taken, enclosing) triples: the enclosing
     `if`s (taken = which arm) and an `IfExp` that selects the zero are
@@ -543,13 +640,12 @@ def _collect_sites(tree):
     """
     zero_names = _zero_names(tree)
     exit_fns = _exit_code_functions(tree)
+    pytest_tests = set(_pytest_test_functions(tree))
     sites = []
-
-    def pytest_test(func):
-        return (func is not None and func.name.startswith("test_")
-                and func in tree.body and not _requests_fixtures(func))
+    exits = [0]
 
     def value_sites(value, node, func, conds, handler):
+        exits[0] += 1
         if isinstance(value, ast.IfExp):
             if _is_zero(value.body, zero_names):
                 sites.append(_Site(node, func, conds + [(value.test, True, True)],
@@ -564,7 +660,8 @@ def _collect_sites(tree):
         if isinstance(st, ast.Return):
             if func is not None and func.name in exit_fns:
                 value_sites(st.value, st, func, conds, handler)
-            elif pytest_test(func) and st.value is None:
+            elif func in pytest_tests and _is_zero(st.value, set()):
+                exits[0] += 1
                 sites.append(_Site(st, func, conds, handler))
         for node in ast.walk(st) if not isinstance(
                 st, (ast.If, ast.For, ast.While, ast.With, ast.Try,
@@ -573,10 +670,10 @@ def _collect_sites(tree):
             if _is_exit_call(node):
                 value_sites(node.args[0] if node.args else None, node, func,
                             conds, handler)
-            elif isinstance(node, ast.Raise) and _is_raise_systemexit(node):
-                args = node.exc.args
-                value_sites(args[0] if args else None, node, func, conds,
-                            handler)
+            else:
+                is_raise, raised = _systemexit_arg(node)
+                if is_raise:
+                    value_sites(raised, node, func, conds, handler)
         if isinstance(st, ast.If):
             visit_block(st.body, func, conds + [(st.test, True, True)], handler)
             visit_block(st.orelse, func, conds + [(st.test, False, True)], handler)
@@ -613,29 +710,50 @@ def _collect_sites(tree):
                 local = local + [(st.test, True, False)]
 
     visit_block(tree.body, None, [], False)
-    return sites
+    return sites, exits[0]
 
 
 def _raw_skip_target(node):
     """True if `node` (a call's func, or a bare decorator) is a raw skip."""
+    if isinstance(node, ast.Name):
+        return node.id in _ALIASES.skip_funcs
     if not (isinstance(node, ast.Attribute) and node.attr in _RAW_SKIP_ATTRS):
         return False
     base = node.value
     base_name = (base.id if isinstance(base, ast.Name) else
                  base.attr if isinstance(base, ast.Attribute) else "")
-    return base_name in ("pytest", "mark", "unittest", "self")
+    return (base_name in _ALIASES.pytest or base_name in _ALIASES.unittest
+            or base_name in ("mark", "self"))
+
+
+def _raw_skip_raise(node):
+    """`raise unittest.SkipTest(...)`, `raise SkipTest`, `raise
+    pytest.skip.Exception(...)` and aliases."""
+    if not isinstance(node, ast.Raise) or node.exc is None:
+        return False
+    exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+    if isinstance(exc, ast.Name):
+        return exc.id in _ALIASES.skip_excs
+    if isinstance(exc, ast.Attribute):
+        if exc.attr in _RAW_SKIP_EXC:
+            return True
+        return exc.attr == "Exception" and _raw_skip_target(exc.value)
+    return False
 
 
 def _raw_skips(tree):
     """pytest/unittest skip spellings that bypass _skip_policy.require().
 
-    CALLS (`pytest.skip(...)`, `self.skipTest(...)`) and DECORATORS
-    (`@pytest.mark.skipif(...)`, `@unittest.skip`) only. A bare attribute
-    read such as `isinstance(exc, pytest.skip.Exception)` skips nothing.
+    CALLS (`pytest.skip(...)`, `self.skipTest(...)`), DECORATORS
+    (`@pytest.mark.skipif(...)`, `@unittest.skip`) and RAISES (`raise
+    unittest.SkipTest`). A bare attribute read such as `isinstance(exc,
+    pytest.skip.Exception)` skips nothing.
     """
     found = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _raw_skip_target(node.func):
+            found.append(node)
+        elif _raw_skip_raise(node):
             found.append(node)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
                              ast.ClassDef)):
@@ -656,48 +774,69 @@ def _enclosing_function(tree, lineno):
     return best
 
 
+def _signature(site):
+    """Line-number-free identity of a site: the exit plus what gates it."""
+    conds = []
+    for test, taken, _ in site.conds:
+        src = ast.unparse(test)
+        conds.append(src if taken else f"not({src})")
+    node = site.node
+    head = ast.unparse(node).splitlines()[0] if not isinstance(
+        node, ast.Raise) else "raise SystemExit"
+    return f"{head} <- " + " & ".join(conds) if conds else head
+
+
 def skip_policy_findings(source, rel):
     """(findings, stats) for one module's source. Pure; unit-testable.
 
-    Each finding is (rel, lineno, function-name, kind, detail).
+    Each finding is (rel, lineno, function-name, kind, detail, signature).
     """
+    global _ALIASES
     tree = ast.parse(source, filename=rel)
+    saved, _ALIASES = _ALIASES, _Aliases(tree)
+    try:
+        return _findings(tree, rel)
+    finally:
+        _ALIASES = saved
+
+
+def _findings(tree, rel):
     findings = []
-    sites = _collect_sites(tree)
+    sites, n_exits = _collect_sites(tree)
     policy = _policy_names(tree)
-    stats = {"sites": len(sites), "policy_calls": 0, "vacuity_checked": 0}
-    stats["policy_calls"] = sum(
-        1 for n in ast.walk(tree) if policy[1](n, policy[0]))
+    stats = {"exits": n_exits, "policy_calls": sum(
+        1 for n in ast.walk(tree) if policy[1](n, policy[0]))}
     for s in sites:
         fname = s.func.name if s.func is not None else "<module>"
         where = (rel, s.node.lineno, fname)
+        kinds = [_classify(t, taken) for t, taken, _ in s.conds]
+        evidence = "evidence" in kinds
         prereq = s.prereq_handler or any(
             _is_prereq_test(t) for t, _, enclosing in s.conds if enclosing)
-        if prereq:
+        if prereq and not evidence:
             findings.append(where + ("PREREQ",
                                      "success exit on a prerequisite branch "
-                                     "that does not go through _skip_policy"))
+                                     "that does not go through _skip_policy",
+                                     _signature(s)))
             continue
-        kinds = [_classify(t, taken) for t, taken, _ in s.conds]
-        if "absence" in kinds or "evidence" in kinds:
-            stats["vacuity_checked"] += 1
-        if "absence" in kinds and "evidence" not in kinds:
+        if "absence" in kinds and not evidence:
             findings.append(where + ("VACUOUS",
                                      "exit 0 justified only by 'nothing "
-                                     "failed'; nothing shows a check ran"))
+                                     "failed'; nothing shows a check ran",
+                                     _signature(s)))
     if rel not in SKIP_GUARD_EXEMPT_MODULES:
         for n in _raw_skips(tree):
             fn = _enclosing_function(tree, n.lineno)
             findings.append((rel, n.lineno, fn.name if fn else "<module>",
                              "RAWSKIP", "raw skip bypasses "
-                             "_skip_policy.require()"))
+                             "_skip_policy.require()",
+                             ast.unparse(n).splitlines()[0]))
     return findings, stats
 
 
 def _skip_guard_scan():
     paths = sorted({p for g in SKIP_GUARD_GLOBS for p in REPO.glob(g)})
-    findings, totals = [], {"files": 0, "sites": 0, "policy_calls": 0,
-                            "vacuity_checked": 0}
+    findings, totals = [], {"files": 0, "exits": 0, "policy_calls": 0}
     for path in paths:
         rel = str(path.relative_to(REPO))
         f, stats = skip_policy_findings(path.read_text(), rel)
@@ -708,16 +847,26 @@ def _skip_guard_scan():
     return findings, totals
 
 
-# Floors under what the scan must find on this tree. A matcher that
-# silently matches nothing is the vacuous-green shape one level up (#178,
-# #161), so each count is pinned at roughly half its measured value: loose
-# enough that ordinary churn does not trip it, tight enough that a broken
-# glob or a matcher that stopped recognising `sys.exit` does.
-#   measured after the #178 sweep: files 64, sites 32, vacuity_checked 15,
-#   policy_calls 159. (Before it: sites 72, vacuity_checked 50 -- the sweep
-#   turned 40 literal verdicts into verdict() calls, which are not sites.)
-SKIP_GUARD_FLOORS = {"files": 32, "sites": 16, "vacuity_checked": 7,
-                     "policy_calls": 80}
+def _apply_allowlist(findings):
+    """(live findings, allowlist keys that matched nothing)."""
+    budget = {k: 1 for k in SKIP_GUARD_ALLOWLIST}
+    live = []
+    for f in findings:
+        key = (f[0], f[2], f[3], f[5])
+        if budget.get(key):
+            budget[key] -= 1
+        else:
+            live.append(f)
+    return live, sorted(k for k, left in budget.items() if left)
+
+
+# Floors under what the scan must find. A matcher that silently matches
+# nothing is the vacuous-green shape one level up (#178, #161). Each floor is
+# on something migration to _skip_policy does NOT shrink -- files scanned,
+# ALL exit statements (a `sys.exit(verdict(...))` still counts), and calls
+# into the policy -- at about half its measured value.
+#   measured at introduction: files 67, exits 403, policy_calls 172.
+SKIP_GUARD_FLOORS = {"files": 33, "exits": 200, "policy_calls": 86}
 
 
 def test_skip_guard_scan_is_not_vacuous() -> None:
@@ -736,32 +885,38 @@ def test_skip_guard_scan_is_not_vacuous() -> None:
 def test_no_involuntary_skip_bypasses_skip_policy() -> None:
     """#178 part 2: the wrong shape cannot be merged."""
     findings, _ = _skip_guard_scan()
-    live = [f for f in findings
-            if (f[0], f[2], f[3]) not in SKIP_GUARD_ALLOWLIST]
+    live, _ = _apply_allowlist(findings)
     assert live == [], (
         "success exits that bypass the involuntary-skip rule "
         "(tools/_skip_policy.py, issue #178):\n" + "\n".join(
-            f"  {p}:{ln} in {fn}(): {kind} -- {detail}"
-            for p, ln, fn, kind, detail in live)
+            f"  {p}:{ln} in {fn}(): {kind} -- {detail}\n      [{sig}]"
+            for p, ln, fn, kind, detail, sig in live)
         + "\nRoute a missing prerequisite through cannot_run()/require(), a "
         "configuration that is out of scope through not_applicable(), and "
-        "gate a failure-count verdict on something having run (e.g. "
-        "`if total == 0: return cannot_run(...)`)."
+        "a finished run's tallies through verdict()."
     )
 
 
 def test_skip_guard_allowlist_has_no_stale_entries() -> None:
     """An exemption that matches nothing is a hole for the next edit."""
     findings, _ = _skip_guard_scan()
-    hit = {(p, fn, k) for p, _, fn, k, _ in findings}
-    stale = sorted(k for k in SKIP_GUARD_ALLOWLIST if k not in hit)
+    _, stale = _apply_allowlist(findings)
     assert stale == [], f"SKIP_GUARD_ALLOWLIST entries match nothing: {stale}"
+
+
+def test_skip_guard_allowlist_exempts_one_site_not_a_function() -> None:
+    """A second vacuous exit in an allowlisted function is still reported."""
+    path, func, kind, sig = next(iter(SKIP_GUARD_ALLOWLIST))
+    fake = [(path, 10, func, kind, "", sig), (path, 20, func, kind, "", sig),
+            (path, 30, func, kind, "", "return 0 <- not(other)")]
+    live, _ = _apply_allowlist(fake)
+    assert [f[1] for f in live] == [20, 30], live
 
 
 # Shapes the guard must flag, and legitimate shapes it must not. These are
 # the matcher's own mutation record: each BAD case is one real regression
-# (the file it came from is named), each GOOD case one legitimate pattern
-# the tree uses today.
+# (the file it came from is named) or one spelling a review showed it
+# missed; each GOOD case is one legitimate pattern the tree uses.
 _GUARD_CASES_BAD = {
     # test_http.py:1048 before #178 part 2.
     "bare_verdict": (
@@ -778,6 +933,25 @@ _GUARD_CASES_BAD = {
         "import sys\ndef main():\n    total = failed = 0\n"
         "    if failed == 0 and total > 0:\n        print('ok')\n"
         "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    # run_all_tests.py before this PR.
+    "aggregate_total_failed": (
+        "import sys\ndef main():\n    total_failed = 0\n"
+        "    sys.exit(0 if total_failed == 0 else 1)\n", "VACUOUS"),
+    # _countish used to substring-match `ran`/`run`/`test`: `transport`.
+    "substring_is_not_evidence": (
+        "import sys\ndef main():\n    transport = failed = 0\n"
+        "    if not transport:\n        sys.exit(1)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    # A list of COLLECTED tests says nothing about how many passed.
+    "collected_list_is_not_evidence": (
+        "def main():\n    tests = [1]\n    assert tests, 'none'\n"
+        "    failed = 0\n    return 1 if failed else 0\n", "VACUOUS"),
+    "sys_alias": (
+        "import sys as s\ndef main():\n    failed = 0\n"
+        "    s.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "from_sys_import_exit": (
+        "from sys import exit as bye\ndef main():\n    failed = 0\n"
+        "    bye(0 if failed == 0 else 1)\n", "VACUOUS"),
     # tests/rig_phase*.py _skip() before #180.
     "prereq_return_0": (
         "import shutil\ndef main():\n    if shutil.which('ca65') is None:\n"
@@ -787,10 +961,23 @@ _GUARD_CASES_BAD = {
     "env_opt_out_exit_0": (
         "import os, sys\nif os.environ.get('OPT') == '1':\n"
         "    print('EXPLICIT SKIP')\n    sys.exit(0)\n", "PREREQ"),
+    "env_opt_out_bare_raise_systemexit": (
+        "import os\nif os.environ.get('OPT') == '1':\n"
+        "    raise SystemExit\n", "PREREQ"),
+    "os_alias_environ": (
+        "import os as o, sys\nif o.environ.get('OPT') == '1':\n"
+        "    sys.exit(0)\n", "PREREQ"),
     # test_build_flags_stamp.py before #177: a pytest `return` is a pass.
     "pytest_bare_return": (
         "import shutil\ndef test_x():\n    if not shutil.which('ld65'):\n"
         "        print('SKIP')\n        return\n    assert True\n", "PREREQ"),
+    "pytest_return_none": (
+        "import shutil\ndef test_x():\n    if not shutil.which('ld65'):\n"
+        "        return None\n    assert True\n", "PREREQ"),
+    "pytest_method_in_test_class": (
+        "import shutil\nclass TestX:\n    def test_x(self):\n"
+        "        if not shutil.which('ld65'):\n            return\n"
+        "        assert True\n", "PREREQ"),
     "import_error_exit_0": (
         "import sys\ntry:\n    import foo\nexcept ImportError:\n"
         "    sys.exit(0)\n", "PREREQ"),
@@ -805,6 +992,16 @@ _GUARD_CASES_BAD = {
     "raw_skipif": (
         "import pytest\n@pytest.mark.skipif(True, reason='x')\n"
         "def test_x():\n    pass\n", "RAWSKIP"),
+    "pytest_alias_skip": (
+        "import pytest as pt\ndef test_x():\n    pt.skip('no')\n", "RAWSKIP"),
+    "from_pytest_import_skip": (
+        "from pytest import skip\ndef test_x():\n    skip('no')\n", "RAWSKIP"),
+    "raise_unittest_skiptest": (
+        "import unittest\ndef test_x():\n"
+        "    raise unittest.SkipTest('no')\n", "RAWSKIP"),
+    "raise_from_unittest_skiptest": (
+        "from unittest import SkipTest\ndef test_x():\n"
+        "    raise SkipTest('no')\n", "RAWSKIP"),
 }
 
 _GUARD_CASES_GOOD = {
@@ -831,9 +1028,6 @@ _GUARD_CASES_GOOD = {
         "import sys\ndef main():\n    ran = failed = 0\n"
         "    if ran + failed == 0:\n        sys.exit(2)\n"
         "    return 1 if failed else 0\n"),
-    "assert_tests_nonempty": (
-        "def main():\n    tests = [1]\n    assert tests, 'none'\n"
-        "    failed = 0\n    return 1 if failed else 0\n"),
     "verdict_helper": (
         "import sys\nfrom _skip_policy import verdict\ndef main():\n"
         "    sys.exit(verdict(1, 0))\n"),
@@ -849,6 +1043,19 @@ _GUARD_CASES_GOOD = {
     "pytest_return_after_assert": (
         "def test_x():\n    out = ''\n    if 'x' in out:\n"
         "        assert out\n        return\n    assert not out\n"),
+    # An evidence-gated verdict that happens to sit under an env condition
+    # is a verdict, not a skip.
+    "evidence_gated_under_env": (
+        "import os, sys\ndef main():\n    passed = failed = 0\n"
+        "    if os.environ.get('VERBOSE'):\n"
+        "        if failed == 0 and passed > 0:\n            sys.exit(0)\n"
+        "    sys.exit(1)\n"),
+    # `ready`/`already` are not prerequisite words.
+    "ready_is_not_a_prereq_word": (
+        "def main():\n    if already_ready():\n        return 0\n    return 1\n"),
+    "non_test_class_method": (
+        "import shutil\nclass Helper:\n    def test_x(self):\n"
+        "        if not shutil.which('ld65'):\n            return\n"),
 }
 
 
