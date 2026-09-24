@@ -242,8 +242,10 @@ def test_empty_reply_is_a_reply():
     SOCKET_CLOSE, failed connects) leaves DATA_AV/STAT_AV low but still sets
     STATE "10". A wait keyed on the availability bits instead of STATE never
     ends on it; here the TOD advances every read, so that shows up as $89."""
-    # (b"", b"") is the firmware's "Null command" shape: VALIDATE_LAST with
-    # no data AND no status, so neither availability bit ever rises.
+    # (b"", b"") has the SHAPE of the firmware's "Null command" reply:
+    # VALIDATE_LAST with no data AND no status, so neither availability bit
+    # ever rises. A real SOCKET_READ always attaches a status, so as a
+    # SOCKET_READ reply this is a stress case, not a reachable one.
     for window, status in ((0, OK), (WINDOW, OK), (WINDOW, b"")):
         cpu, mem, uci, labels = _require(
             [(b"", status), (_read_reply(b"AFTER"), OK)], window)

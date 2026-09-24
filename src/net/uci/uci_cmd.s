@@ -335,10 +335,14 @@ uci_push_wait:
 ; UCI_TARGET_NETWORK ($03) first, but the #230(a) ABORT race can reset
 ; the command pointer mid-command, so the firmware parses a later byte
 ; as the target — e.g. TCP_CONNECT's port_lo, which is $BB for port 443.
-; Then this wait runs out its budget: 5 s and $89 UCI_ERR_WAIT_TIMEOUT,
-; where the old CMD_BUSY wait failed fast as $88. The command is lost
-; either way; only the error code and the delay differ. #230(a)'s fix
-; (wait out the ABORT before the next command) closes it.
+; Then this wait runs out its budget: 5 s and $89 UCI_ERR_WAIT_TIMEOUT.
+; The old CMD_BUSY wait was not faster: it went on to
+; uci_read_resp_bytes' 65,536 fenced spins (~7.5 s at 48 MHz) before
+; reporting $88. In this no-reply case the command is lost either way and
+; only the error code differs. (The observed "21,UNKNOWN COMMAND" outcome
+; of the same race is an empty but VALID reply: it still ends this wait
+; at once, then pays the ~7.5 s spin and reports $88.) #230(a)'s fix
+; (wait out the ABORT before the next command) closes both.
 ;
 ; Same CIA1 TOD budget and error code as uci_wait_idle (the template).
 ; Output: C=0 reply valid or push rejected (caller runs uci_check_err),
@@ -472,7 +476,8 @@ uci_read_resp_bytes:
         ; Every caller reaches this after uci_push_wait, which now returns
         ; only once the reply is VALID (#230 b), so DATA_AV is already
         ; final here; the 16-bit per-byte spin below predates that and is
-        ; now only a (long) wait on a reply shorter than uci_resp_max.
+        ; now only a long wait (~7.5 s at 48 MHz: 65,536 fenced spins) on
+        ; a reply shorter than uci_resp_max.
         lda uci_resp_dst
         sta @rd_store+1
         lda uci_resp_dst+1
