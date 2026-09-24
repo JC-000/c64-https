@@ -13,9 +13,10 @@
 ;   uci_wait_not_busy  — spin until CMD_BUSY==0; TOD-bounded
 ;   uci_begin_cmd      — A = target id; writes target to UCI_CMD_DATA
 ;   uci_put_byte       — A = parameter byte; writes to UCI_CMD_DATA
-;   uci_push_wait      — writes PUSH_CMD, then uci_wait_reply
-;   uci_wait_reply     — spin until the reply is staged (state "1x") or
-;                        the push was rejected (ERROR); TOD-bounded
+;   uci_push_wait      — clears ERROR, writes PUSH_CMD, then waits for the
+;                        reply to be staged (state "1x") or the push to be
+;                        rejected (ERROR); TOD-bounded. (Its tail,
+;                        uci_wait_reply, is internal — not exported.)
 ;   uci_check_err      — returns C=1 if error bit set, clears it; C=0 otherwise
 ;   uci_read_resp_bytes— drain DATA_AV bytes to caller-provided buffer
 ;                        (caller fills uci_resp_dst/uci_resp_max beforehand;
@@ -283,23 +284,24 @@ uci_put_byte:
 ; Returns once the reply is staged or the push was rejected — NOT when
 ; CMD_BUSY clears (#230 part b). See uci_wait_reply for why those differ.
 ;
-; The settle loop below predates that: it made sure CMD_BUSY was asserted
-; before a CMD_BUSY poll could read it clear. The reply wait cannot be
-; fooled that way (bits $28 stay clear until the firmware acts), so the
-; loop is now only a harmless delay, left in place to keep this change
-; to the wait itself.
+; ERROR is cleared first so that, in the wait, it can only mean "THIS push
+; was rejected": error_busy is sticky, and a bit left over from anything
+; else would otherwise end the wait before the firmware had even accepted
+; the command.
 ;
 ; Clobbers: A, X
 ; =============================================================================
 uci_push_wait:
+        lda #UCI_CTRL_CLR_ERR
+        sta UCI_CONTROL
+        jsr uci_settle
         lda #UCI_CTRL_PUSH_CMD
         sta UCI_CONTROL
         uci_fence
-        ; Fixed settle delay — at turbo speeds the FPGA may not have
-        ; latched PUSH_CMD and asserted CMD_BUSY by the time the CPU
-        ; starts polling. $FF iterations × 5 cycles ≈ 27 µs at 48 MHz,
-        ; ≈ 1.3 ms at 1 MHz — sufficient for the FPGA to latch the
-        ; command without using inline NOP fences that bloat code size.
+        ; Fixed delay, kept from the CMD_BUSY-wait era, when it made sure
+        ; CMD_BUSY was asserted before a poll could read it clear. The
+        ; reply wait cannot be fooled that way ($28 stays clear until the
+        ; firmware acts), so this is now only a harmless ~27 us at 48 MHz.
         ldx #$FF
 @pw_settle:
         dex
@@ -323,9 +325,20 @@ uci_push_wait:
 ; STATE bit 5 is state(1), set only by VALIDATE ("10"/"11"), which follows
 ; the copies. ERROR ($08) is included because a PUSH while not idle sets
 ; only error_busy and leaves STATE as it was (possibly "01", which would
-; otherwise hold us here for the whole budget). Every command this adapter
-; pushes gets a reply: the firmware skips copy_result only for targets
-; with CMD_IF_NO_REPLY ($80) set, and we only ever send UCI_TARGET_NETWORK.
+; otherwise hold us here for the whole budget). An EMPTY reply is still a
+; VALIDATE (state "10", DATA_AV/STAT_AV may stay low), which is why this
+; tests STATE and not the availability bits.
+;
+; KNOWN GAP — a command that gets no reply at all. The firmware skips
+; copy_result (HANDSHAKE_RESET, state "00", no VALIDATE) when the first
+; command byte has CMD_IF_NO_REPLY ($80) set. We always send
+; UCI_TARGET_NETWORK ($03) first, but the #230(a) ABORT race can reset
+; the command pointer mid-command, so the firmware parses a later byte
+; as the target — e.g. TCP_CONNECT's port_lo, which is $BB for port 443.
+; Then this wait runs out its budget: 5 s and $89 UCI_ERR_WAIT_TIMEOUT,
+; where the old CMD_BUSY wait failed fast as $88. The command is lost
+; either way; only the error code and the delay differ. #230(a)'s fix
+; (wait out the ABORT before the next command) closes it.
 ;
 ; Same CIA1 TOD budget and error code as uci_wait_idle (the template).
 ; Output: C=0 reply valid or push rejected (caller runs uci_check_err),
@@ -456,10 +469,10 @@ uci_ack:
 ; =============================================================================
 uci_read_resp_bytes:
         ; Patch the dst pointer into the STA abs,Y instruction below.
-        ; At turbo speeds the firmware may not have staged response data
-        ; by the time the CPU reaches this point (e.g. TCP_CONNECT takes
-        ; a full network round-trip). Use a 16-bit spin-wait on DATA_AV
-        ; so we tolerate up to ~150 ms at 48 MHz without bailing early.
+        ; Every caller reaches this after uci_push_wait, which now returns
+        ; only once the reply is VALID (#230 b), so DATA_AV is already
+        ; final here; the 16-bit per-byte spin below predates that and is
+        ; now only a (long) wait on a reply shorter than uci_resp_max.
         lda uci_resp_dst
         sta @rd_store+1
         lda uci_resp_dst+1
