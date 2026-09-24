@@ -598,8 +598,8 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH`), not by dropping
     `reu_mul_init.o` — the wrapper does no member surgery at all any
     more (§6.1), it `cp`s the upstream archive. `reu_mul` is APP_OWNED
-    here. Flag stays off; the in-tree X25519 is correct (RFC 7748
-    vector 2 passes) and ships.
+    here. Flag off; in-tree X25519 ships. RFC vectors passed, but ~1.3%
+    of X25519 scalar mults failed (#242); a24 bug: peer-forced (#244).
   - **P-384 build is broken**, one link deeper than before: the `ar65`
     member-name bug was ours (fixed), and the chain now stops at
     `LIB_NISTCURVES_SHA384_TABLES` overflowing `OVERLAY_REGION` by 1,536 B
