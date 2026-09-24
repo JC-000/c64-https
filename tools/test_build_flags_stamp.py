@@ -190,8 +190,10 @@ def _require_toolchain():
 
 
 class Farm:
-    """A disposable tree whose build/ is private (ip65/ and ip65-build/ are
-    symlinks: the ip65-libs/ip65-blob cases run real sub-makes in them)."""
+    """A disposable tree whose build/ is private. src/cfg/tools/libs/ip65/
+    ip65-build are symlinks into the real checkout, so the libs/ sub-make
+    (libs/nistcurves/build/), `make ip65-libs` and `make ip65-blob`'s
+    ca65/ld65 recipe write there."""
 
     def __init__(self):
         self.dir = Path(tempfile.mkdtemp(prefix="c64-flags-stamp-"))
