@@ -922,37 +922,41 @@ net_tcp_send:
 ; hits the `state <= "00"` arm of the same VHDL file's
 ; c_cif_io_handshake_out case.
 ;
-; That reset is done by a FreeRTOS task, not by the FPGA. uci_abort now
-; waits for it itself, on $DF1C bit 2, which only that reset clears (#230).
-; The same reset write forces state "00" and clears CMD_BUSY, so the
-; uci_wait_idle after it should pass on its first read; it stays as a
-; cheap check of that reading of the VHDL. Its carry is deliberately
-; discarded: we already have a failure to report, and it can only set
-; net_last_error to the UCI_ERR_WAIT_TIMEOUT that is already there.
+; That reset is done by a FreeRTOS task, not by the FPGA. uci_abort waits
+; for it itself (#230): it spins in uci_wait_idle, whose mask now includes
+; $DF1C bit 2, which only that reset clears, in the same write that forces
+; state "00" and clears CMD_BUSY. So one wait covers "reset landed" and
+; "idle"; a second uci_wait_idle here (#194's shape) could only repeat it.
+; Its carry is deliberately discarded: we already have a failure to report,
+; and it can only set net_last_error to the $89 that is already there.
 ;
 ; Two further points in ABORT's favour, both from the firmware side:
 ; HANDSHAKE_RESET also rewinds command_pointer to the buffer base, which
 ; DATA_ACC does not, so a partially-pushed command cannot be prepended to
-; the next one; and NetworkTarget::abort() (network_target.cc) only calls
-; discard_read_reply() — it closes no socket, close_all_sockets() being
-; reachable only from c64_reset() — so aborting here cannot desync our
-; socket id from the firmware's table.
+; the next one; and ABORT closes no socket, so it cannot desync our socket
+; id from the firmware's table: run_task calls the target's abort(int),
+; and NetworkTarget does not override it (network_target.cc declares an
+; empty abort(void), a different signature), so it runs CommandTarget's
+; empty default (command_intf.h). ~/Documents/1541ultimate, read 2026-09.
 ;
 ; WHAT THIS DOES NOT RECOVER. The abort is serviced by the SAME task that
 ; services commands (command_intf.cc's run_task). The likeliest reason
 ; uci_push_wait timed out is that task being blocked inside lwip_send —
-; and a task blocked there cannot action an abort either. In that case
-; uci_wait_idle below also expires and we return with the interface still
-; dirty, having spent a second 5 s (in uci_abort's own wait; the
-; uci_wait_idle is skipped then, as it could only spend a third). This
-; helps the transient-slowness class only; a genuinely stuck server task
-; still needs the boot-time uci_abort in net_init.
+; and a task blocked there cannot action an abort either: the task is
+; FIFO, so the abort waits behind the stuck command. In that case
+; uci_abort's wait also expires and we return with the interface still
+; dirty, having spent a second 5 s. This helps the transient-slowness
+; class only (a command that completes late, after which the queued
+; abort resets it); a genuinely stuck server task still needs a reboot.
 ;
 ; Cost of that, stated plainly: a bail can block ~10 s where it blocked
 ; ~5 s. It is one extra wait per CALL, not per chunk — every caller JMPs
 ; here as its exit — and no caller retries (tls_send_record bcs @fail;
 ; http_get_plain bcs @plain_close_err), so the exposure is bounded at one
-; doubling per call.
+; doubling per call. Worst case against a task that never returns: a
+; connect costs ~10 s (push wait + abort wait) and the close after it
+; ~10 s (entry wait, as the connect left the abort pending, + its own
+; abort wait), ~20 s for the pair where it was ~10 s before.
 ;
 ; SCOPE (#221). Routed here: net_tcp_send's push-wait and drain exits;
 ; net_tcp_connect's entry wait, push wait and both drain pairs; and
@@ -965,11 +969,7 @@ net_tcp_send:
 ; every later connect failing until reboot.
 ; =============================================================================
 uci_txn_bail:
-        jsr uci_abort
-        bcs @tb_done                ; reset never landed: $89 set, and
-                                    ; a second 5 s wait would learn nothing
-        jsr uci_wait_idle
-@tb_done:
+        jsr uci_abort               ; waits for reset AND idle ($35)
         sec
         rts
 
@@ -979,10 +979,6 @@ uci_txn_bail:
 ; forced back to NET_TCP_CLOSED.
 ; =============================================================================
 net_tcp_close:
-        ; CLOSED on every exit, so set it first: nothing below reads it.
-        lda #NET_TCP_CLOSED
-        sta net_tcp_state
-
         jsr uci_wait_idle
         ; Not idle within 5 s (typically a net_poll bail left a reply
         ; open) — abort it and return C=1, as before (#221).
@@ -1005,10 +1001,18 @@ net_tcp_close:
         bcs @cl_bail                ; drain wedged — abort (#221)
         jsr uci_drain_status
         bcs @cl_bail
-        jmp uci_ack                 ; tail call (close returns no code)
+        jsr uci_ack
+        jmp @cl_closed
 
 @cl_bail:
-        jmp uci_txn_bail            ; C=1, as every bail here returned
+        jsr uci_txn_bail            ; C=1, as every bail here returned
+@cl_closed:
+        ; CLOSED is stored on the way OUT, never earlier: it means this
+        ; routine ran to completion or timed out (#232's close_confirmed
+        ; reads it that way), not merely that it was entered.
+        lda #NET_TCP_CLOSED
+        sta net_tcp_state
+        rts
 
 ; =============================================================================
 ; net_dns_resolve — stage a hostname for the next net_tcp_connect.

@@ -20,13 +20,15 @@ it, and the firmware parses an empty ("Null command") or truncated
 socket id: ``$88 UCI_ERR_NO_SOCKET``.  The pending abort shows in neither
 STATE nor CMD_BUSY, so ``uci_wait_idle``'s ``$31`` mask can pass while it
 is still pending.  ``uci_abort`` used a fixed 32-iteration spin; it now
-waits for bit 2 to clear, on the CIA1 TOD bound.
+falls into ``uci_wait_idle``, whose mask is now ``$35`` (bit 2 included),
+on the CIA1 TOD bound, so every entry wait also waits out a pending abort.
 
 (b) ``net_tcp_connect`` and ``net_tcp_close`` had timeout exits that
 returned without accepting or aborting the transaction.  The interface
 stayed where the firmware had put it, and every later connect spent 5 s in
 ``uci_wait_idle`` and failed, until a reboot.  Each exit now ends in
-``uci_txn_bail`` (ABORT, then idle), which is #194's ``@sb_bail`` shared.
+``uci_txn_bail`` (ABORT, then one wait for reset + idle), which is #194's
+``@sb_bail`` shared.
 Each test below stalls one exit and then asks for a fresh connect.
 
 HOW IT TESTS IT
@@ -41,10 +43,15 @@ addresses) runs on ``test_uci_data_acc.py``'s 6502 interpreter against
     ``21,UNKNOWN COMMAND``, a first byte with bit 7 set -> no reply at
     all (``CMD_IF_NO_REPLY``), else the scripted reply);
   * a pending abort: bit 2 reads set, DATA_AV/STAT_AV read low (the VHDL
-    gates both on ``not handshake_in(2)``), and the reset lands
-    ``abort_latency`` model ticks after the ABORT write;
-  * a command the firmware never picks up (a stall), which an abort still
-    clears;
+    gates both on ``not handshake_in(2)``);
+  * a FIFO firmware task, as ``run_task`` is: the IRQ queues each new
+    handshake bit and the task actions them in order. An abort written
+    while a command is still being serviced waits BEHIND it: the command
+    completes (``copy_result``, state "10") and only then does the reset
+    land. A command pushed while an abort is queued ahead of it is parsed
+    after the reset, against the rewound pointer. Each item is actioned
+    N ticks after reaching the head (``abort_latency``, ``cmd_latencies``);
+    ``None`` is a task that never returns, which blocks the abort too;
   * an absent interface (open bus), for the NOT_PRESENT path.
 
 Model time advances on ``$DF1C`` reads (as in the sibling models) and, here,
@@ -144,7 +151,19 @@ class FastCPU(CPU):
 
 
 class AbortModel(CommandInterface):
-    """CommandInterface + command buffer + a pending, delayed abort."""
+    """CommandInterface + command buffer + a FIFO firmware task.
+
+    run_task (command_intf.cc) takes the handshake bits the IRQ queued, in
+    order, one item at a time. So an ABORT written while the task is still
+    busy with a command waits BEHIND that command: the command completes
+    (ACCEPT, copy_result -> state "10") and only then does HANDSHAKE_RESET
+    land. A command pushed while an abort is queued ahead of it is serviced
+    after the reset, against the rewound command pointer.
+
+    Each queue item is [kind, ticks]: it is actioned after `ticks` model
+    ticks at the HEAD of the queue; None means never (a task that does not
+    return, which also blocks everything behind it).
+    """
 
     def __init__(self, replies=(), abort_latency=ABORT_LATENCY,
                  present=True):
@@ -152,11 +171,11 @@ class AbortModel(CommandInterface):
         self.abort_latency = abort_latency      # None: never serviced
         self.present = present
         self.cmd_buf = []
-        self.abort_pending = False
-        self._abort_left = None
-        self.stall_pushes = 0                   # next N pushes never serviced
+        self.abort_pending = False              # handshake_in(2), bit 2
+        self.queue = []                         # FIFO of [kind, ticks]
+        self.cmd_latencies = []                 # per accepted push; default
         self.late_reply = None                  # staged at first $DF1D write
-        self._stalled = False
+        self.on_push = None                     # hook(model) at each push
         self.parsed = []                        # (bytes, kind) per service
         self.status_reads_while_abort_pending = 0
 
@@ -164,16 +183,14 @@ class AbortModel(CommandInterface):
     def _reset(self):
         """HANDSHAKE_RESET (0x87): one write, all of these at once."""
         self.abort_pending = False
-        self._abort_left = None
         self.state = ST_IDLE
         self.new_command = False
         self.cmd_buf = []                       # command_pointer rewound
         self.response = self.status = b""
         self.resp_ptr = self.stat_ptr = 0
         self.endless = False
-        self._stalled = False                   # target->abort()
         self.aborts_completed += 1
-        # A NEW_COMMAND event already queued (_fw_countdown) survives: the
+        # A NEW_COMMAND item already queued behind the abort survives: the
         # task services it next, against the rewound pointer.
 
     def _service(self):
@@ -207,18 +224,27 @@ class AbortModel(CommandInterface):
         self.new_command = False
         self.state = ST_DATA_LAST
 
+    def _run_head(self):
+        kind, _ = self.queue.pop(0)
+        if kind == "abort":
+            self._reset()
+        else:
+            self._service()
+
     def _tick(self):
-        if self.abort_pending:
-            if self._abort_left is not None:
-                self._abort_left -= 1
-                if self._abort_left <= 0:
-                    self._reset()
-            return                              # abort is serviced first
-        if self._fw_countdown is not None:
-            self._fw_countdown -= 1
-            if self._fw_countdown <= 0:
-                self._fw_countdown = None
-                self._service()
+        if not self.queue:
+            return
+        head = self.queue[0]
+        if head[1] is None:
+            return                              # task never returns
+        head[1] -= 1
+        if head[1] <= 0:
+            self._run_head()
+
+    def _enqueue(self, kind, ticks):
+        self.queue.append([kind, ticks])
+        if ticks == 0 and len(self.queue) == 1:
+            self._run_head()
 
     # -- host side ----------------------------------------------------------
     def read(self, addr):
@@ -251,19 +277,21 @@ class AbortModel(CommandInterface):
             return
         if value & UCI_CTRL_ABORT:
             self.abort_writes += 1
-            self.abort_pending = True
-            self._abort_left = self.abort_latency
-            if self.abort_latency == 0:
-                self._reset()
+            if not self.abort_pending:          # the IRQ queues a new bit
+                self.abort_pending = True       # only once until serviced
+                self._enqueue("abort", self.abort_latency)
             value &= ~UCI_CTRL_ABORT
         if not value:
             return
         accepted = self.pushes_accepted
         super().write(addr, value)
-        if self.pushes_accepted > accepted and self.stall_pushes:
-            self.stall_pushes -= 1
-            self._fw_countdown = None           # the task never gets to it
-            self._stalled = True
+        if self.pushes_accepted > accepted:
+            self._fw_countdown = None           # the base model's timer:
+            if self.on_push is not None:        # replaced by the queue
+                self.on_push(self)
+            ticks = (self.cmd_latencies.pop(0) if self.cmd_latencies
+                     else base.FW_LATENCY)
+            self._enqueue("cmd", ticks)
 
 
 # ---------------------------------------------------------------------------
@@ -448,9 +476,16 @@ def test_connect_entry_wait_bail():
                 NET_TCP_CONNECT_FAIL)
 
 
+# A task busy this many model ticks on one command: longer than the push
+# wait's ~50-tick budget, shorter than push wait + abort wait. The stalled
+# command then completes (state "10"), and the abort queued behind it resets.
+STALL_RECOVERS = 70
+
+
 def test_connect_push_wait_bail():
-    uci = AbortModel([CONNECT_OK])
-    uci.stall_pushes = 1
+    """The task is slow on TCP_CONNECT; the abort waits behind it (FIFO)."""
+    uci = AbortModel([CONNECT_OK, CONNECT_OK])
+    uci.cmd_latencies = [STALL_RECOVERS]
     cpu, mem, labels = _require(uci)
     carry = _connect(cpu, labels)
     _after_bail(cpu, mem, uci, labels, carry,
@@ -498,8 +533,9 @@ def test_close_entry_wait_bail():
 
 
 def test_close_push_wait_bail():
-    uci = AbortModel([CONNECT_OK])
-    uci.stall_pushes = 1
+    """The task is slow on SOCKET_CLOSE; the abort waits behind it (FIFO)."""
+    uci = AbortModel([(b"", OK), CONNECT_OK])
+    uci.cmd_latencies = [STALL_RECOVERS]
     cpu, mem, labels = _require(uci)
     mem.write(labels["uci_socket_id"], 1)
     mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
@@ -516,6 +552,70 @@ def test_close_drain_bail():
     carry = _close(cpu, labels)
     _after_bail(cpu, mem, uci, labels, carry,
                 "net_tcp_close's drain bail (@cl_drain_to)", NET_TCP_CLOSED)
+
+
+def test_bail_whose_abort_never_lands():
+    """The task never returns from TCP_CONNECT, so the abort queued behind
+    it never lands either. The bail must report it ($89, C=1) after ONE
+    abort wait, not stack a second 5 s wait behind it."""
+    uci = AbortModel([CONNECT_OK])
+    uci.cmd_latencies = [None]
+    cpu, mem, labels = _require(uci)
+    carry = _connect(cpu, labels)
+    base._check(carry is True and _err(mem, labels) == UCI_ERR_WAIT_TIMEOUT
+                and _state(mem, labels) == NET_TCP_CONNECT_FAIL, (
+        "stuck task: connect returned C=%d, net_last_error=$%02X, "
+        "net_tcp_state=$%02X; expected C=1, $89, CONNECT_FAIL"
+        % (carry, _err(mem, labels), _state(mem, labels))))
+    base._check(uci.abort_writes == 1 and uci.aborts_completed == 0, (
+        "abort writes=%d, completed=%d; expected one write that never lands"
+        % (uci.abort_writes, uci.aborts_completed)))
+    # One TENTHS read per wait-loop iteration and one tenth per read, so
+    # each expired wait costs BUDGET reads: push wait + ONE abort wait.
+    reads = mem._tod_reads
+    budget = base.BUDGET_TENTHS
+    base._check(2 * budget <= reads < 3 * budget, (
+        "the stuck-task connect read the TOD %d times: expected two expired "
+        "waits (%d-%d), push wait + one abort wait; %d or more means a "
+        "further wait was stacked behind an abort that cannot land"
+        % (reads, 2 * budget, 3 * budget - 1, 3 * budget)))
+
+
+def test_closed_is_not_visible_before_the_close_ran():
+    """#232's close_confirmed reads CLOSED as "net_tcp_close ran to
+    completion or timed out". It must not be visible at the SOCKET_CLOSE
+    push, and must be there on the way out."""
+    uci = AbortModel([(b"", OK)])
+    cpu, mem, labels = _require(uci)
+    mem.write(labels["uci_socket_id"], 1)
+    mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
+    seen = []
+    uci.on_push = lambda m: seen.append(_state(mem, labels))
+    _close(cpu, labels)
+    base._check(seen == [NET_TCP_CONNECTED], (
+        "net_tcp_state at the SOCKET_CLOSE push was %r; expected "
+        "[$01 CONNECTED] — CLOSED became visible before the close ran"
+        % seen))
+    base._check(_state(mem, labels) == NET_TCP_CLOSED,
+                "net_tcp_close left net_tcp_state=$%02X"
+                % _state(mem, labels))
+
+
+def test_abort_outlasting_init_is_waited_out_by_the_next_command():
+    """net_init's abort wait expires with the reset still pending (state
+    "00", bit 2 set). The trampoline ignores net_init's carry, so the next
+    thing is net_tcp_connect: its entry wait must see bit 2 ($35 mask), or
+    the command it writes is rewound under it (#230 a, residual case)."""
+    uci = AbortModel([CONNECT_OK], abort_latency=base.BUDGET_TENTHS + 10)
+    cpu, mem, labels = _require(uci)
+    carry = cpu.call(labels["net_init"])
+    base._check(carry is True and _err(mem, labels) == UCI_ERR_WAIT_TIMEOUT
+                and uci.abort_pending, (
+        "premise: net_init should time out with the abort still pending "
+        "(C=%d, err=$%02X, pending=%s)"
+        % (carry, _err(mem, labels), uci.abort_pending)))
+    _assert_connected(cpu, mem, uci, labels,
+                      "connect after net_init's abort wait expired")
 
 
 def test_clean_connect_close_connect_never_aborts():
@@ -549,6 +649,9 @@ TESTS = (
     test_close_entry_wait_bail,
     test_close_push_wait_bail,
     test_close_drain_bail,
+    test_bail_whose_abort_never_lands,
+    test_closed_is_not_visible_before_the_close_ran,
+    test_abort_outlasting_init_is_waited_out_by_the_next_command,
     test_clean_connect_close_connect_never_aborts,
 )
 
