@@ -80,10 +80,10 @@ from rig_https_local import (  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from http_body_checks import (  # noqa: E402
-    EXIT_FAIL, EXIT_INCONCLUSIVE, EXIT_PASS, NET_TCP_CLOSED, STALL_ABORT,
-    STALL_ABORT_MIN, STALL_GRACE, SYMBOLS, check_body_complete,
-    check_fetch_settled, check_http_status, decide_exit, decode_body_state,
-    should_stop_early,
+    EXIT_FAIL, EXIT_INCONCLUSIVE, EXIT_PASS, STALL_ABORT, STALL_GRACE,
+    SYMBOLS, StallTracker, check_body_complete, check_fetch_settled,
+    check_http_status, close_confirmed, decide_exit, decode_body_state,
+    early_stop_step, stall_config_error,
 )
 from ip65_hw_checks import check_shadow_ram_readable  # noqa: E402
 
@@ -121,6 +121,10 @@ FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", str(300 * _SCALE)))
 #: conditions are `http_body_checks.should_stop_early`'s; this is only the
 #: time margin, and that function refuses one below STALL_ABORT_MIN.
 STALL_ABORT_S = float(os.environ.get("STALL_ABORT", str(STALL_ABORT * _SCALE)))
+#: STALL_GRACE: two poll ticks plus slack. Shorter and a slow server reads
+#: as a stall; longer and a real stall reads as progress. Must stay below
+#: STALL_ABORT_S (checked before the lock, `stall_config_error`).
+STALL_GRACE_S = float(os.environ.get("STALL_GRACE", str(STALL_GRACE)))
 
 
 def label_addr(name: str) -> int:
@@ -170,12 +174,13 @@ def main() -> int:
     if not PRG_PATH.is_file():
         print(f"ERROR: no PRG at {PRG_PATH}", file=sys.stderr)
         return 2
-    # #226: refuse a too-small STALL_ABORT HERE, before the device is
-    # touched. should_stop_early raises on one, and a raise inside the poll
-    # loop would skip the 'Q' below with a live socket.
-    if STALL_ABORT_S < STALL_ABORT_MIN:
-        print(f"[fatal] STALL_ABORT={STALL_ABORT_S:.0f}s is below the "
-              f"{STALL_ABORT_MIN:.0f}s floor", file=sys.stderr)
+    # #226: refuse bad stall knobs HERE, before the device is touched. A
+    # sub-floor STALL_ABORT makes should_stop_early raise inside the poll
+    # loop, skipping the 'Q' below with a live socket; a STALL_GRACE at or
+    # above it would make an early stop and the deadline disagree.
+    bad_stall = stall_config_error(STALL_ABORT_S, STALL_GRACE_S)
+    if bad_stall:
+        print(f"[fatal] {bad_stall}", file=sys.stderr)
         return 2
     prg = PRG_PATH.read_bytes()
     print(f"Loaded {len(prg)} B from {PRG_PATH}")
@@ -374,7 +379,7 @@ def main() -> int:
         body = None
         # A body still growing when the budget expires is a budget problem,
         # not a truncation. Track when the consumed count last moved.
-        last_total, last_moved = None, started
+        tracker = StallTracker(started)
         settled = check_fetch_settled(False, 0.0, FETCH_TIMEOUT)
         stopped_early = False
         while time.monotonic() < deadline:
@@ -384,52 +389,45 @@ def main() -> int:
                 print(f"  {body.reason}")
                 break
             now = time.monotonic()
-            if state.body_total != last_total:
-                last_total, last_moved = state.body_total, now
             if now - last_print > 15:
                 print(f"  {state.summary()}")
                 last_print = now
             # #226: a verdict that can no longer change need not wait out
-            # FETCH_TIMEOUT. The socket byte is read only past the time
-            # margin, so a healthy fetch costs no extra REST traffic.
-            if now - last_moved >= STALL_ABORT_S:
-                stop, why = should_stop_early(
-                    state, read_tcp_state(), now - last_moved,
-                    stall_abort=STALL_ABORT_S, shadow_ok=shadow.ok)
-                if stop:
-                    print(f"  {state.summary()}")
-                    print(f"  {why}")
-                    stopped_early = True
-                    settled = check_fetch_settled(
-                        False, now - started, FETCH_TIMEOUT)
-                    break
+            # FETCH_TIMEOUT. early_stop_step records progress and reads the
+            # socket byte only past the time margin.
+            stop, why = early_stop_step(
+                tracker, state, now, read_tcp_state,
+                stall_abort=STALL_ABORT_S, shadow_ok=shadow.ok)
+            if stop:
+                print(f"  {state.summary()}")
+                print(f"  {why}")
+                stopped_early = True
+                settled = check_fetch_settled(
+                    False, now - started, FETCH_TIMEOUT)
+                break
             time.sleep(2.0)
         else:
             print(f"  fetch did not complete within {FETCH_TIMEOUT:.0f}s")
-            # STALL_GRACE: two poll ticks plus slack. Shorter and a slow
-            # server reads as a stall; longer and a real stall reads as
-            # progress.
-            grace = float(os.environ.get("STALL_GRACE", str(STALL_GRACE)))
+            now = time.monotonic()
             settled = check_fetch_settled(
-                time.monotonic() - last_moved < grace,
-                time.monotonic() - started, FETCH_TIMEOUT)
+                tracker.frozen_for(now) < STALL_GRACE_S,
+                now - started, FETCH_TIMEOUT)
 
         print("Sending 'Q' to leave the viewer so the socket closes...")
         client.send_text("Q", finish_with_return=False)
 
-        # #226: after an early stop the marker may never be printed (or has
-        # scrolled away), and waiting the full window was pure cost. The
-        # wait still ends only on POSITIVE evidence: net_tcp_state reading
-        # NET_TCP_CLOSED means net_tcp_close has run — it is the store
-        # just before do_https_get prints the marker. Same window, same
-        # "never reset" rule if neither signal arrives.
-        def client_closed():
-            if stopped_early and read_tcp_state() == NET_TCP_CLOSED:
-                return "net_tcp_state=CLOSED (net_tcp_close has run)"
-            return None
+        # #226: after an early stop in the viewer build the close can also
+        # be read off net_tcp_state (see close_confirmed for exactly what
+        # CLOSED proves, and why the shadow check is re-read here). Same
+        # window, same "never reset" rule if neither signal arrives.
+        def read_shadow_ok():
+            return check_shadow_ram_readable(
+                bytes(client.read_mem(0xA000, 16))).ok
 
-        ok, lines = wait_for(client, "CONNECTION CLOSED", 120 * _SCALE,
-                             "close", also=client_closed)
+        ok, lines = wait_for(
+            client, "CONNECTION CLOSED", 120 * _SCALE, "close",
+            also=lambda: close_confirmed(stopped_early, read_shadow_ok,
+                                         read_tcp_state))
         dump(lines, "final screen")
         if not ok:
             print("WARNING: never saw CONNECTION CLOSED — leaving the machine "

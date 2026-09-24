@@ -222,8 +222,10 @@ def test_should_stop_early_red_green() -> None:
                  hbc.NET_TCP_CLOSED, 10 * ab)
     assert not ok, "an unframed response has no definite expectation"
 
-    # RED: no body yet. body_total sits at 0 with the socket CLOSED for the
-    # whole handshake (minutes; ~35 at 1 MHz) -- exactly the frozen shape.
+    # RED: no body yet. body_total sits at 0 through the whole handshake
+    # (minutes; ~35 at 1 MHz). The socket is CONNECTED then, so the socket
+    # gate alone would hold -- but it is CLOSED (net_init's zero) in the
+    # window before net_tcp_connect, and this gate must not lean on that.
     for ps in (0, 1):
         ok, _ = stop(hbc.BodyState(parse_state=ps, status=0, cl_valid=0,
                                    content_length=0, body_total=0, chunked=0,
@@ -285,26 +287,194 @@ def test_net_tcp_states_match_the_source() -> None:
             f"http_body_checks says {getattr(hbc, name)!r}")
 
 
+def test_stall_tracker_and_early_stop_step() -> None:
+    """The loop step, executed: progress tracking, the lazy socket read,
+    and the margin passed through.
+
+    These used to be locals in the rig, where dropping the update, or
+    measuring from `started`, survived every guard (PR #232 review).
+    """
+    frozen = state(content_length=754_413, body_total=299_123)
+    ab = hbc.STALL_ABORT
+
+    # StallTracker measures from the LAST CHANGE, not from the start.
+    t = hbc.StallTracker(100.0)
+    assert t.frozen_for(100.0) == 0.0
+    t.observe(10, 150.0)
+    assert t.frozen_for(400.0) == 250.0, "measured from the last change"
+    t.observe(10, 300.0)            # no change -> no reset
+    assert t.frozen_for(400.0) == 250.0
+    t.observe(11, 390.0)
+    assert t.frozen_for(400.0) == 10.0
+
+    # early_stop_step: a counter that moved THIS poll is not frozen, however
+    # long ago the run started.
+    reads = []
+
+    def dead():
+        reads.append(1)
+        return hbc.NET_TCP_ERROR
+
+    t = hbc.StallTracker(0.0)
+    t.observe(1_000, 0.0)
+    stop, _ = hbc.early_stop_step(t, frozen, 10 * ab, dead,
+                                  stall_abort=ab, shadow_ok=True)
+    assert not stop, "the body moved this poll; it is not frozen"
+    assert not reads, "the socket byte is read only past the margin"
+
+    # Frozen since 0, but only ab-1 s: still polling, still no socket read.
+    t = hbc.StallTracker(0.0)
+    stop, _ = hbc.early_stop_step(t, frozen, 0.0, dead,
+                                  stall_abort=ab, shadow_ok=True)
+    stop, _ = hbc.early_stop_step(t, frozen, ab - 1, dead,
+                                  stall_abort=ab, shadow_ok=True)
+    assert not stop and not reads
+    # ...and at the margin: one socket read, and the stop.
+    stop, why = hbc.early_stop_step(t, frozen, ab, dead,
+                                    stall_abort=ab, shadow_ok=True)
+    assert stop and reads == [1], why
+
+    # The margin actually passed is the one used (the rig passes the
+    # _SCALE'd value): at 4*ab, a 3*ab freeze keeps polling.
+    t = hbc.StallTracker(0.0)
+    hbc.early_stop_step(t, frozen, 0.0, dead, stall_abort=4 * ab,
+                        shadow_ok=True)
+    stop, _ = hbc.early_stop_step(t, frozen, 3 * ab, dead,
+                                  stall_abort=4 * ab, shadow_ok=True)
+    assert not stop, "stall_abort is not honoured"
+
+    # The socket value read is the one decided on, and shadow_ok reaches it.
+    for sock, shadow_ok in ((hbc.NET_TCP_CONNECTED, True),
+                            (hbc.NET_TCP_ERROR, False)):
+        t = hbc.StallTracker(0.0)
+        hbc.early_stop_step(t, frozen, 0.0, lambda: sock,
+                            stall_abort=ab, shadow_ok=shadow_ok)
+        stop, _ = hbc.early_stop_step(t, frozen, 10 * ab, lambda: sock,
+                                      stall_abort=ab, shadow_ok=shadow_ok)
+        assert not stop, (sock, shadow_ok)
+
+
+def test_close_confirmed_red_green() -> None:
+    """The close wait ends early only on positive, RAM-proven evidence."""
+    calls = []
+
+    def sock(v):
+        def read():
+            calls.append("tcp")
+            return v
+        return read
+
+    # GREEN: after an early stop, RAM readable, CLOSED.
+    assert hbc.close_confirmed(True, lambda: True, sock(hbc.NET_TCP_CLOSED))
+    # RED: not an early stop -- the screen marker alone decides, and the
+    # byte is not even read.
+    calls.clear()
+    assert hbc.close_confirmed(False, lambda: True,
+                               sock(hbc.NET_TCP_CLOSED)) is None
+    assert not calls
+    # RED: still ERROR / CONNECTED -- net_tcp_close has not run.
+    for v in (hbc.NET_TCP_ERROR, hbc.NET_TCP_CONNECTED):
+        assert hbc.close_confirmed(True, lambda: True, sock(v)) is None, v
+    # RED: 'Q' at the menu banked BASIC in; $B3BF is ROM. Even a ROM byte
+    # that happens to equal CLOSED must not be believed.
+    calls.clear()
+    assert hbc.close_confirmed(True, lambda: False,
+                               sock(hbc.NET_TCP_CLOSED)) is None
+    assert not calls, "the socket byte is read only once RAM is proven"
+
+
+def test_stall_config_error_red_green() -> None:
+    """Refused before the lock: a sub-floor STALL_ABORT, or a grace >= it."""
+    assert hbc.stall_config_error(hbc.STALL_ABORT, hbc.STALL_GRACE) is None
+    assert hbc.stall_config_error(hbc.STALL_ABORT_MIN, hbc.STALL_GRACE) is None
+    assert "floor" in hbc.stall_config_error(hbc.STALL_ABORT_MIN - 1,
+                                             hbc.STALL_GRACE)
+    # A grace at or above the margin: the early stop records "settled"
+    # while the deadline path would say "still growing" -- FAIL vs 78.
+    for grace in (hbc.STALL_ABORT, hbc.STALL_ABORT + 1):
+        msg = hbc.stall_config_error(hbc.STALL_ABORT, grace)
+        assert msg and "STALL_GRACE" in msg, grace
+    assert hbc.stall_config_error(hbc.STALL_ABORT,
+                                  hbc.STALL_ABORT - 1) is None
+
+
+def _call_named(tree, name):
+    import ast
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and getattr(n.func, "id", "") == name]
+
+
+def _src(node) -> str:
+    import ast
+    return ast.unparse(node)
+
+
 def test_the_banner_rig_uses_the_early_stop_decision() -> None:
-    """Source inspection (the rig needs a U64E): the loop's early exit goes
-    through should_stop_early, and an early stop still sends 'Q'."""
+    """Source inspection (the rig needs a U64E), of VALUES, not keywords.
+
+    The logic is executed above; what is left in the rig is wiring, and
+    each argument is pinned to the exact expression it must be. A keyword
+    check let `shadow_ok=True`, a constant socket state, the unscaled
+    STALL_ABORT and a vacuous close predicate through (PR #232 review).
+    """
     import ast
     src = (REPO / "tools" / "uci" / "rig_https_banner.py").read_text()
     tree = ast.parse(src)
-    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-             and getattr(n.func, "id", "") == "should_stop_early"]
-    assert calls, "the rig never consults should_stop_early"
-    for c in calls:
-        kws = {k.arg for k in c.keywords}
-        assert {"stall_abort", "shadow_ok"} <= kws, (
-            "pass stall_abort and shadow_ok by keyword; the defaults would "
-            "silently drop the shadow gate and the clock scaling")
+
+    steps = _call_named(tree, "early_stop_step")
+    assert len(steps) == 1, "the loop must call early_stop_step exactly once"
+    step = steps[0]
+    assert [_src(a) for a in step.args] == [
+        "tracker", "state", "now", "read_tcp_state"], (
+        "early_stop_step must get the tracker, this poll's state and time, "
+        "and the socket READER itself (not a value or a stand-in): "
+        + str([_src(a) for a in step.args]))
+    kws = {k.arg: _src(k.value) for k in step.keywords}
+    assert kws == {"stall_abort": "STALL_ABORT_S",
+                   "shadow_ok": "shadow.ok"}, kws
+
+    # read_tcp_state really reads net_tcp_state's label.
+    rts = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+               and n.name == "read_tcp_state")
+    assert "tcp_addr" in _src(rts) and "read_mem" in _src(rts)
+    assert "label_addr('net_tcp_state')" in src.replace('"', "'")
+
+    # The tracker starts at `started`, and the deadline path measures the
+    # grace off the same tracker.
+    assert [_src(a) for c in _call_named(tree, "StallTracker")
+            for a in c.args] == ["started"]
+    assert "tracker.frozen_for(now) < STALL_GRACE_S" in src
+
+    # The close predicate: exactly these three, in this order.
+    cc = _call_named(tree, "close_confirmed")
+    assert len(cc) == 1 and [_src(a) for a in cc[0].args] == [
+        "stopped_early", "read_shadow_ok", "read_tcp_state"], (
+        [_src(a) for a in cc[0].args] if cc else "no close_confirmed call")
+    rso = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+               and n.name == "read_shadow_ok")
+    assert "check_shadow_ram_readable" in _src(rso) and any(
+        isinstance(n, ast.Constant) and n.value == 0xA000
+        for n in ast.walk(rso)), "read_shadow_ok must re-read $A000"
+
+    # Pre-lock: the stall knobs are checked before DeviceLock is taken.
+    lock_line = min(n.lineno for n in _call_named(tree, "DeviceLock"))
+    cfg = [c for c in _call_named(tree, "stall_config_error")
+           if c.lineno < lock_line]
+    assert cfg and [_src(a) for a in cfg[0].args] == [
+        "STALL_ABORT_S", "STALL_GRACE_S"], "stall knobs not checked pre-lock"
+    # ...and the check's verdict is acted on (return before the lock).
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "main")
+    guard = next(n for n in ast.walk(fn) if isinstance(n, ast.If)
+                 and _src(n.test) == "bad_stall")
+    assert any(isinstance(x, ast.Return) and _src(x.value) == "2"
+               for x in guard.body), "a bad stall config must exit 2"
+
     # The 'Q' that lets do_https_get reach net_tcp_close must follow the
     # loop unconditionally -- an early stop may not skip it (lease
     # poisoning if the next lane resets over a live socket).
     loop = next(n for n in ast.walk(tree) if isinstance(n, ast.While)
-                and any(getattr(c.func, "id", "") == "should_stop_early"
-                        for c in ast.walk(n) if isinstance(c, ast.Call)))
+                and step in list(ast.walk(n)))
     parent = next(p for p in ast.walk(tree)
                   if isinstance(getattr(p, "body", None), list)
                   and loop in p.body)
@@ -320,23 +490,10 @@ def test_the_banner_rig_uses_the_early_stop_decision() -> None:
     # An early stop records the fetch as SETTLED (not progressing), which
     # is what the deadline path computes for a frozen counter. Anything
     # else would move a FAIL to 78 purely because the loop stopped early.
-    # (loop.body only: the while's `else:` is the deadline path, which
-    # computes `progressing` from the counter as it always has.)
+    # (loop.body only: the while's `else:` is the deadline path.)
     in_loop = [c for stmt in loop.body for c in ast.walk(stmt)
                if isinstance(c, ast.Call)
                and getattr(c.func, "id", "") == "check_fetch_settled"]
-    # should_stop_early raises on a sub-floor STALL_ABORT; inside the loop
-    # that raise would skip the 'Q'. So the rig refuses one up front, before
-    # it takes the DeviceLock.
-    lock_line = min(n.lineno for n in ast.walk(tree)
-                    if isinstance(n, ast.Call)
-                    and getattr(n.func, "id", "") == "DeviceLock")
-    floors = [n for n in ast.walk(tree) if isinstance(n, ast.Compare)
-              and {"STALL_ABORT_S", "STALL_ABORT_MIN"}
-              <= {x.id for x in ast.walk(n) if isinstance(x, ast.Name)}
-              and n.lineno < lock_line]
-    assert floors, ("the rig does not check STALL_ABORT against "
-                    "STALL_ABORT_MIN before touching the device")
     assert in_loop, "the early stop does not record `settled`"
     for c in in_loop:
         assert (c.args and isinstance(c.args[0], ast.Constant)

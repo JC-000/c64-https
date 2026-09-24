@@ -130,6 +130,10 @@ __all__ = [
     "decode_body_state",
     "expected_body_size",
     "should_stop_early",
+    "StallTracker",
+    "close_confirmed",
+    "early_stop_step",
+    "stall_config_error",
 ]
 
 #: `http_recv_response`'s state machine (src/http.s): 0 = status line,
@@ -423,6 +427,87 @@ def should_stop_early(state: BodyState, tcp_state, frozen_for: float,
                   f"frozen at {state.body_total:,} B for {frozen_for:.0f}s "
                   f"(>= {stall_abort:.0f}s) with net_tcp_state={sock}, so "
                   "no further byte can arrive")
+
+
+class StallTracker:
+    """When `http_body_total` last moved. The poll loop's only clock state.
+
+    It lives here rather than as two locals in the rig so the arithmetic
+    is EXECUTED by the unit suite: as locals, dropping the update or
+    measuring from `started` survived every guard (PR #232 review).
+    """
+
+    def __init__(self, started: float):
+        self.started = started
+        self.last_total = None
+        self.last_moved = started
+
+    def observe(self, total: int, now: float) -> None:
+        if total != self.last_total:
+            self.last_total, self.last_moved = total, now
+
+    def frozen_for(self, now: float) -> float:
+        return now - self.last_moved
+
+
+def early_stop_step(tracker: StallTracker, state: BodyState, now: float,
+                    read_tcp_state, *, stall_abort: float, shadow_ok: bool):
+    """One poll of the rig's loop: record progress, then `should_stop_early`.
+
+    `read_tcp_state` is a zero-argument callable (one REST read), called
+    only once the counter has been frozen for `stall_abort`, so a moving
+    fetch costs no extra traffic.
+    """
+    tracker.observe(state.body_total, now)
+    frozen = tracker.frozen_for(now)
+    if frozen < stall_abort:
+        return False, (f"frozen for {frozen:.0f}s, below the "
+                       f"{stall_abort:.0f}s abort threshold")
+    return should_stop_early(state, read_tcp_state(), frozen,
+                             stall_abort=stall_abort, shadow_ok=shadow_ok)
+
+
+def close_confirmed(stopped_early: bool, read_shadow_ok, read_tcp_state):
+    """After 'Q': has `net_tcp_close` run? -> a description, or None.
+
+    Only after an early stop; otherwise the screen marker alone decides, as
+    before. `read_shadow_ok()` is re-read on every call because 'Q' at the
+    MENU banks BASIC in (boot.s's quit path), after which `$B3BF` reads the
+    ROM, not `net_tcp_state`. In the non-viewer build `do_https_get` has
+    already closed and returned by the time 'Q' lands, so this exit is only
+    reachable in the HTTPS_BODY_TO_REU viewer build.
+
+    CLOSED means `net_tcp_close` RAN — every CLOSED store after `net_init`
+    is inside it — not that the firmware accepted the close: its wedge
+    paths force CLOSED without one. The "CONNECTION CLOSED" marker it
+    replaces is printed after `net_tcp_close` either way, so it is the same
+    evidence, not weaker.
+    """
+    if not stopped_early:
+        return None
+    if not read_shadow_ok():
+        return None
+    if read_tcp_state() == NET_TCP_CLOSED:
+        return "net_tcp_state=CLOSED (net_tcp_close has run)"
+    return None
+
+
+def stall_config_error(stall_abort: float, stall_grace: float):
+    """The rig's pre-lock check of its two stall knobs -> message or None.
+
+    STALL_ABORT below its floor would make `should_stop_early` raise inside
+    the poll loop, past nothing that sends 'Q'. And an early stop records
+    the fetch as not-progressing, which the deadline path agrees with only
+    if the grace is shorter than the abort margin.
+    """
+    if stall_abort < STALL_ABORT_MIN:
+        return (f"STALL_ABORT={stall_abort:.0f}s is below the "
+                f"{STALL_ABORT_MIN:.0f}s floor")
+    if stall_grace >= stall_abort:
+        return (f"STALL_GRACE={stall_grace:.0f}s must be below "
+                f"STALL_ABORT={stall_abort:.0f}s, or an early stop and the "
+                "deadline would disagree about 'settled'")
+    return None
 
 
 # ===========================================================================
