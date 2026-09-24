@@ -155,6 +155,7 @@
         .import tls_app_len
         .import tls_hostname
         .import tls_hostname_len
+        .import tls_reached_connected
 
         ; ---- imports: comb precompute (sibling nistcurves, comb profile) ----
         ; vic_blank/vic_unblank (src/vic.s, LOADER_OVERFLOW) are pulled in
@@ -660,6 +661,9 @@ do_https_get:
         lda #0
         sta tls_hostname,x      ; null-terminate
         stx tls_hostname_len
+        ; #204: a new attempt starts here. A DNS/TCP failure below never
+        ; reaches tls_connect's own clear, so clear the latch before them.
+        sta tls_reached_connected
 
         ; --- DNS resolve ---
         lda #<http_host_target
