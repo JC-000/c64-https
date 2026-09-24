@@ -42,7 +42,6 @@ Runs under pytest, and standalone for anyone without pytest installed
 
 import ast
 import configparser
-import re
 import sys
 from pathlib import Path
 
@@ -267,10 +266,14 @@ def test_testpaths_lists_nothing_pytest_cannot_run() -> None:
 #   * a success condition that names a result it never counts (`0 if all_ok
 #     else 1`, `if ok_body: return 0`) -- a verdict on an observation is
 #     not this rule's business, so it is not flagged either way;
-#   * an evidence-named identifier that does not count what its name says:
+#   * evidence is WORD matching, so it is only as good as the names:
 #     `total = len(TESTS)` counts COLLECTED tests but is treated as
-#     evidence; likewise a count word the list lacks (`num_checks`, `ok`)
-#     is NOT treated as evidence and so reads as VACUOUS;
+#     evidence, as is any `passed`/`executed`/`ran`/`n_<check-noun>` that
+#     does not count what it says; in the other direction a real count
+#     with an unlisted name (`ok`, `nPassed` -- no camelCase split, on
+#     purpose -- `stats["total"]`) is NOT evidence and reads as VACUOUS.
+#     The veto list (dry, first, not, missing, retry, warn, timeout, ...)
+#     is finite: a new decoy word gets through until it is added;
 #   * bool-valued exits (`sys.exit(failed > 0)`, `return not failures`) and
 #     tallies not named fail* (`errs`, `bad`): the verdict is not seen;
 #   * a pytest body wrapped in a prerequisite `if` with no early return
@@ -279,7 +282,8 @@ def test_testpaths_lists_nothing_pytest_cannot_run() -> None:
 #     have: return 0`) -- the condition names only a local;
 #   * skip spellings stored in a variable (`sk = pytest.skip`), decorator
 #     aliases (`m = pytest.mark; @m.skipif`, `from unittest import skip`),
-#     and module-level `pytestmark`;
+#     and a NON-call `pytest.mark.skip` in `pytestmark` (bare or in a
+#     list); the call form `pytestmark = pytest.mark.skipif(...)` IS seen;
 #   * `getattr(sys, "exit")(0)`, `exec`, and any dynamic spelling;
 #   * exit functions other than main/_main that are only reached via
 #     `sys.exit(fn())` in ANOTHER module;
@@ -329,11 +333,27 @@ _PREREQ_WORDS = {"prereq", "prereqs", "prerequisite", "prerequisites",
                  "available", "missing", "supported", "installed"}
 _PREREQ_PREFIXES = ("have_", "has_", "skip_if")
 _PATH_PROBES = {"exists", "is_file", "is_dir", "isfile", "isdir", "access"}
-# Whole words of an identifier that make it a count of what RAN.
-EVIDENCE_WORDS = {"total", "pass", "passed", "passes", "executed", "ran",
-                  "run", "runs", "count", "succeeded", "successes"}
+# What makes an identifier a count of checks that RAN (see _countish).
+# Deliberately narrow: a false "evidence" match silences VACUOUS, so every
+# word here has to name executed checks on its own or as a compound.
+#   * a word that says "executed" by itself: passed, executed, ran, ...
+EVIDENCE_WORDS = {"passed", "passes", "executed", "ran", "succeeded",
+                  "successes"}
+#   * a count word joined to a check noun: pass_count, n_pass, run_count,
+#     check_count, n_checks, vector_count. Neither half counts alone --
+#     bare `count`, `pass` and `run` are too common (retry_count,
+#     pass_phrase, dry_run).
+_COUNT_WORDS = {"count", "n", "num"}
+_CHECK_NOUNS = {"pass", "run", "runs", "check", "checks", "test", "tests",
+                "case", "cases", "vector", "vectors", "assertion",
+                "assertions"}
+#   * `total` on its own, or `total_` + check nouns (total_tests).
+# Any of these words anywhere in the identifier vetoes it.
 _NON_EVIDENCE_WORDS = {"fail", "failed", "failure", "failures", "fails",
-                       "err", "error", "errors", "skip", "skipped", "skips"}
+                       "err", "error", "errors", "skip", "skipped", "skips",
+                       "dry", "first", "not", "missing", "retry", "retries",
+                       "warn", "warning", "warnings", "timeout", "timeouts",
+                       "out", "slow"}
 
 
 class _Aliases:
@@ -498,13 +518,15 @@ def _disjuncts(test):
 
 
 def _words(expr):
-    """Lower-cased words of a Name, Attribute or string-keyed Subscript.
+    """(lower-cased underscore words, from_subscript) of an identifier.
 
-    Split on underscores and on camelCase humps, so `n_pass`, `nPassed`
-    and `stats["executed"]` all yield their count word.
+    Name, Attribute, or a string-keyed Subscript (`stats["executed"]`).
+    NO camelCase split: it turns `byPass` into `by`+`pass`. Mixed-case
+    names therefore stay one word and are not evidence (`nPassed`).
     """
     if isinstance(expr, ast.Call) and _call_name(expr) == "len" and expr.args:
         expr = expr.args[0]
+    sub = False
     if isinstance(expr, ast.Name):
         ident = expr.id
     elif isinstance(expr, ast.Attribute):
@@ -512,11 +534,10 @@ def _words(expr):
     elif (isinstance(expr, ast.Subscript)
           and isinstance(expr.slice, ast.Constant)
           and isinstance(expr.slice.value, str)):
-        ident = expr.slice.value
+        ident, sub = expr.slice.value, True
     else:
-        return None
-    ident = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", ident)
-    return {w for w in ident.lower().split("_") if w}
+        return None, False
+    return {w for w in ident.lower().split("_") if w}, sub
 
 
 def _countish(expr):
@@ -529,10 +550,17 @@ def _countish(expr):
     """
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
         return _countish(expr.left) or _countish(expr.right)
-    words = _words(expr)
+    words, from_subscript = _words(expr)
     if not words or words & _NON_EVIDENCE_WORDS:
         return False
-    return bool(words & EVIDENCE_WORDS)
+    if words & EVIDENCE_WORDS:
+        return True
+    if words & _COUNT_WORDS and words & _CHECK_NOUNS:
+        return True
+    # `total` alone or with check nouns -- but not as a dict key, where
+    # stats["total"] is as likely bytes as checks.
+    return (not from_subscript and "total" in words
+            and words - {"total"} <= _CHECK_NOUNS)
 
 
 def _failure_count(expr):
@@ -542,7 +570,7 @@ def _failure_count(expr):
     that exits 0 on an observation (`if ok_body`, `if status == 200`) is
     judging a result, not counting, and is not this rule's business.
     """
-    words = _words(expr)
+    words, _ = _words(expr)
     return bool(words) and any(w.startswith("fail") for w in words)
 
 
@@ -978,6 +1006,61 @@ _GUARD_CASES_BAD = {
     "from_sys_import_exit": (
         "from sys import exit as bye\ndef main():\n    failed = 0\n"
         "    bye(0 if failed == 0 else 1)\n", "VACUOUS"),
+    # Review 3 (adv237 probe4): words that looked like evidence and are
+    # not. Each was NOT flagged at be1f1ba.
+    "evidence_word_count_not_run": (
+        "import sys\ndef main():\n    count_not_run = failed = 0\n"
+        "    if count_not_run == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "evidence_word_count_missing": (
+        "import sys\ndef main():\n    count_missing = failed = 0\n"
+        "    if count_missing == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "evidence_word_retry_count": (
+        "import sys\ndef main():\n    retry_count = failed = 0\n"
+        "    if retry_count == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "evidence_word_pass_phrase": (
+        "import sys\ndef main():\n    pass_phrase = failed = 0\n"
+        "    if pass_phrase == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "evidence_word_bypass": (
+        "import sys\ndef main():\n    byPass = failed = 0\n"
+        "    if byPass == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "evidence_word_first_run": (
+        "import sys\ndef main():\n    first_run = failed = 0\n"
+        "    if first_run == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "evidence_word_timeout_count": (
+        "import sys\ndef main():\n    timeout_count = failed = 0\n"
+        "    if timeout_count == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "evidence_word_total_bytes": (
+        "import sys\ndef main():\n    total_bytes = failed = 0\n"
+        "    if total_bytes == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "evidence_key_run": (
+        "import sys\ndef main(stats):\n    failed = 0\n"
+        "    if stats['run'] == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "evidence_key_count": (
+        "import sys\ndef main(stats):\n    failed = 0\n"
+        "    if stats['count'] == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "evidence_key_pass": (
+        "import sys\ndef main(stats):\n    failed = 0\n"
+        "    if stats['pass'] == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "evidence_key_total": (
+        "import sys\ndef main(stats):\n    failed = 0\n"
+        "    if stats['total'] == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n", "VACUOUS"),
+    "dry_run_gate": (
+        "import sys\ndef main(args):\n    failed = 0\n"
+        "    if args.dry_run:\n"
+        "        sys.exit(0 if failed == 0 else 1)\n    sys.exit(1)\n",
+        "VACUOUS"),
     # tests/rig_phase*.py _skip() before #180.
     "prereq_return_0": (
         "import shutil\ndef main():\n    if shutil.which('ca65') is None:\n"
@@ -1094,9 +1177,9 @@ _GUARD_CASES_GOOD = {
         "import sys\ndef main():\n    n_pass = failed = 0\n"
         "    if n_pass == 0:\n        sys.exit(2)\n"
         "    sys.exit(0 if failed == 0 else 1)\n"),
-    "camel_case_evidence": (
-        "import sys\ndef main():\n    nPassed = failed = 0\n"
-        "    if nPassed == 0:\n        sys.exit(2)\n"
+    "compound_count_evidence": (
+        "import sys\ndef main():\n    check_count = failed = 0\n"
+        "    if check_count == 0:\n        sys.exit(2)\n"
         "    sys.exit(0 if failed == 0 else 1)\n"),
     "subscript_key_evidence": (
         "import sys\ndef main(stats):\n    failed = 0\n"
