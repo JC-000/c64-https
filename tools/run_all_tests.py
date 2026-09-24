@@ -56,6 +56,7 @@ SUITE_ORDER = (
     "hs_sequence",
     "reu_row_abi",
     "body_truncation",
+    "tls_connected_latch",
 )
 
 # Suites that define run_tests() but are deliberately NOT dispatched here,
@@ -190,6 +191,12 @@ def run_test_suite(name, transport, labels, seed):
             # proved distinct by mutation rather than by inspection.
             from test_body_truncation import run_tests as body_trunc_run
             passed, failed = body_trunc_run(transport, labels)
+
+        elif name == "tls_connected_latch":
+            # Issue #204. Backend-agnostic: stubs every tls_connect callee
+            # in RAM and restores them, so no transport is in the loop.
+            from test_tls_connected_latch import run_tests as latch_run
+            passed, failed = latch_run(transport, labels)
 
         elif name == "reu_row_abi":
             from test_reu_row_abi import run_tests as reu_row_abi_run

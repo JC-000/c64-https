@@ -1097,10 +1097,10 @@ both flags load-bearing). Stock 1 MHz, ~40-80 min.
     1,979 s at 1 MHz (46x), CS8900a fine, DHCP on the automatic
     attempt.** One check goes red there and must stay red:
     `check_tls_connected` samples `tls_state`, which lives only between
-    `tls13.s:303-304` and `tls_close` (`:382-383`), and at 48 MHz that
+    `tls_connect`'s CONNECTED store and `tls_close`, and at 48 MHz that
     window fits inside
     one poll (`tls_last_state` is written only on the ERROR path, so it
-    is no fallback). A turbo run's handshake verdict is inference.
+    is no fallback). Inference until the rig reads `tls_reached_connected` (#204).
   - **CIA timers are realtime under turbo** — 1023.2 ticks/wall-s at
     1 MHz vs 1022.9 at 48 MHz, ratio 1.000, both within 0.05% of NTSC
     phi2/1000. So ip65's `timer_read` (CIA2 timer B, 1000-cycle cascade)
