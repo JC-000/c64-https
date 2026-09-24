@@ -8,12 +8,18 @@
 ;
 ; Exported primitives (see the per-routine headers for calling conventions):
 ;
-;   uci_abort          — flush the state machine (write ABORT + short delay)
-;   uci_wait_idle      — spin until (STATE==0 AND CMD_BUSY==0); TOD-bounded
+;   uci_abort          — flush the state machine: write ABORT, then spin
+;                        until the firmware's reset clears $DF1C bit 2;
+;                        TOD-bounded
+;   uci_wait_idle      — spin until STATE==0, CMD_BUSY==0 and $DF1C bit 2
+;                        (abort pending) clear; TOD-bounded
 ;   uci_wait_not_busy  — spin until CMD_BUSY==0; TOD-bounded
 ;   uci_begin_cmd      — A = target id; writes target to UCI_CMD_DATA
 ;   uci_put_byte       — A = parameter byte; writes to UCI_CMD_DATA
-;   uci_push_wait      — writes PUSH_CMD, then uci_wait_not_busy
+;   uci_push_wait      — clears ERROR, writes PUSH_CMD, then waits for the
+;                        reply to be staged (state "1x") or the push to be
+;                        rejected (ERROR); TOD-bounded. (Its tail,
+;                        uci_wait_reply, is internal — not exported.)
 ;   uci_check_err      — returns C=1 if error bit set, clears it; C=0 otherwise
 ;   uci_read_resp_bytes— drain DATA_AV bytes to caller-provided buffer
 ;                        (caller fills uci_resp_dst/uci_resp_max beforehand;
@@ -60,21 +66,6 @@
 .export uci_resp_count
 
 .segment "UCI_CODE"
-
-; =============================================================================
-; uci_abort — force the UCI FIFO back to idle
-; Writes ABORT to UCI_CONTROL, then burns ~$20 iterations as a settle delay.
-; Clobbers: A, X
-; =============================================================================
-uci_abort:
-        lda #UCI_CTRL_ABORT
-        sta UCI_CONTROL
-        uci_fence
-        ldx #$20
-@spin:
-        dex
-        bne @spin
-        rts
 
 ; =============================================================================
 ; uci_tod_start — start CIA1's Time-of-Day clock (issue #145)
@@ -135,9 +126,12 @@ uci_tod_start:
         rts
 
 ; =============================================================================
-; uci_wait_idle — spin until STATE==0 AND CMD_BUSY==0, with wall-clock cap
-; UCI_STAT_STATE ($30) covers the state field; CMD_BUSY ($01) is bit 0.
-; ORing them (MASK $31) and looping while nonzero gives "fully idle".
+; uci_wait_idle — spin until STATE==0, CMD_BUSY==0 and no abort pending,
+; with wall-clock cap. UCI_STAT_STATE ($30) covers the state field; CMD_BUSY
+; ($01) is bit 0; UCI_STAT_ABORT_PENDING ($04) is bit 2 (#230). ORing them
+; (MASK $35) and looping while nonzero gives "fully idle": a command
+; written while an ABORT is still pending is lost (see uci_abort), so every
+; entry wait also waits out an abort that an earlier uci_abort gave up on.
 ;
 ; Issue #37 — the historical unbounded spin converts an FPGA wedge into a
 ; 600 s test sentinel timeout. The cap below uses CIA1 TOD (CIA_TOD_TENTHS,
@@ -167,6 +161,48 @@ CIA_TOD_HOUR   = $DC0B
 CIA_CRB        = $DC0F
 UCI_WAIT_IDLE_BUDGET_TENTHS = 50      ; 5 seconds at 10 Hz
 
+; =============================================================================
+; uci_abort — force the command interface back to idle, and WAIT for it (#230)
+;
+; Writing ABORT only sets handshake_in(2) ($DF1C bit 2). The reset itself
+; is done later by the firmware's command task (command_intf.cc run_task):
+; HANDSHAKE_RESET (0x87), one write that clears bit 2, forces state "00"
+; and rewinds command_pointer. Until that write lands, any command byte we
+; write goes into a buffer about to be rewound, and a PUSH lands in front
+; of the reset: the firmware then parses an empty or truncated command
+; ("Null command", "21,UNKNOWN COMMAND") and TCP_CONNECT reads back no
+; socket id — $88 UCI_ERR_NO_SOCKET. The pending abort shows in neither
+; STATE nor CMD_BUSY, so a $31 mask (uci_wait_idle's, before #230) can
+; read idle throughout.
+; This used to be a fixed 32-iteration spin (shorter than one fence).
+;
+; So wait for bit 2 to clear: it is cleared by nothing but that reset,
+; in the same FPGA write that forces state "00" and clears CMD_BUSY, so
+; "clear" means the reset has landed. That is exactly uci_wait_idle's
+; mask, which now includes bit 2 (below), so this falls straight into it:
+; same CIA1 TOD bound, same error code.
+;
+; The firmware task is FIFO (command_intf.cc: the IRQ queues the new
+; handshake bits, run_task takes them in order), so if the task is still
+; busy with a command the abort waits behind it: that command completes
+; (copy_result, state "10"), THEN the reset lands. If the task never
+; returns, neither does the reset, and this times out.
+;
+; "Bit 2 clear" means A reset landed, not that every queued abort item was
+; serviced: a C64 reset queues a spurious CMD_ABORT_DATA item on its own
+; (ResetInterruptHandlerCmdIf), and its reset can land first, leaving ours
+; still queued behind. The gap is theoretical: our next access is a fenced
+; command-byte write, and a later RESET only rewinds an empty buffer.
+;
+; Output: C=0 reset landed; C=1 5 s timeout (net_last_error = $89).
+; Clobbers: A
+; =============================================================================
+uci_abort:
+        lda #UCI_CTRL_ABORT
+        sta UCI_CONTROL
+        uci_fence
+        ; fall through into uci_wait_idle
+
 uci_wait_idle:
         ; Sample initial TENTHS for delta-tracking. Latch via HOUR,
         ; release via TENTHS. We don't care about the HOUR value itself.
@@ -178,7 +214,7 @@ uci_wait_idle:
 @wi_loop:
         lda UCI_STATUS
         uci_fence                   ; settle read before testing bits
-        and #(UCI_STAT_STATE | UCI_STAT_CMD_BUSY)   ; $31
+        and #(UCI_STAT_STATE | UCI_STAT_ABORT_PENDING | UCI_STAT_CMD_BUSY) ; $35
         beq @idle_done
 
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
@@ -276,30 +312,108 @@ uci_put_byte:
         rts
 
 ; =============================================================================
-; uci_push_wait — commit pushed bytes as a command, then wait for CMD_BUSY=0
+; uci_push_wait — commit pushed bytes as a command, then wait for the reply
 ;
-; At turbo speeds the FPGA may not have latched PUSH_CMD by the time the
-; CPU starts polling CMD_BUSY. A plain uci_fence after the write gives only
-; ≈ 2 µs at 48 MHz — insufficient for the FPGA to assert CMD_BUSY. We add
-; a short delay loop ($40 iterations ≈ 6 µs at 48 MHz, ≈ 300 µs at 1 MHz)
-; before polling, ensuring CMD_BUSY has been asserted by the time we check.
+; Returns once the reply is staged or the push was rejected — NOT when
+; CMD_BUSY clears (#230 part b). See uci_wait_reply for why those differ.
+;
+; ERROR is cleared first so that, in the wait, it can only mean "THIS push
+; was rejected": error_busy is sticky, and a bit left over from anything
+; else would otherwise end the wait before the firmware had even accepted
+; the command.
 ;
 ; Clobbers: A, X
 ; =============================================================================
 uci_push_wait:
+        lda #UCI_CTRL_CLR_ERR
+        sta UCI_CONTROL
+        jsr uci_settle
         lda #UCI_CTRL_PUSH_CMD
         sta UCI_CONTROL
         uci_fence
-        ; Fixed settle delay — at turbo speeds the FPGA may not have
-        ; latched PUSH_CMD and asserted CMD_BUSY by the time the CPU
-        ; starts polling. $FF iterations × 5 cycles ≈ 27 µs at 48 MHz,
-        ; ≈ 1.3 ms at 1 MHz — sufficient for the FPGA to latch the
-        ; command without using inline NOP fences that bloat code size.
+        ; Fixed delay, kept from the CMD_BUSY-wait era, when it made sure
+        ; CMD_BUSY was asserted before a poll could read it clear. The
+        ; reply wait cannot be fooled that way ($28 stays clear until the
+        ; firmware acts), so this is now only a harmless ~27 us at 48 MHz.
         ldx #$FF
 @pw_settle:
         dex
         bne @pw_settle
-        jmp uci_wait_not_busy
+        ; fall through into uci_wait_reply
+
+; =============================================================================
+; uci_wait_reply — spin until STATE bit 5 (reply valid) OR ERROR, bounded
+;
+; CMD_BUSY ($01) is handshake_in(0), the new-command flag. The firmware
+; clears it with HANDSHAKE_ACCEPT_COMMAND *before* copy_result stages the
+; reply and writes VALIDATE (command_intf.cc run_task: ACCEPT, then
+; copy_result). In between, STATE reads "01" and DATA_AV/STAT_AV read low,
+; so a caller that waited only for CMD_BUSY=0 can see "no data" for a
+; reply that is a moment from valid. In net_poll that took the no-data
+; exit, and its DATA_ACC was a no-op (the VHDL gates it on state(1)); the
+; reply then went valid, the NEXT poll's PUSH hit a non-idle interface
+; (error_busy, $86 UCI_ERR_READ_FAIL) and its error path drained the late
+; reply away — bytes the firmware counted as delivered.
+;
+; STATE bit 5 is state(1), set only by VALIDATE ("10"/"11"), which follows
+; the copies. ERROR ($08) is included because a PUSH while not idle sets
+; only error_busy and leaves STATE as it was (possibly "01", which would
+; otherwise hold us here for the whole budget). An EMPTY reply is still a
+; VALIDATE (state "10", DATA_AV/STAT_AV may stay low), which is why this
+; tests STATE and not the availability bits.
+;
+; KNOWN GAP — a command that gets no reply at all. The firmware skips
+; copy_result (HANDSHAKE_RESET, state "00", no VALIDATE) when the first
+; command byte has CMD_IF_NO_REPLY ($80) set. We always send
+; UCI_TARGET_NETWORK ($03) first, but the #230(a) ABORT race can reset
+; the command pointer mid-command, so the firmware parses a later byte
+; as the target — e.g. TCP_CONNECT's port_lo, which is $BB for port 443.
+; Then this wait runs out its budget: 5 s and $89 UCI_ERR_WAIT_TIMEOUT.
+; The old CMD_BUSY wait was not faster: it went on to
+; uci_read_resp_bytes' 65,536 fenced spins (~7.5 s at 48 MHz) before
+; reporting $88. In this no-reply case the command is lost either way and
+; only the error code differs. (The observed "21,UNKNOWN COMMAND" outcome
+; of the same race is an empty but VALID reply: it still ends this wait
+; at once, then pays the ~7.5 s spin and reports $88.) #230(a)'s fix
+; (wait out the ABORT before the next command) closes both.
+;
+; Same CIA1 TOD budget and error code as uci_wait_idle (the template).
+; Output: C=0 reply valid or push rejected (caller runs uci_check_err),
+;         C=1 on timeout (net_last_error = UCI_ERR_WAIT_TIMEOUT).
+; Clobbers: A
+; =============================================================================
+uci_wait_reply:
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        sta @wr_last_tenths
+        lda #$00
+        sta @wr_elapsed
+@wr_loop:
+        lda UCI_STATUS
+        uci_fence                   ; settle read before testing bits
+        and #(UCI_STAT_REPLY_VALID | UCI_STAT_ERROR)   ; $28
+        bne @wr_done
+
+        lda CIA_TOD_HOUR
+        lda CIA_TOD_TENTHS
+        cmp @wr_last_tenths
+        beq @wr_loop_long           ; no change — keep spinning
+        sta @wr_last_tenths
+        inc @wr_elapsed
+        lda @wr_elapsed
+        cmp #UCI_WAIT_IDLE_BUDGET_TENTHS
+        bcc @wr_loop_long           ; under budget — continue
+        lda #UCI_ERR_WAIT_TIMEOUT
+        sta net_last_error
+        sec
+        rts
+@wr_loop_long:
+        jmp @wr_loop                ; long branch: fence too wide for BCC/BEQ
+@wr_done:
+        clc
+        rts
+@wr_last_tenths: .byte 0
+@wr_elapsed:     .byte 0
 
 ; =============================================================================
 ; uci_check_err — test UCI_STAT_ERROR
@@ -392,10 +506,11 @@ uci_ack:
 ; =============================================================================
 uci_read_resp_bytes:
         ; Patch the dst pointer into the STA abs,Y instruction below.
-        ; At turbo speeds the firmware may not have staged response data
-        ; by the time the CPU reaches this point (e.g. TCP_CONNECT takes
-        ; a full network round-trip). Use a 16-bit spin-wait on DATA_AV
-        ; so we tolerate up to ~150 ms at 48 MHz without bailing early.
+        ; Every caller reaches this after uci_push_wait, which now returns
+        ; only once the reply is VALID (#230 b), so DATA_AV is already
+        ; final here; the 16-bit per-byte spin below predates that and is
+        ; now only a long wait (~7.5 s at 48 MHz: 65,536 fenced spins) on
+        ; a reply shorter than uci_resp_max.
         lda uci_resp_dst
         sta @rd_store+1
         lda uci_resp_dst+1

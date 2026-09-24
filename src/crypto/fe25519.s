@@ -673,27 +673,39 @@ fe_reduce_wide:
         adc poly_prod_hi
         sta fe_wide+1
         bcc @done
+        ; Ripple the +1 with INC, never with ADC #0 (issue #242). The loop
+        ; tests its bound with CPX, and CPX rewrites C: the old
+        ; `lda / adc #0 / sta / inx / cpx #32 / bcc` loop reached byte 3
+        ; with C=0, added nothing, and dropped 2^24 whenever the fold
+        ; carried out of byte 2. INC keeps the carry in the Z flag instead
+        ; (a byte wraps to $00 exactly when it carries out), so the bound
+        ; test cannot disturb it. ~1.3% of X25519 scalar mults lost a
+        ; carry here, and a wrong ClientHello key_share is a handshake
+        ; whose every encrypted record fails its tag.
         ldx #2
 @prop2:
-        lda fe_wide,x
-        adc #0
-        sta fe_wide,x
-        bcc @done
+        inc fe_wide,x
+        bne @done
         inx
         cpx #32
         bcc @prop2
 
-        ; Extremely rare: yet another overflow
-        clc
+        ; Carried out of byte 31: 2^256 = 38 (mod p). Reachable only when
+        ; bytes 2..31 were all $FF, so they are now $00, and byte 1 is at
+        ; most 5 (it just wrapped after adding a fold high byte <= 5), so
+        ; this ripple stops at byte 1 and cannot overflow again. The old
+        ; ADC #0 form of this loop was therefore behaviourally equivalent
+        ; (its CPX only ever ran after byte 1 had already absorbed the
+        ; carry); it is rewritten to match @prop2, not because it was wrong.
         lda fe_wide
+        clc
         adc #38
         sta fe_wide
+        bcc @done
         ldx #1
 @prop3:
-        lda fe_wide,x
-        adc #0
-        sta fe_wide,x
-        bcc @done
+        inc fe_wide,x
+        bne @done
         inx
         cpx #32
         bcc @prop3
@@ -1098,6 +1110,7 @@ fe_mul_a24:
         inx
         cpx #32
         bcc @prop_b32
+        jsr @a24_wrap38         ; ripple ran off byte 31 (#244 review)
 
 @r_b33:
         lda fe_wide+33
@@ -1118,6 +1131,7 @@ fe_mul_a24:
         inx
         cpx #32
         bcc @prop_b33
+        jsr @a24_wrap38         ; ripple ran off byte 31 (#244 review)
 
 @r_b34:
         lda fe_wide+34
@@ -1138,6 +1152,8 @@ fe_mul_a24:
         inx
         cpx #32
         bcc @prop_b34
+        jsr @a24_wrap38         ; defensive: unreachable for a < 2^255
+                                ; (a*121665 < 2^272), kept for symmetry
 
 @r_done_a24:
         ; Copy to (fe_dst)
@@ -1149,6 +1165,28 @@ fe_mul_a24:
         bpl @copy_a24
 
         jsr fe_reduce_final
+        rts
+
+; A fold of bytes 32..34 rippled off byte 31: 2^256 = 38 (mod p), so fold
+; it back in. The old code just exited, returning a result 38 short. Random
+; inputs essentially never get here (bytes k+2..31 must all be $FF), but a
+; peer can force it: at ladder bit 254 E = 4u exactly, so a key_share u
+; with 121665*4u = (H+1)*2^256 - r (r < 121665) hits it every handshake.
+; Bytes k+2..31 are now $00, so this ripple cannot run off byte 31 again.
+@a24_wrap38:
+        lda fe_wide
+        clc
+        adc #38
+        sta fe_wide
+        bcc @a24_wrap_done
+        ldx #1
+@a24_wrap_prop:
+        inc fe_wide,x
+        bne @a24_wrap_done
+        inx
+        cpx #32
+        bcc @a24_wrap_prop
+@a24_wrap_done:
         rts
 
 ; =============================================================================

@@ -30,8 +30,14 @@ UCI_ID_VALUE      = $C9
 UCI_STAT_DATA_AV  = $80         ; response data available
 UCI_STAT_STAT_AV  = $40         ; status string available
 UCI_STAT_STATE    = $30         ; state field mask
+UCI_STAT_REPLY_VALID = $20      ; state(1): "10"/"11", reply staged (#230)
 UCI_STAT_ERROR    = $08         ; command returned an error
-UCI_STAT_CMD_BUSY = $01         ; command FIFO busy / command in flight
+; handshake_in(2): set by our ABORT write, cleared ONLY by the firmware's
+; HANDSHAKE_RESET (0x87), in the same FPGA write that forces state "00" and
+; rewinds command_pointer (command_protocol.vhd; command_intf.cc run_task).
+; While it is set the reset is still to come, and $31 can read idle (#230).
+UCI_STAT_ABORT_PENDING = $04
+UCI_STAT_CMD_BUSY = $01        ; command FIFO busy / command in flight
 
 ; =============================================================================
 ; Control register bits (write to UCI_CONTROL)

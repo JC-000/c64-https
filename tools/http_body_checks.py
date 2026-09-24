@@ -101,6 +101,7 @@ that suite can go red.
 """
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,12 +118,24 @@ __all__ = [
     "EXIT_FAIL",
     "EXIT_INCONCLUSIVE",
     "EXIT_PASS",
+    "NET_TCP_CLOSED",
+    "NET_TCP_CONNECTED",
+    "NET_TCP_ERROR",
+    "STALL_ABORT",
+    "STALL_ABORT_MIN",
+    "STALL_GRACE",
     "check_body_complete",
     "check_fetch_settled",
     "check_http_status",
     "decide_exit",
     "decode_body_state",
     "expected_body_size",
+    "should_stop_early",
+    "StallTracker",
+    "close_confirmed",
+    "early_stop_step",
+    "stall_config_error",
+    "poll_until",
 ]
 
 #: `http_recv_response`'s state machine (src/http.s): 0 = status line,
@@ -335,6 +348,203 @@ def check_fetch_settled(progressing: bool, elapsed: float,
     return Verdict(True, "the fetch had stopped advancing when the state was "
                          "read, so the completeness verdict is about the "
                          "client, not the clock", ev)
+
+
+# ===========================================================================
+# When the poll loop may stop before its budget (issue #226)
+# ===========================================================================
+#: The rig's STALL_GRACE default: how long the counter must be still for
+#: `check_fetch_settled` to call the fetch settled at the deadline.
+STALL_GRACE = 10.0
+
+#: How long the counter must have been frozen before the poll loop may stop
+#: EARLY. Deliberately far above STALL_GRACE: the grace only decides how a
+#: verdict is LABELLED at a deadline that has already arrived, while this
+#: decides whether to stop looking at all. It is not the only condition —
+#: see `should_stop_early` — so it is a margin, not the proof. Scaled by
+#: the rig with the clock, like its other budgets.
+STALL_ABORT = 120.0
+
+#: `should_stop_early` refuses a threshold below this (an operator typo in
+#: STALL_ABORT must not shrink the margin to the grace's order).
+STALL_ABORT_MIN = 60.0
+
+#: src/net/net_states.inc. The UCI adapter's `net_tcp_state` byte;
+#: `net_poll` is an RTS unless it reads NET_TCP_CONNECTED, and nothing in
+#: `do_https_get` reconnects after the response has started, so either of
+#: the other two values means no byte can reach the ring again.
+NET_TCP_CLOSED = 0x00
+NET_TCP_CONNECTED = 0x01
+NET_TCP_ERROR = 0x02
+
+
+def should_stop_early(state: BodyState, tcp_state, frozen_for: float,
+                      stall_abort: float = STALL_ABORT,
+                      shadow_ok: bool = True):
+    """May the rig stop polling before FETCH_TIMEOUT? -> (stop, reason).
+
+    Only when the verdict the budget-expiry path would reach is ALREADY
+    fixed, so stopping changes WHEN the loop ends and never WHAT
+    `decide_exit` returns. Every condition must hold:
+
+      1. the shadow-RAM read is trustworthy (every input lives at $A000+);
+      2. the response has definite framing (Content-Length, or chunked) and
+         `check_body_complete` says FAIL — never an unframed INCONCLUSIVE,
+         never a pass, and never parse_state < 2, which is also what the
+         whole multi-minute handshake looks like before the first header;
+      3. the C64's socket can deliver no more bytes: `net_tcp_state` reads
+         NET_TCP_ERROR or NET_TCP_CLOSED. `net_poll` is an RTS in both, and
+         `do_https_get` never reconnects, so the ring can no longer fill.
+         Bytes already IN the ring can still be consumed, which is what
+         condition 4 waits out. An unreadable (None) or unrecognised value
+         never stops the loop;
+      4. the counter has been frozen for at least `stall_abort` seconds —
+         far past STALL_GRACE, so `check_fetch_settled` computed at the
+         stop reads "settled" exactly as it would have at the deadline.
+
+    A healthy-but-silent socket stays NET_TCP_CONNECTED, so condition 3 is
+    what keeps a slow fetch from being cut short; a stall on a CONNECTED
+    socket still runs to the budget, as before.
+    """
+    if not math.isfinite(stall_abort) or stall_abort < STALL_ABORT_MIN:
+        raise ValueError(
+            f"stall_abort={stall_abort}s is not finite" if not
+            math.isfinite(stall_abort) else
+            f"stall_abort={stall_abort}s is below the "
+            f"{STALL_ABORT_MIN:.0f}s floor")
+    if not shadow_ok:
+        return False, "shadow RAM not proven readable"
+    if state.parse_state < PARSE_STATE_BODY:
+        return False, "the response has not reached its body"
+    # No separate framing test: past parse_state 2, `check_body_complete`
+    # FAILS only under Content-Length or chunked framing (unframed is
+    # INCONCLUSIVE), so this one line is the definite-expectation gate.
+    if check_body_complete(state).status != "fail":
+        return False, "the body verdict is not a failure"
+    if tcp_state not in (NET_TCP_ERROR, NET_TCP_CLOSED):
+        return False, (f"net_tcp_state={tcp_state!r}: the socket may still "
+                       "deliver bytes")
+    if frozen_for < stall_abort:
+        return False, (f"frozen for {frozen_for:.0f}s, below the "
+                       f"{stall_abort:.0f}s abort threshold")
+    sock = "ERROR" if tcp_state == NET_TCP_ERROR else "CLOSED"
+    return True, (f"STOPPED EARLY, budget not exhausted: http_body_total "
+                  f"frozen at {state.body_total:,} B for {frozen_for:.0f}s "
+                  f"(>= {stall_abort:.0f}s) with net_tcp_state={sock}, so "
+                  "no further byte can arrive")
+
+
+class StallTracker:
+    """When `http_body_total` last moved. The poll loop's only clock state.
+
+    It lives here rather than as two locals in the rig so the arithmetic
+    is EXECUTED by the unit suite: as locals, dropping the update or
+    measuring from `started` survived every guard (PR #232 review).
+    """
+
+    def __init__(self, started: float):
+        self.started = started
+        self.last_total = None
+        self.last_moved = started
+
+    def observe(self, total: int, now: float) -> None:
+        if total != self.last_total:
+            self.last_total, self.last_moved = total, now
+
+    def frozen_for(self, now: float) -> float:
+        return now - self.last_moved
+
+
+def early_stop_step(tracker: StallTracker, state: BodyState, now: float,
+                    read_tcp_state, *, stall_abort: float, shadow_ok: bool):
+    """One poll of the rig's loop: record progress, then `should_stop_early`.
+
+    `read_tcp_state` is a zero-argument callable (one REST read), called
+    only once the counter has been frozen for `stall_abort`, so a moving
+    fetch costs no extra traffic.
+    """
+    tracker.observe(state.body_total, now)
+    frozen = tracker.frozen_for(now)
+    if frozen < stall_abort:
+        return False, (f"frozen for {frozen:.0f}s, below the "
+                       f"{stall_abort:.0f}s abort threshold")
+    return should_stop_early(state, read_tcp_state(), frozen,
+                             stall_abort=stall_abort, shadow_ok=shadow_ok)
+
+
+def close_confirmed(stopped_early: bool, read_shadow_ok, read_tcp_state):
+    """After 'Q': has `net_tcp_close` run? -> a description, or None.
+
+    Only after an early stop; otherwise the screen marker alone decides, as
+    before. `read_shadow_ok()` is re-read on every call because 'Q' at the
+    MENU banks BASIC in (boot.s's quit path), after which `$B3BF` reads the
+    ROM, not `net_tcp_state`. In the non-viewer build `do_https_get` has
+    already closed and returned by the time 'Q' lands, so this exit is only
+    reachable in the HTTPS_BODY_TO_REU viewer build.
+
+    CLOSED means `net_tcp_close` RAN — every CLOSED store after `net_init`
+    is inside it — not that the firmware accepted the close: its wedge
+    paths force CLOSED without one. The "CONNECTION CLOSED" marker it
+    replaces is printed after `net_tcp_close` either way, so it is the same
+    evidence, not weaker.
+    """
+    if not stopped_early:
+        return None
+    if not read_shadow_ok():
+        return None
+    if read_tcp_state() == NET_TCP_CLOSED:
+        return "net_tcp_state=CLOSED (net_tcp_close has run)"
+    return None
+
+
+def poll_until(read_screen, marker: str, budget: float, also=None, *,
+               clock, sleep, interval: float = 2.0):
+    """The rig's screen wait -> (what was seen, last screen lines).
+
+    Returns `(None, lines)` when neither signal arrived within `budget`.
+    `also()` counts only when it returns a NON-EMPTY STRING (what
+    `close_confirmed` returns when it has evidence). Any other value is
+    "no signal", so a stand-in that returns something truthy cannot end
+    the close wait over a CONNECTED socket and let the lock go (PR #232
+    review). `clock`/`sleep` are injected so the suite can execute this.
+    """
+    deadline = clock() + budget
+    while True:
+        lines, text = read_screen()
+        if marker in text:
+            return f"'{marker}' reached", lines
+        if also is not None:
+            seen = also()
+            if isinstance(seen, str) and seen:
+                return seen, lines
+        if clock() >= deadline:
+            return None, lines
+        sleep(interval)
+
+
+def stall_config_error(stall_abort: float, stall_grace: float):
+    """The rig's pre-lock check of its two stall knobs -> message or None.
+
+    STALL_ABORT below its floor would make `should_stop_early` raise inside
+    the poll loop, past nothing that sends 'Q'. And an early stop records
+    the fetch as not-progressing, which the deadline path agrees with only
+    if the grace is shorter than the abort margin.
+
+    Non-finite values are refused first: NaN compares False against
+    everything, so `STALL_ABORT=nan` would pass both tests below and then
+    stop the loop at 0 s frozen.
+    """
+    for name, v in (("STALL_ABORT", stall_abort), ("STALL_GRACE", stall_grace)):
+        if not math.isfinite(v):
+            return f"{name}={v} is not a finite number of seconds"
+    if stall_abort < STALL_ABORT_MIN:
+        return (f"STALL_ABORT={stall_abort:.0f}s is below the "
+                f"{STALL_ABORT_MIN:.0f}s floor")
+    if stall_grace >= stall_abort:
+        return (f"STALL_GRACE={stall_grace:.0f}s must be below "
+                f"STALL_ABORT={stall_abort:.0f}s, or an early stop and the "
+                "deadline would disagree about 'settled'")
+    return None
 
 
 # ===========================================================================

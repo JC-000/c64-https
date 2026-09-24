@@ -44,6 +44,7 @@
 ; --- TLS BSS / data (data.asm) ---
 .import tls_state
 .import tls_last_state
+.import tls_reached_connected
 .import tls_client_random
 .import tls_ecdhe_privkey
 .import tls_rec_buf
@@ -138,6 +139,7 @@ tls_connect:
         ; init state
         lda #TLS_STATE_IDLE
         sta tls_state
+        sta tls_reached_connected ; #204: this attempt has not connected yet
 
         ; generate client random (32 bytes)
         lda #<tls_client_random
@@ -305,6 +307,7 @@ tls_connect:
         ; connected!
         lda #TLS_STATE_CONNECTED
         sta tls_state
+        sta tls_reached_connected ; #204: the only set; tls_close keeps it
         clc
         rts
 
@@ -380,13 +383,18 @@ tls_recv:
 
 ; =============================================================================
 ; tls_close - send close_notify alert and tear down
+; Deliberately leaves tls_reached_connected alone (#204).
+; In TLS_CODE, not CODE: jsr-only, and moving its 6 B out of ip65's LOADER
+; pays for the #204 latch stores there (TLS_CODE is CRYPTO_OVERLAY on ip65).
 ; =============================================================================
+.segment "TLS_CODE"
 tls_close:
         ; jsr tls_send_alert            ; TODO: close_notify
         ; jsr net_tcp_close
         lda #TLS_STATE_IDLE
         sta tls_state
         rts
+.segment "CODE"
 
 ; =============================================================================
 ; tls_send_client_hello - build and send ClientHello, init transcript

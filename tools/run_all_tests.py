@@ -57,6 +57,7 @@ SUITE_ORDER = (
     "reu_row_abi",
     "body_truncation",
     "aead_fail_closed",
+    "tls_connected_latch",
 )
 
 # Suites that define run_tests() but are deliberately NOT dispatched here,
@@ -200,6 +201,12 @@ def run_test_suite(name, transport, labels, seed):
             # unfixed build also ends at C=1, 65,536 idle ticks later.
             from test_aead_fail_closed import run_tests as aead_fail_run
             passed, failed = aead_fail_run(transport, labels)
+
+        elif name == "tls_connected_latch":
+            # Issue #204. Backend-agnostic: stubs every tls_connect callee
+            # in RAM and restores them, so no transport is in the loop.
+            from test_tls_connected_latch import run_tests as latch_run
+            passed, failed = latch_run(transport, labels)
 
         elif name == "reu_row_abi":
             from test_reu_row_abi import run_tests as reu_row_abi_run

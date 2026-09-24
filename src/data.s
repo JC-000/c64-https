@@ -189,6 +189,7 @@ net_poll_return_count:  .res 2
 ; -----------------------------------------------------------------------------
 .export tls_state
 .export tls_last_state
+.export tls_reached_connected
 .export tls_recv_progress
 .export tls_recv_sub_progress
 .export tls_recv_poll_count
@@ -196,6 +197,12 @@ net_poll_return_count:  .res 2
 .export tls_server_random
 tls_state:              .res 1
 tls_last_state:         .res 1
+; High-water latch for rigs (#204): TLS_STATE_CONNECTED once the current
+; attempt's handshake completes, else 0. Cleared by do_https_get (before
+; DNS) and by tls_connect; set only at tls_connect's CONNECTED store.
+; tls_close and the error path never touch it, so it outlives the
+; CONNECTED window that tls_state holds only until tls_close.
+tls_reached_connected:  .res 1
 tls_recv_progress:      .res 1
 tls_recv_sub_progress:  .res 1
 tls_recv_poll_count:    .res 2

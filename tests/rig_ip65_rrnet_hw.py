@@ -134,9 +134,9 @@ first 48 MHz run (2026-09-06, 43.1 s 'G' to CONNECTION CLOSED against
 that check while every other check passed, HTTP 200 and the exact body
 came out of the C64's own buffer, and `net_last_error` was $00.
 
-`src/tls13.s:303-304` sets tls_state = CONNECTED right after the
-traffic-key derivation, and `tls_close` (`src/tls13.s:379`, storing IDLE
-at `:382-383`) writes it back to IDLE, so
+`tls_connect` in `src/tls13.s` (grep `lda #TLS_STATE_CONNECTED`) sets
+tls_state = CONNECTED right after the traffic-key derivation, and
+`tls_close` (grep `^tls_close:`) writes it back to IDLE, so
 the value only exists between them — which is why the rig polls rather
 than reading it afterwards. At 1 MHz that window is minutes wide. At
 48 MHz the client Finished, the GET, the response and the close all fit
