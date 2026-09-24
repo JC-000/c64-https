@@ -454,6 +454,12 @@ def test_poll_until_red_green() -> None:
         assert t >= 10.0 and n > 1, (
             f"the wait ended after {n} poll(s) / {t}s with no signal")
 
+    # The budget passed is the budget used: not clamped, not a default.
+    # (Every case above uses 10 s, so a `min(budget, 10.0)` walked past.)
+    seen, n, t = run(["..."], also=lambda: None, budget=37.0)
+    assert seen is None and 37.0 <= t < 37.0 + 2.0 + 1e-9, (
+        f"a 37 s wait ended at {t}s")
+
     # A real close_confirmed over a CONNECTED socket is "no signal".
     seen, _, t = run(["..."], also=lambda: hbc.close_confirmed(
         True, lambda: True, lambda: hbc.NET_TCP_CONNECTED))
