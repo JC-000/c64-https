@@ -54,7 +54,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_uci_data_acc import CPU                         # noqa: E402
+from test_uci_data_acc import CPU, CPUError               # noqa: E402
 import test_uci_timeout_recovery as base                  # noqa: E402
 from test_uci_timeout_recovery import (                   # noqa: E402
     CommandInterface, Memory, Unavailable, VoluntarySkip,
@@ -85,6 +85,17 @@ class WindowedInterface(CommandInterface):
         self.window = window
         self._validate_countdown = None
         self._pending = None
+        self.status_reads_since_push = 0
+
+    def read(self, addr):
+        if addr == 0xDF1C:
+            self.status_reads_since_push += 1
+        return super().read(addr)
+
+    def write(self, addr, value):
+        if addr == 0xDF1C and value & 0x01:        # PUSH_CMD
+            self.status_reads_since_push = 0
+        super().write(addr, value)
 
     def _tick(self):
         if self._validate_countdown is not None:
@@ -109,7 +120,7 @@ class WindowedInterface(CommandInterface):
         super()._tick()
 
 
-def _machine(replies, window, state=None):
+def _machine(replies, window, state=None, error_busy=False):
     labels = base._labels()
     for needed in base.NEEDED_LABELS:
         if needed not in labels:
@@ -123,6 +134,7 @@ def _machine(replies, window, state=None):
     uci = WindowedInterface(replies, window)
     if state is not None:
         uci.state = state
+    uci.error_busy = error_busy
     mem = Memory(raw[2:], raw[0] | (raw[1] << 8), uci,
                  tod_reads_per_tenth=10_000)   # no wait may expire here
     for name in ("uci_status_len", "uci_status_force", "net_last_error"):
@@ -225,11 +237,81 @@ def test_rejected_push_ends_the_wait():
                 "net_tcp_state should be ERROR after a rejected push")
 
 
+def test_empty_reply_is_a_reply():
+    """A VALIDATE with no data bytes (c_message_empty: SOCKET_READ errors,
+    SOCKET_CLOSE, failed connects) leaves DATA_AV/STAT_AV low but still sets
+    STATE "10". A wait keyed on the availability bits instead of STATE never
+    ends on it; here the TOD advances every read, so that shows up as $89."""
+    # (b"", b"") is the firmware's "Null command" shape: VALIDATE_LAST with
+    # no data AND no status, so neither availability bit ever rises.
+    for window, status in ((0, OK), (WINDOW, OK), (WINDOW, b"")):
+        cpu, mem, uci, labels = _require(
+            [(b"", status), (_read_reply(b"AFTER"), OK)], window)
+        mem._per_tenth = 1
+        cpu.call(labels["net_poll"])
+        err = mem.read(labels["net_last_error"])
+        base._check(err != UCI_ERR_WAIT_TIMEOUT, (
+            "empty SOCKET_READ reply timed out the wait ($89) — it waited for "
+            "data/status availability, not for STATE (window=%d)" % window))
+        base._check(uci.accepts == 1 and uci.idle,
+                    "empty reply was not accepted back to idle (window=%d)"
+                    % window)
+        cpu.call(labels["net_poll"])
+        base._check(_ring(mem, labels, _tail(mem, labels)) == b"AFTER",
+                    "the poll after an empty reply did not deliver (window=%d)"
+                    % window)
+
+        cpu, mem, uci, labels = _require([(b"", OK)], window)
+        mem._per_tenth = 1
+        cpu.call(labels["net_tcp_close"])
+        err = mem.read(labels["net_last_error"])
+        base._check(err != UCI_ERR_WAIT_TIMEOUT and uci.accepts == 1, (
+            "SOCKET_CLOSE's empty reply: net_last_error=$%02X, accepts=%d "
+            "(window=%d)" % (err, uci.accepts, window)))
+
+
+def test_wait_budget_is_fifty_tenths():
+    """Pin the bound: a command the firmware accepts but never validates
+    must fail as $89 after exactly UCI_WAIT_IDLE_BUDGET_TENTHS (50) TOD
+    transitions. The model advances one tenth per $DC08 read, one per loop."""
+    cpu, mem, uci, labels = _require([(b"", OK)], 10 ** 9)  # never VALIDATEs
+    mem._per_tenth = 1
+    cpu.call(labels["net_poll"])
+    err = mem.read(labels["net_last_error"])
+    base._check(err == UCI_ERR_WAIT_TIMEOUT,
+                "net_last_error=$%02X, expected $89" % err)
+    base._check(mem.read(labels["net_tcp_state"]) == NET_TCP_ERROR,
+                "a timed-out SOCKET_READ must leave net_tcp_state ERROR")
+    base._check(uci.status_reads_since_push == base.BUDGET_TENTHS, (
+        "the wait gave up after %d status reads / tenths, expected %d"
+        % (uci.status_reads_since_push, base.BUDGET_TENTHS)))
+
+
+def test_stale_error_bit_does_not_end_the_wait():
+    """error_busy is sticky. If it is already set when the push goes out
+    (left by anything else), the ERROR arm of the wait must not fire before
+    the firmware has even accepted the command: the push has to clear it."""
+    first, second = b"STREAM-A", b"STREAM-B"
+    cpu, mem, uci, labels = _require(
+        [(_read_reply(first), OK), (_read_reply(second), OK)], WINDOW,
+        None, True)
+    cpu.call(labels["net_poll"])
+    cpu.call(labels["net_poll"])
+    err = mem.read(labels["net_last_error"])
+    got = _ring(mem, labels, _tail(mem, labels))
+    base._check(err == 0 and uci.pushes_rejected == 0 and got == first + second,
+                "stale ERROR bit: net_last_error=$%02X, rejected=%d, ring=%r"
+                % (err, uci.pushes_rejected, got))
+
+
 TESTS = (
     test_atomic_reply_control,
     test_reply_inside_accept_validate_window,
     test_every_window_length_delivers,
     test_rejected_push_ends_the_wait,
+    test_empty_reply_is_a_reply,
+    test_wait_budget_is_fifty_tenths,
+    test_stale_error_bit_does_not_end_the_wait,
 )
 
 
@@ -244,7 +326,7 @@ def main():
         except Unavailable as exc:
             print("CANNOT RUN: %s" % exc)
             return 2
-        except AssertionError as exc:
+        except (AssertionError, CPUError) as exc:
             failed += 1
             print("FAIL %s: %s" % (test.__name__, exc))
         else:
