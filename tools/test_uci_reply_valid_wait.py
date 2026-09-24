@@ -20,7 +20,10 @@ does nothing (``command_protocol.vhd`` gates it on ``state(1)``).  The
 reply then goes valid, the next poll's PUSH_CMD meets a non-idle
 interface — ``error_busy``, ``$86 UCI_ERR_READ_FAIL`` — and that error
 path drains the late reply away.  For a TCP stream those are bytes the
-firmware has already handed over: a permanent hole.
+firmware has already handed over: a permanent hole.  If VALIDATE lands
+a little earlier — after the header test but before the no-data exit's
+own single-shot ``uci_drain_resp`` — that drain reads the reply to
+nowhere and the ACK succeeds: the same hole with ``net_last_error`` $00.
 
 The fix waits for STATE bit 5 (VALIDATE has run) or the ERROR bit.
 
@@ -194,6 +197,16 @@ def test_reply_inside_accept_validate_window():
     _assert_both_polls_delivered(window=WINDOW)
 
 
+def test_every_window_length_delivers():
+    """Sweep the window. On the unfixed code it fails two different ways,
+    depending on where VALIDATE lands among net_poll's single-shot reads:
+    late, and the next push is rejected ($86); in between, and the no-data
+    exit's own uci_drain_resp reads the reply to nowhere and the ACK then
+    succeeds — a silent hole with no error byte at all."""
+    for window in range(1, 13):
+        _assert_both_polls_delivered(window=window)
+
+
 def test_rejected_push_ends_the_wait():
     """A PUSH into a busy ("01") interface sets only ERROR; the wait must see
     it and report $86, not spin out its budget as $89."""
@@ -215,6 +228,7 @@ def test_rejected_push_ends_the_wait():
 TESTS = (
     test_atomic_reply_control,
     test_reply_inside_accept_validate_window,
+    test_every_window_length_delivers,
     test_rejected_push_ends_the_wait,
 )
 
