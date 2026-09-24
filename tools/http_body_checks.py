@@ -135,6 +135,7 @@ __all__ = [
     "close_confirmed",
     "early_stop_step",
     "stall_config_error",
+    "poll_until",
 ]
 
 #: `http_recv_response`'s state machine (src/http.s): 0 = status line,
@@ -406,8 +407,11 @@ def should_stop_early(state: BodyState, tcp_state, frozen_for: float,
     socket still runs to the budget, as before.
     """
     if not math.isfinite(stall_abort) or stall_abort < STALL_ABORT_MIN:
-        raise ValueError(f"stall_abort={stall_abort}s is below the "
-                         f"{STALL_ABORT_MIN:.0f}s floor")
+        raise ValueError(
+            f"stall_abort={stall_abort}s is not finite" if not
+            math.isfinite(stall_abort) else
+            f"stall_abort={stall_abort}s is below the "
+            f"{STALL_ABORT_MIN:.0f}s floor")
     if not shadow_ok:
         return False, "shadow RAM not proven readable"
     if state.parse_state < PARSE_STATE_BODY:
@@ -491,6 +495,31 @@ def close_confirmed(stopped_early: bool, read_shadow_ok, read_tcp_state):
     if read_tcp_state() == NET_TCP_CLOSED:
         return "net_tcp_state=CLOSED (net_tcp_close has run)"
     return None
+
+
+def poll_until(read_screen, marker: str, budget: float, also=None, *,
+               clock, sleep, interval: float = 2.0):
+    """The rig's screen wait -> (what was seen, last screen lines).
+
+    Returns `(None, lines)` when neither signal arrived within `budget`.
+    `also()` counts only when it returns a NON-EMPTY STRING (what
+    `close_confirmed` returns when it has evidence). Any other value is
+    "no signal", so a stand-in that returns something truthy cannot end
+    the close wait over a CONNECTED socket and let the lock go (PR #232
+    review). `clock`/`sleep` are injected so the suite can execute this.
+    """
+    deadline = clock() + budget
+    while True:
+        lines, text = read_screen()
+        if marker in text:
+            return f"'{marker}' reached", lines
+        if also is not None:
+            seen = also()
+            if isinstance(seen, str) and seen:
+                return seen, lines
+        if clock() >= deadline:
+            return None, lines
+        sleep(interval)
 
 
 def stall_config_error(stall_abort: float, stall_grace: float):

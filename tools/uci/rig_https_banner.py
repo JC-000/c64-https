@@ -83,7 +83,7 @@ from http_body_checks import (  # noqa: E402
     EXIT_FAIL, EXIT_INCONCLUSIVE, EXIT_PASS, STALL_ABORT, STALL_GRACE,
     SYMBOLS, StallTracker, check_body_complete, check_fetch_settled,
     check_http_status, close_confirmed, decide_exit, decode_body_state,
-    early_stop_step, stall_config_error,
+    early_stop_step, poll_until, stall_config_error,
 )
 from ip65_hw_checks import check_shadow_ram_readable  # noqa: E402
 
@@ -145,21 +145,15 @@ def screen(client) -> tuple[list[str], str]:
 def wait_for(client, marker: str, budget: float, label: str,
              also=None) -> tuple[bool, list[str]]:
     """Poll the screen for `marker`; `also()` returning a string is an
-    equivalent positive signal (it names what was seen)."""
-    deadline = time.monotonic() + budget
-    while True:
-        lines, text = screen(client)
-        if marker in text:
-            print(f"  [{label}] '{marker}' reached")
-            return True, lines
-        seen = also() if also is not None else None
-        if seen:
-            print(f"  [{label}] {seen}")
-            return True, lines
-        if time.monotonic() >= deadline:
-            print(f"  [{label}] '{marker}' NOT seen within {budget:.0f}s")
-            return False, lines
-        time.sleep(2.0)
+    equivalent positive signal. The decision is `poll_until`'s, executed
+    by the unit suite."""
+    seen, lines = poll_until(lambda: screen(client), marker, budget, also,
+                             clock=time.monotonic, sleep=time.sleep)
+    if seen is None:
+        print(f"  [{label}] '{marker}' NOT seen within {budget:.0f}s")
+        return False, lines
+    print(f"  [{label}] {seen}")
+    return True, lines
 
 
 def dump(lines: list[str], title: str) -> None:

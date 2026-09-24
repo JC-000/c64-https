@@ -417,6 +417,49 @@ def test_stall_config_error_red_green() -> None:
         raise AssertionError("should_stop_early accepted stall_abort=nan")
 
 
+def test_poll_until_red_green() -> None:
+    """The rig's screen wait, executed with a fake clock.
+
+    RED is the lease-poisoning shape: a close wait that ends on its first
+    poll while the socket is still CONNECTED releases the lock, and the
+    next lane's reset lands on a live firmware socket.
+    """
+    def run(texts, also=None, budget=10.0):
+        t = [0.0]
+        polls = []
+
+        def read():
+            polls.append(1)
+            txt = texts[min(len(polls) - 1, len(texts) - 1)]
+            return [txt], txt
+
+        def sleep(dt):
+            t[0] += dt
+        seen, _ = hbc.poll_until(read, "CONNECTION CLOSED", budget, also,
+                                 clock=lambda: t[0], sleep=sleep)
+        return seen, len(polls), t[0]
+
+    # GREEN: the marker ends the wait, on the poll that sees it.
+    seen, n, _ = run(["...", "...", "CONNECTION CLOSED"])
+    assert seen == "'CONNECTION CLOSED' reached" and n == 3, (seen, n)
+    # GREEN: close_confirmed's evidence string ends it too.
+    seen, n, _ = run(["..."], also=lambda: "net_tcp_state=CLOSED")
+    assert seen == "net_tcp_state=CLOSED" and n == 1, (seen, n)
+
+    # RED: no signal -> the wait runs the WHOLE budget, then says None.
+    for also in (None, lambda: None, lambda: "", lambda: True,
+                 lambda: 1, lambda: ["x"]):
+        seen, n, t = run(["..."], also=also, budget=10.0)
+        assert seen is None, (also, seen)
+        assert t >= 10.0 and n > 1, (
+            f"the wait ended after {n} poll(s) / {t}s with no signal")
+
+    # A real close_confirmed over a CONNECTED socket is "no signal".
+    seen, _, t = run(["..."], also=lambda: hbc.close_confirmed(
+        True, lambda: True, lambda: hbc.NET_TCP_CONNECTED))
+    assert seen is None and t >= 10.0
+
+
 def _call_named(tree, name):
     import ast
     return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
@@ -567,11 +610,55 @@ def test_the_banner_rig_uses_the_early_stop_decision() -> None:
                   if isinstance(getattr(p, "body", None), list)
                   and loop in p.body)
     after = parent.body[parent.body.index(loop) + 1:]
-    sends_q = any(isinstance(c, ast.Call)
-                  and getattr(c.func, "attr", "") == "send_text"
-                  and c.args and getattr(c.args[0], "value", None) == "Q"
-                  for stmt in after for c in ast.walk(stmt))
-    assert sends_q, "no unconditional 'Q' after the poll loop"
+    # DIRECT statements only: ast.walk would accept a `send_text("Q")`
+    # nested under `if not stopped_early:`, which skips the 'Q' exactly
+    # when the early stop fired (round-3 review).
+    assert [_src(s) for s in after[:2]] == [
+        "print(\"Sending 'Q' to leave the viewer so the socket closes...\")",
+        "client.send_text('Q', finish_with_return=False)"], [
+        _src(s) for s in after[:2]]
+
+    # The close wait itself, argument for argument (a 0 s window, or a
+    # different predicate, ends it before the socket can close).
+    closes = [c for c in _call_named(tree, "wait_for")
+              if any(k.arg == "also" for k in c.keywords)]
+    assert [_src(c) for c in closes] == [
+        "wait_for(client, 'CONNECTION CLOSED', 120 * _SCALE, 'close', "
+        "also=lambda: close_confirmed(stopped_early, read_shadow_ok, "
+        "read_tcp_state))"], [_src(c) for c in closes]
+
+    # wait_for (module level, outside main) is a thin shell over the
+    # executed poll_until; pinned whole.
+    wf = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+              and n.name == "wait_for")
+    body = [s for s in wf.body
+            if not (isinstance(s, ast.Expr)
+                    and isinstance(s.value, ast.Constant))]   # docstring
+    assert "\n".join(_src(s) for s in body) == (
+        "seen, lines = poll_until(lambda: screen(client), marker, budget, "
+        "also, clock=time.monotonic, sleep=time.sleep)\n"
+        "if seen is None:\n"
+        "    print(f\"  [{label}] '{marker}' NOT seen within {budget:.0f}s\")\n"
+        "    return (False, lines)\n"
+        "print(f'  [{label}] {seen}')\n"
+        "return (True, lines)"), "\n".join(_src(s) for s in body)
+
+    # The knobs: STALL_ABORT_S scales with the clock (120 s at 48 MHz,
+    # 5,760 s at 1 MHz); dropping _SCALE cuts the 1 MHz margin 48x.
+    knobs = {t.id: _src(n.value) for n in tree.body
+             if isinstance(n, ast.Assign) for t in n.targets
+             if isinstance(t, ast.Name)}
+    assert knobs.get("STALL_ABORT_S") == (
+        "float(os.environ.get('STALL_ABORT', str(STALL_ABORT * _SCALE)))"), \
+        knobs.get("STALL_ABORT_S")
+    assert knobs.get("STALL_GRACE_S") == (
+        "float(os.environ.get('STALL_GRACE', str(STALL_GRACE)))"), \
+        knobs.get("STALL_GRACE_S")
+    assert knobs.get("_SCALE") == "max(1.0, 48.0 / float(TURBO_MHZ))", \
+        knobs.get("_SCALE")
+    # `started` is bound once, by the clock.
+    assert [_src(a) for a in assigns("started")] == [
+        "started = time.monotonic()"], [_src(a) for a in assigns("started")]
     assert not any(isinstance(n, (ast.Return, ast.Raise))
                    for n in ast.walk(loop)), (
         "the poll loop must not return or raise past the 'Q'")
@@ -587,6 +674,9 @@ def test_the_banner_rig_uses_the_early_stop_decision() -> None:
         assert (c.args and isinstance(c.args[0], ast.Constant)
                 and c.args[0].value is False), (
             "the early stop must record progressing=False")
+    assert [_src(c) for c in in_loop] == [
+        "check_fetch_settled(False, now - started, FETCH_TIMEOUT)"], [
+        _src(c) for c in in_loop]
 
 
 # ===========================================================================
