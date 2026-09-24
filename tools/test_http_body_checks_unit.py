@@ -168,6 +168,183 @@ def test_fetch_settled_red_green() -> None:
 
 
 # ===========================================================================
+# When the poll loop may stop early (#226)
+# ===========================================================================
+def test_should_stop_early_red_green() -> None:
+    """Stop only when the budget-expiry verdict is already fixed.
+
+    #226's measured run: 299,123 B of a declared 754,413 B, frozen, polled
+    for ~700 s. Each red case below removes exactly one condition from
+    that shape and requires the loop to KEEP polling, because each is a
+    way an early stop could turn a slow-but-healthy fetch into a FAIL.
+    """
+    stop = hbc.should_stop_early
+    ab = hbc.STALL_ABORT
+    frozen = state(content_length=754_413, body_total=299_123)
+
+    # GREEN: the #226 shape, on a dead socket, past the threshold.
+    for sock in (hbc.NET_TCP_ERROR, hbc.NET_TCP_CLOSED):
+        ok, why = stop(frozen, sock, ab)
+        assert ok, why
+        assert "budget not exhausted" in why, (
+            "an early stop must say so, or a reader cannot tell it from a "
+            "budget that ran out")
+        assert "299,123" in why, why
+    # Chunked with no terminal chunk is a definite expectation too.
+    ok, _ = stop(state(cl_valid=0, content_length=0, chunked=1,
+                       chunk_state=2), hbc.NET_TCP_ERROR, ab)
+    assert ok
+
+    # RED: a healthy-but-silent socket is still CONNECTED. That is the
+    # slow fetch that must run to the budget, however long it is frozen.
+    ok, _ = stop(frozen, hbc.NET_TCP_CONNECTED, 10 * ab)
+    assert not ok, "a CONNECTED socket may still deliver the rest"
+    # ...and a socket state that could not be read, or is not one we know.
+    for sock in (None, 0x03, 0xFF):
+        ok, _ = stop(frozen, sock, 10 * ab)
+        assert not ok, f"net_tcp_state={sock!r} must not stop the loop"
+
+    # RED: frozen, but not for long enough.
+    ok, _ = stop(frozen, hbc.NET_TCP_ERROR, ab - 1)
+    assert not ok, "below STALL_ABORT the loop keeps polling"
+
+    # RED: the verdict is not a failure -- a complete body is not "stopped
+    # early", it is done, and the loop's own body.ok exit owns that.
+    ok, _ = stop(state(), hbc.NET_TCP_CLOSED, 10 * ab)
+    assert not ok
+    chunk_done = state(cl_valid=0, content_length=0, chunked=1,
+                       chunk_state=hbc.CHUNK_STATE_TERMINAL)
+    ok, _ = stop(chunk_done, hbc.NET_TCP_CLOSED, 10 * ab)
+    assert not ok
+
+    # RED: unframed. Its verdict is INCONCLUSIVE; out of scope for #226.
+    ok, _ = stop(state(cl_valid=0, content_length=0, chunked=0),
+                 hbc.NET_TCP_CLOSED, 10 * ab)
+    assert not ok, "an unframed response has no definite expectation"
+
+    # RED: no body yet. body_total sits at 0 with the socket CLOSED for the
+    # whole handshake (minutes; ~35 at 1 MHz) -- exactly the frozen shape.
+    for ps in (0, 1):
+        ok, _ = stop(hbc.BodyState(parse_state=ps, status=0, cl_valid=0,
+                                   content_length=0, body_total=0, chunked=0,
+                                   chunk_state=0), hbc.NET_TCP_CLOSED, 10 * ab)
+        assert not ok, f"parse_state={ps}: the handshake is not a stall"
+    # ...even if stale framing bytes claim a length.
+    ok, _ = stop(state(parse_state=1, body_total=0), hbc.NET_TCP_CLOSED,
+                 10 * ab)
+    assert not ok
+
+    # RED: DMA reads of $A000+ were not proven to be RAM.
+    ok, _ = stop(frozen, hbc.NET_TCP_ERROR, 10 * ab, shadow_ok=False)
+    assert not ok, "ROM bytes are frozen by construction"
+
+    # The margin is far above the grace, and cannot be configured below
+    # the floor: an operator typo must not reduce it to the grace's order.
+    assert hbc.STALL_ABORT >= hbc.STALL_ABORT_MIN >= 6 * hbc.STALL_GRACE
+    for bad in (hbc.STALL_GRACE, hbc.STALL_ABORT_MIN - 1):
+        try:
+            stop(frozen, hbc.NET_TCP_ERROR, 10 * ab, stall_abort=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"stall_abort={bad} was accepted")
+
+
+def test_an_early_stop_decides_what_the_budget_would() -> None:
+    """Stopping early changes WHEN, never WHAT: same exit code as expiry.
+
+    The rig sets `settled` from check_fetch_settled(False, ...) on an early
+    stop -- the value the deadline path computes for a counter that is
+    still frozen -- so decide_exit sees the same five verdicts either way.
+    """
+    frozen = state(content_length=754_413, body_total=299_123)
+    ok, _ = hbc.should_stop_early(frozen, hbc.NET_TCP_ERROR, hbc.STALL_ABORT)
+    assert ok
+    body = hbc.check_body_complete(frozen)
+    shadow = hbc.Verdict(True, "RAM")
+    early = hbc.decide_exit(
+        banner_ok=True, shadow=shadow, body=body,
+        status=hbc.check_http_status(frozen),
+        settled=hbc.check_fetch_settled(False, hbc.STALL_ABORT, 900.0))
+    expiry = hbc.decide_exit(
+        banner_ok=True, shadow=shadow, body=body,
+        status=hbc.check_http_status(frozen),
+        settled=hbc.check_fetch_settled(False, 900.0, 900.0))
+    assert early[0] == expiry[0] == hbc.EXIT_FAIL
+
+
+def test_net_tcp_states_match_the_source() -> None:
+    """The socket-state values should_stop_early trusts are the 6502's."""
+    import re
+    src = (REPO / "src" / "net" / "net_states.inc").read_text()
+    found = {m.group(1): int(m.group(2), 16) for m in re.finditer(
+        r"^(NET_TCP_\w+)\s*=\s*\$([0-9A-Fa-f]+)", src, re.M)}
+    for name in ("NET_TCP_CLOSED", "NET_TCP_CONNECTED", "NET_TCP_ERROR"):
+        assert found.get(name) == getattr(hbc, name), (
+            f"{name}: src/net/net_states.inc says {found.get(name)!r}, "
+            f"http_body_checks says {getattr(hbc, name)!r}")
+
+
+def test_the_banner_rig_uses_the_early_stop_decision() -> None:
+    """Source inspection (the rig needs a U64E): the loop's early exit goes
+    through should_stop_early, and an early stop still sends 'Q'."""
+    import ast
+    src = (REPO / "tools" / "uci" / "rig_https_banner.py").read_text()
+    tree = ast.parse(src)
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", "") == "should_stop_early"]
+    assert calls, "the rig never consults should_stop_early"
+    for c in calls:
+        kws = {k.arg for k in c.keywords}
+        assert {"stall_abort", "shadow_ok"} <= kws, (
+            "pass stall_abort and shadow_ok by keyword; the defaults would "
+            "silently drop the shadow gate and the clock scaling")
+    # The 'Q' that lets do_https_get reach net_tcp_close must follow the
+    # loop unconditionally -- an early stop may not skip it (lease
+    # poisoning if the next lane resets over a live socket).
+    loop = next(n for n in ast.walk(tree) if isinstance(n, ast.While)
+                and any(getattr(c.func, "id", "") == "should_stop_early"
+                        for c in ast.walk(n) if isinstance(c, ast.Call)))
+    parent = next(p for p in ast.walk(tree)
+                  if isinstance(getattr(p, "body", None), list)
+                  and loop in p.body)
+    after = parent.body[parent.body.index(loop) + 1:]
+    sends_q = any(isinstance(c, ast.Call)
+                  and getattr(c.func, "attr", "") == "send_text"
+                  and c.args and getattr(c.args[0], "value", None) == "Q"
+                  for stmt in after for c in ast.walk(stmt))
+    assert sends_q, "no unconditional 'Q' after the poll loop"
+    assert not any(isinstance(n, (ast.Return, ast.Raise))
+                   for n in ast.walk(loop)), (
+        "the poll loop must not return or raise past the 'Q'")
+    # An early stop records the fetch as SETTLED (not progressing), which
+    # is what the deadline path computes for a frozen counter. Anything
+    # else would move a FAIL to 78 purely because the loop stopped early.
+    # (loop.body only: the while's `else:` is the deadline path, which
+    # computes `progressing` from the counter as it always has.)
+    in_loop = [c for stmt in loop.body for c in ast.walk(stmt)
+               if isinstance(c, ast.Call)
+               and getattr(c.func, "id", "") == "check_fetch_settled"]
+    # should_stop_early raises on a sub-floor STALL_ABORT; inside the loop
+    # that raise would skip the 'Q'. So the rig refuses one up front, before
+    # it takes the DeviceLock.
+    lock_line = min(n.lineno for n in ast.walk(tree)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "id", "") == "DeviceLock")
+    floors = [n for n in ast.walk(tree) if isinstance(n, ast.Compare)
+              and {"STALL_ABORT_S", "STALL_ABORT_MIN"}
+              <= {x.id for x in ast.walk(n) if isinstance(x, ast.Name)}
+              and n.lineno < lock_line]
+    assert floors, ("the rig does not check STALL_ABORT against "
+                    "STALL_ABORT_MIN before touching the device")
+    assert in_loop, "the early stop does not record `settled`"
+    for c in in_loop:
+        assert (c.args and isinstance(c.args[0], ast.Constant)
+                and c.args[0].value is False), (
+            "the early stop must record progressing=False")
+
+
+# ===========================================================================
 # The decoder
 # ===========================================================================
 def _raw(parse_state=2, status=200, cl_valid=1, content_length=125_703,

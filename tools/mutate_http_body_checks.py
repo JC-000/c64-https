@@ -173,6 +173,71 @@ MUTANTS = [
      MODULE,
      "    if progressing:",
      "    if False and progressing:"),
+    # --- #226: when the poll loop may stop before FETCH_TIMEOUT. Each is a
+    # --- way an early stop could cut a slow-but-healthy fetch short.
+    ("#226: should_stop_early ignores the socket state",
+     MODULE,
+     "    if tcp_state not in (NET_TCP_ERROR, NET_TCP_CLOSED):",
+     "    if False and tcp_state not in (NET_TCP_ERROR, NET_TCP_CLOSED):"),
+    ("#226: should_stop_early treats a CONNECTED socket as dead",
+     MODULE,
+     "    if tcp_state not in (NET_TCP_ERROR, NET_TCP_CLOSED):",
+     "    if tcp_state not in (NET_TCP_ERROR, NET_TCP_CLOSED, "
+     "NET_TCP_CONNECTED):"),
+    ("#226: should_stop_early ignores how long the counter was frozen",
+     MODULE,
+     "    if frozen_for < stall_abort:",
+     "    if False and frozen_for < stall_abort:"),
+    ("#226: should_stop_early uses STALL_GRACE as its margin",
+     MODULE,
+     "    if frozen_for < stall_abort:",
+     "    if frozen_for < STALL_GRACE:"),
+    ("#226: should_stop_early stops during the handshake (parse_state < 2)",
+     MODULE,
+     "    if state.parse_state < PARSE_STATE_BODY:\n"
+     "        return False, \"the response has not reached its body\"",
+     "    if False and state.parse_state < PARSE_STATE_BODY:\n"
+     "        return False, \"the response has not reached its body\""),
+    ("#226: should_stop_early stops on an unframed (INCONCLUSIVE) response",
+     MODULE,
+     "    if check_body_complete(state).status != \"fail\":",
+     "    if check_body_complete(state).status == \"pass\":"),
+    ("#226: should_stop_early stops on a body that is not a failure",
+     MODULE,
+     "    if check_body_complete(state).status != \"fail\":",
+     "    if False and check_body_complete(state).status != \"fail\":"),
+    ("#226: should_stop_early trusts an unproven shadow-RAM read",
+     MODULE,
+     "    if not shadow_ok:",
+     "    if False and not shadow_ok:"),
+    ("#226: should_stop_early accepts a threshold below its floor",
+     MODULE,
+     "    if stall_abort < STALL_ABORT_MIN:",
+     "    if False and stall_abort < STALL_ABORT_MIN:"),
+    ("#226: NET_TCP_ERROR drifts from src/net/net_states.inc",
+     MODULE,
+     "NET_TCP_ERROR = 0x02",
+     "NET_TCP_ERROR = 0x03"),
+    ("#226: the rig returns out of the poll loop, skipping the 'Q'",
+     RIG,
+     "                    stopped_early = True\n",
+     "                    stopped_early = True\n"
+     "                    return EXIT_FAIL\n"),
+    ("#226: the rig records an early stop as still growing (FAIL -> 78)",
+     RIG,
+     "                    settled = check_fetch_settled(\n"
+     "                        False, now - started, FETCH_TIMEOUT)",
+     "                    settled = check_fetch_settled(\n"
+     "                        True, now - started, FETCH_TIMEOUT)"),
+    ("#226: the rig no longer refuses a sub-floor STALL_ABORT up front "
+     "(the raise would land inside the loop, past the 'Q')",
+     RIG,
+     "    if STALL_ABORT_S < STALL_ABORT_MIN:",
+     "    if False:"),
+    ("#226: the rig drops the shadow gate from the early-stop call",
+     RIG,
+     "                    stall_abort=STALL_ABORT_S, shadow_ok=shadow.ok)",
+     "                    stall_abort=STALL_ABORT_S)"),
     ("a check_* is renamed away (the RED_CASES registry goes stale)",
      MODULE,
      "def check_http_status(", "def renamed_check_http_status("),
@@ -219,6 +284,10 @@ def stage(root: Path) -> None:
     # below, so the mirror copy is what the suite must see.
     for rel in (SRC, "src/data.s"):
         shutil.copy(REPO / rel, root / rel)
+    # #226: the NET_TCP_* values should_stop_early trusts.
+    (root / "src" / "net").mkdir()
+    shutil.copy(REPO / "src/net/net_states.inc",
+                root / "src/net/net_states.inc")
 
 
 def run_suite(root: Path):

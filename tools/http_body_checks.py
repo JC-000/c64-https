@@ -117,12 +117,19 @@ __all__ = [
     "EXIT_FAIL",
     "EXIT_INCONCLUSIVE",
     "EXIT_PASS",
+    "NET_TCP_CLOSED",
+    "NET_TCP_CONNECTED",
+    "NET_TCP_ERROR",
+    "STALL_ABORT",
+    "STALL_ABORT_MIN",
+    "STALL_GRACE",
     "check_body_complete",
     "check_fetch_settled",
     "check_http_status",
     "decide_exit",
     "decode_body_state",
     "expected_body_size",
+    "should_stop_early",
 ]
 
 #: `http_recv_response`'s state machine (src/http.s): 0 = status line,
@@ -335,6 +342,87 @@ def check_fetch_settled(progressing: bool, elapsed: float,
     return Verdict(True, "the fetch had stopped advancing when the state was "
                          "read, so the completeness verdict is about the "
                          "client, not the clock", ev)
+
+
+# ===========================================================================
+# When the poll loop may stop before its budget (issue #226)
+# ===========================================================================
+#: The rig's STALL_GRACE default: how long the counter must be still for
+#: `check_fetch_settled` to call the fetch settled at the deadline.
+STALL_GRACE = 10.0
+
+#: How long the counter must have been frozen before the poll loop may stop
+#: EARLY. Deliberately far above STALL_GRACE: the grace only decides how a
+#: verdict is LABELLED at a deadline that has already arrived, while this
+#: decides whether to stop looking at all. It is not the only condition —
+#: see `should_stop_early` — so it is a margin, not the proof. Scaled by
+#: the rig with the clock, like its other budgets.
+STALL_ABORT = 120.0
+
+#: `should_stop_early` refuses a threshold below this (an operator typo in
+#: STALL_ABORT must not shrink the margin to the grace's order).
+STALL_ABORT_MIN = 60.0
+
+#: src/net/net_states.inc. The UCI adapter's `net_tcp_state` byte;
+#: `net_poll` is an RTS unless it reads NET_TCP_CONNECTED, and nothing in
+#: `do_https_get` reconnects after the response has started, so either of
+#: the other two values means no byte can reach the ring again.
+NET_TCP_CLOSED = 0x00
+NET_TCP_CONNECTED = 0x01
+NET_TCP_ERROR = 0x02
+
+
+def should_stop_early(state: BodyState, tcp_state, frozen_for: float,
+                      stall_abort: float = STALL_ABORT,
+                      shadow_ok: bool = True):
+    """May the rig stop polling before FETCH_TIMEOUT? -> (stop, reason).
+
+    Only when the verdict the budget-expiry path would reach is ALREADY
+    fixed, so stopping changes WHEN the loop ends and never WHAT
+    `decide_exit` returns. Every condition must hold:
+
+      1. the shadow-RAM read is trustworthy (every input lives at $A000+);
+      2. the response has definite framing (Content-Length, or chunked) and
+         `check_body_complete` says FAIL — never an unframed INCONCLUSIVE,
+         never a pass, and never parse_state < 2, which is also what the
+         whole multi-minute handshake looks like before the first header;
+      3. the C64's socket can deliver no more bytes: `net_tcp_state` reads
+         NET_TCP_ERROR or NET_TCP_CLOSED. `net_poll` is an RTS in both, and
+         `do_https_get` never reconnects, so the ring can no longer fill.
+         Bytes already IN the ring can still be consumed, which is what
+         condition 4 waits out. An unreadable (None) or unrecognised value
+         never stops the loop;
+      4. the counter has been frozen for at least `stall_abort` seconds —
+         far past STALL_GRACE, so `check_fetch_settled` computed at the
+         stop reads "settled" exactly as it would have at the deadline.
+
+    A healthy-but-silent socket stays NET_TCP_CONNECTED, so condition 3 is
+    what keeps a slow fetch from being cut short; a stall on a CONNECTED
+    socket still runs to the budget, as before.
+    """
+    if stall_abort < STALL_ABORT_MIN:
+        raise ValueError(f"stall_abort={stall_abort}s is below the "
+                         f"{STALL_ABORT_MIN:.0f}s floor")
+    if not shadow_ok:
+        return False, "shadow RAM not proven readable"
+    if state.parse_state < PARSE_STATE_BODY:
+        return False, "the response has not reached its body"
+    # No separate framing test: past parse_state 2, `check_body_complete`
+    # FAILS only under Content-Length or chunked framing (unframed is
+    # INCONCLUSIVE), so this one line is the definite-expectation gate.
+    if check_body_complete(state).status != "fail":
+        return False, "the body verdict is not a failure"
+    if tcp_state not in (NET_TCP_ERROR, NET_TCP_CLOSED):
+        return False, (f"net_tcp_state={tcp_state!r}: the socket may still "
+                       "deliver bytes")
+    if frozen_for < stall_abort:
+        return False, (f"frozen for {frozen_for:.0f}s, below the "
+                       f"{stall_abort:.0f}s abort threshold")
+    sock = "ERROR" if tcp_state == NET_TCP_ERROR else "CLOSED"
+    return True, (f"STOPPED EARLY, budget not exhausted: http_body_total "
+                  f"frozen at {state.body_total:,} B for {frozen_for:.0f}s "
+                  f"(>= {stall_abort:.0f}s) with net_tcp_state={sock}, so "
+                  "no further byte can arrive")
 
 
 # ===========================================================================
