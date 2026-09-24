@@ -31,7 +31,8 @@ Two neighbours of the same conflation are pinned here too:
     and lets the framing verdict decide — C=1 when short of
     Content-Length, C=0 for an unframed body — instead of being an idle
     tick. It is an orderly close, so ``tls_state`` is NOT latched. Any
-    OTHER alert (AlertDescription != 0) returns C=1 at once.
+    OTHER alert (AlertDescription != 0), or an alert that is not exactly
+    2 B, returns C=1 at once.
 
 Added after adversarial review of PR #240:
 
@@ -855,6 +856,47 @@ def run_tests(transport, labels) -> tuple[int, int]:
     else:
         print("\n  [ ] REU-sink abort case: NOT APPLICABLE on this build "
               "(ip65 compiles the sink to a stub) - not counted")
+
+    # --- P: the length guard reads the high byte ------------------------
+    rec257 = seal(app_key, app_iv, 0, TLS_CT_APPLICATION, b"z" * 240)
+    assert len(rec257) == 5 + 257
+    r = run_receive(transport, labels, stream=rec257,
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="tls_record_recv_and_decrypt")
+    tally(_report(
+        "control: 257-byte record (low length byte 1) accepted",
+        "the <=16 B guard must test the high byte: 256..272 B records "
+        "share a low byte with 0..16",
+        r, [("carry C=0", r["carry"] == 0),
+            ("tls_state still CONNECTED", r["tls_state"] == TLS_STATE_CONNECTED),
+            ("tls_read_seq = 1", r["read_seq"] == 1)]))
+
+    # --- Q: an alert that is not 2 bytes --------------------------------
+    # A 0-byte alert leaves tls_rec_buf+1 holding the first tag byte. Pick
+    # a key whose tag starts with $00 so a build that reads it as the
+    # AlertDescription sees close_notify deterministically (1/256 otherwise).
+    for _ in range(4096):
+        qk = secrets.token_bytes(32)
+        qa = seal(qk, app_iv, 1, TLS_CT_ALERT, b"")
+        if qa[6] == 0:
+            break
+    else:
+        raise RuntimeError("no key found with tag[0] == 0 in 4096 tries")
+    qb = seal(qk, app_iv, 0, TLS_CT_APPLICATION,
+              b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello")
+    r = run_receive(transport, labels, stream=qb + qa,
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=qk,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "0-byte alert after an unframed body: not a close_notify, C=1",
+        "an alert is 2 B; with 0 B the 'description' is a stale tag byte, "
+        "here chosen as $00",
+        r, [("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=1 (not read as close_notify)", r["carry"] == 1),
+            ("both records authenticated (tls_read_seq = 2)",
+             r["read_seq"] == 2),
+            (f"at once (polls <= {MAX_POLLS_AFTER_FAIL})",
+             r["polls"] <= MAX_POLLS_AFTER_FAIL)]))
 
     # --- O: the next connection after an abort ---------------------------
     sh = bytes([0x16, 0x03, 0x03, 0x00, 0x04, 2, 0, 0, 0])

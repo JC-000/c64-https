@@ -708,7 +708,7 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     will PRG size.
   - Region margins measured at #239 (they drift, so re-measure
     rather than cite): ip65 **29 B** LOADER, **56 B** NET_CODE tail
-    (14 B with the wikipedia target), **83 B** CRYPTO_OVERLAY, **69 B** CRYPTO_RESIDENT. UCI comb
+    (14 B with the wikipedia target), **76 B** CRYPTO_OVERLAY, **69 B** CRYPTO_RESIDENT. UCI comb
     **126 B** CRYPTO_OVERLAY, down from 153 B — that tail is what the
     rigs' `MemoryArbiter` hands out, so re-check `rig_https_wiki.py`
     scratch after any tenant lands there. The "~223 B" comb figure
@@ -888,7 +888,7 @@ segment recovered in one profile can land in a different region in another
 ip65 is essentially full. Measured on **ip65-onchip** — the shipped
 product — at the v0.14.0 pin, with the P-384 objects gated out of the
 link and #239 in: 56 B NET_CODE tail (on top of the 20 B the
-default target strings already use), 69 B CRYPTO_RESIDENT, 83 B
+default target strings already use), 69 B CRYPTO_RESIDENT, 76 B
 CRYPTO_OVERLAY, 29 B LOADER, and a 43 B hole
 below TABLES_BSS in
 CRYPTO_COLD_SHADOW. The unshipped ip65 REU profile matches on three of

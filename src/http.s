@@ -79,6 +79,7 @@
         .import tls_state       ; #239: bit 7 = record layer aborted
         .import tls_rec_type    ; #239: last record decrypted was an alert
         .import tls_rec_buf     ; #239: its AlertDescription byte
+        .import tls_rec_len     ; #239: ... valid only if the alert is 2 B
 
         ; ---- imports: net.asm wrappers around ip65 ----
         ; §13 retired at contract v1.0.0; net_abi.inc is the normative
@@ -357,7 +358,8 @@ http_recv_timeout_verdict:
 ;
 ;   An alert was also just an idle tick: tls_recv returns C=1 for any
 ;   record that is not application data. The peer sends nothing after one.
-;   close_notify (AlertDescription 0) now hands straight to
+;   close_notify (AlertDescription 0, in an alert of exactly 2 B —
+;   anything else would leave tls_rec_buf+1 a stale byte) now hands to
 ;   http_recv_timeout_verdict — C=1 at once if short of Content-Length,
 ;   C=0 at once if it ends an unframed (Connection: close) body. Any other
 ;   alert returns C=1 at once (tls_state is not latched: the record
@@ -382,6 +384,9 @@ http_recv_tick:
         lda tls_rec_type
         cmp #TLS_CT_ALERT
         bne @tick_count
+        lda tls_rec_len         ; an alert is exactly 2 B; any other size
+        cmp #2                  ;  would make tls_rec_buf+1 a stale byte
+        bne @tick_abort         ;  (non-close: C=1)
         lda tls_rec_buf+1       ; AlertDescription: 0 = close_notify
         bne @tick_abort         ; any other alert: the peer failed us
         beq @tick_verdict       ; close_notify: framing decides now
