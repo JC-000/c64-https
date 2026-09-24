@@ -536,7 +536,8 @@ def main():
               f"— this run certifies NOTHING about {CERTIFIES}")
     print(f"{'FAILED' if failures else 'OK'} — {failures} failure(s), "
           f"{skipped} skipped")
-    return verdict(passed, failures, skipped=skipped, certifies=CERTIFIES)
+    return verdict(passed, failures, skipped=skipped,
+                   opt_out_env=OPT_OUT_ENV, certifies=CERTIFIES)
 
 
 if __name__ == "__main__":

@@ -888,6 +888,7 @@ def main() -> int:
     print(f"\n{passed}/{len(tests)} passed"
           + (f", {skipped} skipped by explicit opt-out" if skipped else ""))
     return verdict(passed, failed, skipped=skipped,
+                   opt_out_env="C64_ALLOW_NO_BUILD",
                    certifies="the RR-Net rig's pure verdict functions")
 
 

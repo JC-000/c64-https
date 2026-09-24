@@ -618,7 +618,8 @@ def main():
         print("\nEXPLICIT SKIP (%s=1): %d of %d checks did NOT run."
               % (OPT_OUT_ENV, len(skipped), len(TESTS)))
         if executed == 0:
-            return verdict(0, 0, skipped=len(skipped), certifies=CERTIFIES)
+            return verdict(0, 0, skipped=len(skipped),
+                           opt_out_env=OPT_OUT_ENV, certifies=CERTIFIES)
 
     if failures:
         print("\n%d/%d checks failed (%d assertions executed)"
