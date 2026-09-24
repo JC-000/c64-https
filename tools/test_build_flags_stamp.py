@@ -190,7 +190,8 @@ def _require_toolchain():
 
 
 class Farm:
-    """A disposable tree that builds the repo without writing to it."""
+    """A disposable tree whose build/ is private (ip65/ and ip65-build/ are
+    symlinks: the ip65-libs/ip65-blob cases run real sub-makes in them)."""
 
     def __init__(self):
         self.dir = Path(tempfile.mkdtemp(prefix="c64-flags-stamp-"))
@@ -410,9 +411,13 @@ def test_maintenance_goals_do_not_invalidate():
     survive that too.
     """
     _require_toolchain()
+    # A NON-default target string, so the flagless goal also differs from
+    # build/https_host.inc: without it, the https_host.inc block's skip goes
+    # untested (reverting only that guard left this suite green).
+    targeted = UCI + ("HTTPS_HOST=en.wikipedia.org",)
     for goal in MAINTENANCE_GOALS:
         with Farm() as farm:
-            farm.make(*UCI)
+            farm.make(*targeted)
             objs = farm.mtimes()
             prg_sha = farm.sha()
             stamp = farm.path(STAMP).read_text()
@@ -437,7 +442,7 @@ def test_maintenance_goals_do_not_invalidate():
                 f"`make {goal}` rewrote {STAMP}; it would then describe a "
                 "flag set whose objects were never built."
             )
-            proc = farm.make(*UCI)
+            proc = farm.make(*targeted)
             assert farm.mtimes() == objs and farm.sha() == prg_sha, (
                 f"after `make {goal}`, a real rebuild of the SAME flags "
                 "re-assembled objects:\n" + proc.stdout

@@ -67,8 +67,8 @@ but not `http.o`, which cost a false negative on #141) and no link at all
 exit 0). Because the stamp holds the expanded command lines rather than a
 list of knob names, a new flag is covered the day it is added. The suite
 also pins the inverse — an unchanged flag set must still rebuild nothing.
-Both stamps delete `.map`/`labels.txt`/`.dbg` with the PRG, and goals that
-touch nothing in `build/` (`clean`/`ip65-libs`/`ip65-blob`, alone) skip both (#220).
+`flags.stamp` and `https_host.inc` (below) delete `.map`/`labels.txt`/`.dbg` with the PRG;
+a goal set made only of `clean`/`ip65-libs`/`ip65-blob` skips both (#220).
 
 Parse time includes a dry run, so `make -n` used to delete the tree while
 answering "what would this build?". **`-n`/`-q`/`-t` are now exempt

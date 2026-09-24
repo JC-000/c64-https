@@ -176,7 +176,8 @@ CA65FLAGS += -D TLS_STREAM_DEFRAME=1
 endif
 # Lazy (=) so the USE_NISTCURVES_ONCHIP_COMB block below can retarget
 # CFG to the cfg variant after this line.
-LD65FLAGS = -C $(CFG) -Ln build/labels.txt -m build/c64-https.map --dbgfile build/c64-https.dbg
+# Paths come from LINK_OUTPUTS' variables below (lazy =, so they may follow).
+LD65FLAGS = -C $(CFG) -Ln $(LABELS) -m $(LINK_MAP) --dbgfile $(LINK_DBG)
 
 # Source inventory.
 TOP_SRCS    := $(wildcard src/*.s)
@@ -508,11 +509,13 @@ ALL_OBJS := $(TOP_OBJS) $(CRYPTO_OBJS) $(CRYPTO_SHARED_OBJS) $(NET_OBJS)
 
 PRG    := build/c64-https.prg
 LABELS := build/labels.txt
-# Everything one link writes (the -Ln/-m/--dbgfile paths in LD65FLAGS).
+# Everything one link writes; LD65FLAGS' -Ln/-m/--dbgfile read these same names.
 # Issue #220: both parse-time invalidations below delete ALL of these, not
 # just the PRG, so a .map / labels.txt / .dbg can never outlive the image it
 # describes — an absent map is honest, a stale one still parses fine.
-LINK_OUTPUTS := $(PRG) $(LABELS) build/c64-https.map build/c64-https.dbg
+LINK_MAP     := build/c64-https.map
+LINK_DBG     := build/c64-https.dbg
+LINK_OUTPUTS := $(PRG) $(LABELS) $(LINK_MAP) $(LINK_DBG)
 
 .PHONY: all link run clean ip65-libs ip65-blob package package-verify
 
@@ -741,15 +744,15 @@ MAKE_DRY_RUN := $(strip \
     $(findstring q,$(MAKE_OPT_LETTERS)) \
     $(findstring t,$(MAKE_OPT_LETTERS)))
 
-# Issue #220: goals that read and write nothing under build/ skip BOTH
-# parse-time blocks entirely — no compare, no stamp write, no deletion. The
-# compare runs before goal selection, so a flagless `make ip65-libs` after a
-# comb build used to delete every object and the PRG of a build it never
-# touched. Skipping is exact, not a #174-style guess: nothing in build/
-# changes, so the stamp still describes the objects beside it and the next
-# real build compares against the truth. A CLOSED allowlist, and only when
-# EVERY goal is in it (`make ip65-libs all` still invalidates): an unlisted
-# goal falls back to invalidating, which is the safe direction.
+# Issue #220: a goal set made ONLY of these skips BOTH parse-time blocks —
+# no compare, no stamp write, no deletion (`make clean ip65-libs` skips too).
+# The compare runs before goal selection, so a flagless `make ip65-libs`
+# after a comb build used to delete every object and the PRG of a build it
+# never touched. Exact, not a #174-style guess: ip65-libs/ip65-blob write
+# nothing under build/, so the stamp still describes the objects beside it;
+# clean deletes build/ stamps and all, so nothing is left to go stale. A
+# CLOSED allowlist, and any other goal in the set (`make ip65-libs all`)
+# takes the ordinary invalidating path, which is the safe direction.
 STAMP_EXEMPT_GOALS := clean ip65-libs ip65-blob
 STAMP_SKIP := $(if $(MAKECMDGOALS),$(if $(filter-out $(STAMP_EXEMPT_GOALS),$(MAKECMDGOALS)),,skip))
 
