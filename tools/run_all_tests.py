@@ -25,6 +25,8 @@ LABELS_PATH = os.path.join("build", "labels.txt")
 # Import each test module's run function
 sys.path.insert(0, "tools")
 
+from _skip_policy import cannot_run, verdict  # noqa: E402
+
 
 # The suites this runner covers, in launch order, and the single source of
 # truth for that set: main() schedules exactly these and run_test_suite()
@@ -320,7 +322,7 @@ def main():
 
             for fut in as_completed(futures):
                 name, passed, failed, duration = fut.result()
-                status = "PASS" if failed == 0 else "FAIL"
+                status = _suite_status(passed, failed)
                 results.append((name, passed, failed, duration))
                 print(f"  [{status}] {name}: {passed}/{passed+failed} "
                       f"({duration:.1f}s)")
@@ -339,7 +341,8 @@ def main():
     print(f"TOTAL: {total_passed}/{total_tests} passed, "
           f"{total_failed} failed{skipped_note}")
     for name, passed, failed, duration in sorted(results):
-        status = "OK" if failed == 0 else "FAIL"
+        status = {"PASS": "OK"}.get(_suite_status(passed, failed),
+                                    _suite_status(passed, failed))
         print(f"  {status:4s} {name:20s} {passed:3d}/{passed+failed:3d} "
               f"({duration:.1f}s)")
     for name, reason in skipped_suites:
@@ -351,7 +354,37 @@ def main():
               "the TOTAL.")
     print(f"{'='*60}")
 
-    sys.exit(0 if total_failed == 0 else 1)
+    sys.exit(aggregate_exit(results))
+
+
+def aggregate_exit(results):
+    """The runner's exit code from its (name, passed, failed, secs) rows.
+
+    A suite that reported 0 passed / 0 failed ran no assertion. Its "0
+    failed" used to read as [PASS] and fold into an exit-0 aggregate --
+    #178's shape one level up. It is not a pass, and it outranks a clean
+    TOTAL: the aggregate cannot certify a suite that executed nothing.
+    A failure anywhere still outranks both (exit 1).
+    """
+    total_passed = sum(r[1] for r in results)
+    total_failed = sum(r[2] for r in results)
+    empty = sorted(r[0] for r in results if r[1] + r[2] == 0)
+    if total_failed:
+        return verdict(total_passed, total_failed)
+    if empty:
+        return cannot_run(
+            "suite(s) executed no assertion: " + ", ".join(empty),
+            executed=len(results) - len(empty), total=len(results),
+            certifies=", ".join(empty))
+    return verdict(total_passed, total_failed,
+                   certifies="the aggregate VICE suites")
+
+
+def _suite_status(passed, failed):
+    """PASS only when something passed and nothing failed; 0/0 is EMPTY."""
+    if failed:
+        return "FAIL"
+    return "PASS" if passed else "EMPTY"
 
 
 if __name__ == "__main__":
