@@ -307,10 +307,12 @@ tls_connect:
 
 @error:
         lda tls_state           ; preserve last attempted state
+        bmi :+                  ; already ERROR: the record layer aborted
+                                ;  (#239) and recorded the state itself
         sta tls_last_state
         lda #TLS_STATE_ERROR
         sta tls_state
-        sec
+:       sec
         rts
 
 ; =============================================================================
@@ -575,11 +577,13 @@ tls_recv_encrypted:
         jsr net_poll
         jsr tls_record_recv_and_decrypt
         bcc @enc_got_record
+        bit tls_state           ; ERROR (bit 7): AEAD tag failure, the
+        bmi @enc_abort          ;  connection is aborted — not idle (#239)
         inc enc_timeout
         bne @enc_wait
         inc enc_timeout+1
         bne @enc_wait
-        ; timeout
+@enc_abort:                     ; timeout, or #239 abort
         sec
         rts
 @enc_got_record:
@@ -629,11 +633,13 @@ tls_recv_encrypted:
         clc
         jmp @enc_got_record
 :
+        bit tls_state           ; ERROR (bit 7): AEAD tag failure, the
+        bmi @enc_abort          ;  connection is aborted — not idle (#239)
         inc enc_timeout
         bne @enc_wait
         inc enc_timeout+1
         bne @enc_wait
-        ; timeout
+@enc_abort:                     ; timeout, or #239 abort
         sec
         rts
 @enc_got_record:

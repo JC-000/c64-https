@@ -76,6 +76,8 @@
         ; ---- imports: TLS record layer (app-data send/recv) ----
         .import tls_send
         .import tls_recv
+        .import tls_state       ; #239: bit 7 = record layer aborted
+        .import tls_rec_type    ; #239: last record decrypted was an alert
 
         ; ---- imports: net.asm wrappers around ip65 ----
         ; §13 retired at contract v1.0.0; net_abi.inc is the normative
@@ -207,10 +209,10 @@ http_get:
 ; see the span-input comment at the record handoff below.
 ;
 ; Input:  TLS session established, request already sent
-; Output: C=0; http_status / http_resp_buf (body) / http_resp_len populated.
-;         Returns on parse-complete OR on the poll-timeout fallback
-;         ("accept whatever we have" — preserves the historical http_get
-;         behaviour for chunked/streaming responses with no Content-Length).
+; Output: C=0 complete; http_status / http_resp_buf (body) / http_resp_len
+;         populated. C=1 if the body is short of its framing when the tick
+;         budget expires (#211), or at once if the record layer aborted the
+;         connection on an AEAD tag failure (tls_state = ERROR, #239).
 ;         Caller closes the connection.
 ; Clobbers: A, X, Y, zp_ptr
 ; =============================================================================
@@ -226,9 +228,9 @@ http_recv_body:
 
         ; Poll + receive loop
         lda #0
-        sta @recv_timeout
-        sta @recv_timeout+1
-@recv_loop:
+        sta http_recv_ticks
+        sta http_recv_ticks+1
+http_recv_loop:
         jsr net_poll
         jsr tls_recv
         bcs @recv_no_data
@@ -257,20 +259,16 @@ http_recv_body:
         bcc @recv_complete      ; C=0 means parsing complete
         ; Reset timeout counter on progress
         lda #0
-        sta @recv_timeout
-        sta @recv_timeout+1
-        jmp @recv_loop
+        sta http_recv_ticks
+        sta http_recv_ticks+1
+        jmp http_recv_loop
 
 @recv_no_data:
-        inc @recv_timeout
-        bne @recv_loop
-        inc @recv_timeout+1
-        bne @recv_loop
-        ; Tick budget exhausted.  The budget expiring is NOT evidence that
-        ; the body ended (issue #211) — http_recv_timeout_verdict decides.
-        ; It sits in HTTP_AUX_CODE2, not here: see its header for why
-        ; neither this segment nor LOADER_OVERFLOW can afford it on ip65.
-        jmp http_recv_timeout_verdict
+        ; tls_recv C=1: an idle tick, an alert, OR the record layer aborted
+        ; the connection (#239). http_recv_tick tells them apart, counts the
+        ; tick budget, and hands off to http_recv_timeout_verdict; it sits
+        ; in TLS_CODE because this segment is ip65's LOADER.
+        jmp http_recv_tick
 
 @recv_complete:
         ; Sink finalize is idempotent (http_sink_flushed latch): on the
@@ -280,8 +278,6 @@ http_recv_body:
         jsr http_body_finish
         clc
         rts
-
-@recv_timeout: .word 0
 
 ; -----------------------------------------------------------------------------
 ; http_recv_timeout_verdict - decide the carry when http_recv_body's tick
@@ -346,6 +342,58 @@ http_recv_timeout_verdict:
 @to_short:
         sec
         rts
+
+; -----------------------------------------------------------------------------
+; http_recv_tick - one failed tls_recv in http_recv_body (jmp'd, not jsr'd).
+;
+;   Issue #239: tls_recv's C=1 used to be counted as "no data yet" whatever
+;   caused it, so an AEAD tag failure — after which every later record
+;   fails too, because tls_read_seq stops advancing — sat out the whole
+;   65,536-tick budget (~87 min against a live UCI socket) and then reached
+;   the framing verdict as if the peer had merely gone quiet. The record
+;   layer now sets tls_state = TLS_STATE_ERROR on a tag failure (the only
+;   state with bit 7 set): that returns C=1 at once, with no further poll.
+;
+;   An alert (close_notify, or a fatal alert) was also just an idle tick:
+;   tls_recv returns C=1 for any record that is not application data. The
+;   peer sends nothing after one, so the loop now hands straight to
+;   http_recv_timeout_verdict instead of waiting out the budget first — a
+;   close_notify short of Content-Length is C=1 at once, and one that ends
+;   an unframed (Connection: close) body is C=0 at once. tls_rec_type
+;   holds the inner type of the last record decrypted until the next
+;   header is parsed, and nothing is sent after close_notify, so the test
+;   is stable across the idle ticks behind it. Other non-application
+;   records (NewSessionTicket) still count as ticks, as before.
+;
+;   Otherwise count the tick, loop, or hand the expired budget to
+;   http_recv_timeout_verdict.
+;
+;   TLS_CODE, not HTTP_AUX_CODE2: both are CRYPTO_OVERLAY on ip65, but
+;   under UCI HTTP_AUX_CODE2 is CRYPTO_OVERLAY — whose comb tail is the
+;   rigs' MemoryArbiter scratch — while TLS_CODE is NET_CODE, which has
+;   the room. Nothing here may go in CODE (ip65 LOADER).
+; -----------------------------------------------------------------------------
+        .segment "TLS_CODE"
+http_recv_tick:
+        bit tls_state
+        bmi @tick_abort         ; aborted by the record layer: not idle
+        lda tls_rec_type
+        cmp #TLS_CT_ALERT       ; peer closed (or failed): framing decides now
+        beq @tick_verdict
+        inc http_recv_ticks
+        bne @tick_more
+        inc http_recv_ticks+1
+        bne @tick_more
+@tick_verdict:
+        jmp http_recv_timeout_verdict   ; budget wrapped / alert: framing decides
+@tick_more:
+        jmp http_recv_loop
+@tick_abort:
+        jsr http_body_finish    ; same partial-body finalize as the verdict
+        sec
+        rts
+
+http_recv_ticks: .word 0        ; consecutive no-data ticks (was @recv_timeout)
         .segment "CODE"
 
 ; =============================================================================

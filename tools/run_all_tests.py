@@ -56,6 +56,7 @@ SUITE_ORDER = (
     "hs_sequence",
     "reu_row_abi",
     "body_truncation",
+    "aead_fail_closed",
 )
 
 # Suites that define run_tests() but are deliberately NOT dispatched here,
@@ -190,6 +191,15 @@ def run_test_suite(name, transport, labels, seed):
             # proved distinct by mutation rather than by inspection.
             from test_body_truncation import run_tests as body_trunc_run
             passed, failed = body_trunc_run(transport, labels)
+
+        elif name == "aead_fail_closed":
+            # Issue #239. Real ChaCha20-Poly1305 records (sealed on the host)
+            # in the real TCP ring, net_poll replaced by a call counter.
+            # Backend-agnostic (measured both ways). Its discriminator is the
+            # poll count and the latched tls_state, not the carry alone: an
+            # unfixed build also ends at C=1, 65,536 idle ticks later.
+            from test_aead_fail_closed import run_tests as aead_fail_run
+            passed, failed = aead_fail_run(transport, labels)
 
         elif name == "reu_row_abi":
             from test_reu_row_abi import run_tests as reu_row_abi_run

@@ -33,6 +33,7 @@
 .import tls_rec_len
 .import tls_rec_type
 .import tls_state
+.import tls_last_state
 .import tls_recv_sub_progress
 
 .segment "CODE"
@@ -249,13 +250,11 @@ tls_recv_record:
         rts
 
 @error:
-        ; Reset state machine on error
-        lda #0
-        sta tls_recv_state
-        sta tls_recv_count
-        sta tls_recv_count+1
-        sec
-        rts
+        ; Malformed header (type, version or length). Before the handshake
+        ; keys this resets the reader and resyncs a byte at a time, as it
+        ; always did; once records are encrypted it is fatal (#239) — see
+        ; tls_rec_frame_fail. TLS_CODE, off the ip65 LOADER.
+        jmp tls_rec_frame_fail
 
 ; =============================================================================
 ; tls_record_send_plaintext - send a plaintext (unencrypted) TLS record
@@ -317,10 +316,27 @@ tls_record_send_encrypted:
 ; tls_record_recv_and_decrypt - receive a complete record and decrypt if needed
 ;
 ; Output: C=0 success (plaintext in tls_rec_buf, type in tls_rec_type)
-;         C=1 incomplete, error, or AEAD verification failure
+;         C=1 and tls_state != TLS_STATE_ERROR: no complete record yet, or
+;             a malformed header was skipped — poll again
+;         C=1 and tls_state == TLS_STATE_ERROR: AEAD authentication failed,
+;             or a malformed record header arrived after ServerHello, and
+;             the connection is ABORTED (issue #239) — fatal, stop
 ;
 ; After ServerHello, all incoming records are encrypted. This routine
 ; handles both plaintext and encrypted records based on tls_state.
+;
+; Issue #239: the tag failure used to return the same bare C=1 as "record
+; incomplete", so every caller polled on. After one lost or altered byte
+; tls_read_seq stops advancing, every later record fails its tag too, and
+; the fetch sat in its tick budget (~87 min on UCI) instead of failing.
+; tls_rec_auth_fail now latches the error; each looping caller tests
+; bit 7 of tls_state (ERROR is the only state with it set) before counting
+; the failure as an idle tick. A header that fails validation once records
+; are encrypted latches it too (tls_rec_frame_fail): it used to reset the
+; reader and resync one byte at a time through ciphertext, which after a
+; lost header byte meant scanning silently to the next real header. No
+; bad_record_mac alert is sent: tls_close sends no close_notify either,
+; and ip65 has no bytes for one.
 ; =============================================================================
 tls_record_recv_and_decrypt:
 @retry:
@@ -358,13 +374,55 @@ tls_record_recv_and_decrypt:
         clc
         rts
 
-@recv_incomplete:
-        sec
+@recv_incomplete:                ; reached only by bcs: C is already 1
         rts
 
 @aead_fail:
+        jmp tls_rec_auth_fail   ; far: TLS_CODE, off the ip65 LOADER
+
+; =============================================================================
+; tls_rec_frame_fail / tls_rec_auth_fail - fail closed (issue #239)
+;
+; tls_rec_frame_fail: jmp'd from tls_recv_record's @error (bad content type,
+;   version or length). Resets the record reader either way. While
+;   tls_state < TLS_STATE_ENCRYPTED_EXT (ClientHello/ServerHello, plaintext)
+;   it returns C=1 and the caller resyncs a byte at a time, exactly as
+;   before; from EncryptedExtensions on it falls into the latch below with
+;   tls_recv_sub_progress = $0C.
+; tls_rec_auth_fail: tail-jumped from tls_record_recv_and_decrypt on an
+;   AEAD tag failure; sub-progress $0B. The record is discarded and
+;   tls_read_seq is not advanced (tls_record_decrypt returns before the
+;   increment).
+;
+; The latch records the state the failure hit in tls_last_state
+; (TLS_STATE_CONNECTED for application data — tls_connect never writes that
+; value there, so it names this abort) and sets tls_state = ERROR, which
+; the looping callers test. Output: C=1 always.
+;
+; TLS_CODE, not CODE: CODE lands in ip65's LOADER region, the tight one.
+; =============================================================================
+.segment "TLS_CODE"
+tls_rec_frame_fail:
+        lda #0                  ; reset the record reader (as @error did)
+        sta tls_recv_state
+        sta tls_recv_count
+        sta tls_recv_count+1
+        lda tls_state
+        cmp #TLS_STATE_ENCRYPTED_EXT
+        bcc tls_rec_fail_ret    ; plaintext phase: resync, not fatal
+        lda #$0C                ; sub-progress: bad header after keys
+        .byte $2C               ; BIT abs: skips the LDA #$0B below
+tls_rec_auth_fail:
+        lda #$0B                ; sub-progress: AEAD tag rejected
+        sta tls_recv_sub_progress
+        lda tls_state
+        sta tls_last_state
+        lda #TLS_STATE_ERROR
+        sta tls_state
+tls_rec_fail_ret:
         sec
         rts
+.segment "CODE"
 
 ; =============================================================================
 ; Module data — state machine for tls_recv_record
