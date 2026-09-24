@@ -721,6 +721,9 @@ def test_body_partial_leak_is_found() -> None:
     v = hw.check_body_not_on_wire(most, body, control)
     assert not v.ok and v.status == "fail", v.reason
     assert v.evidence["partial_longest"] == len(body) - 1, v.evidence
+    # A PARTIAL-only leak is attributed too, not just a full hit.
+    assert v.evidence["secret_hits"] == 0
+    assert v.evidence["leak_sources"] == [hw.fmt_mac(HOST_MAC)], v.evidence
 
     # The floor, exactly: PARTIAL_RUN_MIN bytes are reported, one fewer are
     # not. \x00 delimiters cannot extend a run of an uppercase body.
@@ -782,6 +785,11 @@ def test_body_partial_leak_split_across_segments_is_found() -> None:
     v = hw.check_body_not_on_wire(frames, body, SNI.encode())
     assert not v.ok and v.evidence["partial_longest"] == 12, v.evidence
     assert v.evidence["partial_detail"][0]["kind"] == "stream", v.evidence
+    # ...attributed to the station whose stream it is. frames[0] of this
+    # capture is the C64's DHCP request, so a stream credited to the
+    # capture's first frame would name the wrong box.
+    assert v.evidence["partial_detail"][0]["eth_src"] == hw.fmt_mac(HOST_MAC)
+    assert v.evidence["leak_sources"] == [hw.fmt_mac(HOST_MAC)], v.evidence
 
 
 def test_leak_evidence_names_the_source() -> None:
@@ -1030,10 +1038,19 @@ def test_ip65_config_written_asserts_the_values_it_is_given() -> None:
     assert _cfg(cfg_gateway=bytes(4)).ok
     # Wrong but plausible values, one field at a time: only the expectation
     # can reject them.
+    # Differences in the LAST byte, the FIRST byte, and byte ORDER: a
+    # compare of only some bytes, or an order-insensitive one, passes at
+    # least one of these.
     for name, bad in (("cfg_ip", hw.ip4_bytes("10.0.66.42")),
+                      ("cfg_ip", hw.ip4_bytes("11.0.66.200")),
+                      ("cfg_ip", hw.ip4_bytes(C64_IP)[::-1]),
                       ("cfg_gateway", hw.ip4_bytes("10.0.66.254")),
+                      ("cfg_gateway", hw.ip4_bytes("11.0.66.1")),
+                      ("cfg_gateway", hw.ip4_bytes(HOST_IP)[::-1]),
                       ("cfg_gateway", bytes(4)),
-                      ("cfg_mac", bytes.fromhex("000e3a646465"))):
+                      ("cfg_mac", bytes.fromhex("000e3a646465")),
+                      ("cfg_mac", bytes.fromhex("020e3a646464")),
+                      ("cfg_mac", C64_MAC[::-1])):
         assert _cfg(**{name: bad}).ok, name          # defaults-only: passes
         v = cfg(**{name: bad})
         assert not v.ok and [w["field"] for w in v.evidence["wrong_value"]] \
