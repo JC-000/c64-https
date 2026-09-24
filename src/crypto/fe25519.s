@@ -673,27 +673,35 @@ fe_reduce_wide:
         adc poly_prod_hi
         sta fe_wide+1
         bcc @done
+        ; Ripple the +1 with INC, never with ADC #0 (issue #242). The loop
+        ; tests its bound with CPX, and CPX rewrites C: the old
+        ; `lda / adc #0 / sta / inx / cpx #32 / bcc` loop reached byte 3
+        ; with C=0, added nothing, and dropped 2^24 whenever the fold
+        ; carried out of byte 2. INC keeps the carry in the Z flag instead
+        ; (a byte wraps to $00 exactly when it carries out), so the bound
+        ; test cannot disturb it. ~1.3% of X25519 scalar mults lost a
+        ; carry here, and a wrong ClientHello key_share is a handshake
+        ; whose every encrypted record fails its tag.
         ldx #2
 @prop2:
-        lda fe_wide,x
-        adc #0
-        sta fe_wide,x
-        bcc @done
+        inc fe_wide,x
+        bne @done
         inx
         cpx #32
         bcc @prop2
 
-        ; Extremely rare: yet another overflow
-        clc
+        ; Carried out of byte 31: 2^256 = 38 (mod p). Reachable only when
+        ; bytes 2..31 were all $FF, so bytes 1..31 are now $00 and this
+        ; fold cannot overflow again.
         lda fe_wide
+        clc
         adc #38
         sta fe_wide
+        bcc @done
         ldx #1
 @prop3:
-        lda fe_wide,x
-        adc #0
-        sta fe_wide,x
-        bcc @done
+        inc fe_wide,x
+        bne @done
         inx
         cpx #32
         bcc @prop3
