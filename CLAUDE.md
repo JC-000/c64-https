@@ -345,9 +345,9 @@ drops a symbol fails the link by name on both backends. Surface:
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
     is now `print_local_ip` in `boot.s`, one copy for both backends.
   - Byte accounting on ip65 (the tight one): LOADER went from 16 B free to
-    58 B **at the time of #142**; it is **17 B** at the v0.14.0 pin with
+    58 B **at the time of #142**; it was 17 B at the v0.14.0 pin with
     #211's fix in (21 B before it — the 4 B is `http.o`'s `CODE` growth in
-    that fix, measured), which is the number the
+    that fix, measured), and is **14 B** after #204, which is the number the
     Memory layout section carries and the one to use.
     `print_local_ip` rides LOADER_OVERFLOW, so the NET_CODE tail that is
     `HTTPS_HOST`/`HTTPS_PATH`'s ip65 budget shrank from 170 to ~60 B beyond
@@ -689,7 +689,7 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
       - inline in `CODE` took ip65's LOADER from the 21 B free it had
         *then* to **zero** — it fit exactly, so the *next* byte anyone
         added would not link. The routine landed in `HTTP_AUX_CODE2`
-        instead, and LOADER measures **17 B** free today. The 4 B is
+        instead, and LOADER measured **17 B** free (14 B after #204). The 4 B is
         `http.o`'s own `CODE` growth in that same fix: rebuilding
         ip65-onchip with only `src/http.s` reverted to `60022de` moves
         `http.o`'s `CODE` from $35E to $35A and the whole `CODE` segment
@@ -706,9 +706,9 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     room. **Before adding to ip65 `NET_CODE`, build the wikipedia target
     — the default target's "bytes free" will not tell you**, and neither
     will PRG size.
-  - Region margins measured at #211's fix (they drift, so re-measure
-    rather than cite): ip65 **17 B** LOADER, **56 B** NET_CODE tail
-    (14 B with the wikipedia target), **125 B** CRYPTO_OVERLAY. UCI comb
+  - Region margins measured at #204 (they drift, so re-measure
+    rather than cite): ip65 **14 B** LOADER, **56 B** NET_CODE tail
+    (14 B with the wikipedia target), **119 B** CRYPTO_OVERLAY. UCI comb
     **126 B** CRYPTO_OVERLAY, down from 153 B — that tail is what the
     rigs' `MemoryArbiter` hands out, so re-check `rig_https_wiki.py`
     scratch after any tenant lands there. The "~223 B" comb figure
@@ -887,9 +887,9 @@ segment recovered in one profile can land in a different region in another
 
 ip65 is essentially full. Measured on **ip65-onchip** — the shipped
 product — at the v0.14.0 pin, with the P-384 objects gated out of the
-link and #211's fix in: 56 B NET_CODE tail (on top of the 20 B the
-default target strings already use), 145 B CRYPTO_RESIDENT, 125 B
-CRYPTO_OVERLAY, 17 B LOADER, and a 43 B hole
+link and #204 in: 56 B NET_CODE tail (on top of the 20 B the
+default target strings already use), 145 B CRYPTO_RESIDENT, 119 B
+CRYPTO_OVERLAY, 14 B LOADER, and a 42 B hole
 below TABLES_BSS in
 CRYPTO_COLD_SHADOW. The unshipped ip65 REU profile matches on three of
 those (LOADER, CRYPTO_OVERLAY, NET_CODE) but **not** on CRYPTO_RESIDENT,

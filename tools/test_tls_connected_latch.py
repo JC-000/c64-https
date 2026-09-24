@@ -33,6 +33,9 @@ sequencing is the real one:
                         right before CONNECTED), latch=0
   fail at first step    latch poisoned -> ClientHello send fails -> latch=0
   success after failure latch 0 -> CONNECTED (not stuck)
+  mid-attempt probe     latch starts CONNECTED; tls_send_client_hello is
+                        replaced by a probe that records the latch -> 0
+                        (the clear is at entry, not only on the error path)
   do_https_get, DNS fails   latch set to CONNECTED as a previous attempt
                         would leave it; tls_connect replaced by a tripwire
                         that would overwrite tls_state; afterwards tls_state
@@ -107,9 +110,10 @@ REQUIRED_LABELS = [
 # Cassette buffer. Harness jsr() trampoline $0334, run_all_tests.py's loop
 # $0339, run_subroutine's U64 trampoline $0360-$036D and flags $03F0/$03F1,
 # test_finished_verify.py $0340-$0350, test_body_truncation.py $0380-$03B1.
-# $03C0-$03CA collides with none of them.
+# $03C0-$03CB collides with none of them.
 DRIVER_ADDR = 0x03C0      # 10 B -> $03C9
 CARRY_ADDR = 0x03CA
+PROBE_ADDR = 0x03CB       # latch value seen mid-attempt (probe case)
 
 POISON = 0xA5
 CLC_RTS = bytes([0x18, 0x60])
@@ -199,20 +203,32 @@ def stub_callees(p: Patcher, labels, fail_at: str | None) -> None:
 
 
 def run_tls_connect(transport, labels, fail_at: str | None,
-                    latch_before: int) -> dict:
+                    latch_before: int, probe: bool = False) -> dict:
     p = Patcher(transport)
     try:
         stub_callees(p, labels, fail_at)
+        if probe:
+            # tls_send_client_hello -> LDA latch / STA probe / CLC / RTS:
+            # records the latch as the attempt sees it, before any outcome.
+            l_lo, l_hi = _lohi(labels["tls_reached_connected"])
+            s_lo, s_hi = _lohi(PROBE_ADDR)
+            p.patch(labels["tls_send_client_hello"],
+                    bytes([0xAD, l_lo, l_hi, 0x8D, s_lo, s_hi, 0x18, 0x60]),
+                    "mid-attempt latch probe")
+            p.patch(PROBE_ADDR, bytes([POISON]), "probe byte")
         poke(transport, labels, "tls_reached_connected", latch_before)
         poke(transport, labels, "tls_state", 0x42)
         poke(transport, labels, "tls_last_state", 0x42)
         carry = call(transport, p, labels["tls_connect"])
-        return {
+        r = {
             "carry": carry,
             "state": peek(transport, labels, "tls_state"),
             "last": peek(transport, labels, "tls_last_state"),
             "latch": peek(transport, labels, "tls_reached_connected"),
         }
+        if probe:
+            r["mid"] = read_bytes(transport, PROBE_ADDR, 1)[0]
+        return r
     finally:
         p.restore()
 
@@ -296,8 +312,8 @@ def run_tests(transport, labels) -> tuple[int, int]:
     r = run_tls_connect(transport, labels,
                         fail_at="tls_derive_traffic_keys", latch_before=C)
     report("failed handshake after a success reads 0 (last step fails)",
-           "the entry clear separates attempts; failing the step just "
-           "before CONNECTED catches a latch set too early",
+           "a failed attempt does not inherit the last success; failing "
+           "the step just before CONNECTED catches a latch set too early",
            [("C=1", r["carry"] == 1),
             ("tls_state == ERROR", r["state"] == TLS_STATE_ERROR),
             ("tls_last_state == FINISHED (walk reached the end)",
@@ -320,6 +336,19 @@ def run_tests(transport, labels) -> tuple[int, int]:
            [("C=0", r["carry"] == 0),
             ("tls_state == CONNECTED", r["state"] == C),
             ("latch == CONNECTED", r["latch"] == C)], fmt(r))
+
+    # Every case above reads the latch after tls_connect returns, so a
+    # clear moved from tls_connect's entry to its @error path would pass
+    # them all. This one reads it DURING the attempt.
+    r = run_tls_connect(transport, labels, fail_at=None, latch_before=C,
+                        probe=True)
+    report("latch is already 0 mid-attempt (cleared at entry)",
+           "a rig polling during the handshake must not see the previous "
+           "attempt's CONNECTED; an error-path-only clear fails this",
+           [("mid-attempt latch == 0 (seen from tls_send_client_hello)",
+             r["mid"] == 0),
+            ("C=0", r["carry"] == 0),
+            ("latch == CONNECTED at the end", r["latch"] == C)], fmt(r))
 
     r = run_https_get_dns_fail(transport, labels)
     report("do_https_get clears the latch before DNS",
