@@ -30,7 +30,28 @@ Two neighbours of the same conflation are pinned here too:
   * an alert record (close_notify) ends ``http_recv_body``'s loop at once
     and lets the framing verdict decide — C=1 when short of
     Content-Length, C=0 for an unframed body — instead of being an idle
-    tick. It is an orderly close, so ``tls_state`` is NOT latched.
+    tick. It is an orderly close, so ``tls_state`` is NOT latched. Any
+    OTHER alert (AlertDescription != 0) returns C=1 at once.
+
+Added after adversarial review of PR #240:
+
+  * records of 16 B or less after the keys are rejected ($0C) before
+    ``tls_record_decrypt``, whose unchecked ``tls_rec_len - 16`` underflowed
+    and swept ~64 KB of memory (I/O included) through Poly1305.
+    ``tls_enc_aead_len`` is poisoned as the witness that the decrypt was
+    never entered; a 17-byte record is the accepted boundary control;
+  * the frame check is exercised in the handshake states (3 and 6), not
+    only CONNECTED; CCS after the keys is a green control on both paths;
+  * with the REU body sink on (UCI builds), an abort still finalizes the
+    partial body (``http_body_finish``);
+  * ``tls_connect`` drops an earlier connection's unread ring bytes and
+    record-reader state (``tls_rx_reset``), so stale ciphertext is not read
+    as the next ServerHello. Driven through the real ``tls_connect`` with
+    key generation / ClientHello / the ServerHello parser stubbed, and the
+    new server's bytes becoming visible only on the first poll.
+
+Menu wait: ``C64_INIT_WAIT`` seconds (default 120; a comb image's boot
+precompute needs ~135 s in VICE).
 
 HOW IT DRIVES THE C64
 ---------------------
@@ -123,14 +144,28 @@ REQUIRED_LABELS = [
     "http_body_sink",
     "http_cl_valid",
     "http_chunked",
+    "http_resp_len",
+    "http_resp_buf",
+    "http_sink_flushed",
+    "tls_rec_type",
+    "tls_rec_len",
+    "tls_enc_aead_len",
+    "tls_recv_progress",
+    "drbg_fill_bytes",
+    "tls_ecdh_generate_keypair",
+    "tls_send_client_hello",
+    "tls_parse_server_hello",
 ]
 
 # src/constants.inc
 TLS_STATE_SERVER_HELLO = 2
 TLS_STATE_ENCRYPTED_EXT = 3
+TLS_STATE_CERTIFICATE = 4
 TLS_STATE_CERT_VERIFY = 5
+TLS_STATE_FINISHED = 6
 TLS_STATE_CONNECTED = 7
 TLS_STATE_ERROR = 0xFF
+TLS_CT_CHANGE_CIPHER = 20
 TLS_CT_HANDSHAKE = 22
 TLS_CT_APPLICATION = 23
 TLS_CT_ALERT = 21
@@ -261,11 +296,14 @@ def assert_shadow_ram_readable(transport, labels) -> None:
 
 def run_receive(transport, labels, *, stream: bytes, state: int,
                 keys: tuple[str, str], key: bytes, iv: bytes,
-                target: str, pre: str | None = None) -> dict:
+                target: str, pre: str | None = None,
+                extra: tuple = (), reads: tuple = ()) -> dict:
     """Put *stream* in the TCP ring, set the TLS read context, JSR *target*.
 
-    Returns what the fail-closed assertions need. Everything written is
-    restored afterwards.
+    *extra* is ((label, bytes), ...) patched after the defaults (so it can
+    override them); *reads* is ((label, length), ...) read back into the
+    result as raw bytes. Returns what the fail-closed assertions need.
+    Everything written is restored afterwards.
     """
     key_label, iv_label = keys
     if len(stream) > TCP_RECV_MASK:
@@ -306,6 +344,8 @@ def run_receive(transport, labels, *, stream: bytes, state: int,
         p.patch(labels["http_chunked"], bytes([0]), "chunked")
         p.patch(labels["http_status"], bytes([POISON, POISON]), "status")
         p.patch(labels["http_body_total"], bytes([POISON] * 3), "body_total")
+        for name, data in extra:
+            p.patch(labels[name], data, name)
 
         timed_out = False
         try:
@@ -332,6 +372,8 @@ def run_receive(transport, labels, *, stream: bytes, state: int,
             "status": st[0] | (st[1] << 8),
             "body_total": bt[0] | (bt[1] << 8) | (bt[2] << 16),
             "ring_head": head[0] | (head[1] << 8),
+            **{name: bytes(read_bytes(transport, labels[name], n))
+               for name, n in reads},
         }
     finally:
         p.restore()
@@ -369,6 +411,82 @@ def find_connect_error_exit(labels) -> tuple[int, bool]:
             f"${labels['tls_connect']:04X}-${labels['tls_send']:04X}, found "
             f"{len(hits)}: " + ", ".join(f"${a:04X}" for a, _ in hits))
     return hits[0]
+
+
+def build_tail_setter(labels, tail: int) -> bytes:
+    """net_poll replacement for the connect cases: the "server's reply"
+    becomes visible on the first poll (tail := *tail*, idempotent), plus
+    the usual 24-bit call counter."""
+    t_lo, t_hi = _lohi(labels["tcp_recv_tail"])
+    t1_lo, t1_hi = _lohi(labels["tcp_recv_tail"] + 1)
+    return bytes([
+        0xA9, tail & 0xFF, 0x8D, t_lo, t_hi,     # LDA #<tail / STA tail
+        0xA9, tail >> 8, 0x8D, t1_lo, t1_hi,     # LDA #>tail / STA tail+1
+    ]) + build_poll_counter()
+
+
+def run_connect_stale(transport, labels, *, stale: bytes, server: bytes,
+                      reader: tuple = (0, 0, 0)) -> dict:
+    """Run tls_connect with a previous connection's leftovers in place.
+
+    *stale* is unread ring content from the earlier connection and
+    *reader* = (tls_recv_state, tls_recv_count, tls_rec_len) the record
+    reader it left behind. *server* (a plaintext ServerHello record) sits
+    after it in the ring but only becomes visible — tail moves past it — on
+    the first net_poll, which tls_connect reaches only after ClientHello,
+    as on the wire (TLS 1.3 is client-first). Key generation and the
+    ClientHello send are stubbed; tls_parse_server_hello is stubbed to SEC,
+    so the run ends in tls_connect's error exit right after the first
+    record is handed to ServerHello processing, and tls_recv_progress /
+    tls_rec_type say which record that was.
+    """
+    n1, n2 = len(stale), len(server)
+    p = Patcher(transport)
+    try:
+        p.patch(STUB_ADDR, build_tail_setter(labels, n1 + n2),
+                "tail-setter net_poll")
+        p.patch(labels["net_poll"], bytes([0x4C, *_lohi(STUB_ADDR)]),
+                "net_poll JMP")
+        p.patch(labels["drbg_fill_bytes"], bytes([0x60]), "drbg RTS")
+        p.patch(labels["tls_ecdh_generate_keypair"], bytes([0x60]),
+                "keypair RTS")
+        p.patch(labels["tls_send_client_hello"], bytes([0x18, 0x60]),
+                "ClientHello CLC/RTS")
+        p.patch(labels["tls_parse_server_hello"], bytes([0x38, 0x60]),
+                "parse SEC/RTS")
+        p.patch(DRIVER_ADDR, build_driver(labels["tls_connect"]), "driver")
+        p.patch(LATCH_ADDR, bytes([POISON]), "carry latch")
+        p.patch(COUNTER_ADDR, bytes(3), "poll counter")
+        p.patch(labels["tls_recv_progress"], bytes([0]), "tls_recv_progress")
+        p.patch(labels["tls_rec_type"], bytes([0]), "tls_rec_type")
+        rs, rc, rl = reader
+        p.patch(labels["tls_recv_state"], bytes([rs]), "tls_recv_state")
+        p.patch(labels["tls_recv_count"], bytes([rc & 0xFF, rc >> 8]),
+                "tls_recv_count")
+        p.patch(labels["tls_rec_len"], bytes([rl & 0xFF, rl >> 8]),
+                "tls_rec_len")
+        p.patch(labels["tcp_recv_buf"], stale + server, "tcp_recv_buf")
+        p.patch(labels["tcp_recv_head"], bytes(2), "tcp_recv_head")
+        p.patch(labels["tcp_recv_tail"], bytes([n1 & 0xFF, n1 >> 8]),
+                "tcp_recv_tail")
+        timed_out = False
+        try:
+            jsr(transport, DRIVER_ADDR, timeout=JSR_TIMEOUT,
+                recover_on_timeout=True)
+        except Exception as e:  # noqa: BLE001
+            timed_out = True
+            print(f"        JSR did not return within {JSR_TIMEOUT:.0f} s: {e}")
+        c = read_bytes(transport, COUNTER_ADDR, 3)
+        return {
+            "timed_out": timed_out,
+            "carry": read_bytes(transport, LATCH_ADDR, 1)[0],
+            "polls": c[0] | (c[1] << 8) | (c[2] << 16),
+            "progress": read_bytes(transport, labels["tls_recv_progress"], 1)[0],
+            "rec_type": read_bytes(transport, labels["tls_rec_type"], 1)[0],
+            "last_state": read_bytes(transport, labels["tls_last_state"], 1)[0],
+        }
+    finally:
+        p.restore()
 
 
 def run_connect_error_exit(transport, labels, entry_state: int,
@@ -589,6 +707,181 @@ def run_tests(transport, labels) -> tuple[int, int]:
             ("exactly one byte consumed", r["ring_head"] == 1),
         ]))
 
+    # --- J: bad header in the handshake states (3..6) --------------------
+    for st in (TLS_STATE_ENCRYPTED_EXT, TLS_STATE_FINISHED):
+        r = run_receive(transport, labels, stream=bad_hdr, state=st,
+                        keys=hs_keys, key=hs_key, iv=hs_iv,
+                        target="tls_recv_encrypted", pre=pre)
+        tally(_report(
+            f"bad record header during the handshake (tls_state={st}): fatal",
+            "the frame check applies from EncryptedExtensions on, not only "
+            "once CONNECTED",
+            r, _fail_closed_checks(r, live_state=st, seq_after=0,
+                                   sub=SUB_PROGRESS_FRAME_FAIL)))
+
+    # --- K: records too short to hold a tag (tls_rec_len - 16 underflow) --
+    # tls_record_decrypt's first act is tls_enc_aead_len := tls_rec_len - 16
+    # (unchecked). Poisoned beforehand, it witnesses whether the decrypt was
+    # entered at all: $FFF5 for a 5-byte record is the underflow itself.
+    aead_len_witness = dict(extra=(("tls_enc_aead_len", bytes([POISON] * 2)),),
+                            reads=(("tls_enc_aead_len", 2),))
+
+    def not_decrypted(r):
+        return ("tls_record_decrypt never entered (tls_enc_aead_len still "
+                "poisoned; $FFF5 would be the underflow)",
+                r["tls_enc_aead_len"] == bytes([POISON] * 2))
+
+    short_app = bytes([0x17, 3, 3, 0, 5]) + secrets.token_bytes(5)
+    r = run_receive(transport, labels, stream=short_app,
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body", **aead_len_witness)
+    tally(_report(
+        "5-byte record after the keys: rejected before the decrypt",
+        "was: tls_rec_len-16 underflowed and Poly1305 swept ~64 KB, "
+        "$D000-$DFFF I/O included, then the tag failed",
+        r, _fail_closed_checks(r, live_state=TLS_STATE_CONNECTED, seq_after=0,
+                               sub=SUB_PROGRESS_FRAME_FAIL)
+        + [not_decrypted(r)]))
+    r = run_receive(transport, labels, stream=short_app,
+                    state=TLS_STATE_CERTIFICATE, keys=hs_keys, key=hs_key,
+                    iv=hs_iv, target="tls_recv_encrypted", pre=pre,
+                    **aead_len_witness)
+    tally(_report(
+        "5-byte record during the handshake: same guard, same verdict",
+        "tls_recv_encrypted reaches the same tls_record_decrypt",
+        r, _fail_closed_checks(r, live_state=TLS_STATE_CERTIFICATE,
+                               seq_after=0, sub=SUB_PROGRESS_FRAME_FAIL)
+        + [not_decrypted(r)]))
+    r = run_receive(transport, labels,
+                    stream=bytes([0x17, 3, 3, 0, 16]) + secrets.token_bytes(16),
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="tls_record_recv_and_decrypt",
+                    **aead_len_witness)
+    tally(_report(
+        "16-byte record (a tag and no inner type): rejected",
+        "boundary: ciphertext length 0 would index the inner type at -1",
+        r, [("carry C=1", r["carry"] == 1),
+            ("tls_state = ERROR", r["tls_state"] == TLS_STATE_ERROR),
+            (f"sub_progress = ${SUB_PROGRESS_FRAME_FAIL:02X}",
+             r["sub_progress"] == SUB_PROGRESS_FRAME_FAIL),
+            not_decrypted(r)]))
+    empty = seal(app_key, app_iv, 0, TLS_CT_APPLICATION, b"")
+    assert len(empty) == 5 + 17
+    r = run_receive(transport, labels, stream=empty,
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="tls_record_recv_and_decrypt")
+    tally(_report(
+        "control: 17-byte record (empty application data) still accepted",
+        "boundary, green both ways: the smallest legal record",
+        r, [("carry C=0", r["carry"] == 0),
+            ("tls_state still CONNECTED", r["tls_state"] == TLS_STATE_CONNECTED),
+            ("tls_read_seq = 1", r["read_seq"] == 1)]))
+
+    # --- L: ChangeCipherSpec after the keys is still skipped -------------
+    ccs = bytes([0x14, 0x03, 0x03, 0x00, 0x01, 0x01])
+    good_ee = seal(hs_key, hs_iv, 0, TLS_CT_HANDSHAKE, ee)
+    r = run_receive(transport, labels, stream=ccs + good_ee,
+                    state=TLS_STATE_ENCRYPTED_EXT, keys=hs_keys, key=hs_key,
+                    iv=hs_iv, target="tls_recv_encrypted", pre=pre)
+    tally(_report(
+        "control: CCS then a valid EncryptedExtensions (green both ways)",
+        "RFC 8446 middlebox CCS: 1 byte, unencrypted - neither the frame "
+        "check nor the length guard may reject it",
+        r, [("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=0", r["carry"] == 0),
+            ("tls_state still ENCRYPTED_EXT",
+             r["tls_state"] == TLS_STATE_ENCRYPTED_EXT),
+            ("tls_read_seq = 1", r["read_seq"] == 1)]))
+    r = run_receive(transport, labels, stream=ccs + good,
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "control: CCS then application data (green both ways)",
+        "same, on the application path",
+        r, [("carry C=0", r["carry"] == 0),
+            ("HTTP 200 parsed", r["status"] == 200),
+            ("tls_state still CONNECTED", r["tls_state"] == TLS_STATE_CONNECTED)]))
+
+    # --- M: a fatal alert (not close_notify) -----------------------------
+    fatal = seal(app_key, app_iv, 1, TLS_CT_ALERT, bytes([2, 50]))  # decode_error
+    r = run_receive(transport, labels, stream=r1 + fatal,
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "fatal alert (decode_error) after part of the body: C=1 at once",
+        "only close_notify is an orderly close",
+        r, [("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=1", r["carry"] == 1),
+            (f"at once (polls <= {MAX_POLLS_AFTER_FAIL})",
+             r["polls"] <= MAX_POLLS_AFTER_FAIL),
+            ("both records authenticated (tls_read_seq = 2)",
+             r["read_seq"] == 2)]))
+    unframed_body = seal(app_key, app_iv, 0, TLS_CT_APPLICATION,
+                         b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello")
+    r = run_receive(transport, labels, stream=unframed_body + fatal,
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "fatal alert ending an unframed body: C=1, not a completed body",
+        "a close_notify there is C=0 (case above); decode_error is not",
+        r, [("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=1", r["carry"] == 1),
+            (f"at once (polls <= {MAX_POLLS_AFTER_FAIL})",
+             r["polls"] <= MAX_POLLS_AFTER_FAIL)]))
+
+    # --- N: abort with the REU body sink on (UCI only) -------------------
+    if labels.address("sink_reu_setup") is not None:
+        r = run_receive(
+            transport, labels, stream=r1 + flip_tag_bit(r2),
+            state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key, iv=app_iv,
+            target="http_recv_body",
+            extra=(("http_body_sink", bytes([1])),
+                   ("http_reu_body_base", bytes([0, 0, 5])),  # REU bank 5
+                   ("http_sink_flushed", bytes([POISON])),
+                   ("http_resp_len", bytes([POISON, POISON]))),
+            reads=(("http_sink_flushed", 1), ("http_resp_len", 2),
+                   ("http_resp_buf", 10)))
+        rl = r["http_resp_len"][0] | (r["http_resp_len"][1] << 8)
+        tally(_report(
+            "abort with the REU sink on: partial body still finalized",
+            "the abort path runs http_body_finish, like the verdict: final "
+            "blit + first-512 fetch-back",
+            r, _fail_closed_checks(r, live_state=TLS_STATE_CONNECTED,
+                                   seq_after=1)
+            + [("http_sink_flushed = 1", r["http_sink_flushed"] == b"\x01"),
+               ("http_resp_len = 10 (min(512, total))", rl == 10),
+               ("http_resp_buf = the 10 body bytes, back from the REU",
+                r["http_resp_buf"] == b"A" * 10)]))
+    else:
+        print("\n  [ ] REU-sink abort case: NOT APPLICABLE on this build "
+              "(ip65 compiles the sink to a stub) - not counted")
+
+    # --- O: the next connection after an abort ---------------------------
+    sh = bytes([0x16, 0x03, 0x03, 0x00, 0x04, 2, 0, 0, 0])
+    residue = seal(app_key, app_iv, 1, TLS_CT_APPLICATION, b"y" * 40)
+    r = run_connect_stale(transport, labels, stale=residue, server=sh)
+    tally(_report(
+        "next tls_connect after an abort: stale ciphertext is not the "
+        "ServerHello",
+        "was: the aborted connection's unread record came back as the "
+        "first record in SERVER_HELLO state, C=0",
+        r, [("returned (no harness timeout)", not r["timed_out"]),
+            ("the record handed to ServerHello processing is the new "
+             "handshake record (type $16)", r["rec_type"] == TLS_CT_HANDSHAKE),
+            ("it got as far as the parser (tls_recv_progress = 4)",
+             r["progress"] == 4)]))
+    r = run_connect_stale(transport, labels, stale=b"", server=sh,
+                          reader=(1, 3, 100))
+    tally(_report(
+        "next tls_connect with the reader left mid-record",
+        "a budget-expired fetch can leave tls_recv_state = 1; the new "
+        "connection's ServerHello must not be read as that record's payload",
+        r, [("returned (no harness timeout)", not r["timed_out"]),
+            ("ServerHello record reached the parser (type $16, progress 4)",
+             r["rec_type"] == TLS_CT_HANDSHAKE and r["progress"] == 4),
+            (f"at once (polls <= {MAX_POLLS_AFTER_FAIL})",
+             r["polls"] <= MAX_POLLS_AFTER_FAIL)]))
+
     # --- E: tls_connect's error exit keeps the record layer's verdict -----
     r = run_connect_error_exit(transport, labels, TLS_STATE_ERROR,
                                TLS_STATE_ENCRYPTED_EXT)
@@ -630,7 +923,7 @@ def main() -> int:
     if ChaCha20Poly1305 is None:
         return cannot_run(
             "python 'cryptography' package not importable",
-            executed=0, total=10,
+            executed=0, total=None,
             certifies="AEAD fail-closed behaviour (#239)")
 
     if os.environ.get("C64_SKIP_BUILD"):
@@ -658,6 +951,13 @@ def main() -> int:
     for name in REQUIRED_LABELS:
         print(f"  {name:<24} = ${labels[name]:04X}")
 
+    try:
+        menu_wait = float(os.environ.get("C64_INIT_WAIT", "120"))
+    except ValueError:
+        print(f"FATAL: C64_INIT_WAIT={os.environ['C64_INIT_WAIT']!r} is not "
+              f"a number of seconds")
+        return 1
+
     print("\n=== Starting VICE ===")
     config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True,
                                  sound=False)
@@ -665,9 +965,12 @@ def main() -> int:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"  VICE PID={inst.pid}, port={inst.port}")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=120.0, verbose=False)
+        grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait,
+                             verbose=False)
         if grid is None:
-            print("FATAL: Main menu did not appear")
+            print(f"FATAL: Main menu did not appear within {menu_wait:.0f} s "
+                  f"(a comb image's boot precompute needs ~135 s in VICE: "
+                  f"set C64_INIT_WAIT)")
             mgr.release(inst)
             return 1
         print("  Main menu ready")

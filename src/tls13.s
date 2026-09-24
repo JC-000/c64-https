@@ -63,6 +63,7 @@
 .import tls_record_send_plaintext
 .import tls_record_send_encrypted
 .import tls_record_recv_and_decrypt
+.import tls_rx_reset
 
 ; --- ClientHello / ServerHello builders & parsers (tls_handshake) ---
 .import tls_build_client_hello
@@ -132,6 +133,8 @@
 ; Output: C=0 success (CONNECTED state), C=1 failure
 ; =============================================================================
 tls_connect:
+        jsr tls_rx_reset        ; #239: drop an earlier connection's unread
+                                ;  ring bytes + reset the record reader
         ; init state
         lda #TLS_STATE_IDLE
         sta tls_state

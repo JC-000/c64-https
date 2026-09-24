@@ -78,6 +78,7 @@
         .import tls_recv
         .import tls_state       ; #239: bit 7 = record layer aborted
         .import tls_rec_type    ; #239: last record decrypted was an alert
+        .import tls_rec_buf     ; #239: its AlertDescription byte
 
         ; ---- imports: net.asm wrappers around ip65 ----
         ; §13 retired at contract v1.0.0; net_abi.inc is the normative
@@ -354,15 +355,16 @@ http_recv_timeout_verdict:
 ;   layer now sets tls_state = TLS_STATE_ERROR on a tag failure (the only
 ;   state with bit 7 set): that returns C=1 at once, with no further poll.
 ;
-;   An alert (close_notify, or a fatal alert) was also just an idle tick:
-;   tls_recv returns C=1 for any record that is not application data. The
-;   peer sends nothing after one, so the loop now hands straight to
-;   http_recv_timeout_verdict instead of waiting out the budget first — a
-;   close_notify short of Content-Length is C=1 at once, and one that ends
-;   an unframed (Connection: close) body is C=0 at once. tls_rec_type
-;   holds the inner type of the last record decrypted until the next
-;   header is parsed, and nothing is sent after close_notify, so the test
-;   is stable across the idle ticks behind it. Other non-application
+;   An alert was also just an idle tick: tls_recv returns C=1 for any
+;   record that is not application data. The peer sends nothing after one.
+;   close_notify (AlertDescription 0) now hands straight to
+;   http_recv_timeout_verdict — C=1 at once if short of Content-Length,
+;   C=0 at once if it ends an unframed (Connection: close) body. Any other
+;   alert returns C=1 at once (tls_state is not latched: the record
+;   authenticated; the peer's description stays in tls_rec_buf+1).
+;   tls_rec_type / tls_rec_buf hold the last decrypted record until the
+;   next record's header and payload arrive, and nothing is sent after an
+;   alert, so the test is stable across the idle ticks behind it. Other non-application
 ;   records (NewSessionTicket) still count as ticks, as before.
 ;
 ;   Otherwise count the tick, loop, or hand the expired budget to
@@ -378,8 +380,12 @@ http_recv_tick:
         bit tls_state
         bmi @tick_abort         ; aborted by the record layer: not idle
         lda tls_rec_type
-        cmp #TLS_CT_ALERT       ; peer closed (or failed): framing decides now
-        beq @tick_verdict
+        cmp #TLS_CT_ALERT
+        bne @tick_count
+        lda tls_rec_buf+1       ; AlertDescription: 0 = close_notify
+        bne @tick_abort         ; any other alert: the peer failed us
+        beq @tick_verdict       ; close_notify: framing decides now
+@tick_count:
         inc http_recv_ticks
         bne @tick_more
         inc http_recv_ticks+1

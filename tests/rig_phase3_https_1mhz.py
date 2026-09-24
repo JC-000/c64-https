@@ -497,6 +497,8 @@ def _dump_diagnostics(transport=None) -> None:
             0x08: "about to decrypt",
             0x09: "decrypt succeeded",
             0x0A: "returning success",
+            0x0B: "AEAD tag rejected: connection aborted (#239)",
+            0x0C: "bad/short record header after keys: aborted (#239)",
         }
         try:
             transport.resume()

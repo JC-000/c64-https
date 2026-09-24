@@ -24,6 +24,7 @@
 .export tls_record_recv_and_decrypt
 .export tls_recv_state
 .export tls_recv_count
+.export tls_rx_reset
 
 .include "net_abi.inc"          ; net_tcp_send, net_recv_byte, net_send_len
 .import tls_record_encrypt
@@ -363,8 +364,8 @@ tls_record_recv_and_decrypt:
         ; Decrypt the record in-place
         lda #$08
         sta tls_recv_sub_progress
-        jsr tls_record_decrypt
-        bcs @aead_fail          ; AEAD verification failed
+        jsr tls_rec_decrypt_chk ; length guard, then tls_record_decrypt
+        bcs @aead_fail          ; AEAD verification failed (or short record)
         lda #$09
         sta tls_recv_sub_progress
 
@@ -381,39 +382,84 @@ tls_record_recv_and_decrypt:
         jmp tls_rec_auth_fail   ; far: TLS_CODE, off the ip65 LOADER
 
 ; =============================================================================
-; tls_rec_frame_fail / tls_rec_auth_fail - fail closed (issue #239)
+; Fail-closed record-layer helpers (issue #239). Never CODE: that lands in
+; ip65's LOADER region, the tight one. Under UCI they go in TLS_CODE
+; (NET_CODE, which has room); under ip65 in CRYPTO_CODE, i.e. the
+; CRYPTO_RESIDENT half of the CRYPTO_OVERLAY+CRYPTO_RESIDENT pool, because
+; TLS_CODE's half (CRYPTO_OVERLAY) would be left with single-digit bytes.
 ;
-; tls_rec_frame_fail: jmp'd from tls_recv_record's @error (bad content type,
-;   version or length). Resets the record reader either way. While
+; tls_rx_reset: called at tls_connect entry. Drops whatever an earlier
+;   connection left unread in the TCP ring (head := tail) and puts the
+;   record reader back at a record boundary. Nothing that far back reset
+;   either, so after an aborted fetch the next connect used to read the old
+;   connection's ciphertext as its "ServerHello". Safe to discard: TLS 1.3
+;   is client-first — the server sends nothing on a new connection until it
+;   has our ClientHello, which tls_connect has not sent yet — and both
+;   backends append to the ring only inside net_poll, never asynchronously.
+;
+; tls_rec_decrypt_chk: in front of tls_record_decrypt. Once records are
+;   encrypted a record of 16 B or less cannot hold a tag plus an inner type,
+;   and tls_record_decrypt computes tls_rec_len - 16 unchecked: below 16 it
+;   underflows and Poly1305 sweeps ~64 KB, I/O at $D000-$DFFF included
+;   (read side effects: CIA ICR, the UCI $DF1C-$DF1F queues). Rejected as a
+;   fatal framing error ($0C). ChangeCipherSpec (1 B) never gets here — it
+;   is skipped before the decrypt — and in the plaintext phase nothing is
+;   decrypted, so neither needs an exemption.
+;
+; tls_rec_frame_fail: jmp'd from tls_recv_record's @error (bad content
+;   type, version or length). Resets the record reader either way. While
 ;   tls_state < TLS_STATE_ENCRYPTED_EXT (ClientHello/ServerHello, plaintext)
 ;   it returns C=1 and the caller resyncs a byte at a time, exactly as
-;   before; from EncryptedExtensions on it falls into the latch below with
-;   tls_recv_sub_progress = $0C.
+;   before; from EncryptedExtensions on it latches with sub-progress $0C.
+;
 ; tls_rec_auth_fail: tail-jumped from tls_record_recv_and_decrypt on an
 ;   AEAD tag failure; sub-progress $0B. The record is discarded and
 ;   tls_read_seq is not advanced (tls_record_decrypt returns before the
-;   increment).
+;   increment). If the short-record guard already latched, it keeps that.
 ;
 ; The latch records the state the failure hit in tls_last_state
 ; (TLS_STATE_CONNECTED for application data — tls_connect never writes that
 ; value there, so it names this abort) and sets tls_state = ERROR, which
 ; the looping callers test. Output: C=1 always.
-;
-; TLS_CODE, not CODE: CODE lands in ip65's LOADER region, the tight one.
 ; =============================================================================
+.ifdef BACKEND_UCI
 .segment "TLS_CODE"
-tls_rec_frame_fail:
-        lda #0                  ; reset the record reader (as @error did)
+.else
+.segment "CRYPTO_CODE"
+.endif
+tls_rx_reset:
+        lda tcp_recv_tail
+        sta tcp_recv_head
+        lda tcp_recv_tail+1
+        sta tcp_recv_head+1
+tls_rec_reader_reset:
+        lda #0
         sta tls_recv_state
         sta tls_recv_count
         sta tls_recv_count+1
+        rts
+
+tls_rec_decrypt_chk:
+        lda tls_rec_len+1
+        bne @long               ; >= 256 B
+        lda #16
+        cmp tls_rec_len         ; C = (tls_rec_len <= 16)
+        bcs tls_rec_frame_fail  ; too short for a tag: fatal (state >= 3 here)
+@long:
+        jmp tls_record_decrypt
+
+tls_rec_frame_fail:
+        jsr tls_rec_reader_reset
         lda tls_state
         cmp #TLS_STATE_ENCRYPTED_EXT
         bcc tls_rec_fail_ret    ; plaintext phase: resync, not fatal
-        lda #$0C                ; sub-progress: bad header after keys
-        .byte $2C               ; BIT abs: skips the LDA #$0B below
+        lda #$0C                ; sub-progress: bad/short header after keys
+        bne tls_rec_latch       ; always
 tls_rec_auth_fail:
+        bit tls_state
+        bmi tls_rec_fail_ret    ; already latched by the length guard
         lda #$0B                ; sub-progress: AEAD tag rejected
+tls_rec_latch:
         sta tls_recv_sub_progress
         lda tls_state
         sta tls_last_state
