@@ -508,6 +508,11 @@ ALL_OBJS := $(TOP_OBJS) $(CRYPTO_OBJS) $(CRYPTO_SHARED_OBJS) $(NET_OBJS)
 
 PRG    := build/c64-https.prg
 LABELS := build/labels.txt
+# Everything one link writes (the -Ln/-m/--dbgfile paths in LD65FLAGS).
+# Issue #220: both parse-time invalidations below delete ALL of these, not
+# just the PRG, so a .map / labels.txt / .dbg can never outlive the image it
+# describes — an absent map is honest, a stale one still parses fine.
+LINK_OUTPUTS := $(PRG) $(LABELS) build/c64-https.map build/c64-https.dbg
 
 .PHONY: all link run clean ip65-libs ip65-blob package package-verify
 
@@ -736,6 +741,18 @@ MAKE_DRY_RUN := $(strip \
     $(findstring q,$(MAKE_OPT_LETTERS)) \
     $(findstring t,$(MAKE_OPT_LETTERS)))
 
+# Issue #220: goals that read and write nothing under build/ skip BOTH
+# parse-time blocks entirely — no compare, no stamp write, no deletion. The
+# compare runs before goal selection, so a flagless `make ip65-libs` after a
+# comb build used to delete every object and the PRG of a build it never
+# touched. Skipping is exact, not a #174-style guess: nothing in build/
+# changes, so the stamp still describes the objects beside it and the next
+# real build compares against the truth. A CLOSED allowlist, and only when
+# EVERY goal is in it (`make ip65-libs all` still invalidates): an unlisted
+# goal falls back to invalidating, which is the safe direction.
+STAMP_EXEMPT_GOALS := clean ip65-libs ip65-blob
+STAMP_SKIP := $(if $(MAKECMDGOALS),$(if $(filter-out $(STAMP_EXEMPT_GOALS),$(MAKECMDGOALS)),,skip))
+
 # Under a dry run each block below still runs its COMPARE — it just reports
 # instead of acting, so `make -n` stays an honest answer to "what would a build
 # do?" rather than silently printing "nothing to be done". The dry-run compare
@@ -764,7 +781,7 @@ FLAGS_STAMP_BODY := printf '%s\n' \
     'X25519_INIT_SEGMENT=$(X25519_INIT_SEGMENT)' \
     'X25519_SEG_LADDER=$(X25519_SEG_LADDER)'
 
-ifneq ($(MAKECMDGOALS),clean)
+ifeq ($(STAMP_SKIP),)
 ifeq ($(MAKE_DRY_RUN),)
 _ := $(shell mkdir -p build; \
              $(FLAGS_STAMP_BODY) > $(FLAGS_STAMP).tmp; \
@@ -772,13 +789,13 @@ _ := $(shell mkdir -p build; \
                  rm -f $(FLAGS_STAMP).tmp; \
              else \
                  mv $(FLAGS_STAMP).tmp $(FLAGS_STAMP); \
-                 rm -f $(ALL_OBJS) $(PRG); \
+                 rm -f $(ALL_OBJS) $(LINK_OUTPUTS); \
              fi)
 else
 # -n / -q / -t: compare and report, mutate nothing. See MAKE_DRY_RUN above.
 ifneq ($(shell $(FLAGS_STAMP_BODY) 2>/dev/null | cmp -s - $(FLAGS_STAMP) >/dev/null 2>&1 || echo differs),)
 $(warning DRY RUN (-$(MAKE_OPT_LETTERS)): build flags differ from $(FLAGS_STAMP).)
-$(warning   A real build would rewrite the stamp and delete every object and $(PRG))
+$(warning   A real build would rewrite the stamp and delete every object and $(LINK_OUTPUTS))
 $(warning   at parse time. NOTHING was deleted; the tree is untouched.)
 endif
 endif
@@ -839,7 +856,7 @@ $(FLAGS_STAMP):
 HTTPS_TARGET_INC_BODY := printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n.define HTTPS_SNI_STR "%s"\n' \
                     '$(HTTPS_HOST)' '$(HTTPS_PATH)' '$(HTTPS_SNI)'
 
-ifneq ($(MAKECMDGOALS),clean)
+ifeq ($(STAMP_SKIP),)
 ifeq ($(MAKE_DRY_RUN),)
 _ := $(shell mkdir -p build; \
              $(HTTPS_TARGET_INC_BODY) > build/https_host.inc.tmp; \
@@ -847,13 +864,13 @@ _ := $(shell mkdir -p build; \
                  rm -f build/https_host.inc.tmp; \
              else \
                  mv build/https_host.inc.tmp build/https_host.inc; \
-                 rm -f build/boot.o build/http.o $(PRG); \
+                 rm -f build/boot.o build/http.o $(LINK_OUTPUTS); \
              fi)
 else
 # -n / -q / -t: compare and report, mutate nothing. See MAKE_DRY_RUN above.
 ifneq ($(shell $(HTTPS_TARGET_INC_BODY) 2>/dev/null | cmp -s - build/https_host.inc >/dev/null 2>&1 || echo differs),)
 $(warning DRY RUN (-$(MAKE_OPT_LETTERS)): target strings differ from build/https_host.inc.)
-$(warning   A real build would delete build/boot.o, build/http.o and $(PRG) at parse)
+$(warning   A real build would delete build/boot.o, build/http.o and $(LINK_OUTPUTS) at parse)
 $(warning   time. NOTHING was deleted; the tree is untouched.)
 endif
 endif
