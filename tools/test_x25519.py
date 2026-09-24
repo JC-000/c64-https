@@ -706,6 +706,69 @@ def test_fe_reduce_wide_carry(transport, labels):
     return passed, failed
 
 
+# ----------------------------------------------------------------------------
+# fe_mul_a24 had the sibling defect (found in review of #244): its three
+# folds of bytes 32..34 (x38) rippled with INC but simply stopped when the
+# ripple ran off byte 31, losing 2^256 = 38 (mod p). Random inputs almost
+# never reach it (bytes 3..31 must all be $FF), but a PEER can: at ladder
+# bit 254 (always set after clamping) E = AA - BB = 4u exactly, so a
+# server key_share u = a/4 with a*121665 = (H+1)*2^256 - r faults every
+# handshake that uses it.
+# ----------------------------------------------------------------------------
+
+def a24_trap(h):
+    """a < p with a*121665 = (h+1)*2^256 - r, r < 121665: bytes 3..31 of
+    the product are $FF and bytes 32..34 hold h."""
+    r = ((h + 1) << 256) % 121665
+    return (((h + 1) << 256) - r) // 121665
+
+
+A24_TRAP_HS = (50000, 40000, 30000, 60000)
+# u = a24_trap(50000) / 4 mod p, and X25519(ISSUE_242_PRIV, u) from the
+# `cryptography` package (RFC 7748). Unfixed code returns 67c65d3c...
+A24_TRAP_U = bytes.fromhex(
+    "566921b9502455f0956529a6c75c428d42b3b613a7d438bfc111c979a9604d5a")
+A24_TRAP_EXPECTED = bytes.fromhex(
+    "81de4f2b4753ba75f04b1f1740966d3c53506a4d696ecca7be36fb9e0c44ba56")
+
+
+def test_fe_mul_a24_fold_carry(transport, labels):
+    """fe_mul_a24 must fold a ripple that runs off byte 31 back in as +38."""
+    passed = failed = 0
+    for h in A24_TRAP_HS:
+        a = a24_trap(h)
+        got = c64_fe_mul_a24(transport, labels, a)
+        want = fe_mul_a24_ref(a)
+        if got % P == want:
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS fe_mul_a24 trap H={h}")
+        else:
+            failed += 1
+            print(f"  FAIL fe_mul_a24 trap H={h}: short by "
+                  f"{(want - got) % P} (mod p)")
+            print(f"    expected: {want:064x}")
+            print(f"    got:      {got:064x}")
+    return passed, failed
+
+
+def test_x25519_a24_trap_u(transport, labels):
+    """X25519 with a peer-chosen u that hits the fe_mul_a24 fold at bit 254."""
+    passed = failed = 0
+    print("    a24 trap u...", end="", flush=True)
+    result = c64_x25519_scalarmult(transport, labels, ISSUE_242_PRIV,
+                                   A24_TRAP_U)
+    if result == A24_TRAP_EXPECTED:
+        passed += 1
+        print(" PASS")
+    else:
+        failed += 1
+        print(" FAIL")
+        print(f"    expected: {A24_TRAP_EXPECTED.hex()}")
+        print(f"    got:      {result.hex()}")
+    return passed, failed
+
+
 def test_x25519_issue_242_keygen(transport, labels):
     """X25519(captured #242 private key, 9) must be the RFC 7748 value."""
     passed = failed = 0
@@ -762,6 +825,8 @@ def run_tests(transport, labels, seed):
          lambda: test_fe_inv(transport, labels, rng)),
         ("fe_reduce_wide carry (#242)",
          lambda: test_fe_reduce_wide_carry(transport, labels)),
+        ("fe_mul_a24 fold carry (#244 review)",
+         lambda: test_fe_mul_a24_fold_carry(transport, labels)),
     ]
 
     skipped_groups = []
@@ -782,6 +847,8 @@ def run_tests(transport, labels, seed):
          lambda: test_x25519_rfc7748_vector2(transport, labels)),
         ("x25519 #242 captured keygen",
          lambda: test_x25519_issue_242_keygen(transport, labels)),
+        ("x25519 fe_mul_a24 trap u",
+         lambda: test_x25519_a24_trap_u(transport, labels)),
     ]
     if FAST:
         # A skipped group must not silently leave the denominator: record

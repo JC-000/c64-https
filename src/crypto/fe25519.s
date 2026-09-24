@@ -691,8 +691,12 @@ fe_reduce_wide:
         bcc @prop2
 
         ; Carried out of byte 31: 2^256 = 38 (mod p). Reachable only when
-        ; bytes 2..31 were all $FF, so bytes 1..31 are now $00 and this
-        ; fold cannot overflow again.
+        ; bytes 2..31 were all $FF, so they are now $00, and byte 1 is at
+        ; most 5 (it just wrapped after adding a fold high byte <= 5), so
+        ; this ripple stops at byte 1 and cannot overflow again. The old
+        ; ADC #0 form of this loop was therefore behaviourally equivalent
+        ; (its CPX only ever ran after byte 1 had already absorbed the
+        ; carry); it is rewritten to match @prop2, not because it was wrong.
         lda fe_wide
         clc
         adc #38
@@ -1106,6 +1110,7 @@ fe_mul_a24:
         inx
         cpx #32
         bcc @prop_b32
+        jsr @a24_wrap38         ; ripple ran off byte 31 (#244 review)
 
 @r_b33:
         lda fe_wide+33
@@ -1126,6 +1131,7 @@ fe_mul_a24:
         inx
         cpx #32
         bcc @prop_b33
+        jsr @a24_wrap38         ; ripple ran off byte 31 (#244 review)
 
 @r_b34:
         lda fe_wide+34
@@ -1146,6 +1152,7 @@ fe_mul_a24:
         inx
         cpx #32
         bcc @prop_b34
+        jsr @a24_wrap38         ; ripple ran off byte 31 (#244 review)
 
 @r_done_a24:
         ; Copy to (fe_dst)
@@ -1157,6 +1164,28 @@ fe_mul_a24:
         bpl @copy_a24
 
         jsr fe_reduce_final
+        rts
+
+; A fold of bytes 32..34 rippled off byte 31: 2^256 = 38 (mod p), so fold
+; it back in. The old code just exited, returning a result 38 short. Random
+; inputs essentially never get here (bytes k+2..31 must all be $FF), but a
+; peer can force it: at ladder bit 254 E = 4u exactly, so a key_share u
+; with 121665*4u = (H+1)*2^256 - r (r < 121665) hits it every handshake.
+; Bytes k+2..31 are now $00, so this ripple cannot run off byte 31 again.
+@a24_wrap38:
+        lda fe_wide
+        clc
+        adc #38
+        sta fe_wide
+        bcc @a24_wrap_done
+        ldx #1
+@a24_wrap_prop:
+        inc fe_wide,x
+        bne @a24_wrap_done
+        inx
+        cpx #32
+        bcc @a24_wrap_prop
+@a24_wrap_done:
         rts
 
 ; =============================================================================
