@@ -42,6 +42,7 @@ Runs under pytest, and standalone for anyone without pytest installed
 
 import ast
 import configparser
+import re
 import sys
 from pathlib import Path
 
@@ -231,9 +232,11 @@ def test_testpaths_lists_nothing_pytest_cannot_run() -> None:
 #            pytest-test `return` there is the #158/#165/#177 shape -- and
 #            so is calling cannot_run() for its printout and then returning
 #            0 anyway, which is why a policy call elsewhere in the branch
-#            earns no exemption. A site that ALSO carries evidence that a
-#            check ran (see VACUOUS) is a verdict, not a skip, and is not
-#            PREREQ.
+#            earns no exemption. Nor does evidence (see VACUOUS) anywhere on
+#            the path: `if total == 0: exit(2)` followed by `if not
+#            which('ca65'): return 0` is the #165 partial-skip shape, and a
+#            count that proves SOME checks ran says nothing about the ones
+#            the prerequisite branch then skipped.
 #
 #   VACUOUS  Is this success exit justified ONLY by the absence of failures
 #            (`0 if failed == 0 else 1`, `1 if failed else 0`, `if failed:
@@ -264,8 +267,19 @@ def test_testpaths_lists_nothing_pytest_cannot_run() -> None:
 #   * a success condition that names a result it never counts (`0 if all_ok
 #     else 1`, `if ok_body: return 0`) -- a verdict on an observation is
 #     not this rule's business, so it is not flagged either way;
-#   * an evidence-named identifier that does not count what its name says
-#     (`total = len(TESTS)` is treated as evidence);
+#   * an evidence-named identifier that does not count what its name says:
+#     `total = len(TESTS)` counts COLLECTED tests but is treated as
+#     evidence; likewise a count word the list lacks (`num_checks`, `ok`)
+#     is NOT treated as evidence and so reads as VACUOUS;
+#   * bool-valued exits (`sys.exit(failed > 0)`, `return not failures`) and
+#     tallies not named fail* (`errs`, `bad`): the verdict is not seen;
+#   * a pytest body wrapped in a prerequisite `if` with no early return
+#     (`if which('ca65'): <asserts>`) -- the test passes having run nothing;
+#   * a prerequisite held in a local first (`have = which(...); if not
+#     have: return 0`) -- the condition names only a local;
+#   * skip spellings stored in a variable (`sk = pytest.skip`), decorator
+#     aliases (`m = pytest.mark; @m.skipif`, `from unittest import skip`),
+#     and module-level `pytestmark`;
 #   * `getattr(sys, "exit")(0)`, `exec`, and any dynamic spelling;
 #   * exit functions other than main/_main that are only reached via
 #     `sys.exit(fn())` in ANOTHER module;
@@ -296,6 +310,9 @@ SKIP_GUARD_ALLOWLIST = {
     # path reaches `return 0` without them. `failures` is a list the local
     # check() appends to, and nothing counts passes, so the shape reads as
     # VACUOUS to an AST that cannot see that every check is unconditional.
+    # NOTHING RE-CHECKS THAT JUSTIFICATION: the signature pins the exit and
+    # its gates, not the check() calls above it. Re-read the function when
+    # touching it.
     ("tools/uci/rig_https_live.py", "_selfcheck", "VACUOUS",
      "return 0 <- not(failures)"):
         "straight-line: every check() above the verdict is unconditional",
@@ -313,8 +330,8 @@ _PREREQ_WORDS = {"prereq", "prereqs", "prerequisite", "prerequisites",
 _PREREQ_PREFIXES = ("have_", "has_", "skip_if")
 _PATH_PROBES = {"exists", "is_file", "is_dir", "isfile", "isdir", "access"}
 # Whole words of an identifier that make it a count of what RAN.
-EVIDENCE_WORDS = {"total", "passed", "passes", "executed", "ran", "run",
-                  "runs", "succeeded", "successes"}
+EVIDENCE_WORDS = {"total", "pass", "passed", "passes", "executed", "ran",
+                  "run", "runs", "count", "succeeded", "successes"}
 _NON_EVIDENCE_WORDS = {"fail", "failed", "failure", "failures", "fails",
                        "err", "error", "errors", "skip", "skipped", "skips"}
 
@@ -481,15 +498,24 @@ def _disjuncts(test):
 
 
 def _words(expr):
-    """Lower-cased underscore-separated words of a Name/Attribute, or None."""
+    """Lower-cased words of a Name, Attribute or string-keyed Subscript.
+
+    Split on underscores and on camelCase humps, so `n_pass`, `nPassed`
+    and `stats["executed"]` all yield their count word.
+    """
     if isinstance(expr, ast.Call) and _call_name(expr) == "len" and expr.args:
         expr = expr.args[0]
     if isinstance(expr, ast.Name):
         ident = expr.id
     elif isinstance(expr, ast.Attribute):
         ident = expr.attr
+    elif (isinstance(expr, ast.Subscript)
+          and isinstance(expr.slice, ast.Constant)
+          and isinstance(expr.slice.value, str)):
+        ident = expr.slice.value
     else:
         return None
+    ident = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", ident)
     return {w for w in ident.lower().split("_") if w}
 
 
@@ -813,7 +839,7 @@ def _findings(tree, rel):
         evidence = "evidence" in kinds
         prereq = s.prereq_handler or any(
             _is_prereq_test(t) for t, _, enclosing in s.conds if enclosing)
-        if prereq and not evidence:
+        if prereq:
             findings.append(where + ("PREREQ",
                                      "success exit on a prerequisite branch "
                                      "that does not go through _skip_policy",
@@ -978,6 +1004,25 @@ _GUARD_CASES_BAD = {
         "import shutil\nclass TestX:\n    def test_x(self):\n"
         "        if not shutil.which('ld65'):\n            return\n"
         "        assert True\n", "PREREQ"),
+    # Adversary probes (PR #237 review 2): earlier evidence on the path
+    # used to launder a later prerequisite skip -- #165's partial skip.
+    "prereq_after_total_guard": (
+        "import sys, shutil\nTESTS=[1]\ndef main():\n    total = len(TESTS)\n"
+        "    if total == 0:\n        sys.exit(2)\n"
+        "    if not shutil.which('ca65'):\n        print('SKIP')\n"
+        "        return 0\n    return 1\n", "PREREQ"),
+    "prereq_after_assert_total": (
+        "import shutil\ndef main():\n    total = 3\n    assert total > 0\n"
+        "    if not shutil.which('ca65'):\n        return 0\n    return 1\n",
+        "PREREQ"),
+    "pytest_prereq_after_total": (
+        "import shutil\ndef test_x():\n    total = 1\n    assert total\n"
+        "    if not shutil.which('ld65'):\n        return\n    assert True\n",
+        "PREREQ"),
+    "prereq_with_run_arg": (
+        "import shutil\ndef main(run=True):\n"
+        "    if run and not shutil.which('x'):\n        return 0\n"
+        "    return 1\n", "PREREQ"),
     "import_error_exit_0": (
         "import sys\ntry:\n    import foo\nexcept ImportError:\n"
         "    sys.exit(0)\n", "PREREQ"),
@@ -1043,13 +1088,20 @@ _GUARD_CASES_GOOD = {
     "pytest_return_after_assert": (
         "def test_x():\n    out = ''\n    if 'x' in out:\n"
         "        assert out\n        return\n    assert not out\n"),
-    # An evidence-gated verdict that happens to sit under an env condition
-    # is a verdict, not a skip.
-    "evidence_gated_under_env": (
-        "import os, sys\ndef main():\n    passed = failed = 0\n"
-        "    if os.environ.get('VERBOSE'):\n"
-        "        if failed == 0 and passed > 0:\n            sys.exit(0)\n"
-        "    sys.exit(1)\n"),
+    # Whole-word evidence, widened in review 2: `pass`/`count`, camelCase,
+    # and a string-keyed subscript.
+    "n_pass_evidence": (
+        "import sys\ndef main():\n    n_pass = failed = 0\n"
+        "    if n_pass == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n"),
+    "camel_case_evidence": (
+        "import sys\ndef main():\n    nPassed = failed = 0\n"
+        "    if nPassed == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n"),
+    "subscript_key_evidence": (
+        "import sys\ndef main(stats):\n    failed = 0\n"
+        "    if stats['executed'] == 0:\n        sys.exit(2)\n"
+        "    sys.exit(0 if failed == 0 else 1)\n"),
     # `ready`/`already` are not prerequisite words.
     "ready_is_not_a_prereq_word": (
         "def main():\n    if already_ready():\n        return 0\n    return 1\n"),
