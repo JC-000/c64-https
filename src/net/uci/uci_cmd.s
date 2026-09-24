@@ -8,8 +8,11 @@
 ;
 ; Exported primitives (see the per-routine headers for calling conventions):
 ;
-;   uci_abort          — flush the state machine (write ABORT + short delay)
-;   uci_wait_idle      — spin until (STATE==0 AND CMD_BUSY==0); TOD-bounded
+;   uci_abort          — flush the state machine: write ABORT, then spin
+;                        until the firmware's reset clears $DF1C bit 2;
+;                        TOD-bounded
+;   uci_wait_idle      — spin until STATE==0, CMD_BUSY==0 and $DF1C bit 2
+;                        (abort pending) clear; TOD-bounded
 ;   uci_wait_not_busy  — spin until CMD_BUSY==0; TOD-bounded
 ;   uci_begin_cmd      — A = target id; writes target to UCI_CMD_DATA
 ;   uci_put_byte       — A = parameter byte; writes to UCI_CMD_DATA
@@ -63,21 +66,6 @@
 .export uci_resp_count
 
 .segment "UCI_CODE"
-
-; =============================================================================
-; uci_abort — force the UCI FIFO back to idle
-; Writes ABORT to UCI_CONTROL, then burns ~$20 iterations as a settle delay.
-; Clobbers: A, X
-; =============================================================================
-uci_abort:
-        lda #UCI_CTRL_ABORT
-        sta UCI_CONTROL
-        uci_fence
-        ldx #$20
-@spin:
-        dex
-        bne @spin
-        rts
 
 ; =============================================================================
 ; uci_tod_start — start CIA1's Time-of-Day clock (issue #145)
@@ -138,9 +126,12 @@ uci_tod_start:
         rts
 
 ; =============================================================================
-; uci_wait_idle — spin until STATE==0 AND CMD_BUSY==0, with wall-clock cap
-; UCI_STAT_STATE ($30) covers the state field; CMD_BUSY ($01) is bit 0.
-; ORing them (MASK $31) and looping while nonzero gives "fully idle".
+; uci_wait_idle — spin until STATE==0, CMD_BUSY==0 and no abort pending,
+; with wall-clock cap. UCI_STAT_STATE ($30) covers the state field; CMD_BUSY
+; ($01) is bit 0; UCI_STAT_ABORT_PENDING ($04) is bit 2 (#230). ORing them
+; (MASK $35) and looping while nonzero gives "fully idle": a command
+; written while an ABORT is still pending is lost (see uci_abort), so every
+; entry wait also waits out an abort that an earlier uci_abort gave up on.
 ;
 ; Issue #37 — the historical unbounded spin converts an FPGA wedge into a
 ; 600 s test sentinel timeout. The cap below uses CIA1 TOD (CIA_TOD_TENTHS,
@@ -170,6 +161,48 @@ CIA_TOD_HOUR   = $DC0B
 CIA_CRB        = $DC0F
 UCI_WAIT_IDLE_BUDGET_TENTHS = 50      ; 5 seconds at 10 Hz
 
+; =============================================================================
+; uci_abort — force the command interface back to idle, and WAIT for it (#230)
+;
+; Writing ABORT only sets handshake_in(2) ($DF1C bit 2). The reset itself
+; is done later by the firmware's command task (command_intf.cc run_task):
+; HANDSHAKE_RESET (0x87), one write that clears bit 2, forces state "00"
+; and rewinds command_pointer. Until that write lands, any command byte we
+; write goes into a buffer about to be rewound, and a PUSH lands in front
+; of the reset: the firmware then parses an empty or truncated command
+; ("Null command", "21,UNKNOWN COMMAND") and TCP_CONNECT reads back no
+; socket id — $88 UCI_ERR_NO_SOCKET. The pending abort shows in neither
+; STATE nor CMD_BUSY, so a $31 mask (uci_wait_idle's, before #230) can
+; read idle throughout.
+; This used to be a fixed 32-iteration spin (shorter than one fence).
+;
+; So wait for bit 2 to clear: it is cleared by nothing but that reset,
+; in the same FPGA write that forces state "00" and clears CMD_BUSY, so
+; "clear" means the reset has landed. That is exactly uci_wait_idle's
+; mask, which now includes bit 2 (below), so this falls straight into it:
+; same CIA1 TOD bound, same error code.
+;
+; The firmware task is FIFO (command_intf.cc: the IRQ queues the new
+; handshake bits, run_task takes them in order), so if the task is still
+; busy with a command the abort waits behind it: that command completes
+; (copy_result, state "10"), THEN the reset lands. If the task never
+; returns, neither does the reset, and this times out.
+;
+; "Bit 2 clear" means A reset landed, not that every queued abort item was
+; serviced: a C64 reset queues a spurious CMD_ABORT_DATA item on its own
+; (ResetInterruptHandlerCmdIf), and its reset can land first, leaving ours
+; still queued behind. The gap is theoretical: our next access is a fenced
+; command-byte write, and a later RESET only rewinds an empty buffer.
+;
+; Output: C=0 reset landed; C=1 5 s timeout (net_last_error = $89).
+; Clobbers: A
+; =============================================================================
+uci_abort:
+        lda #UCI_CTRL_ABORT
+        sta UCI_CONTROL
+        uci_fence
+        ; fall through into uci_wait_idle
+
 uci_wait_idle:
         ; Sample initial TENTHS for delta-tracking. Latch via HOUR,
         ; release via TENTHS. We don't care about the HOUR value itself.
@@ -181,7 +214,7 @@ uci_wait_idle:
 @wi_loop:
         lda UCI_STATUS
         uci_fence                   ; settle read before testing bits
-        and #(UCI_STAT_STATE | UCI_STAT_CMD_BUSY)   ; $31
+        and #(UCI_STAT_STATE | UCI_STAT_ABORT_PENDING | UCI_STAT_CMD_BUSY) ; $35
         beq @idle_done
 
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
