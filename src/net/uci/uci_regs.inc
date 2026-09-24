@@ -30,6 +30,7 @@ UCI_ID_VALUE      = $C9
 UCI_STAT_DATA_AV  = $80         ; response data available
 UCI_STAT_STAT_AV  = $40         ; status string available
 UCI_STAT_STATE    = $30         ; state field mask
+UCI_STAT_REPLY_VALID = $20      ; state(1): "10"/"11", reply staged (#230)
 UCI_STAT_ERROR    = $08         ; command returned an error
 UCI_STAT_CMD_BUSY = $01         ; command FIFO busy / command in flight
 
