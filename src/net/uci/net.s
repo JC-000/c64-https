@@ -95,9 +95,8 @@ net_init:
         ; Start CIA1's TOD before anything that waits on it. The CIA's
         ; TOD is halted out of reset and every bounded wait in uci_cmd.s
         ; measures wall-clock by watching it tick, so without this the
-        ; 5 s bounds are infinite on real hardware (#145). uci_abort
-        ; below spins on an iteration count, not the TOD, so the order
-        ; here is about net_dhcp_acquire and everything after it.
+        ; 5 s bounds are infinite on real hardware (#145) — including
+        ; uci_abort's own wait below (#230), so this must come first.
         jsr uci_tod_start
 
         ; Arm the status capture: uci_status_len is sticky-first, so a line
@@ -107,19 +106,28 @@ net_init:
         sta uci_status_len
         sta uci_status_force
 
+        ; Waits for the firmware's reset to land (#230). Its carry is held
+        ; across the ID check so that "no interface" is still reported as
+        ; NOT_PRESENT: with the interface absent, $DF1C is open bus and
+        ; the wait may run out its 5 s on a bit 2 nobody will ever clear.
         jsr uci_abort
+        php
 
         lda UCI_ID
         uci_fence                   ; settle before comparing ID
         cmp #UCI_ID_VALUE
         beq @present
 
+        plp
         lda #UCI_ERR_NOT_PRESENT
         sta net_last_error
         sec
-        rts
+@init_to:
+        rts                         ; C=1 on both paths here
 
 @present:
+        plp
+        bcs @init_to                ; reset never landed: $89 already set
         lda #$00
         sta net_local_ip+0
         sta net_local_ip+1
@@ -590,14 +598,10 @@ net_tcp_connect:
         stx uci_connect_port_hi
 
         jsr uci_wait_idle
-        bcc :+
-        ; FPGA wedged before we even queued anything — surface the timeout
-        ; (net_last_error already set) with the connect-fail tcp_state.
-        lda #NET_TCP_CONNECT_FAIL
-        sta net_tcp_state
-        sec
-        rts
-:
+        ; Not idle within 5 s — someone left a transaction open. Surface
+        ; the timeout (net_last_error already set) with the connect-fail
+        ; tcp_state, and abort it so the NEXT connect can work (#221).
+        bcs @tc_fail_bail
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -631,15 +635,10 @@ net_tcp_connect:
         uci_fence
 
         jsr uci_push_wait
-        bcc :+
         ; FPGA wedged waiting for TCP_CONNECT response — net_last_error is
         ; already UCI_ERR_WAIT_TIMEOUT. Force tcp_state to CONNECT_FAIL so
-        ; callers don't try to use a phantom socket.
-        lda #NET_TCP_CONNECT_FAIL
-        sta net_tcp_state
-        sec
-        rts
-:
+        ; callers don't try to use a phantom socket, then abort (#221).
+        bcs @tc_fail_bail
 
         jsr uci_check_err
         bcc @tc_no_err
@@ -647,13 +646,21 @@ net_tcp_connect:
         lda #UCI_ERR_CONNECT_FAIL
         sta net_last_error
         jsr uci_drain_resp
-        bcs @tc_err_drain_to        ; drain wedged — still surface CONNECT_FAIL
+        bcs @tc_bail                ; drain wedged — abort, C=1 (#221)
         jsr uci_drain_status
-        bcs @tc_err_drain_to
+        bcs @tc_bail
         jsr uci_ack
-@tc_err_drain_to:
         sec
         rts
+
+; Timeout exits (#221). Each is a bounded wait that expired mid-transaction
+; with net_last_error = $89 already set; uci_txn_bail aborts the transaction
+; and returns C=1, which is what every one of these exits returned before.
+@tc_fail_bail:
+        lda #NET_TCP_CONNECT_FAIL
+        sta net_tcp_state
+@tc_bail:
+        jmp uci_txn_bail
 
 @tc_no_err:
         ; Read 1-byte socket_id response.
@@ -670,19 +677,12 @@ net_tcp_connect:
         jsr uci_read_resp_bytes
 
         jsr uci_drain_resp
-        bcs @tc_ok_drain_to         ; drain wedged — surface as CONNECT_FAIL
+        bcs @tc_fail_bail           ; drain wedged — surface as CONNECT_FAIL
                                     ; (net_last_error already
                                     ;  UCI_ERR_WAIT_TIMEOUT from the drain)
         jsr uci_drain_status
-        bcs @tc_ok_drain_to
+        bcs @tc_fail_bail
         jsr uci_ack
-        jmp @tc_validate
-@tc_ok_drain_to:
-        lda #NET_TCP_CONNECT_FAIL
-        sta net_tcp_state
-        sec
-        rts
-@tc_validate:
 
         ; Validate the response: firmware must have returned at least 1
         ; byte (uci_resp_count) AND a non-zero socket_id. Issue #36 — at
@@ -830,70 +830,8 @@ net_tcp_send:
         sec
         rts
 
-; -----------------------------------------------------------------------
-; @sb_bail — leave a half-finished SOCKET_WRITE transaction (issue #194).
-;
-; Every branch here is a bounded wait that expired mid-transaction, so
-; net_last_error is already UCI_ERR_WAIT_TIMEOUT and the caller gets C=1
-; exactly as before. What changes is the state the command interface is
-; left in: these paths used to return without ever accepting or aborting
-; the transaction, so the interface stayed wherever the firmware had put
-; it, and only the next boot's net_init cleared it (uci_abort had exactly
-; one call site).
-;
-; ABORT, not DATA_ACC, is the primitive that applies. In
-; command_protocol.vhd the DATA_ACC bit is gated on `state(1) = '1'`, so
-; after a uci_push_wait timeout — where the firmware has not replied and
-; state is still "01" — writing it does nothing at all. The abort bit
-; sets handshake_in(2) unconditionally; command_intf.cc's task then runs
-; the target's abort() and writes HANDSHAKE_RESET (0x87), whose bit 7
-; hits the `state <= "00"` arm of the same VHDL file's
-; c_cif_io_handshake_out case.
-;
-; That reset is done by a FreeRTOS task, not by the FPGA, so uci_abort's
-; own settle (32 iterations — shorter than a single uci_fence) cannot
-; cover it. Wait for idle afterwards, on the same 5 s wall clock as every
-; other wait in this backend. Its carry is deliberately discarded: we
-; already have a failure to report, and it can only set net_last_error to
-; the UCI_ERR_WAIT_TIMEOUT that is already there.
-;
-; Two further points in ABORT's favour, both from the firmware side:
-; HANDSHAKE_RESET also rewinds command_pointer to the buffer base, which
-; DATA_ACC does not, so a partially-pushed command cannot be prepended to
-; the next one; and NetworkTarget::abort() (network_target.cc) only calls
-; discard_read_reply() — it closes no socket, close_all_sockets() being
-; reachable only from c64_reset() — so aborting here cannot desync our
-; socket id from the firmware's table.
-;
-; WHAT THIS DOES NOT RECOVER. The abort is serviced by the SAME task that
-; services commands (command_intf.cc's run_task). The likeliest reason
-; uci_push_wait timed out is that task being blocked inside lwip_send —
-; and a task blocked there cannot action an abort either. In that case
-; uci_wait_idle below also expires and we return with the interface still
-; dirty, having spent a second 5 s. This helps the transient-slowness
-; class only; a genuinely stuck server task still needs the boot-time
-; uci_abort in net_init.
-;
-; Cost of that, stated plainly: a bail can now block ~10 s where it
-; blocked ~5 s. It is one extra wait per net_tcp_send CALL, not per chunk
-; — @sb_bail returns from the whole routine — and no caller retries
-; (tls_send_record bcs @fail; http_get_plain bcs @plain_close_err), so
-; the exposure is bounded at one doubling per send.
-;
-; SCOPE. net_tcp_connect has four structurally identical dirty exits and
-; net_tcp_close one; they are knowingly untouched here and tracked as
-; #221. They cannot produce the $86 this exit is about — both open with
-; uci_wait_idle (mask $31) rather than net_poll's uci_wait_not_busy
-; (mask $01), so a left-open data phase stops them before PUSH_CMD — but
-; they can leave the interface unusable until reboot, every later connect
-; burning 5 s in uci_wait_idle and returning CONNECT_FAIL. @sb_bail is
-; the remedy to reuse there.
-; -----------------------------------------------------------------------
 @sb_bail:
-        jsr uci_abort
-        jsr uci_wait_idle
-        sec
-        rts
+        jmp uci_txn_bail            ; abort the transaction, C=1 (#194)
 
 @sb_no_err:
         ; Read 2-byte written count into uci_write_resp (LE).
@@ -961,19 +899,94 @@ net_tcp_send:
         rts
 
 ; =============================================================================
+; uci_txn_bail — leave a half-finished transaction (#194, #221).
+;
+; Shared by net_tcp_send (#194), net_tcp_connect and net_tcp_close (#221).
+; Entered by JMP, as the tail of the caller's exit.
+;
+; Every branch here is a bounded wait that expired mid-transaction (or, for
+; the connect/close ENTRY waits, found one somebody else left open), so
+; net_last_error is already UCI_ERR_WAIT_TIMEOUT and the caller gets C=1
+; exactly as before. What changes is the state the command interface is
+; left in: these paths used to return without ever accepting or aborting
+; the transaction, so the interface stayed wherever the firmware had put
+; it, and only the next boot's net_init cleared it (uci_abort had exactly
+; one call site).
+;
+; ABORT, not DATA_ACC, is the primitive that applies. In
+; command_protocol.vhd the DATA_ACC bit is gated on `state(1) = '1'`, so
+; after a uci_push_wait timeout — where the firmware has not replied and
+; state is still "01" — writing it does nothing at all. The abort bit
+; sets handshake_in(2) unconditionally; command_intf.cc's task then runs
+; the target's abort() and writes HANDSHAKE_RESET (0x87), whose bit 7
+; hits the `state <= "00"` arm of the same VHDL file's
+; c_cif_io_handshake_out case.
+;
+; That reset is done by a FreeRTOS task, not by the FPGA. uci_abort now
+; waits for it itself, on $DF1C bit 2, which only that reset clears (#230).
+; The same reset write forces state "00" and clears CMD_BUSY, so the
+; uci_wait_idle after it should pass on its first read; it stays as a
+; cheap check of that reading of the VHDL. Its carry is deliberately
+; discarded: we already have a failure to report, and it can only set
+; net_last_error to the UCI_ERR_WAIT_TIMEOUT that is already there.
+;
+; Two further points in ABORT's favour, both from the firmware side:
+; HANDSHAKE_RESET also rewinds command_pointer to the buffer base, which
+; DATA_ACC does not, so a partially-pushed command cannot be prepended to
+; the next one; and NetworkTarget::abort() (network_target.cc) only calls
+; discard_read_reply() — it closes no socket, close_all_sockets() being
+; reachable only from c64_reset() — so aborting here cannot desync our
+; socket id from the firmware's table.
+;
+; WHAT THIS DOES NOT RECOVER. The abort is serviced by the SAME task that
+; services commands (command_intf.cc's run_task). The likeliest reason
+; uci_push_wait timed out is that task being blocked inside lwip_send —
+; and a task blocked there cannot action an abort either. In that case
+; uci_wait_idle below also expires and we return with the interface still
+; dirty, having spent a second 5 s (in uci_abort's own wait; the
+; uci_wait_idle is skipped then, as it could only spend a third). This
+; helps the transient-slowness class only; a genuinely stuck server task
+; still needs the boot-time uci_abort in net_init.
+;
+; Cost of that, stated plainly: a bail can block ~10 s where it blocked
+; ~5 s. It is one extra wait per CALL, not per chunk — every caller JMPs
+; here as its exit — and no caller retries (tls_send_record bcs @fail;
+; http_get_plain bcs @plain_close_err), so the exposure is bounded at one
+; doubling per call.
+;
+; SCOPE (#221). Routed here: net_tcp_send's push-wait and drain exits;
+; net_tcp_connect's entry wait, push wait and both drain pairs; and
+; net_tcp_close's entry wait, push wait and drains. NOT routed: net_poll's
+; exits (they force NET_TCP_ERROR, and the close that follows meets the
+; open transaction at its entry wait, which now aborts it),
+; net_dhcp_acquire's, and net_tcp_send's entry wait (C=1 to a caller that
+; then closes or reconnects, and both entry waits now abort). So a dirty
+; interface costs at most one 5 s entry wait plus the abort, instead of
+; every later connect failing until reboot.
+; =============================================================================
+uci_txn_bail:
+        jsr uci_abort
+        bcs @tb_done                ; reset never landed: $89 set, and
+                                    ; a second 5 s wait would learn nothing
+        jsr uci_wait_idle
+@tb_done:
+        sec
+        rts
+
+; =============================================================================
 ; net_tcp_close — CMD_SOCKET_CLOSE on the open socket. Best-effort; the
 ; UCI error bit is drained but not surfaced, and net_tcp_state is always
 ; forced back to NET_TCP_CLOSED.
 ; =============================================================================
 net_tcp_close:
-        jsr uci_wait_idle
-        bcc :+
-        ; FPGA wedged on close — force CLOSED state and bail. Best-effort
-        ; semantics already match the existing close path (no return code).
+        ; CLOSED on every exit, so set it first: nothing below reads it.
         lda #NET_TCP_CLOSED
         sta net_tcp_state
-        rts
-:
+
+        jsr uci_wait_idle
+        ; Not idle within 5 s (typically a net_poll bail left a reply
+        ; open) — abort it and return C=1, as before (#221).
+        bcs @cl_bail
 
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
@@ -985,24 +998,17 @@ net_tcp_close:
         jsr uci_put_byte
 
         jsr uci_push_wait
-        bcc :+
-        ; FPGA wedged on close — force CLOSED state and bail. Best-effort
-        ; semantics: skip drains (FIFO state is undefined when wedged).
-        lda #NET_TCP_CLOSED
-        sta net_tcp_state
-        rts
-:
+        ; FPGA wedged on close — skip the drains and abort (#221).
+        bcs @cl_bail
         jsr uci_check_err       ; clear latched error if any
         jsr uci_drain_resp
-        bcs @cl_drain_to            ; drain wedged — still force CLOSED
+        bcs @cl_bail                ; drain wedged — abort (#221)
         jsr uci_drain_status
-        bcs @cl_drain_to
-        jsr uci_ack
+        bcs @cl_bail
+        jmp uci_ack                 ; tail call (close returns no code)
 
-@cl_drain_to:
-        lda #NET_TCP_CLOSED
-        sta net_tcp_state
-        rts
+@cl_bail:
+        jmp uci_txn_bail            ; C=1, as every bail here returned
 
 ; =============================================================================
 ; net_dns_resolve — stage a hostname for the next net_tcp_connect.

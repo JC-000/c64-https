@@ -8,7 +8,9 @@
 ;
 ; Exported primitives (see the per-routine headers for calling conventions):
 ;
-;   uci_abort          — flush the state machine (write ABORT + short delay)
+;   uci_abort          — flush the state machine: write ABORT, then spin
+;                        until the firmware's reset clears $DF1C bit 2;
+;                        TOD-bounded
 ;   uci_wait_idle      — spin until (STATE==0 AND CMD_BUSY==0); TOD-bounded
 ;   uci_wait_not_busy  — spin until CMD_BUSY==0; TOD-bounded
 ;   uci_begin_cmd      — A = target id; writes target to UCI_CMD_DATA
@@ -63,21 +65,6 @@
 .export uci_resp_count
 
 .segment "UCI_CODE"
-
-; =============================================================================
-; uci_abort — force the UCI FIFO back to idle
-; Writes ABORT to UCI_CONTROL, then burns ~$20 iterations as a settle delay.
-; Clobbers: A, X
-; =============================================================================
-uci_abort:
-        lda #UCI_CTRL_ABORT
-        sta UCI_CONTROL
-        uci_fence
-        ldx #$20
-@spin:
-        dex
-        bne @spin
-        rts
 
 ; =============================================================================
 ; uci_tod_start — start CIA1's Time-of-Day clock (issue #145)
@@ -170,7 +157,41 @@ CIA_TOD_HOUR   = $DC0B
 CIA_CRB        = $DC0F
 UCI_WAIT_IDLE_BUDGET_TENTHS = 50      ; 5 seconds at 10 Hz
 
+; =============================================================================
+; uci_abort — force the command interface back to idle, and WAIT for it (#230)
+;
+; Writing ABORT only sets handshake_in(2) ($DF1C bit 2). The reset itself
+; is done later by the firmware's command task (command_intf.cc run_task):
+; HANDSHAKE_RESET (0x87), one write that clears bit 2, forces state "00"
+; and rewinds command_pointer. Until that write lands, any command byte we
+; write goes into a buffer about to be rewound, and a PUSH lands in front
+; of the reset: the firmware then parses an empty or truncated command
+; ("Null command", "21,UNKNOWN COMMAND") and TCP_CONNECT reads back no
+; socket id — $88 UCI_ERR_NO_SOCKET. The pending abort shows in neither
+; STATE nor CMD_BUSY, so uci_wait_idle's $31 can read idle throughout.
+; This used to be a fixed 32-iteration spin (shorter than one fence).
+;
+; So wait for bit 2 to clear: it is cleared by nothing but that reset,
+; in the same FPGA write, so "clear" means the reset has landed. Same
+; CIA1 TOD bound and error code as uci_wait_idle, whose loop this shares.
+;
+; Output: C=0 reset landed; C=1 5 s timeout (net_last_error = $89).
+; Clobbers: A
+; =============================================================================
+uci_abort:
+        lda #UCI_CTRL_ABORT
+        sta UCI_CONTROL
+        uci_fence
+        lda #UCI_STAT_ABORT_PENDING
+        bne uci_wait_clear          ; always taken (A != 0)
+
+; uci_wait_idle is uci_wait_clear with the $31 mask.
 uci_wait_idle:
+        lda #(UCI_STAT_STATE | UCI_STAT_CMD_BUSY)   ; $31
+
+; uci_wait_clear — entry: A = $DF1C mask; spin until (STATUS & A) == 0.
+uci_wait_clear:
+        sta @wi_mask+1              ; SMC: the AND #imm operand below
         ; Sample initial TENTHS for delta-tracking. Latch via HOUR,
         ; release via TENTHS. We don't care about the HOUR value itself.
         lda CIA_TOD_HOUR
@@ -181,7 +202,8 @@ uci_wait_idle:
 @wi_loop:
         lda UCI_STATUS
         uci_fence                   ; settle read before testing bits
-        and #(UCI_STAT_STATE | UCI_STAT_CMD_BUSY)   ; $31
+@wi_mask:
+        and #$FF                    ; SMC: mask patched on entry
         beq @idle_done
 
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
