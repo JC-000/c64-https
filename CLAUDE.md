@@ -625,7 +625,7 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     pin bump, measuring all three UCI profiles.
   - `http_recv_response`: `Content-Length` (single-SP matcher, **24-bit,
     with a separate `http_cl_valid` flag byte**) and chunked
-    (`http_state_body_chunked`, `HTTP_AUX_CODE`; chunks >64 KB desync)
+    (`http_state_body_chunked`, `HTTP_AUX_CODE`; 24-bit chunk sizes)
     supported; body rendered via `ascii_chrout` (case folded, #28);
     `http_resp_buf` keeps raw ASCII. The **`$FFFF` Content-Length sentinel
     this line used to describe no longer exists** — W4 widened the count to

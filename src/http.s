@@ -790,6 +790,7 @@ http_hdr_init:
         sta http_chunk_state
         sta http_chunk_rem
         sta http_chunk_rem+1
+        sta http_chunk_rem+2
         rts
 
 ; -----------------------------------------------------------------------------
@@ -1033,7 +1034,7 @@ http_state_body:
 ; http_state_body_chunked - strip Transfer-Encoding: chunked framing.
 ;
 ; Sub-state in http_chunk_state:
-;   0 = accumulating hex chunk-size digits (http_chunk_rem, 16-bit)
+;   0 = accumulating hex chunk-size digits (http_chunk_rem, 24-bit)
 ;   1 = skipping the rest of the size line (chunk extensions) until LF
 ;   2 = copying chunk payload (http_chunk_rem bytes) via body_append
 ;   3 = skipping the CRLF that follows chunk payload, until LF
@@ -1041,9 +1042,11 @@ http_state_body:
 ;       the response (http_line_idx is reused as a line-nonempty flag —
 ;       header parsing is over, so the buffer index is free)
 ;
-; A chunk larger than 65535 B would wrap http_chunk_rem and desync the
-; framing; real servers chunk at their buffer size (8-32 KB).  A desync
-; degrades to the caller's poll-timeout fallback, never to a hang.
+; http_chunk_rem is 24-bit (#147): github.com sends 65536 B and 67880 B
+; chunks, and a 16-bit count read "10000" as the terminal chunk (a false
+; complete) and 0x10928 as 0x0928 (a desync). A size that would shift out
+; of 24 bits saturates to $FFFFFF instead of wrapping, so it can never
+; read as a small chunk or as the terminal one.
 ; -----------------------------------------------------------------------------
 http_state_body_chunked:
         jsr http_in_byte
@@ -1057,28 +1060,37 @@ http_state_body_chunked:
         dex
         beq @cs_data
         dex
-        beq @cs_crlf
-        jmp @cs_final
+        bne :+
+        jmp @cs_crlf            ; out of branch range since the 24-bit count
+:       jmp @cs_final
 
 @cs_size:
         cmp #$0a                ; LF ends the size line
         beq @size_eol
         jsr hex_digit
         bcs @to_skip            ; non-hex (CR, ';', extension) -> state 1
-        ; http_chunk_rem = http_chunk_rem*16 + digit
+        ; http_chunk_rem = http_chunk_rem*16 + digit (24-bit)
         pha
+        lda http_chunk_rem+2
+        cmp #$10
+        bcs @size_ovf           ; would shift out of 24 bits
+        ldx #4
+@size_shl:
         asl http_chunk_rem
         rol http_chunk_rem+1
-        asl http_chunk_rem
-        rol http_chunk_rem+1
-        asl http_chunk_rem
-        rol http_chunk_rem+1
-        asl http_chunk_rem
-        rol http_chunk_rem+1
+        rol http_chunk_rem+2
+        dex
+        bne @size_shl
         pla
         ora http_chunk_rem
         sta http_chunk_rem
         jmp http_state_body_chunked
+@size_ovf:
+        pla
+        lda #$ff                ; saturate; skip the rest of the line
+        sta http_chunk_rem
+        sta http_chunk_rem+1
+        sta http_chunk_rem+2
 @to_skip:
         lda #1
         sta http_chunk_state
@@ -1091,6 +1103,7 @@ http_state_body_chunked:
         ; size line complete: 0 -> terminal chunk, else payload follows
         lda http_chunk_rem
         ora http_chunk_rem+1
+        ora http_chunk_rem+2
         beq @final_enter
         lda #2
         sta http_chunk_state
@@ -1104,13 +1117,19 @@ http_state_body_chunked:
 
 @cs_data:
         jsr body_append         ; append-if-room (discards past 512)
-        ; 16-bit decrement of http_chunk_rem
+        ; 24-bit decrement of http_chunk_rem
         lda http_chunk_rem
-        bne :+
+        bne @dec_lo
+        lda http_chunk_rem+1
+        bne @dec_mid
+        dec http_chunk_rem+2
+@dec_mid:
         dec http_chunk_rem+1
-:       dec http_chunk_rem
+@dec_lo:
+        dec http_chunk_rem
         lda http_chunk_rem
         ora http_chunk_rem+1
+        ora http_chunk_rem+2
         bne @cb_loop
         lda #3
         sta http_chunk_state
@@ -1549,6 +1568,6 @@ http_in_len:    .res 2          ; span bytes remaining (16-bit)
         .export http_chunk_rem
 http_chunked:      .res 1       ; 1 = Transfer-Encoding: chunked seen
 http_chunk_state:  .res 1       ; chunk parser sub-state (0..4)
-http_chunk_rem:    .res 2       ; bytes remaining in current chunk
+http_chunk_rem:    .res 3       ; bytes remaining in current chunk (24-bit)
 ; W4 REU sink finalize-once latch (see http_body_finish)
 http_sink_flushed: .res 1       ; 1 = finish already ran for this body
