@@ -364,6 +364,7 @@ def _bind_ephemeral(mod, box, restore_list):
     orig = mod._try_bind
 
     def bind(ip, port):
+        box.setdefault("events", []).append("bind")
         srv = orig("127.0.0.1", 0)
         box["port"] = srv.getsockname()[1]
         return srv
@@ -421,6 +422,7 @@ def _run_slow_queue(modname, server_attr):
 
         def slow_acquire(lock, **k):
             events.append(("acquire",))
+            verdict["bound_before_lock"] = bool(box.get("events"))
             _real_sleep(1.0)          # queued behind another lane
         mod.acquire_device_lock = slow_acquire
         try:
@@ -441,6 +443,9 @@ def _run_slow_queue(modname, server_attr):
 
 def test_local_rig_listener_survives_a_slow_lock_queue() -> None:
     verdict, events = _run_slow_queue("rig_https_local", "_run_https_server")
+    assert verdict.get("bound_before_lock") is False, (
+        "the port is bound while queued: it would refuse every other lane's "
+        "local rig on this host for the length of the queue")
     assert verdict.get("dial") == "connected", (
         f"#246: the listener was gone by the time the C64 dialled: {verdict}")
     assert verdict.get("accepted"), verdict
@@ -450,6 +455,9 @@ def test_local_rig_listener_survives_a_slow_lock_queue() -> None:
 def test_bad_finished_rig_listener_survives_a_slow_lock_queue() -> None:
     verdict, events = _run_slow_queue("rig_https_bad_finished",
                                       "serve_one_connection")
+    assert verdict.get("bound_before_lock") is False, (
+        "the port is bound while queued: it would refuse every other lane's "
+        "local rig on this host for the length of the queue")
     assert verdict.get("dial") == "connected", (
         f"#246: the listener was gone by the time the C64 dialled: {verdict}")
     assert verdict.get("accepted"), verdict
@@ -589,14 +597,21 @@ def test_discovery_finds_the_known_fetch_rigs() -> None:
 
 
 def test_every_listener_starts_after_the_lock() -> None:
-    """#246, structurally: no listener thread before acquire_device_lock."""
+    """#246, structurally: in main(), no listener bind or thread before
+    acquire_device_lock."""
     bad = []
     for p in _rig_files():
         tree = ast.parse(p.read_text())
+        mains = [n for n in tree.body
+                 if isinstance(n, ast.FunctionDef) and n.name == "main"]
+        if not mains:
+            continue
+        tree = mains[0]
         acq = _calls(tree, "acquire_device_lock")
         if not acq:
             continue
-        for fn in ("start_listener", "Thread"):
+        for fn in ("start_listener", "Thread", "_try_bind",
+                   "_bind_https_listener", "bind"):
             for line in _calls(tree, fn):
                 if line < acq[0]:
                     bad.append(f"{p.name}:{line} {fn} before the lock "
