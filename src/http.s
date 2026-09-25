@@ -32,6 +32,9 @@
         .export http_sink_blit
 .endif
 
+        ; Every REU execute goes through src/reu_exec.s (#191, SPEC §8.2).
+        .import reu_execute
+
         ; ---- imports: data.asm BSS (HTTP I/O + parser state) ----
         .import http_host_ptr
         .import http_host_len
@@ -1320,7 +1323,7 @@ http_sink_blit:
         adc http_reu_cursor+2
         sta reu_reu_bank
         lda #%10110000          ; execute + autoload + STASH (C64->REU)
-        sta reu_command
+        jsr reu_execute
         clc                     ; cursor += resp_len
         lda http_reu_cursor
         adc http_resp_len
@@ -1387,7 +1390,7 @@ http_body_finish:
         lda http_reu_body_base+2
         sta reu_reu_bank
         lda #%10110001          ; execute + autoload + FETCH (REU->C64)
-        sta reu_command
+        jsr reu_execute
 @restore:
 .ifndef USE_NISTCURVES_ONCHIP
         ; Re-latch the reu_fetch_mul_row register state that
