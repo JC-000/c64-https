@@ -82,13 +82,12 @@
 ; These bodies live in LOADER_OVERFLOW, not in CODE and not in
 ; CRYPTO_CODE, and the choice was forced by measurement rather than taste:
 ;
-;   - CODE/LOADER looks roomy under UCI (602 B free) but is the wrong
+;   - CODE/LOADER looks roomy under UCI but is the wrong
 ;     read. Under ip65 the same segment carries boot + TLS + HTTP + the
-;     net wrapper and has essentially no slack — putting 30 bytes there
-;     overflows `LOADER` by 10 (`ld65: Warning: cfg/c64-https-ip65.cfg(90):
-;     Segment 'CODE' overflows memory area 'LOADER' by 10 bytes`).
-;   - CRYPTO_CODE would fit, but CRYPTO_HOT / CRYPTO_RESIDENT had 68 bytes
-;     free at the v0.10.2 pin and is the region that has twice overflowed
+;     net wrapper and has essentially no slack — when this was placed,
+;     30 bytes there overflowed `LOADER` by 10.
+;   - CRYPTO_CODE would fit, but CRYPTO_HOT / CRYPTO_RESIDENT is tight in
+;     every profile and is the region that has twice overflowed
 ;     on a library bump. Spending its margin on display control would be
 ;     a poor trade.
 ;

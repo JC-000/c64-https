@@ -628,9 +628,10 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     scratch after any tenant lands there. The arbiter reads
     `build/labels.txt`; the harness write guard raises `MemoryPolicyError`
     before the wire.
-  - `CRYPTO_HOT` margin under UCI is **per profile**: the comb cfg routes
-    `RODATA`/`CRYPTO_RODATA`/`LIB_NISTCURVES_P256_RODATA` to
-    `CRYPTO_OVERLAY`, so no backend-wide figure is right. Watch it on every
+  - `CRYPTO_HOT` margin under UCI is **per profile**, even between the two
+    that share `cfg/c64-https-uci.cfg`: each links a different nistcurves
+    archive, and comb's cfg also moves `RODATA`/`CRYPTO_RODATA` out to
+    `CRYPTO_OVERLAY`. No backend-wide figure is right. Watch it on every
     pin bump, measuring all three UCI profiles.
   - `http_recv_response`: `Content-Length` (single-SP matcher, **24-bit,
     with a separate `http_cl_valid` flag byte**) and chunked
@@ -674,7 +675,8 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     `python3 tools/measure_margins.py` reads free bytes per region off
     `build/c64-https.map` against the linked cfg's MEMORY block; `--build`
     does all five profiles plus `rig_https_wiki.py`'s target on both ip65
-    profiles, each table stamped with its PRG sha256. Margins are per
+    profiles, each table stamped with its PRG sha256; it exits 1 on a failed
+    link (ld65 still writes the map). Margins are per
     profile — never carry a figure from one to another.
   - `net_tcp_set_recv_cb` is an RTS stub. Boot banner: `rr-net` under ip65,
     `UCI NETWORKING` under UCI — `boot_check.py` asserts both.

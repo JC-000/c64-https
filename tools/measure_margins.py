@@ -160,17 +160,26 @@ def cfg_from_stamp(text):
 # Measurement (pure)
 # ---------------------------------------------------------------------------
 def measure(areas, segments):
-    """Per file-backed area: occupancy, tail free and largest interior hole."""
+    """Per file-backed area: occupancy, tail free and largest interior hole.
+
+    `overflow` is how far a segment that STARTS in the area runs past its
+    end. ld65 writes the map even when a link fails on a memory-area
+    overflow, so a map is not evidence of a good link: any non-zero
+    overflow means the figures describe a failed link, not margins.
+    """
     out = []
     for a in areas:
         if not a["file"] or a["size"] == 0 or a["name"] == "LOADADDR":
             continue
+        overflow = max([s["end"] - a["end"] for s in segments
+                        if s["size"] and a["start"] <= s["start"] <= a["end"]
+                        and s["end"] > a["end"]], default=0)
         spans = sorted((max(s["start"], a["start"]), min(s["end"], a["end"]))
                        for s in segments
                        if s["size"] and s["start"] <= a["end"]
                        and s["end"] >= a["start"])
         row = {"region": a["name"], "start": a["start"], "end": a["end"],
-               "size": a["size"]}
+               "size": a["size"], "overflow": overflow}
         if not spans:
             row.update(empty=True, last_used=None, tail=None, hole=None,
                        hole_at=None, used=0)
@@ -211,6 +220,10 @@ def format_rows(rows):
             lines.append(f"  {r['region']:<24}{extent:<15}"
                          f"{'EMPTY to ld65 (not headroom)':>41}")
             continue
+        if r["overflow"]:
+            lines.append(f"  {r['region']:<24}{extent:<15}"
+                         f"{'OVERFLOWS by %s B' % format(r['overflow'], ','):>41}")
+            continue
         hole = (f"{r['hole']:,} B @ ${r['hole_at']:04X}" if r["hole"] else "-")
         lines.append(f"  {r['region']:<24}{extent:<15}"
                      f"{'$%04X' % r['last_used']:>10}"
@@ -232,8 +245,12 @@ def format_matrix(results):
         cells = []
         for n in names:
             hit = [r for r in results[n]["rows"] if r["region"] == reg]
-            cells.append(f"{hit[0]['tail']:,}" if hit and not hit[0]["empty"]
-                         else "-")
+            if not hit or hit[0]["empty"]:
+                cells.append("-")
+            elif hit[0]["overflow"]:
+                cells.append(f"OVF+{hit[0]['overflow']:,}")
+            else:
+                cells.append(f"{hit[0]['tail']:,}")
         lines.append(f"  {reg:<24}" + "".join(f"{c:>{width}}" for c in cells))
     return "\n".join(lines)
 
@@ -248,6 +265,10 @@ def _sha256(path):
 def read_build(build_dir, repo=REPO):
     """Measure the build in `build_dir` (map + flags.stamp + PRG)."""
     build_dir = Path(build_dir)
+    for f in ("flags.stamp", "c64-https.map"):
+        if not (build_dir / f).exists():
+            raise ParseError(f"{build_dir / f} not found — build first "
+                             "(or use --build)")
     cfg = cfg_from_stamp((build_dir / "flags.stamp").read_text())
     prg = build_dir / "c64-https.prg"
     return {
@@ -265,7 +286,7 @@ def build_profile(name, out_dir, repo=REPO, make="make"):
                           capture_output=True, text=True)
     build = Path(repo) / "build"
     if proc.returncode != 0 or not (build / "c64-https.prg").exists():
-        raise RuntimeError(f"{name}: build failed ({' '.join(flags)})\n"
+        raise ParseError(f"{name}: build failed ({' '.join(flags)})\n"
                            + proc.stdout[-2000:] + proc.stderr[-2000:])
     dest = Path(out_dir) / name
     dest.mkdir(parents=True, exist_ok=True)
@@ -295,24 +316,49 @@ def main(argv=None):
         results = {}
         for name in args.profile or PROFILES:
             print(f"building {name} ...", file=sys.stderr)
-            results[name] = build_profile(name, out, args.repo)
+            try:
+                results[name] = build_profile(name, out, args.repo)
+            except ParseError as exc:
+                print(f"measure_margins: {exc}", file=sys.stderr)
+                return 1
         print(f"artifacts: {out}", file=sys.stderr)
     else:
         if args.profile:
             ap.error("--profile needs --build")
         build_dir = args.build_dir or str(Path(args.repo) / "build")
-        results = {"build/": read_build(build_dir, args.repo)}
+        try:
+            results = {"build/": read_build(build_dir, args.repo)}
+        except ParseError as exc:
+            print(f"measure_margins: {exc}", file=sys.stderr)
+            return 2
 
     if args.json:
         print(json.dumps(results, indent=2))
-        return 0
+    else:
+        for name, res in results.items():
+            print(f"{name}  ({res['cfg']}, PRG sha256 {res['prg_sha256']})")
+            print(format_rows(res["rows"]))
+            print()
+        if len(results) > 1:
+            print(format_matrix(results))
+    bad = failed_links(results)
+    for msg in bad:
+        print(f"measure_margins: {msg}", file=sys.stderr)
+    return 1 if bad else 0
+
+
+def failed_links(results):
+    """Reasons the measured builds are not good links (empty when all are)."""
+    bad = []
     for name, res in results.items():
-        print(f"{name}  ({res['cfg']}, PRG sha256 {res['prg_sha256']})")
-        print(format_rows(res["rows"]))
-        print()
-    if len(results) > 1:
-        print(format_matrix(results))
-    return 0
+        if res["prg_sha256"] is None:
+            bad.append(f"{name}: no PRG — the map is from a FAILED link, "
+                       "so these figures are not margins")
+        for r in res["rows"]:
+            if r["overflow"]:
+                bad.append(f"{name}: a segment overflows {r['region']} by "
+                           f"{r['overflow']:,} B")
+    return bad
 
 
 if __name__ == "__main__":

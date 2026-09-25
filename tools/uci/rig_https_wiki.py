@@ -150,7 +150,8 @@ EXPECT_STATUS = int(os.environ.get("EXPECT_STATUS", "200"))
 
 # Issue #135 fallout: the DMA trampoline's ~464 B of harness scratch came out
 # of the CRYPTO_OVERLAY tail, which the 491 B src/x509_name.s consumed on the
-# comb profile (223 B left). Menu mode needs no scratch at all and is the
+# comb profile, leaving too little (tools/measure_margins.py measures the
+# tail today). Menu mode needs no scratch at all and is the
 # default; WIKI_TRAMPOLINE=1 restores the old path for a host/path that does
 # not match what the PRG was built with.
 MENU_MODE = os.environ.get("WIKI_TRAMPOLINE") != "1"

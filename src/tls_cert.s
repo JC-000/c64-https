@@ -84,7 +84,7 @@
 ; this itself rather than assume the handler did — see issue #161, and
 ; tools/test_finished_verify.py's carry stub, which jsr's here first.
 ; Lives in CRYPTO_CODE, not TLS_CODE: the NET_CODE region that hosts
-; TLS_CODE under UCI has ~8 bytes of slack.
+; TLS_CODE under UCI is treated as full (#149 overflowed it).
 ; Clobbers: A
 ; =============================================================================
         .segment "CRYPTO_CODE"

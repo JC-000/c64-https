@@ -180,14 +180,61 @@ def test_empty_and_non_file_regions():
                           "CRYPTO_RESIDENT", "CRYPTO_COLD_SHADOW"]
 
 
-def test_hole_at_region_start_and_clipping_at_region_edge():
+def test_hole_at_region_start():
     areas = mm.parse_cfg_memory(
         "MEMORY { R: start = $1000, size = $0100, file = %O; }")
     segs = [{"name": "A", "start": 0x1010, "end": 0x101F, "size": 0x10},
-            {"name": "B", "start": 0x10F0, "end": 0x1120, "size": 0x31}]
+            {"name": "B", "start": 0x10F0, "end": 0x10FF, "size": 0x10}]
     (row,) = mm.measure(areas, segs)
     assert (row["hole"], row["hole_at"]) == (0xF0 - 0x20, 0x1020)
-    assert row["tail"] == 0 and row["used"] == 0x10 + 0x10
+    assert row["tail"] == 0 and row["overflow"] == 0
+    assert row["used"] == 0x10 + 0x10
+
+
+def test_segment_past_region_end_is_an_overflow_not_a_full_region():
+    areas = mm.parse_cfg_memory(
+        "MEMORY { R: start = $1000, size = $0100, file = %O;"
+        "         S: start = $1100, size = $0100, file = %O; }")
+    segs = [{"name": "B", "start": 0x10F0, "end": 0x1120, "size": 0x31},
+            {"name": "C", "start": 0x1180, "end": 0x118F, "size": 0x10}]
+    rows = {r["region"]: r for r in mm.measure(areas, segs)}
+    assert rows["R"]["overflow"] == 0x1120 - 0x10FF == 0x21
+    assert rows["S"]["overflow"] == 0
+    # B's spill into S is clipped to S's bounds, not counted from B's start.
+    assert rows["S"]["used"] == (0x1120 - 0x1100 + 1) + 0x10
+    assert rows["R"]["last_used"] == 0x10FF
+    assert "OVERFLOWS by 33 B" in mm.format_rows(list(rows.values()))
+
+
+# ld65 writes the map even when the link fails on an overflow. This is the
+# ip65-onchip map with 200 B added to HTTP_AUX_CODE2 (ld65: "overflows
+# memory area 'CRYPTO_OVERLAY' by 130 bytes"); the PRG is not written.
+FAILED_MAP = MAP.replace("HTTP_AUX_CODE2        005EF6  005FB9  0000C4",
+                         "HTTP_AUX_CODE2        005EF6  006081  00018C")
+
+
+def test_failed_link_map_reports_the_overflow_and_fails():
+    rows = mm.measure(mm.parse_cfg_memory(CFG), mm.parse_map_segments(FAILED_MAP))
+    byname = {r["region"]: r for r in rows}
+    assert byname["CRYPTO_OVERLAY"]["overflow"] == 0x6081 - 0x5FFF == 130
+    assert byname["CRYPTO_RESIDENT"]["overflow"] == 0
+    bad = mm.failed_links({"x": {"prg_sha256": "ab" * 32, "rows": rows}})
+    assert bad and "overflows CRYPTO_OVERLAY by 130 B" in bad[0]
+
+
+def test_missing_prg_is_a_failed_link_and_a_good_one_is_not():
+    rows = list(_rows().values())
+    assert mm.failed_links({"x": {"prg_sha256": "ab" * 32, "rows": rows}}) == []
+    bad = mm.failed_links({"x": {"prg_sha256": None, "rows": rows}})
+    assert len(bad) == 1 and "FAILED link" in bad[0]
+
+
+def test_missing_build_files_are_a_clean_error():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        assert _raises(mm.read_build, d)
+        rc = mm.main(["--build-dir", d])
+    assert rc == 2
 
 
 def test_format_rows_shows_every_region():

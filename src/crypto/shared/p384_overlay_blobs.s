@@ -65,7 +65,7 @@
 ; The blobs are embedded only when USE_OVERLAY_P384_EMBED is asserted by
 ; the top-level Makefile (UCI backend, no USE_X25519_SIBLING flag).
 ; Under ip65 there is no room in main RAM after the existing layout
-; (NET_BSS_TAIL has only ~800 B of slack and CRYPTO_OVERLAY is a
+; (NET_BSS_TAIL has little slack and CRYPTO_OVERLAY is a
 ; zero-size alias).  Under USE_X25519_SIBLING=1 the X25519 sibling
 ; rodata occupies CRYPTO_OVERLAY at PRG load time so the SHA blob
 ; cannot share that slot.  Either gate leaves the segments empty;
