@@ -473,7 +473,7 @@ def early_stop_step(tracker: StallTracker, state: BodyState, now: float,
 
 
 def close_confirmed(stopped_early: bool, read_shadow_ok, read_tcp_state):
-    """After 'Q': has `net_tcp_close` run? -> a description, or None.
+    """After 'Q': is the socket closed? -> a description, or None.
 
     Only after an early stop; otherwise the screen marker alone decides, as
     before. `read_shadow_ok()` is re-read on every call because 'Q' at the
@@ -482,18 +482,21 @@ def close_confirmed(stopped_early: bool, read_shadow_ok, read_tcp_state):
     already closed and returned by the time 'Q' lands, so this exit is only
     reachable in the HTTPS_BODY_TO_REU viewer build.
 
-    CLOSED means `net_tcp_close` RAN — every CLOSED store after `net_init`
-    is inside it — not that the firmware accepted the close: its wedge
-    paths force CLOSED without one. The "CONNECTION CLOSED" marker it
-    replaces is printed after `net_tcp_close` either way, so it is the same
-    evidence, not weaker.
+    CLOSED means `net_tcp_close` RAN, or that `net_poll` read the peer's
+    EOF, after which the firmware has already closed the socket itself —
+    not that the firmware accepted our close: `net_tcp_close`'s wedge
+    paths force CLOSED without one. After an EOF, CLOSED can precede the
+    'Q'-triggered `net_tcp_close`, so this is NOT evidence that it has
+    run — only that no firmware socket is left for a reset to hit, which
+    is what the close wait is for.
     """
     if not stopped_early:
         return None
     if not read_shadow_ok():
         return None
     if read_tcp_state() == NET_TCP_CLOSED:
-        return "net_tcp_state=CLOSED (net_tcp_close has run)"
+        return ("net_tcp_state=CLOSED (net_tcp_close has run, or the "
+                "firmware closed the socket at the peer's EOF)")
     return None
 
 

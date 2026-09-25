@@ -55,6 +55,8 @@
 .import uci_tod_start
 .import uci_status_len
 .import uci_status_force
+.import uci_status_seen
+.import uci_status_tail
 .import uci_wait_idle
 .import uci_wait_not_busy
 .import uci_begin_cmd
@@ -311,11 +313,20 @@ net_poll:
         sta uci_poll_rem+1
         ora uci_poll_rem+0
         bne @have_data
+        ; actual_len 0 is EOF, not "no data": lwip_recv returns 0 only for
+        ; a peer FIN (idle polls answer $FFFF), and read_socket then
+        ; lwip_close()s the socket itself and says "01,CONNECTION CLOSED
+        ; BY HOST" (network_target.cc). Staying CONNECTED here kept the
+        ; caller polling a socket that no longer exists, for the rest of
+        ; http_recv_body's tick budget. CLOSED is true: the
+        ; firmware socket is gone, so a C64 reset over it poisons nothing.
         jsr uci_drain_resp
         bcs @hd0_drain_to           ; drain wedged — surface as ERROR
         jsr uci_drain_status
         bcs @hd0_drain_to
         jsr uci_ack
+        lda #NET_TCP_CLOSED
+        sta net_tcp_state
         rts
 @hd0_drain_to:
         lda #NET_TCP_ERROR
@@ -446,10 +457,37 @@ net_poll:
         jsr uci_drain_status
         bcs @dd_drain_to
         jsr uci_ack
-        rts
+        ; actual_len $FFFF is lwip_recv's -1, and read_socket says why in
+        ; "02,NO DATA: <errno>". errno 11 (EWOULDBLOCK) is every idle
+        ; poll; any other (104 ECONNRESET for a peer RST, 9 EBADF, 128
+        ; ENOTCONN, ...) is a socket that will never deliver again, and
+        ; staying CONNECTED polled it for the rest of http_recv_body's
+        ; tick budget. Idle is exactly 14 bytes ending "11".
+        lda uci_read_hdr+0
+        and uci_read_hdr+1
+        cmp #$FF
+        bne @dd_live                ; a real length
+        lda uci_status_seen
+        cmp #14
+        bne @dd_dead
+        lda uci_status_tail+0
+        cmp #'1'
+        bne @dd_dead
+        lda uci_status_tail+1
+        cmp #'1'
+        beq @dd_live
+@dd_dead:
+        ; Keep the line: the post-mortem filter drops every "02," line,
+        ; and this is the one that says what killed the socket. The bytes
+        ; are in uci_status_buf whenever no earlier line is held.
+        lda uci_status_len
+        bne @dd_drain_to
+        lda uci_status_seen
+        sta uci_status_len
 @dd_drain_to:
         lda #NET_TCP_ERROR
         sta net_tcp_state
+@dd_live:
         rts
 
 ; =============================================================================
@@ -718,7 +756,8 @@ net_tcp_connect:
 ; advance the patched base address by 256 every time Y rolls over.
 ; Response: 2 bytes = written_lo/hi (LE). If written != requested we set
 ; UCI_ERR_SHORT_WRITE but still return C=0 so the caller can continue
-; (mirrors ip65 behaviour that treats short writes as best-effort).
+; (mirrors ip65 behaviour that treats short writes as best-effort). A
+; written count of $FFFF (lwip_send's -1) is a failed send: C=1, $87.
 ; =============================================================================
 net_tcp_send:
         sta uci_send_ptr_lo
@@ -857,6 +896,20 @@ net_tcp_send:
         ; rem and post-chunk rem by using the written count directly.
         ; Simpler: if written_hi/lo both match what we just dec'd off, OK.
         ; For MVP we only flag if written == 0 but we asked for > 0.
+        ;
+        ; A negative count is lwip_send's -1 (write_socket passes ret
+        ; through; "12,SEND ERROR: n" on the status channel), e.g. a peer
+        ; that has closed. Taken as a length it moved the pointer back one
+        ; and GREW uci_send_rem by one per round trip, so the loop ran
+        ; ~65k SOCKET_WRITEs (~45 min) before rem wrapped to zero and it
+        ; returned C=0. A chunk is at most 800 B, so bit 15 is never a count.
+        lda uci_write_resp+1
+        bpl @sb_counted
+        lda #UCI_ERR_SHORT_WRITE
+        sta net_last_error
+        sec
+        rts
+@sb_counted:
         lda uci_write_resp+0
         ora uci_write_resp+1
         bne @sb_had_write
@@ -960,7 +1013,8 @@ net_tcp_send:
 ;
 ; SCOPE (#221). Routed here: net_tcp_send's push-wait and drain exits;
 ; net_tcp_connect's entry wait, push wait and both drain pairs; and
-; net_tcp_close's entry wait, push wait and drains. NOT routed: net_poll's
+; net_tcp_close's push wait and drains (its entry wait aborts and retries
+; the close once instead, #243). NOT routed: net_poll's
 ; exits (they force NET_TCP_ERROR, and the close that follows meets the
 ; open transaction at its entry wait, which now aborts it),
 ; net_dhcp_acquire's, and net_tcp_send's entry wait (C=1 to a caller that
@@ -976,14 +1030,32 @@ uci_txn_bail:
 ; =============================================================================
 ; net_tcp_close — CMD_SOCKET_CLOSE on the open socket. Best-effort; the
 ; UCI error bit is drained but not surfaced, and net_tcp_state is always
-; forced back to NET_TCP_CLOSED.
+; forced back to NET_TCP_CLOSED. C=0 closed; C=1 a bounded wait expired
+; (net_last_error = $89) and the firmware socket may still be live.
+;
+; The entry wait retries once (#243). Not idle within 5 s is typically a
+; net_poll bail that left a reply open; returning there, as #221 did, left
+; the firmware socket live under a CLOSED net_tcp_state, which a later
+; C64 reset turns into lease poisoning. ABORT closes no socket, so once
+; its reset lands the SOCKET_CLOSE is still owed and the interface is
+; clean enough to send it. uci_abort's wait IS the idle wait (the $35
+; mask), so the retry goes straight to the command. If the reset never
+; lands the task is stuck and a retry would only add a third 5 s: that is
+; C=1/$89 as before. A retry that succeeds restores the net_last_error
+; the caller came in with (e.g. net_poll's $86), so $89 means the close
+; failed, not that it needed a second attempt. Any later failure takes
+; @cl_bail, so there is exactly one retry.
 ; =============================================================================
 net_tcp_close:
+        lda net_last_error
+        sta @cl_err_in
         jsr uci_wait_idle
-        ; Not idle within 5 s (typically a net_poll bail left a reply
-        ; open) — abort it and return C=1, as before (#221).
-        bcs @cl_bail
-
+        bcc @cl_send
+        jsr uci_abort               ; waits for reset AND idle ($35)
+        bcs @cl_closed              ; stuck task: C=1, $89
+        lda @cl_err_in
+        sta net_last_error
+@cl_send:
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
 
@@ -1002,17 +1074,20 @@ net_tcp_close:
         jsr uci_drain_status
         bcs @cl_bail
         jsr uci_ack
-        jmp @cl_closed
+        clc
+        bcc @cl_closed
 
 @cl_bail:
         jsr uci_txn_bail            ; C=1, as every bail here returned
 @cl_closed:
         ; CLOSED is stored on the way OUT, never earlier: it means this
         ; routine ran to completion or timed out (#232's close_confirmed
-        ; reads it that way), not merely that it was entered.
+        ; reads it that way), not merely that it was entered. net_poll's
+        ; EOF is the only other CLOSED store.
         lda #NET_TCP_CLOSED
         sta net_tcp_state
         rts
+@cl_err_in: .byte 0
 
 ; =============================================================================
 ; net_dns_resolve — stage a hostname for the next net_tcp_connect.

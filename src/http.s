@@ -179,8 +179,9 @@ http_get:
         ; unconditional `clc`, so even a http_recv_body that reported a
         ; short body could not reach the caller — two independent reasons
         ; a caller could not tell a complete body from a truncated one.
-        ; php/plp carries the carry across the two closes, neither of
-        ; which has a return value of its own.
+        ; php/plp carries the carry across the two closes: their own
+        ; carries (net_tcp_close's C=1 on a bounded-wait failure) are not
+        ; the fetch's verdict.
         php
         jsr tls_close
         jsr net_tcp_close

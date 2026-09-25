@@ -96,12 +96,13 @@ from test_uci_timeout_recovery import (                   # noqa: E402
 
 OPT_OUT_ENV = "C64_UCI_TESTS_OPTIONAL"
 from _skip_policy import require, verdict  # noqa: E402
-CERTIFIES = "#230(a) / #221"
+CERTIFIES = "#230(a) / #221 / #243 / net_poll EOF"
 
 UCI_STAT_ABORT_PENDING = 0x04
 
 NET_TCP_CLOSED = 0x00
 NET_TCP_CONNECTED = 0x01
+NET_TCP_ERROR = 0x02
 NET_TCP_CONNECT_FAIL = 0x03
 
 UCI_ERR_NOT_PRESENT = 0x81
@@ -124,7 +125,10 @@ CONNECT_BYTES = (bytes([TARGET_NETWORK, CMD_TCP_CONNECT, PORT & 0xFF,
 # wait for the reset loses the NEXT command too.
 ABORT_LATENCY = 4
 
-LABELS_NEEDED = ("net_init", "net_tcp_connect", "net_tcp_close",
+LABELS_NEEDED = ("net_init", "net_tcp_connect", "net_tcp_close", "net_poll",
+                 "net_tcp_send", "net_send_len", "net_recv_byte",
+                 "tcp_recv_buf", "uci_status_buf",
+                 "tcp_recv_head", "tcp_recv_tail",
                  "uci_host_buf", "uci_socket_id", "net_last_error",
                  "net_tcp_state", "uci_status_len", "uci_status_force")
 
@@ -319,6 +323,9 @@ def _machine(uci, tod_reads_per_tenth):
     for name in ("uci_status_len", "uci_status_force", "net_last_error",
                  "net_tcp_state", "uci_socket_id"):
         mem.write(labels[name], 0)
+    for off in range(2):
+        mem.write(labels["tcp_recv_head"] + off, 0)
+        mem.write(labels["tcp_recv_tail"] + off, 0)
     for i, b in enumerate(HOST + b"\x00"):
         mem.write(labels["uci_host_buf"] + i, b)
     return FastCPU(mem), mem, labels
@@ -522,15 +529,88 @@ def _close(cpu, labels):
     return cpu.call(labels["net_tcp_close"])
 
 
-def test_close_entry_wait_bail():
-    uci = AbortModel([CONNECT_OK])
+CMD_SOCKET_CLOSE = 0x09
+CLOSE_BYTES = bytes([TARGET_NETWORK, CMD_SOCKET_CLOSE, 1])
+UCI_ERR_READ_FAIL = 0x86
+
+
+def _closes(uci):
+    return [p for p in uci.parsed if p[0] == CLOSE_BYTES]
+
+
+def test_close_entry_wait_bail_retries_the_close():
+    """#243: the entry wait finds a transaction somebody left open (a
+    net_poll bail). The abort clears it, so the close must still reach the
+    firmware: without the retry the socket stays live while net_tcp_state
+    says CLOSED, and the next C64 reset over it poisons the lease. A
+    retry that succeeds reports success and leaves the error the caller
+    came in with (here net_poll's $86), not the entry wait's $89."""
+    uci = AbortModel([(b"", OK), CONNECT_OK])
+    _dirty_interface(uci)
+    cpu, mem, labels = _require(uci)
+    mem.write(labels["uci_socket_id"], 1)
+    mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
+    mem.write(labels["net_last_error"], UCI_ERR_READ_FAIL)
+    carry = _close(cpu, labels)
+    base._check(_closes(uci) == [(CLOSE_BYTES, "ok")], (
+        "after the entry-wait abort the firmware parsed %r: no SOCKET_CLOSE "
+        "%r reached it, so the socket is still live" % (uci.parsed,
+                                                        CLOSE_BYTES)))
+    base._check(uci.abort_writes == 1 and uci.aborts_completed == 1, (
+        "abort writes=%d completed=%d; expected exactly one, landed"
+        % (uci.abort_writes, uci.aborts_completed)))
+    base._check(carry is False and _err(mem, labels) == UCI_ERR_READ_FAIL, (
+        "the retried close succeeded but returned C=%d, net_last_error=$%02X;"
+        " expected C=0 and the entry value $86"
+        % (carry, _err(mem, labels))))
+    base._check(_state(mem, labels) == NET_TCP_CLOSED,
+                "net_tcp_state=$%02X after the close" % _state(mem, labels))
+    _assert_connected(cpu, mem, uci, labels, "connect after the retried close")
+
+
+def test_close_no_retry_when_the_abort_never_lands():
+    """The entry wait expired because the task is stuck, so the abort
+    queued behind it never lands either. Retrying would only stack a third
+    5 s wait: report $89 after the entry wait + ONE abort wait, as before."""
+    uci = AbortModel([(b"", OK)], abort_latency=None)
     _dirty_interface(uci)
     cpu, mem, labels = _require(uci)
     mem.write(labels["uci_socket_id"], 1)
     mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
     carry = _close(cpu, labels)
+    base._check(carry is True and _err(mem, labels) == UCI_ERR_WAIT_TIMEOUT
+                and _state(mem, labels) == NET_TCP_CLOSED, (
+        "stuck task: close returned C=%d, net_last_error=$%02X, "
+        "net_tcp_state=$%02X; expected C=1, $89, CLOSED"
+        % (carry, _err(mem, labels), _state(mem, labels))))
+    base._check(uci.abort_writes == 1 and not uci.parsed
+                and uci.pushes_accepted + uci.pushes_rejected == 0, (
+        "stuck task: %d abort write(s), %d push(es), parsed %r; expected one "
+        "abort and no command" % (uci.abort_writes, uci.pushes_accepted
+                                   + uci.pushes_rejected, uci.parsed)))
+    reads = mem._tod_reads
+    budget = base.BUDGET_TENTHS
+    base._check(2 * budget <= reads < 3 * budget, (
+        "the stuck-task close read the TOD %d times: expected the entry wait "
+        "+ one abort wait (%d-%d)" % (reads, 2 * budget, 3 * budget - 1)))
+
+
+def test_close_retry_that_also_fails_reports_89():
+    """The abort lands, but the retried SOCKET_CLOSE stalls too: $89, C=1,
+    CLOSED, exactly one retry, and the interface still left clean."""
+    uci = AbortModel([(b"", OK), CONNECT_OK])
+    uci.cmd_latencies = [STALL_RECOVERS]
+    _dirty_interface(uci)
+    cpu, mem, labels = _require(uci)
+    mem.write(labels["uci_socket_id"], 1)
+    mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
+    carry = _close(cpu, labels)
+    base._check(_closes(uci) == [(CLOSE_BYTES, "ok")], (
+        "expected exactly one (retried) SOCKET_CLOSE, the firmware parsed %r"
+        % uci.parsed))
     _after_bail(cpu, mem, uci, labels, carry,
-                "net_tcp_close's entry uci_wait_idle bail", NET_TCP_CLOSED)
+                "net_tcp_close's retried close, push wait bail",
+                NET_TCP_CLOSED)
 
 
 def test_close_push_wait_bail():
@@ -624,16 +704,163 @@ def test_clean_connect_close_connect_never_aborts():
     uci = AbortModel([CONNECT_OK, (b"", OK), CONNECT_OK])
     cpu, mem, labels = _require(uci)
     _assert_connected(cpu, mem, uci, labels, "first clean connect")
-    _close(cpu, labels)                 # no return code: carry not checked
-    base._check(_state(mem, labels) == NET_TCP_CLOSED,
-                "a clean close left net_tcp_state=$%02X"
-                % _state(mem, labels))
+    carry = _close(cpu, labels)
+    base._check(carry is False and _state(mem, labels) == NET_TCP_CLOSED, (
+        "a clean close returned C=%d, net_tcp_state=$%02X; expected C=0, "
+        "CLOSED" % (carry, _state(mem, labels))))
     _assert_connected(cpu, mem, uci, labels, "second clean connect")
     base._check(uci.abort_writes == 0, (
         "the clean paths wrote ABORT %d time(s); the bail has leaked onto "
         "a success path" % uci.abort_writes))
     base._check(uci.pushes_rejected == 0,
                 "%d push(es) rejected on the clean paths" % uci.pushes_rejected)
+
+
+def _poll_once(reply):
+    uci = AbortModel([reply])
+    cpu, mem, labels = _require(uci)
+    mem.write(labels["uci_socket_id"], 1)
+    mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
+    cpu.call(labels["net_poll"], budget=8_000_000)
+    return uci, mem, labels
+
+
+def test_poll_eof_closes_the_socket_state():
+    """SOCKET_READ answering actual_len 0 is the peer's FIN: read_socket
+    has already lwip_close()d the socket and said "01,CONNECTION CLOSED BY
+    HOST". net_poll must stop reporting CONNECTED, or http_recv_body polls
+    a dead socket for the rest of its tick budget (live: github.com runs
+    sat out the rig's 900 s sentinel this way)."""
+    uci, mem, labels = _poll_once((b"\x00\x00", b"01,CONNECTION CLOSED BY HOST"))
+    base._check(uci.parsed and uci.parsed[0][0][:2] == bytes([TARGET_NETWORK,
+                                                              0x10]), (
+        "premise: net_poll did not issue a SOCKET_READ (parsed %r)"
+        % uci.parsed))
+    base._check(_state(mem, labels) == NET_TCP_CLOSED, (
+        "after an EOF reply net_tcp_state=$%02X, expected $00 CLOSED"
+        % _state(mem, labels)))
+    base._check(_err(mem, labels) == 0,
+                "an EOF set net_last_error=$%02X; a FIN is not an error"
+                % _err(mem, labels))
+    base._check(uci.idle and uci.abort_writes == 0,
+                "the EOF poll left the interface in %s (aborts=%d)"
+                % (uci.describe(), uci.abort_writes))
+
+
+def test_poll_no_data_keeps_the_socket():
+    """Control: the idle answer ($FFFF, "02,NO DATA: 11") is not EOF."""
+    uci, mem, labels = _poll_once((b"\xff\xff", b"02,NO DATA: 11"))
+    base._check(_state(mem, labels) == NET_TCP_CONNECTED, (
+        "an idle poll changed net_tcp_state to $%02X"
+        % _state(mem, labels)))
+
+
+def test_poll_reset_is_not_idle():
+    """A peer RST: lwip_recv returns -1 with ECONNRESET, so SOCKET_READ
+    answers $FFFF (the same header as an idle poll) and "02,NO DATA: 104".
+    Only the errno tells them apart. Staying CONNECTED polled the dead
+    socket for the rest of http_recv_body's tick budget; the line must
+    also be kept for the post-mortem (the routine-line filter drops every
+    "02," line)."""
+    # 111 (ECONNREFUSED) ends in "11" like the idle line, so only the
+    # length tells it apart.
+    for status in (b"02,NO DATA: 104", b"02,NO DATA: 9", b"02,NO DATA: 128",
+                   b"02,NO DATA: 111"):
+        uci, mem, labels = _poll_once((b"\xff\xff", status))
+        base._check(_state(mem, labels) == NET_TCP_ERROR, (
+            "SOCKET_READ $FFFF with %r left net_tcp_state=$%02X, expected "
+            "$02 ERROR" % (status, _state(mem, labels))))
+        n = mem.read(labels["uci_status_len"])
+        held = bytes(mem.read(labels["uci_status_buf"] + i)
+                     for i in range(n))
+        base._check(held == status, (
+            "the dead socket's status line was not kept: uci_status_len=%d, "
+            "buffer %r, expected %r" % (n, held, status)))
+        base._check(uci.idle and uci.abort_writes == 0,
+                    "the %r poll left the interface in %s" % (status,
+                                                             uci.describe()))
+
+
+def test_poll_data_keeps_the_socket():
+    """Control: a real read ("00,OK") stays CONNECTED."""
+    uci, mem, labels = _poll_once((b"\x03\x00abc", b"00,OK"))
+    base._check(_state(mem, labels) == NET_TCP_CONNECTED, (
+        "a 3-byte read changed net_tcp_state to $%02X"
+        % _state(mem, labels)))
+
+
+def test_eof_keeps_the_bytes_already_in_the_ring():
+    """The body's last bytes and the EOF cannot share a reply (read_socket
+    answers data OR 0), but they can share a moment: the data poll fills
+    the ring, the EOF poll runs before the HTTP/TLS layer has drained it.
+    Flipping to CLOSED must not drop them: the ring is untouched and
+    net_recv_byte (which never reads net_tcp_state) still hands out every
+    byte; only further SOCKET_READs stop. http_recv_body's verdict is then
+    decided by the body's own framing, as test_body_truncation.py pins."""
+    uci = AbortModel([(b"\x00\x00", b"01,CONNECTION CLOSED BY HOST")])
+    cpu, mem, labels = _require(uci)
+    mem.write(labels["uci_socket_id"], 1)
+    mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
+    tail = b"0\r\n\r\n" + bytes(range(0x40, 0x4B))   # a body's last bytes
+    for i, b in enumerate(tail):
+        mem.write(labels["tcp_recv_buf"] + i, b)
+    mem.write(labels["tcp_recv_tail"], len(tail))
+    cpu.call(labels["net_poll"], budget=8_000_000)
+    base._check(_state(mem, labels) == NET_TCP_CLOSED,
+                "premise: the EOF poll left net_tcp_state=$%02X"
+                % _state(mem, labels))
+    head = mem.read(labels["tcp_recv_head"]) | mem.read(labels["tcp_recv_head"] + 1) << 8
+    tl = mem.read(labels["tcp_recv_tail"]) | mem.read(labels["tcp_recv_tail"] + 1) << 8
+    base._check((head, tl) == (0, len(tail)), (
+        "the EOF poll moved the ring: head=%d tail=%d, expected 0/%d"
+        % (head, tl, len(tail))))
+    got = []
+    for _ in range(len(tail) + 1):
+        carry = cpu.call(labels["net_recv_byte"])
+        if carry:
+            break
+        got.append(cpu.a)
+    base._check(bytes(got) == tail, (
+        "after the EOF net_recv_byte returned %r, expected %r"
+        % (bytes(got), tail)))
+    parsed = len(uci.parsed)
+    cpu.call(labels["net_poll"], budget=8_000_000)
+    base._check(len(uci.parsed) == parsed,
+                "net_poll issued another command after the EOF: %r"
+                % uci.parsed[parsed:])
+
+
+UCI_ERR_SHORT_WRITE = 0x87
+CMD_SOCKET_WRITE = 0x11
+
+
+def test_send_error_is_not_a_length():
+    """SOCKET_WRITE answering written=$FFFF is lwip_send's -1 (a peer that
+    has closed). Read as a length it moved the source back a byte and grew
+    the remaining count by one per round trip: ~65k SOCKET_WRITEs, ~45 min
+    on the device, then C=0. Live: browserleaks.com closes during the
+    onchip handshake and the client Finished write hung for the rig's
+    whole 900 s. It must fail at once: C=1, $87, one write."""
+    uci = AbortModel([(b"\xff\xff", b"12,SEND ERROR: 9")] * 4)
+    cpu, mem, labels = _require(uci)
+    mem.write(labels["uci_socket_id"], 1)
+    mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
+    mem.write(labels["net_send_len"], 58)
+    mem.write(labels["net_send_len"] + 1, 0)
+    cpu.a, cpu.x = 0x00, 0x04
+    try:
+        carry = cpu.call(labels["net_tcp_send"], budget=4_000_000)
+    except CPUError as exc:
+        raise AssertionError(
+            "net_tcp_send did not return after a -1 write (%d SOCKET_WRITEs "
+            "parsed): %s" % (sum(1 for b, _ in uci.parsed
+                                 if b[1:2] == bytes([CMD_SOCKET_WRITE])), exc))
+    writes = [b for b, _ in uci.parsed if b[1:2] == bytes([CMD_SOCKET_WRITE])]
+    base._check(carry is True and _err(mem, labels) == UCI_ERR_SHORT_WRITE
+                and len(writes) == 1, (
+        "a -1 write returned C=%d, net_last_error=$%02X after %d "
+        "SOCKET_WRITE(s); expected C=1, $87, one"
+        % (carry, _err(mem, labels), len(writes))))
 
 
 TESTS = (
@@ -647,13 +874,21 @@ TESTS = (
     test_connect_push_wait_bail,
     test_connect_error_path_drain_bail,
     test_connect_ok_path_drain_bail,
-    test_close_entry_wait_bail,
+    test_close_entry_wait_bail_retries_the_close,
+    test_close_no_retry_when_the_abort_never_lands,
+    test_close_retry_that_also_fails_reports_89,
     test_close_push_wait_bail,
     test_close_drain_bail,
     test_bail_whose_abort_never_lands,
     test_closed_is_not_visible_before_the_close_ran,
     test_abort_outlasting_init_is_waited_out_by_the_next_command,
     test_clean_connect_close_connect_never_aborts,
+    test_poll_eof_closes_the_socket_state,
+    test_poll_no_data_keeps_the_socket,
+    test_poll_reset_is_not_idle,
+    test_poll_data_keeps_the_socket,
+    test_eof_keeps_the_bytes_already_in_the_ring,
+    test_send_error_is_not_a_length,
 )
 
 
