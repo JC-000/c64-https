@@ -731,7 +731,7 @@ def _dump_diag(transport: Ultimate64Transport,
                  "net_initialized"):
         if name in labels:
             print(f"  {name:22s} : 0x{r8(name):02X}")
-    for name in ("tls_state", "tls_last_state",
+    for name in ("tls_state", "tls_last_state", "tls_reached_connected",
                  "tls_recv_progress", "tls_recv_sub_progress"):
         if name in labels:
             print(f"  {name:22s} : 0x{r8(name):02X}")
@@ -778,6 +778,7 @@ def _dump_tls_state_snapshot(transport: Ultimate64Transport,
         # --- top-level state / progress ---
         ("tls_state", 1),
         ("tls_last_state", 1),
+        ("tls_reached_connected", 1),
         ("tls_recv_progress", 1),
         ("tls_recv_sub_progress", 1),
         ("tls_recv_poll_count", 2),

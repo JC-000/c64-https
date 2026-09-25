@@ -47,6 +47,8 @@
 .export net_resolved_ip
 ; c64-https extension (not §13)
 .export net_recv_byte
+; Rig diagnostic (#235): read by tools/ip65_hw_checks.py check_net_counters
+.export ip65_tcp_send_calls
 ; net_tcp_recv_cb, net_save_zp, net_restore_zp are adapter-internal (§13.5)
 ; and deliberately NOT exported. tools/test_net.py reaches them through
 ; build/labels.txt, which carries local labels too.
@@ -212,6 +214,7 @@ net_tcp_connect:
 ; Output: C=0 success, C=1 failure (net_last_error = NET_ERR_IP65_SEND)
 ; =============================================================================
 net_tcp_send:
+        inc ip65_tcp_send_calls ; counted before the attempt, success or not
         sta net_send_ptr
         stx net_send_ptr+1
         jsr net_save_zp
@@ -489,3 +492,11 @@ net_local_ip:       .res 4      ; lease copied from ip65_cfg_ip on DHCP success
 net_resolved_ip:    .res 4      ; copied from ip65_dns_ip_addr on resolve success
 net_last_error:     .res 1      ; NET_ERR_IP65_* (ip65_errors.inc); $00 = OK
 net_tcp_state:      .res 1      ; NET_TCP_* (net_states.inc)
+; net_tcp_send calls since boot (#235), wraps at 256. Cumulative, NOT
+; c64-wireguard's per-send ip65_send_attempts: a TLS record is two calls
+; (header, payload), so the first completed HTTPS fetch after boot --
+; ClientHello, client Finished, GET -- leaves it at exactly 6. Nonzero
+; with nothing on the wire: the driver tried and the wire ate it. Zero:
+; it never tried. Its receive-side twin is the existing tcp_recv_overflow
+; (ring full, sticky since boot).
+ip65_tcp_send_calls: .res 1
