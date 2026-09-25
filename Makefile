@@ -131,6 +131,33 @@ HTTPS_SNI ?=
 ifneq ($(strip $(HTTPS_SNI)),)
 CA65FLAGS += -D HTTPS_SNI_OVERRIDE=1
 endif
+# Issue #155: pin the server's leaf key. The value is the SHA-256 of the
+# leaf SubjectPublicKeyInfo DER, as `python3 tools/spki_pin.py <host>`
+# prints it. Unset = no pin, and the build is byte-identical to one that
+# has never heard of it. Set = the handshake aborts ("PIN FAIL EXP .. GOT
+# ..") unless the server presents exactly that key; HTTPS_PIN_WARN=1
+# prints "PIN WARN ..." and continues instead. The 32 bytes travel in
+# build/https_host.inc, so re-pinning after a key rotation needs no
+# `make clean`. P-256 leaves only (the only ones this client can verify).
+# Both backends; on ip65 it is the only certificate authentication there is
+# (no name check), and it costs 14 B of the tight LOADER.
+HTTPS_PIN_SPKI_SHA256 ?=
+HTTPS_PIN_WARN ?=
+HTTPS_PIN_BYTES :=
+ifneq ($(strip $(HTTPS_PIN_SPKI_SHA256)),)
+ifeq ($(shell printf '%s' '$(strip $(HTTPS_PIN_SPKI_SHA256))' | grep -Eqx '[0-9A-Fa-f]{64}' && echo ok),)
+$(error HTTPS_PIN_SPKI_SHA256 must be exactly 64 hex digits (python3 tools/spki_pin.py <host> prints it))
+endif
+HTTPS_PIN_BYTES := $(shell printf '%s' '$(strip $(HTTPS_PIN_SPKI_SHA256))' | sed 's/../$$&,/g; s/,$$//')
+CA65FLAGS += -D HTTPS_PIN_SPKI=1
+ifeq ($(HTTPS_PIN_WARN),1)
+CA65FLAGS += -D HTTPS_PIN_WARN=1
+else ifneq ($(filter-out 0,$(HTTPS_PIN_WARN)),)
+$(error HTTPS_PIN_WARN must be 1 (report and continue) or 0/unset (enforce))
+endif
+else ifneq ($(filter-out 0,$(HTTPS_PIN_WARN)),)
+$(error HTTPS_PIN_WARN=$(HTTPS_PIN_WARN) without HTTPS_PIN_SPKI_SHA256: there is no pin to warn about)
+endif
 # Optional REU document-base override, shared by the http.s body sink
 # and the Lane G viewer (both read the HTTP_REU_BODY_BASE equate /
 # runtime var; defaults to $10:0000 = 1048576). VICE tests use a
@@ -764,8 +791,10 @@ $(FLAGS_STAMP):
 # make builds its file database, so the deletion is visible to the dependency
 # graph. Absence is not a timestamp comparison, which is the whole point:
 # nothing here can be defeated by two files sharing a second.
-HTTPS_TARGET_INC_BODY := printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n.define HTTPS_SNI_STR "%s"\n' \
-                    '$(HTTPS_HOST)' '$(HTTPS_PATH)' '$(HTTPS_SNI)'
+# The pin line is emitted only when a pin is set, so an unpinned build's
+# header is unchanged byte for byte.
+HTTPS_TARGET_INC_BODY := printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n.define HTTPS_SNI_STR "%s"\n$(if $(HTTPS_PIN_BYTES),.define HTTPS_PIN_SPKI_BYTES %s\n)' \
+                    '$(HTTPS_HOST)' '$(HTTPS_PATH)' '$(HTTPS_SNI)' $(if $(HTTPS_PIN_BYTES),'$(HTTPS_PIN_BYTES)')
 
 ifeq ($(STAMP_SKIP),)
 ifeq ($(MAKE_DRY_RUN),)
@@ -775,13 +804,13 @@ _ := $(shell mkdir -p build; \
                  rm -f build/https_host.inc.tmp; \
              else \
                  mv build/https_host.inc.tmp build/https_host.inc; \
-                 rm -f build/boot.o build/http.o $(LINK_OUTPUTS); \
+                 rm -f build/boot.o build/http.o build/cert_pin.o $(LINK_OUTPUTS); \
              fi)
 else
 # -n / -q / -t: compare and report, mutate nothing. See MAKE_DRY_RUN above.
 ifneq ($(shell $(HTTPS_TARGET_INC_BODY) 2>/dev/null | cmp -s - build/https_host.inc >/dev/null 2>&1 || echo differs),)
 $(warning DRY RUN (-$(MAKE_OPT_LETTERS)): target strings differ from build/https_host.inc.)
-$(warning   A real build would delete build/boot.o, build/http.o and $(LINK_OUTPUTS) at parse)
+$(warning   A real build would delete build/boot.o, build/http.o, build/cert_pin.o and $(LINK_OUTPUTS) at parse)
 $(warning   time. NOTHING was deleted; the tree is untouched.)
 endif
 endif
@@ -797,7 +826,7 @@ endif
 # transition adds -D HTTPS_SNI_OVERRIDE=1 to CA65FLAGS. The edge is here so
 # that the two objects that KNOW about the target strings invalidate as a
 # pair, whichever of them grows a direct dependency next.
-build/boot.o build/http.o: build/https_host.inc
+build/boot.o build/http.o build/cert_pin.o: build/https_host.inc
 
 # Phase C.3: c64-nist-curves sibling archive (libs/nistcurves/ submodule).
 # Phase 1.5 split: produces TWO archives, one per overlay half. The

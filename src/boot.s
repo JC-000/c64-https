@@ -18,6 +18,9 @@
         ; never resolve, so a default build cannot dial anything real) and
         ; the default build byte-identical.
         .include "https_host.inc"
+.ifdef HTTPS_PIN_SPKI
+        .import cert_pin_banner
+.endif
 
         ; ---- exports: entry + print helpers ----
         .export start
@@ -275,7 +278,11 @@ start:
         ; print banner tail (trailing blank line before the menu)
         lda #<banner_msg_tail
         ldy #>banner_msg_tail
+.ifdef HTTPS_PIN_SPKI
+        jsr cert_pin_banner     ; #155: "SPKI PIN xxxxxxxx", then the tail
+.else
         jsr print_string
+.endif
 
         cli                     ; re-enable interrupts
 

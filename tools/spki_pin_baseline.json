@@ -1,0 +1,14 @@
+{
+  "captured": "2026-08-30",
+  "note": "SHA-256(leaf SPKI DER) for the P-256 hosts c64-https can reach. Re-run `python3 tools/spki_pin.py --check-baseline` to see which keys rotated; a host whose key survives renewal is a candidate for an enforcing pin, one that rotates wants HTTPS_PIN_WARN=1.",
+  "hosts": {
+    "github.com": "b8e9b0a8122f30ce9b636921b2ef139a9fa5b5d5ecb779f103a67766e29e0160",
+    "en.wikipedia.org": "c0a0573a0bfb1cc696f3ccb6a0be4e784fb9d887755b3e509a44adc41481c3fe",
+    "lwn.net": "86374d92fa452d09b2e7ad0ab1805780c527b9c0a3f66f1119ea39df0d97d2af",
+    "browserleaks.com": "ce408b17ac274c6f410b08882802c94bf036582378d2c8d38b49004124eaa78d",
+    "www.google.com": "c256daac9c3a8eec4dc9d3ec81ab09d06e5e57b48cca21a9fe75743f6976da41",
+    "ietf.org": "6d7ee315df29f6d50fcc82f6ea54db66796c862391662195f44f6608c472011f",
+    "example.com": "0856752f53199a673dcc955c137fe1f5b105a180528acb320bb3eddf15103a9b",
+    "news.ycombinator.com": "bd2735e69321b5c60de849b2c4843b064403b33f83553ef6c08173661b03be05"
+  }
+}

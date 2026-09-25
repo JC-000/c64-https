@@ -88,7 +88,7 @@ and pinned by two tests. Real builds are byte-for-byte unchanged.
 
 The target *strings* `HTTPS_HOST`/`HTTPS_PATH`/`HTTPS_SNI` keep their own
 narrower stamp, the generated `build/https_host.inc` (#128): it invalidates
-`boot.o` + `http.o` only, so retargeting stays cheap. Only the strings are
+`boot.o` + `http.o` + `cert_pin.o` only, so retargeting stays cheap. Only the strings are
 outside `flags.stamp`; a non-empty `HTTPS_SNI` still moves `CA65FLAGS` (it
 adds `-D HTTPS_SNI_OVERRIDE=1`), so the override's presence is stamped even
 though the name in it is not.
@@ -153,6 +153,12 @@ Variables:
     P-384 symbol that has gone away. The flag applies on all five profiles
     since the hoist out of the `USE_NISTCURVES_ONCHIP` block — it used to
     be silently dropped by the two REU-profile builds.
+  - `HTTPS_PIN_SPKI_SHA256=<64 hex>` (+ `HTTPS_PIN_WARN=1` = report, don't
+    abort) — leaf SPKI pin, #155. `tools/spki_pin.py <host>` computes it;
+    the bytes ride `build/https_host.inc`. Both backends (ip65: in
+    CRYPTO_RESIDENT, +14 B LOADER); unset = byte-identical PRG. Test: `tools/test_cert_pin.py` (builds its
+    own images). The pin hashes the window the key SCANNER read, not the
+    DER-parsed SPKI — see the header of `src/cert_pin.s` before changing it.
   - `HTTPS_HOST` / `HTTPS_PATH` / `HTTPS_SNI` / `HTTPS_PORT` /
     `HTTPS_BODY_TO_REU=1` — build-time target. Hosts >63 chars are a build
     error. The strings live in their own `HTTPS_TARGET_RODATA` segment
