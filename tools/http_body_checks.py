@@ -482,8 +482,9 @@ def close_confirmed(stopped_early: bool, read_shadow_ok, read_tcp_state):
     already closed and returned by the time 'Q' lands, so this exit is only
     reachable in the HTTPS_BODY_TO_REU viewer build.
 
-    CLOSED means `net_tcp_close` RAN — every CLOSED store after `net_init`
-    is inside it — not that the firmware accepted the close: its wedge
+    CLOSED means `net_tcp_close` RAN, or that `net_poll` read the peer's
+    EOF, after which the firmware has already closed the socket itself —
+    not that the firmware accepted our close: `net_tcp_close`'s wedge
     paths force CLOSED without one. The "CONNECTION CLOSED" marker it
     replaces is printed after `net_tcp_close` either way, so it is the same
     evidence, not weaker.

@@ -96,7 +96,7 @@ from test_uci_timeout_recovery import (                   # noqa: E402
 
 OPT_OUT_ENV = "C64_UCI_TESTS_OPTIONAL"
 from _skip_policy import require, verdict  # noqa: E402
-CERTIFIES = "#230(a) / #221 / #243"
+CERTIFIES = "#230(a) / #221 / #243 / net_poll EOF"
 
 UCI_STAT_ABORT_PENDING = 0x04
 
@@ -124,7 +124,8 @@ CONNECT_BYTES = (bytes([TARGET_NETWORK, CMD_TCP_CONNECT, PORT & 0xFF,
 # wait for the reset loses the NEXT command too.
 ABORT_LATENCY = 4
 
-LABELS_NEEDED = ("net_init", "net_tcp_connect", "net_tcp_close",
+LABELS_NEEDED = ("net_init", "net_tcp_connect", "net_tcp_close", "net_poll",
+                 "tcp_recv_head", "tcp_recv_tail",
                  "uci_host_buf", "uci_socket_id", "net_last_error",
                  "net_tcp_state", "uci_status_len", "uci_status_force")
 
@@ -319,6 +320,9 @@ def _machine(uci, tod_reads_per_tenth):
     for name in ("uci_status_len", "uci_status_force", "net_last_error",
                  "net_tcp_state", "uci_socket_id"):
         mem.write(labels[name], 0)
+    for off in range(2):
+        mem.write(labels["tcp_recv_head"] + off, 0)
+        mem.write(labels["tcp_recv_tail"] + off, 0)
     for i, b in enumerate(HOST + b"\x00"):
         mem.write(labels["uci_host_buf"] + i, b)
     return FastCPU(mem), mem, labels
@@ -709,6 +713,45 @@ def test_clean_connect_close_connect_never_aborts():
                 "%d push(es) rejected on the clean paths" % uci.pushes_rejected)
 
 
+def _poll_once(reply):
+    uci = AbortModel([reply])
+    cpu, mem, labels = _require(uci)
+    mem.write(labels["uci_socket_id"], 1)
+    mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
+    cpu.call(labels["net_poll"], budget=8_000_000)
+    return uci, mem, labels
+
+
+def test_poll_eof_closes_the_socket_state():
+    """SOCKET_READ answering actual_len 0 is the peer's FIN: read_socket
+    has already lwip_close()d the socket and said "01,CONNECTION CLOSED BY
+    HOST". net_poll must stop reporting CONNECTED, or http_recv_body polls
+    a dead socket for its whole tick budget (~87 min; live: github.com and
+    browserleaks.com runs sat out the rig's 900 s sentinel this way)."""
+    uci, mem, labels = _poll_once((b"\x00\x00", b"01,CONNECTION CLOSED BY HOST"))
+    base._check(uci.parsed and uci.parsed[0][0][:2] == bytes([TARGET_NETWORK,
+                                                              0x10]), (
+        "premise: net_poll did not issue a SOCKET_READ (parsed %r)"
+        % uci.parsed))
+    base._check(_state(mem, labels) == NET_TCP_CLOSED, (
+        "after an EOF reply net_tcp_state=$%02X, expected $00 CLOSED"
+        % _state(mem, labels)))
+    base._check(_err(mem, labels) == 0,
+                "an EOF set net_last_error=$%02X; a FIN is not an error"
+                % _err(mem, labels))
+    base._check(uci.idle and uci.abort_writes == 0,
+                "the EOF poll left the interface in %s (aborts=%d)"
+                % (uci.describe(), uci.abort_writes))
+
+
+def test_poll_no_data_keeps_the_socket():
+    """Control: the idle answer ($FFFF, "02,NO DATA: 11") is not EOF."""
+    uci, mem, labels = _poll_once((b"\xff\xff", b"02,NO DATA: 11"))
+    base._check(_state(mem, labels) == NET_TCP_CONNECTED, (
+        "an idle poll changed net_tcp_state to $%02X"
+        % _state(mem, labels)))
+
+
 TESTS = (
     test_prompt_abort_control,
     test_connect_after_a_delayed_abort,
@@ -729,6 +772,8 @@ TESTS = (
     test_closed_is_not_visible_before_the_close_ran,
     test_abort_outlasting_init_is_waited_out_by_the_next_command,
     test_clean_connect_close_connect_never_aborts,
+    test_poll_eof_closes_the_socket_state,
+    test_poll_no_data_keeps_the_socket,
 )
 
 

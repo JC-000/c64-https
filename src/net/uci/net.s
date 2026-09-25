@@ -311,11 +311,20 @@ net_poll:
         sta uci_poll_rem+1
         ora uci_poll_rem+0
         bne @have_data
+        ; actual_len 0 is EOF, not "no data": lwip_recv returns 0 only for
+        ; a peer FIN (idle polls answer $FFFF), and read_socket then
+        ; lwip_close()s the socket itself and says "01,CONNECTION CLOSED
+        ; BY HOST" (network_target.cc). Staying CONNECTED here kept the
+        ; caller polling a socket that no longer exists, for the whole
+        ; ~87 min tick budget in http_recv_body. CLOSED is true: the
+        ; firmware socket is gone, so a C64 reset over it poisons nothing.
         jsr uci_drain_resp
         bcs @hd0_drain_to           ; drain wedged — surface as ERROR
         jsr uci_drain_status
         bcs @hd0_drain_to
         jsr uci_ack
+        lda #NET_TCP_CLOSED
+        sta net_tcp_state
         rts
 @hd0_drain_to:
         lda #NET_TCP_ERROR
@@ -1029,7 +1038,8 @@ net_tcp_close:
 @cl_closed:
         ; CLOSED is stored on the way OUT, never earlier: it means this
         ; routine ran to completion or timed out (#232's close_confirmed
-        ; reads it that way), not merely that it was entered.
+        ; reads it that way), not merely that it was entered. net_poll's
+        ; EOF is the only other CLOSED store.
         lda #NET_TCP_CLOSED
         sta net_tcp_state
         rts
