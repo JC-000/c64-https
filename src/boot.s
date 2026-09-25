@@ -275,14 +275,14 @@ start:
         ldy #>net_banner_str
         jsr print_string
 
-.ifdef HTTPS_PIN_SPKI
-        jsr cert_pin_banner     ; #155: "SPKI PIN xxxxxxxx" identifies the build
-.endif
-
         ; print banner tail (trailing blank line before the menu)
         lda #<banner_msg_tail
         ldy #>banner_msg_tail
+.ifdef HTTPS_PIN_SPKI
+        jsr cert_pin_banner     ; #155: "SPKI PIN xxxxxxxx", then the tail
+.else
         jsr print_string
+.endif
 
         cli                     ; re-enable interrupts
 

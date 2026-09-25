@@ -28,9 +28,15 @@
 ; ecdsa_pubkey_x/y holding whatever an EARLIER connection put there.
 ;
 ; POSITIVE FLAG, not abort-on-mismatch (#152 interlock). cert_pin_status is
-; zeroed by tls_connect and written only here; tls_connect calls
-; cert_pin_require before deriving traffic keys. A flight that never delivers
-; a Certificate never runs this code, and fails there.
+; zeroed every connection as the handshake keys are derived (cert_pin_hs_keys,
+; which tls_connect calls in place of tls_derive_handshake_keys — no
+; Certificate can be processed before those keys exist) and set only by
+; cert_pin_check. tls_connect calls cert_pin_send_finished in place of
+; tls_send_finished, which refuses (C=1, nothing sent) unless
+; cert_pin_require passes; its caller's existing abort does the rest. A flight
+; that never delivers a Certificate never runs the check, and fails there.
+; Wrapping the two existing calls is what keeps the pin at ZERO bytes in
+; tls13.s / boot.s, i.e. in ip65's LOADER.
 ;
 ;   cert_pin_status   $00  check has not run this connection
 ;                     $01  SPKI matched the pin
@@ -51,6 +57,8 @@
 .export cert_pin_check
 .export cert_pin_require
 .export cert_pin_banner
+.export cert_pin_hs_keys
+.export cert_pin_send_finished
 .export cert_pin_status
 .export cert_pin_expected
 
@@ -61,6 +69,8 @@
 .import sha256_hash
 .import ecdsa_curve_id
 .import print_string
+.import tls_derive_handshake_keys
+.import tls_send_finished
 .ifdef X509_VERIFY_NAME
 .import x509_verify_hostname
 .endif
@@ -171,6 +181,21 @@ cert_pin_status:
         .byte 0
 
 ; -----------------------------------------------------------------------------
+; cert_pin_hs_keys — tls_connect's tls_derive_handshake_keys call site
+; cert_pin_send_finished — tls_connect's tls_send_finished call site
+; -----------------------------------------------------------------------------
+cert_pin_hs_keys:
+        lda #0
+        sta cert_pin_status             ; new handshake: nothing pinned yet
+        jmp tls_derive_handshake_keys
+
+cert_pin_send_finished:
+        jsr cert_pin_require
+        bcs :+                          ; refused: send nothing, C=1
+        jmp tls_send_finished
+:       rts
+
+; -----------------------------------------------------------------------------
 ; cert_pin_report — "PIN FAIL EXP xxxxxxxx GOT yyyyyyyy" ("PIN WARN ..." in
 ; warn mode): the first 4 bytes of both, so the operator reads the server's
 ; new fingerprint off the screen instead of meeting an undifferentiated stall.
@@ -191,9 +216,20 @@ cert_pin_report:
 
 ; -----------------------------------------------------------------------------
 ; cert_pin_banner — boot banner line, so a pinned build is identifiable
-; before it ever fails: "SPKI PIN xxxxxxxx" (+ " WARN" in warn mode).
+; before it ever fails: "SPKI PIN xxxxxxxx" (+ " WARN" in warn mode). Takes
+; boot.s's print_string call for the banner tail: prints the pin line, then
+; the string in A/Y.
 ; -----------------------------------------------------------------------------
 cert_pin_banner:
+        pha
+        tya
+        pha
+        jsr @line
+        pla
+        tay
+        pla
+        jmp print_string
+@line:
         lda #<pin_banner_msg
         ldy #>pin_banner_msg
         jsr print_string
