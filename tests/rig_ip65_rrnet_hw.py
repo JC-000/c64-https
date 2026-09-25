@@ -130,30 +130,19 @@ One objection to turbo has been retired by measurement, and one has not:
   cartridge is on the expansion bus and its access timing is the U64's to
   honour; that is what a turbo run actually tests.
 
-AND ONE CHECK GOES RED AT TURBO FOR A REASON THAT IS NOT THE CLIENT
-===================================================================
-`check_tls_connected` is a SAMPLING oracle, and turbo outruns it. The
-first 48 MHz run (2026-09-06, 43.1 s 'G' to CONNECTION CLOSED against
-1,979 s at 1 MHz) reported `tls_state_max` = 5 (CERT_VERIFY) and failed
-that check while every other check passed, HTTP 200 and the exact body
-came out of the C64's own buffer, and `net_last_error` was $00.
-
-`tls_connect` in `src/tls13.s` (grep `lda #TLS_STATE_CONNECTED`) sets
-tls_state = CONNECTED right after the traffic-key derivation, and
-`tls_close` (grep `^tls_close:`) writes it back to IDLE, so
-the value only exists between them — which is why the rig polls rather
-than reading it afterwards. At 1 MHz that window is minutes wide. At
-48 MHz the client Finished, the GET, the response and the close all fit
-inside one poll. `tls_last_state` is no fallback: tls13.s writes it only
-on the ERROR path, so a clean run leaves it 0.
-
-DO NOT soften the check to make a turbo run green — that is the failure
-mode this file's docstring is otherwise entirely about. A real fix is a
-high-water latch for tls_state on the C64 side, which is a change to
-shipped source for test observability: issue #204, scoped after the
-release. Until someone writes it, a turbo run's verdict on the handshake
-is INFERENCE from the screen markers, the body and the wire, and must be
-reported as inference.
+THE CONNECTED VERDICT IS THE C64'S OWN LATCH, NOT THE POLL
+==========================================================
+`tls_state` holds CONNECTED only between tls_connect's CONNECTED store and
+`tls_close` (grep `^tls_close:` in `src/tls13.s`), which writes IDLE back.
+At 48 MHz the client Finished, the GET, the response and the close all fit
+inside one poll: the first turbo run (2026-09-06) sampled `tls_state_max`
+= 5 (CERT_VERIFY) on a run that did connect, and the old sampling oracle
+went red. `check_tls_connected` now decides on `tls_reached_connected`
+(#204), which tls_connect sets at that same store and tls_close never
+clears; `stage_fetch` reads it after the fetch, inside the device lock and
+before anything resets the machine. The sampled maximum is still recorded
+and must agree -- latch 0 beside a CONNECTED sample is INCONCLUSIVE, the
+instrument being broken rather than the client.
 
 USAGE
 =====
@@ -696,9 +685,13 @@ def stage_fetch(tr, labels: dict) -> str:
     RUN["final_screen"] = get_screen_text(tr)
     print(f"  fetch ended after {RUN['fetch_seconds']:.0f}s: {result}")
 
+    # Read here, inside the device lock and before main()'s finally resets
+    # the machine: the latch is only BSS, and boot zeroes it.
     last_state = tr.read_memory(labels["tls_last_state"], 1)[0]
+    reached = tr.read_memory(labels["tls_reached_connected"], 1)[0]
     RUN["tls_last_state"] = last_state
-    RES.verdict(hw.check_tls_connected(tls_max, last_state),
+    RUN["tls_reached_connected"] = reached
+    RES.verdict(hw.check_tls_connected(tls_max, last_state, reached),
                 "the C64's TLS state machine reached CONNECTED")
 
     status = read_u16(tr, labels["http_status"])
@@ -716,6 +709,15 @@ def stage_fetch(tr, labels: dict) -> str:
     RES.verdict(hw.check_net_last_error(
         err, hw.net_error_table(ERRORS_INC.read_text())),
         "net_last_error is clean")
+
+    sends = tr.read_memory(labels["ip65_tcp_send_calls"], 1)[0]
+    overflow = tr.read_memory(labels["tcp_recv_overflow"], 1)[0]
+    RUN["ip65_tcp_send_calls"] = sends
+    RUN["tcp_recv_overflow"] = overflow
+    RES.verdict(hw.check_net_counters(
+        sends, overflow,
+        expect_sends=hw.HTTPS_FETCH_SEND_CALLS if result == "pass" else None),
+        "the adapter sent the whole fetch and dropped nothing")
     if result == "timeout":
         RES.check(False, "the fetch completed inside its budget",
                   f"no terminal screen after {FETCH_BUDGET_S:.0f}s; last phase "
@@ -808,8 +810,8 @@ def main() -> int:
             certifies=CERTIFIES)
 
     for line in hw.format_provenance(hw.provenance(
-            [Path(__file__), PROJECT_ROOT / "tools" / "ip65_hw_checks.py",
-             PRG_PATH], repo=PROJECT_ROOT)):
+            [Path(__file__), PROJECT_ROOT / "tools" / "ip65_hw_checks.py"],
+            repo=PROJECT_ROOT)):
         print(line)
 
     if not selftest_library():
@@ -823,6 +825,11 @@ def main() -> int:
         return cannot_run("the PRG could not be built -- `make` failed",
                           executed=0, total=1, certifies=CERTIFIES,
                           opt_out_env=None)
+    # The PRG's provenance AFTER the build: hashed before it, it named
+    # whatever the previous build left in build/, not the image that runs.
+    for line in hw.format_provenance(hw.provenance([PRG_PATH],
+                                                   repo=PROJECT_ROOT)):
+        print(line)
 
     problems = rig_problems()
     if problems:

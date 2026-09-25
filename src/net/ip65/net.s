@@ -47,6 +47,8 @@
 .export net_resolved_ip
 ; c64-https extension (not §13)
 .export net_recv_byte
+; Rig diagnostic (#235): read by tools/ip65_hw_checks.py check_net_counters
+.export ip65_tcp_send_calls
 ; net_tcp_recv_cb, net_save_zp, net_restore_zp are adapter-internal (§13.5)
 ; and deliberately NOT exported. tools/test_net.py reaches them through
 ; build/labels.txt, which carries local labels too.
@@ -212,6 +214,7 @@ net_tcp_connect:
 ; Output: C=0 success, C=1 failure (net_last_error = NET_ERR_IP65_SEND)
 ; =============================================================================
 net_tcp_send:
+        inc ip65_tcp_send_calls ; counted before the attempt, success or not
         sta net_send_ptr
         stx net_send_ptr+1
         jsr net_save_zp
@@ -313,6 +316,17 @@ cb_load_len_lo:
 cb_load_len_hi:
         lda $ffff               ; SMC: patched to addr of tcp_inbound_data_length+1
         sta cb_remaining+1
+        ; Length $FFFF is not data: ip65 tcp.s signals the peer's FIN and RST
+        ; that way, with tcp_inbound_data_ptr left stale. Copying it filled
+        ; the ring with ~4 KB of old buffer and latched tcp_recv_overflow on
+        ; every close. No real segment reaches $FF00 (MSS <= 1460), so the
+        ; high byte alone identifies it.
+        cmp #$ff
+        bne cb_not_closed
+        lda #NET_TCP_CLOSED     ; FIN or RST: ip65 has closed its end
+        sta net_tcp_state
+        rts
+cb_not_closed:                  ; A still holds the high byte
         ; if length == 0, nothing to copy
         ora cb_remaining
         bne :+
@@ -355,14 +369,14 @@ cb_loop:
         bne cb_not_full
         ; ring full — record overflow and stop copying this delivery.
         ; Semantics (issue #72): ip65 ACKs the full inbound length
-        ; regardless of what we copy (see the PR #27 clamp history), so
-        ; if the dropped tail was NEW in-sequence data it is genuinely
-        ; lost to the stream — the TLS layer will then fail on a broken
-        ; record. In practice the flag has only been observed latching
-        ; during TCP retransmission bursts, where the dropped delivery
-        ; duplicated bytes already consumed and the stream survived.
-        ; Treat a set flag as a diagnostic breadcrumb, not proof of
-        ; corruption — but investigate if TLS errors follow.
+        ; regardless of what we copy (see the PR #27 clamp history), and
+        ; it delivers only the next in-sequence segment (tcp.s rejects
+        ; any other sequence number), so the dropped tail is ACKed bytes
+        ; lost to the stream for good — the TLS layer then fails on a
+        ; broken record. The flag used to latch on every connection
+        ; close, when ip65's FIN/RST length ($FFFF) was copied as data;
+        ; the $FFFF check at the top of the callback drops that now, so a
+        ; set flag is real loss.
         lda #1
         sta tcp_recv_overflow
         jmp cb_done
@@ -489,3 +503,11 @@ net_local_ip:       .res 4      ; lease copied from ip65_cfg_ip on DHCP success
 net_resolved_ip:    .res 4      ; copied from ip65_dns_ip_addr on resolve success
 net_last_error:     .res 1      ; NET_ERR_IP65_* (ip65_errors.inc); $00 = OK
 net_tcp_state:      .res 1      ; NET_TCP_* (net_states.inc)
+; net_tcp_send calls since boot (#235), wraps at 256. Cumulative, NOT
+; c64-wireguard's per-send ip65_send_attempts: a TLS record is two calls
+; (header, payload), so the first completed HTTPS fetch after boot --
+; ClientHello, client Finished, GET -- leaves it at exactly 6. Nonzero
+; with nothing on the wire: the driver tried and the wire ate it. Zero:
+; it never tried. Its receive-side twin is the existing tcp_recv_overflow
+; (ring full, sticky since boot).
+ip65_tcp_send_calls: .res 1

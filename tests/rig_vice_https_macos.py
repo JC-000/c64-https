@@ -266,7 +266,8 @@ def _last_progress(screen: str) -> str:
 
 _DIAG_SYMBOLS = (
     # (label, byte count) — read on failure, before teardown kills VICE.
-    ("tls_state", 1), ("tls_recv_progress", 1), ("tls_recv_sub_progress", 1),
+    ("tls_state", 1), ("tls_reached_connected", 1),
+    ("tls_recv_progress", 1), ("tls_recv_sub_progress", 1),
     ("tls_read_seq", 8), ("tls_rec_type", 1), ("tls_rec_len", 2),
     ("net_last_error", 1), ("net_tcp_state", 1),
     ("tcp_recv_head", 2), ("tcp_recv_tail", 2), ("tcp_recv_overflow", 1),
