@@ -74,7 +74,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from _skip_policy import cannot_run, not_applicable  # noqa: E402
+from _skip_policy import cannot_run, not_applicable, verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -361,7 +361,8 @@ def main() -> int:
     print(f"\n{'='*60}")
     print(f"RESULTS: {passed}/{total} passed, {failed}/{total} failed")
     print(f"{'='*60}")
-    return 0 if failed == 0 else 1
+    return verdict(passed, failed,
+                   certifies="the P-384 overlay symbols and swap dispatcher")
 
 
 if __name__ == "__main__":

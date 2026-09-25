@@ -69,6 +69,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
 import ip65_hw_checks as hw  # noqa: E402
+from _skip_policy import VoluntarySkip, require, verdict  # noqa: E402
 
 SEED = int(os.environ.get("C64_TEST_SEED", "20260905"))
 RNG = random.Random(SEED)
@@ -1327,17 +1328,20 @@ def test_the_build_exports_every_symbol_the_rig_reads() -> None:
     even then it says so loudly rather than passing quietly. The
     exemplars are `test_x509.py` (missing labels counted as failures) and
     `test_finished_verify.py` (missing label = FATAL).
+
+    The opt-out goes through `_skip_policy.require()` (#178): it used to
+    `print` and `return`, which pytest records as a PASS and whose printout
+    pytest swallows -- an opt-out that read as a green test. require()
+    makes it a pytest SKIP whose reason carries the warning.
     """
     labels_path = REPO / "build" / "labels.txt"
-    if not labels_path.exists():
-        msg = (f"{labels_path} is absent, so this check verified NOTHING about "
-               "whether the build exports the symbols the hardware rig reads. "
-               "Build first (`make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1`), or "
-               "set C64_ALLOW_NO_BUILD=1 to accept an unverified run.")
-        if os.environ.get("C64_ALLOW_NO_BUILD") == "1":
-            print(f"\n!! EXPLICIT SKIP (C64_ALLOW_NO_BUILD=1): {msg}")
-            return
-        raise AssertionError(msg)
+    require(labels_path.exists(),
+            f"{labels_path} is absent -- build first "
+            "(`make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1`)",
+            executed=0, total=1,
+            certifies="whether the build exports the symbols the hardware "
+                      "rig reads",
+            opt_out_env="C64_ALLOW_NO_BUILD")
     labels = {}
     for line in labels_path.read_text().splitlines():
         parts = line.split()
@@ -1423,19 +1427,26 @@ def main() -> int:
     print(f"seed {SEED} (reproduce with C64_TEST_SEED={SEED})")
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
-    failed = 0
+    failed = skipped = 0
     for name, fn in tests:
         try:
             fn()
             print(f"  PASS  {name}")
+        except VoluntarySkip as exc:        # named before Exception, see class
+            skipped += 1
+            print(f"  SKIP  {name}: {exc}")
         except AssertionError as exc:
             failed += 1
             print(f"  FAIL  {name}: {exc}")
         except Exception as exc:                              # noqa: BLE001
             failed += 1
             print(f"  ERROR {name}: {type(exc).__name__}: {exc}")
-    print(f"\n{len(tests) - failed}/{len(tests)} passed")
-    return 1 if failed else 0
+    passed = len(tests) - failed - skipped
+    print(f"\n{passed}/{len(tests)} passed"
+          + (f", {skipped} skipped by explicit opt-out" if skipped else ""))
+    return verdict(passed, failed, skipped=skipped,
+                   opt_out_env="C64_ALLOW_NO_BUILD",
+                   certifies="the RR-Net rig's pure verdict functions")
 
 
 if __name__ == "__main__":

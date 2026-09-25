@@ -54,6 +54,7 @@ from c64_test_harness import (
 )
 
 from _vice_helpers import default_vice_config
+from _skip_policy import verdict  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -910,7 +911,8 @@ def main():
         print(f"\n  [-] X.509/ECDSA: {failed} TEST(S) FAILED")
     print(f"{'='*60}")
 
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(verdict(passed, failed,
+                     certifies="X.509 parsing and ECDSA verification"))
 
 
 if __name__ == "__main__":

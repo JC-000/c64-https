@@ -31,6 +31,7 @@ from c64_test_harness import (
     jsr,
     wait_for_text,
 )
+from _skip_policy import verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -207,7 +208,8 @@ def main():
     else:
         print(f"  [-] TRANSCRIPT LARGE: {failed} TEST(S) FAILED")
     print(f"{'='*60}")
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(verdict(passed, failed,
+                     certifies="the large-buffer transcript hash"))
 
 
 if __name__ == "__main__":

@@ -70,6 +70,16 @@ Usage (script lane)::
             certifies="the UCI dual-overlay swap dispatcher",
         )
 
+Usage (end of a run)::
+
+    from _skip_policy import verdict
+
+    sys.exit(verdict(passed, failed, certifies="the HTTP response parser"))
+
+``verdict()`` is the end-of-run half of the same rule: ``0 if failed == 0
+else 1`` exits 0 when NOTHING ran, which is how a suite whose every group
+skipped used to report success (#178's test_http.py finding).
+
 Usage (pytest lane)::
 
     from _skip_policy import require
@@ -99,6 +109,7 @@ __all__ = [
     "cannot_run",
     "not_applicable",
     "require",
+    "verdict",
 ]
 
 EXIT_PASS = 0
@@ -295,14 +306,17 @@ def require(
     """
     if condition:
         return
+    opted_out = _opted_out(opt_out_env)
+    # When the hatch is already open, "set X=1 to accept..." is noise next
+    # to "[X=1 set]"; say it once.
     text = reason_text(
         reason,
         executed=executed,
         total=total,
         certifies=certifies,
-        opt_out_env=opt_out_env,
+        opt_out_env=None if opted_out else opt_out_env,
     )
-    if _opted_out(opt_out_env):
+    if opted_out:
         # Hand the skip to pytest ONLY when pytest is actually DRIVING this
         # run -- `sys.modules`, not `import`.  `import pytest` succeeds
         # whenever pytest is merely INSTALLED, which on a developer machine
@@ -318,6 +332,73 @@ def require(
         # copy, so it has to be at least as correct as the thing it replaces.
         pytest = sys.modules.get("pytest")
         if pytest is None:
-            raise VoluntarySkip(f"{text} [{opt_out_env}=1 set]")
-        pytest.skip(f"{text} [{opt_out_env}=1 set]")
+            raise VoluntarySkip(f"{text} [{opt_out_env}=1 set: accepted "
+                                "as unverified]")
+        pytest.skip(f"{text} [{opt_out_env}=1 set: accepted as unverified]")
     raise SkipPolicyError(text)
+
+
+def verdict(
+    passed: int,
+    failed: int,
+    *,
+    skipped: int = 0,
+    opt_out_env: Optional[str] = None,
+    certifies: Optional[str] = None,
+    out: Optional[TextIO] = None,
+) -> int:
+    """Turn a finished run's tallies into the 0/1/2 exit code.
+
+    * any failure                         -> ``EXIT_FAIL`` (1)
+    * at least one pass, no failure       -> ``EXIT_PASS`` (0)
+    * nothing passed, nothing failed,
+      ``skipped`` > 0                     -> ``EXIT_PASS`` (0), with a block
+      saying nothing was verified -- but ONLY if ``opt_out_env`` names the
+      variable that authorised the skips and it is set to exactly "1".
+      Otherwise the skips were not chosen, and it is ``cannot_run()`` (2).
+      ``skipped`` > 0 without ``opt_out_env`` is a caller bug (TypeError):
+      a bare count cannot tell a chosen skip from an involuntary one, which
+      is exactly the laundering this function exists to stop.
+    * nothing at all                      -> ``cannot_run()`` -> ``EXIT_CANNOT_RUN``
+      (2).  There is no opt-out here: a run that got as far as its verdict
+      and executed nothing is not a configuration anyone chose.
+
+    This replaces ``sys.exit(0 if failed == 0 else 1)``, which exits 0 on a
+    run in which every check was skipped.
+    """
+    if skipped and not opt_out_env:
+        raise TypeError(
+            "verdict(skipped=%d) needs opt_out_env: only a named, set opt-out "
+            "can make a skip voluntary" % skipped)
+    if failed:
+        return EXIT_FAIL
+    if passed > 0:
+        return EXIT_PASS
+    if skipped > 0:
+        if not _opted_out(opt_out_env):
+            return cannot_run(
+                f"{skipped} check(s) skipped but {opt_out_env} is not set to "
+                "1 -- an unrequested skip is a failure",
+                executed=0, total=skipped, certifies=certifies,
+                opt_out_env=opt_out_env, out=out)
+        _print_block(
+            "NOTHING VERIFIED (explicit opt-out)",
+            f"{skipped} check(s) skipped by explicit {opt_out_env}=1, "
+            "0 executed",
+            [
+                f"this run certifies NOTHING about "
+                f"{certifies or 'the behaviour under test'}",
+                "exit 0 because the skip was chosen, NOT because anything "
+                "passed",
+            ],
+            out,
+        )
+        return EXIT_PASS
+    return cannot_run(
+        "no check executed -- every group skipped, or none was collected",
+        executed=0,
+        total=None,
+        certifies=certifies,
+        opt_out_env=None,
+        out=out,
+    )

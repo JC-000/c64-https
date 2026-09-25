@@ -964,7 +964,9 @@ def main() -> int:
             failed += 1
             print(f"  ERROR {name}: {type(exc).__name__}: {exc}")
     print(f"\n{len(tests) - failed}/{len(tests)} passed")
-    return 1 if failed else 0
+    from _skip_policy import verdict
+    return verdict(len(tests) - failed, failed,
+                   certifies="the #210 body-completeness oracle")
 
 
 if __name__ == "__main__":

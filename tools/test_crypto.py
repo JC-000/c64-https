@@ -18,6 +18,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
+from _skip_policy import verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -777,7 +778,8 @@ def main():
     print(f"\n{'='*60}")
     print(f"RESULTS: {passed}/{total} passed, {failed}/{total} failed")
     print(f"{'='*60}")
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(verdict(passed, failed,
+                     certifies="the in-tree crypto primitives"))
 
 
 if __name__ == "__main__":

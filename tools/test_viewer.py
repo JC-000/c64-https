@@ -42,6 +42,7 @@ from c64_test_harness import (
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _vice_helpers import default_vice_config
+from _skip_policy import verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -383,7 +384,7 @@ def main():
     else:
         print(f"\n  [-] viewer: {failed} TEST(S) FAILED")
     print("=" * 60)
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(verdict(passed, failed, certifies="the REU body viewer"))
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ from _skip_policy import (  # noqa: E402
     not_applicable,
     reason_text,
     require,
+    verdict,
 )
 
 ENV = "C64_TEST_SKIP_POLICY_OPT_OUT"
@@ -181,6 +182,80 @@ def test_the_two_exit_codes_are_distinct():
     # different states and callers are documented to tell them apart.
     assert EXIT_CANNOT_RUN == 2
     assert EXIT_PASS == 0
+
+
+# ---------------------------------------------------------------------------
+# 2b. verdict(): the end-of-run half.  `0 if failed == 0 else 1` exits 0 on
+#     a run in which nothing executed (#178's test_http.py finding).
+# ---------------------------------------------------------------------------
+
+def _verdict(*args, **kw):
+    buf = io.StringIO()
+    return verdict(*args, out=buf, **kw), buf.getvalue()
+
+
+def test_verdict_a_pass_needs_something_to_have_passed():
+    assert _verdict(3, 0) == (EXIT_PASS, "")
+
+
+def test_verdict_any_failure_is_a_failure():
+    assert _verdict(3, 1)[0] == EXIT_FAIL
+    assert _verdict(0, 1)[0] == EXIT_FAIL
+    # A failure outranks an opt-out skip: skipping some checks does not
+    # excuse the ones that ran and failed.
+    with _Env("1"):
+        assert _verdict(0, 1, skipped=4, opt_out_env=ENV)[0] == EXIT_FAIL
+
+
+def test_verdict_nothing_ran_is_could_not_run():
+    rc, out = _verdict(0, 0, certifies="the HTTP parser")
+    assert rc == EXIT_CANNOT_RUN, rc
+    assert "COULD NOT RUN" in out
+    assert "certifies NOTHING about the HTTP parser" in out
+
+
+def test_verdict_nothing_ran_has_no_opt_out():
+    # A run that reached its verdict and executed nothing is not a
+    # configuration anyone chose; no environment variable turns it green.
+    for name in (ENV, "C64_ALLOW_SKIP"):
+        saved = os.environ.get(name)
+        os.environ[name] = "1"
+        try:
+            assert _verdict(0, 0)[0] == EXIT_CANNOT_RUN, name
+        finally:
+            if saved is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = saved
+
+
+def test_verdict_all_skipped_by_opt_out_is_zero_and_says_so():
+    with _Env("1"):
+        rc, out = _verdict(0, 0, skipped=2, opt_out_env=ENV,
+                           certifies="DATA_ACC")
+    assert rc == EXIT_PASS
+    assert "NOTHING VERIFIED" in out
+    assert "certifies NOTHING about DATA_ACC" in out
+
+
+def test_verdict_skips_without_a_named_opt_out_are_a_caller_bug():
+    # A bare count cannot tell a chosen skip from an involuntary one; if it
+    # could return 0, any caller could launder an involuntary skip into it.
+    try:
+        _verdict(0, 0, skipped=3)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("verdict(skipped=3) without opt_out_env "
+                             "must refuse, not return an exit code")
+
+
+def test_verdict_skips_with_the_opt_out_unset_or_not_one_are_could_not_run():
+    for value in (None, "0", "false", "yes", ""):
+        with _Env(value):
+            rc, out = _verdict(0, 0, skipped=3, opt_out_env=ENV)
+        assert rc == EXIT_CANNOT_RUN, (value, rc)
+        assert "COULD NOT RUN" in out, value
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +527,11 @@ def _standalone() -> int:
     if failed:
         return EXIT_FAIL
     if cannot:
+        return EXIT_CANNOT_RUN
+    if passed == 0:
+        # Every test raised VoluntarySkip: nothing here was verified, and
+        # that is not a pass (#178 review).
+        print("NOTHING VERIFIED: 0 tests passed")
         return EXIT_CANNOT_RUN
     return EXIT_PASS
 

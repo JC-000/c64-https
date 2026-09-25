@@ -58,6 +58,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "tools"))
+from _skip_policy import verdict  # noqa: E402
 SUBJECT = REPO / "tools" / "test_build_flags_stamp.py"
 
 # The tools whose absence must be loud. Both are needed by every case in the
@@ -194,7 +196,7 @@ def main() -> int:
     print("=== involuntary skip must be loud (#177) ===")
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
-    failed = 0
+    passed = failed = 0
     for name, fn in tests:
         try:
             fn()
@@ -202,11 +204,12 @@ def main() -> int:
             failed += 1
             print(f"  FAIL {name}\n       {type(exc).__name__}: {exc}")
         else:
+            passed += 1
             print(f"  ok   {name}")
-    assert tests, "no tests collected"
     print(f"\n{'FAILED' if failed else 'PASSED'}: {failed} failure(s) "
           f"({len(tests)} executed)")
-    return 1 if failed else 0
+    return verdict(passed, failed,
+                   certifies="the loudness of an absent-toolchain run (#177)")
 
 
 if __name__ == "__main__":

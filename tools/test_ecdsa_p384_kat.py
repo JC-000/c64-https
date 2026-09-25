@@ -94,7 +94,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from _skip_policy import cannot_run  # noqa: E402
+from _skip_policy import cannot_run, verdict  # noqa: E402
 
 # The device-lock budget is one number for the whole repo, and it lives
 # with the rigs that take the lock most often. This suite is the only
@@ -933,16 +933,12 @@ def main() -> int:
     print(f"{'=' * 60}")
 
     total_fail = v_fail + u_fail
-    # NOTE: there is deliberately no `total_run == 0` vacuity guard here.
-    # One was written and removed: _build_vector_list() never returns an
-    # empty list (1 vector for the smoke default, 4 for --full) and
-    # _run_backend() puts every vector into `passed` or `failed`, including
-    # under --sha-only, whose short-circuit in _run_one_vector() returns an
-    # "error" dict and is therefore counted as a failure.  So the guard could
-    # not fire under any flag combination.  A check that matches nothing is
-    # the same vacuous-green shape issue #178 exists to close, so it does not
-    # belong in #178's own implementation.  If a vector FILTER is ever added,
-    # add the guard back beside it -- where it can actually fire.
+    # The zero-vector case cannot arise today: _build_vector_list() never
+    # returns an empty list and _run_backend() counts every vector as passed
+    # or failed (--sha-only included).  A local guard for it was written and
+    # removed as dead code.  verdict() carries that case instead, exercised
+    # by tools/test_skip_policy.py rather than here, so a future vector
+    # FILTER inherits it without anyone having to remember (#178).
     overall = "PASS" if total_fail == 0 else "FAIL"
     print(f"OVERALL: {overall}")
     if sha_only:
@@ -951,7 +947,8 @@ def main() -> int:
               "OVERALL: PASS. It is a diagnostic for the\n      "
               "swap + SHA-384 + splice path only; drop --sha-only to test "
               "the verify.")
-    return 0 if total_fail == 0 else 1
+    return verdict(v_pass + u_pass, total_fail,
+                   certifies="the P-384 verify path")
 
 
 if __name__ == "__main__":

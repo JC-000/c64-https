@@ -422,7 +422,10 @@ def stage(root: Path, source: Path = REPO) -> None:
     (root / "src" / "net" / "ip65").mkdir(parents=True)
     (root / "build").mkdir(parents=True)
     (root / "ip65-build").mkdir(parents=True)
+    # tools/_skip_policy.py: the suite imports it (#178); without it the
+    # mirror's baseline dies at import and every mutation reads as "caught".
     for rel in ("tools/ip65_hw_checks.py", "tools/test_ip65_hw_checks_unit.py",
+                "tools/_skip_policy.py",
                 "tools/rig-up-rrnet-macos.sh", "src/net/ip65/ip65_errors.inc",
                 "src/net/ip65/ip65_symbols.inc", "ip65-build/ip65_stub.s"):
         if (source / rel).exists():

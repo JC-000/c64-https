@@ -95,6 +95,8 @@ from test_uci_timeout_recovery import (                   # noqa: E402
 )
 
 OPT_OUT_ENV = "C64_UCI_TESTS_OPTIONAL"
+from _skip_policy import require, verdict  # noqa: E402
+CERTIFIES = "#230(a) / #221"
 
 UCI_STAT_ABORT_PENDING = 0x04
 
@@ -328,12 +330,10 @@ def _require(uci, tod_reads_per_tenth=1):
     except Unavailable as exc:
         if os.environ.get(OPT_OUT_ENV) != "1":
             raise
-        reason = ("EXPLICIT SKIP (%s=1): %s — this exit-0 certifies NOTHING "
-                  "about #230(a) / #221." % (OPT_OUT_ENV, exc))
-        pytest = sys.modules.get("pytest")
-        if pytest is None:
-            raise VoluntarySkip(reason)
-        pytest.skip(reason)
+        # _skip_policy.require() folds the warning into the reason
+        # and hands pytest a skip only when pytest is driving (#178).
+        require(False, str(exc), executed=0, total=len(TESTS),
+                certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV)
 
 
 def _connect(cpu, labels, budget=8_000_000):
@@ -658,13 +658,15 @@ TESTS = (
 
 
 def main():
-    failed = 0
+    passed = failed = 0
     for test in TESTS:
         try:
             test()
         except VoluntarySkip as exc:
             print("SKIP: %s" % exc)
-            return 0
+            return verdict(passed, failed,
+                           skipped=len(TESTS) - passed - failed,
+                           opt_out_env=OPT_OUT_ENV, certifies=CERTIFIES)
         except Unavailable as exc:
             print("CANNOT RUN: %s" % exc)
             return 2
@@ -672,13 +674,14 @@ def main():
             failed += 1
             print("FAIL %s: %s" % (test.__name__, exc))
         else:
+            passed += 1
             print("ok   %s" % test.__name__)
     print("%d/%d passed, %d assertions" % (len(TESTS) - failed, len(TESTS),
                                            base.ASSERTIONS_RUN))
     if base.ASSERTIONS_RUN == 0:
         print("CANNOT RUN: no assertion executed")
         return 2
-    return 1 if failed else 0
+    return verdict(passed, failed, certifies=CERTIFIES)
 
 
 if __name__ == "__main__":

@@ -752,7 +752,9 @@ def _main(tests=None) -> int:
         else:
             print(f"ok   {name}")
     print(f"\n{len(tests) - failed} passed, {failed} failed")
-    return 1 if failed else 0
+    from _skip_policy import verdict
+    return verdict(len(tests) - failed, failed,
+                   certifies="rig device prep (turbo + REU config)")
 
 
 if __name__ == "__main__":

@@ -72,19 +72,21 @@ def test_submodule_checkouts_match_their_gitlinks():
 
 
 def _main():
-    failures = 0
+    passed = failures = 0
     for name, fn in sorted(
         (n, f) for n, f in globals().items()
         if n.startswith("test_") and callable(f)
     ):
         try:
             fn()
+            passed += 1
             print(f"  ok   {name}")
         except AssertionError as e:
             failures += 1
             print(f"  FAIL {name}: {e}")
     print(f"\n{'PASSED' if failures == 0 else 'FAILED'}: {failures} failure(s)")
-    return 1 if failures else 0
+    from _skip_policy import verdict
+    return verdict(passed, failures, certifies="the submodule pins")
 
 
 if __name__ == "__main__":

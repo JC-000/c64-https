@@ -103,7 +103,7 @@ from c64_test_harness import (
     read_bytes, write_bytes, jsr, wait_for_text,
 )
 from _vice_helpers import default_vice_config
-from _skip_policy import cannot_run
+from _skip_policy import cannot_run, verdict
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
@@ -1030,7 +1030,8 @@ def main() -> int:
     print(f"\n  [{'+' if failed == 0 else '-'}] AEAD fail-closed: "
           + ("ALL TESTS PASSED" if failed == 0 else f"{failed} FAILED"))
     print("=" * 60)
-    return 0 if failed == 0 else 1
+    return verdict(passed, failed,
+                   certifies="AEAD fail-closed decryption (#239)")
 
 
 if __name__ == "__main__":

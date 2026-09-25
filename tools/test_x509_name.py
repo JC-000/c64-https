@@ -49,6 +49,9 @@ from c64_test_harness import (
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _vice_helpers import default_vice_config  # noqa: E402
 
+# `verdict` is a local name in main(); import the policy under another.
+from _skip_policy import verdict as exit_verdict  # noqa: E402
+
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools", "package", "listener"))
 # The names the bundled listener's certificate actually carries. Single
@@ -436,7 +439,8 @@ def main() -> int:
                 print(f"  [-] {name}: {n} B > cert_buf {cert_cap} B")
         print(f"\nRESULTS: {passed}/{passed+failed} passed"
               f"{f' ({len(oversize)} could not run)' if oversize else ''}")
-        return 0 if failed == 0 else 1
+        return exit_verdict(passed, failed,
+                            certifies="x509_verify_hostname (SAN matching)")
 
 
 if __name__ == "__main__":

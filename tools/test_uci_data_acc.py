@@ -75,6 +75,9 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _skip_policy import VoluntarySkip, cannot_run, require, verdict  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 PRG = REPO / "build" / "c64-https.prg"
 LABELS = REPO / "build" / "labels.txt"
@@ -82,6 +85,7 @@ LABELS = REPO / "build" / "labels.txt"
 # The one deliberate, announced way to skip this suite.  Anything else that
 # stops it running is a failure (#165).
 OPT_OUT_ENV = "C64_UCI_TESTS_OPTIONAL"
+CERTIFIES = "the DATA_ACC accept protocol (#144 item 1)"
 
 # The status line the firmware is imagined to have written.  Deliberately
 # NOT a "00,..." or "02,..." line: uci_drain_status filters those two as
@@ -589,10 +593,6 @@ class Unavailable(Exception):
     """
 
 
-class VoluntarySkip(Exception):
-    """The operator declared this run deliberately untested (opt-out env)."""
-
-
 # Every assertion this module runs goes through _check, so the count it
 # reports is measured, not declared.  A run that says "0 assertions" cannot
 # also say "passed".
@@ -619,21 +619,13 @@ def _require(fn, *args):
     except Unavailable as exc:
         if os.environ.get(OPT_OUT_ENV) != "1":
             raise
-        # The reason carries the vacuity warning itself, because under
-        # pytest this string is the ONLY channel: `-ra` (pinned in
-        # pytest.ini addopts) prints it and nothing else. An opt-out that
-        # reads as a bare "skipped" would be #165 again with a flag on it.
-        reason = ("EXPLICIT SKIP (%s=1 is set in this environment): %s "
-                  "0 of %d checks and 0 assertions ran; this exit-0 "
-                  "certifies NOTHING about the DATA_ACC accept protocol "
-                  "(#144 item 1). Unset %s to make it a failure again."
-                  % (OPT_OUT_ENV, exc, len(TESTS), OPT_OUT_ENV))
-        # Only hand the skip to pytest when pytest is actually driving; the
-        # standalone runner has its own reporting and must not see Skipped.
-        pytest = sys.modules.get("pytest")
-        if pytest is None:
-            raise VoluntarySkip(reason)
-        pytest.skip(reason, allow_module_level=False)
+        # The opt-out is honoured by _skip_policy.require(), which this
+        # module's hand-rolled copy predated (#178): it folds the vacuity
+        # warning INTO the reason -- under pytest `-ra` that string is the
+        # only channel -- and hands pytest a skip only when pytest is
+        # driving, raising VoluntarySkip for the standalone runner instead.
+        require(False, str(exc), executed=0, total=len(TESTS),
+                certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV)
 
 
 def _labels():
@@ -800,15 +792,11 @@ def _cannot_run(reason):
 
 def main():
     if not PRG.is_file() or not LABELS.is_file():
-        if os.environ.get(OPT_OUT_ENV) == "1":
-            print("EXPLICIT SKIP (%s=1): no build in build/; "
-                  "test_uci_data_acc.py did NOT run." % OPT_OUT_ENV)
-            print("  0 of %d checks executed; this exit 0 certifies nothing."
-                  % len(TESTS))
-            return EXIT_OK
-        return _cannot_run(
+        return cannot_run(
             "no build to test. Run `make clean && make BACKEND=uci "
-            "USE_NISTCURVES_ONCHIP=1`")
+            "USE_NISTCURVES_ONCHIP=1`",
+            executed=0, total=len(TESTS), certifies=CERTIFIES,
+            opt_out_env=OPT_OUT_ENV)
 
     failures = 0
     executed = 0
@@ -840,8 +828,8 @@ def main():
               "certifies\nnothing about them." % (OPT_OUT_ENV, len(skipped),
                                                   len(TESTS)))
         if executed == 0:
-            print("  0 assertions executed.")
-            return EXIT_OK
+            return verdict(0, 0, skipped=len(skipped),
+                           opt_out_env=OPT_OUT_ENV, certifies=CERTIFIES)
 
     if failures:
         print("\n%d/%d checks failed (%d assertions executed)"

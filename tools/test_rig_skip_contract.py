@@ -527,6 +527,11 @@ def _standalone() -> int:
         return EXIT_FAIL
     if cannot:
         return EXIT_CANNOT_RUN
+    if passed == 0:
+        # Every test raised VoluntarySkip: nothing here was verified, and
+        # that is not a pass (#178 review).
+        print("NOTHING VERIFIED: 0 tests passed")
+        return EXIT_CANNOT_RUN
     return EXIT_PASS
 
 

@@ -104,6 +104,7 @@ from c64_test_harness import (
 )
 
 from _vice_helpers import default_vice_config
+from _skip_policy import verdict  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants (mirrors tools/test_x509.py)
@@ -536,7 +537,8 @@ def main():
     else:
         print(f"\n  [-] ECDSA KAT oracle: {failed} VECTOR(S) FAILED")
     print(f"{'='*60}")
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(verdict(passed, failed,
+                     certifies="ECDSA P-256 verify against the KAT oracle"))
 
 
 if __name__ == "__main__":
