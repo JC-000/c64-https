@@ -46,7 +46,9 @@ Usage:
 
 Env:
     C64_SKIP_BUILD=1   test only the PRG already in build/ (whichever
-                       profile it is), instead of building both
+                       profile it is), instead of building both; the
+                       no-REU phase runs only on the onchip profile
+    C64_INIT_TIMEOUT   menu wait in seconds (default 180; comb needs ~600)
 
 Requires: Python 3.10+, c64_test_harness, VICE x64sc
 """
@@ -144,6 +146,15 @@ def static_checks() -> list[tuple[str, bool, str]]:
     return out
 
 
+def stamp_profile(stamp: str) -> str:
+    """Which bound the build in build/ links, from build/flags.stamp."""
+    if re.search(r"\bUSE_NISTCURVES_COMB\b", stamp):
+        return "comb"
+    if re.search(r"\bUSE_NISTCURVES_ONCHIP\b", stamp):
+        return "onchip"
+    return "REU default"
+
+
 def _lohi(addr: int) -> tuple[int, int]:
     return addr & 0xFF, (addr >> 8) & 0xFF
 
@@ -188,7 +199,9 @@ def regs_preserved(regs: dict) -> list[tuple[str, bool]]:
 
 def boot(mgr) -> object:
     inst = mgr.acquire()
-    grid = wait_for_text(inst.transport, "Q=QUIT", timeout=180.0,
+    # Comb boots run ec_precompute_256 first: minutes of VICE time.
+    grid = wait_for_text(inst.transport, "Q=QUIT",
+                         timeout=float(os.environ.get("C64_INIT_TIMEOUT", "180")),
                          verbose=False)
     if grid is None:
         mgr.release(inst)
@@ -304,9 +317,12 @@ def main() -> int:
             print(f"FATAL: {PRG_PATH} not found")
             return 1
         with open(os.path.join(PROJECT_ROOT, "build", "flags.stamp")) as f:
-            onchip = ("USE_NISTCURVES_ONCHIP" in f.read())
-        labels = reu_phase("onchip" if onchip else "REU default")
-        if onchip and labels is not None:
+            profile = stamp_profile(f.read())
+        labels = reu_phase(profile)
+        # Only the short-bound onchip build may boot without a REU: comb
+        # also defines USE_NISTCURVES_ONCHIP but links the long bound and
+        # needs bank 2 for its precompute.
+        if profile == "onchip" and labels is not None:
             no_reu_phase(labels)
     else:
         print("\n=== Building default (REU row-fetch profile, long bound) ===")
