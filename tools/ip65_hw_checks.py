@@ -1251,34 +1251,70 @@ def check_shadow_ram_readable(bytes_at_a000: bytes | None) -> Verdict:
 
 
 def check_tls_connected(tls_state_max: int | None,
-                        tls_last_state: int | None = None) -> Verdict:
+                        tls_last_state: int | None = None,
+                        reached_connected: int | None = None) -> Verdict:
     """The C64's own TLS state machine reached CONNECTED.
 
-    Sampled DURING the run, not after: `http.s` calls `tls_close` on the way
-    out, which writes tls_state back to IDLE (0), so a post-run read cannot
-    distinguish a completed handshake from one that never started.
-    `tls_state_max` is the highest value the rig observed while polling.
+    The authority is `tls_reached_connected` (#204), a latch the C64 sets at
+    tls_connect's CONNECTED store and that `tls_close` never clears: it holds
+    TLS_STATE_CONNECTED once this attempt's handshake completed, else 0
+    (cleared by do_https_get before DNS and by tls_connect at entry). Read it
+    after the fetch -- inside the device lock, before any reset.
 
-    None is a failure, not a pass: an unread state machine is not a working
-    one, and the server's view of the handshake is not evidence about the
-    client — the server completes as soon as it has sent its Finished,
-    whether or not the C64 ever verified it.
+    `tls_state` itself only holds CONNECTED until `tls_close` writes IDLE
+    over it, so `tls_state_max`, the highest value the rig SAMPLED while
+    polling, is corroboration, not proof. At 48 MHz the whole CONNECTED
+    window fits inside one poll and the sample tops out at CERT_VERIFY on a
+    run that did connect; judging on the sample alone is what made the first
+    turbo run red. Softening the check to accept the terminal evidence
+    instead would have been inference; the latch is a direct observation.
+
+      latch unread                       fail -- an unread state machine is
+                                         not a working one
+      latch not 0 / CONNECTED            inconclusive -- the latch holds only
+                                         those two, so this is the wrong
+                                         address or an unwritten byte
+      latch CONNECTED                    pass, whatever was sampled
+      latch 0, sampled CONNECTED         inconclusive -- impossible inside one
+                                         attempt; the instrument is broken
+      latch 0                            fail, reporting ERROR/last state
+
+    The server's view of the handshake is not evidence about the client: the
+    server completes as soon as it has sent its Finished, whether or not the
+    C64 ever verified it.
     """
-    ev = {"tls_state_max": tls_state_max, "tls_last_state": tls_last_state,
+    ev = {"tls_reached_connected": reached_connected,
+          "tls_state_max": tls_state_max, "tls_last_state": tls_last_state,
           "connected_value": TLS_STATE_CONNECTED,
           "state_name": TLS_STATE_NAMES.get(tls_state_max, "unknown")}
-    if tls_state_max is None:
-        return Verdict(False, "tls_state was never read from the C64", ev)
+    if reached_connected is None:
+        return Verdict(False, "tls_reached_connected was never read from the "
+                              "C64", ev)
+    if reached_connected not in (0, TLS_STATE_CONNECTED):
+        shown = (f"${reached_connected:02X}" if isinstance(reached_connected, int)
+                 else repr(reached_connected))
+        return Verdict(False,
+                       f"tls_reached_connected is {shown}; the "
+                       f"latch only ever holds 0 or ${TLS_STATE_CONNECTED:02X}, "
+                       "so this is the wrong address or an unwritten byte", ev,
+                       status="inconclusive")
+    if reached_connected == TLS_STATE_CONNECTED:
+        return Verdict(True, "the C64's tls_reached_connected latch reads "
+                             f"CONNECTED (7); highest tls_state sampled was "
+                             f"{ev['state_name']} ({tls_state_max})", ev)
+    if tls_state_max == TLS_STATE_CONNECTED:
+        return Verdict(False,
+                       "tls_state was SAMPLED at CONNECTED but the latch reads "
+                       "0; inside one attempt that cannot happen, so the latch "
+                       "or its address is wrong", ev, status="inconclusive")
     if tls_state_max == TLS_STATE_ERROR:
         name = TLS_STATE_NAMES.get(tls_last_state, f"unknown({tls_last_state})")
-        return Verdict(False, f"tls_state is ERROR ($FF); the last state attempted "
-                              f"was {name}", ev)
-    if tls_state_max != TLS_STATE_CONNECTED:
-        return Verdict(False,
-                       f"the highest tls_state observed is {ev['state_name']} "
-                       f"({tls_state_max}), not CONNECTED "
-                       f"({TLS_STATE_CONNECTED})", ev)
-    return Verdict(True, "the C64's tls_state reached CONNECTED (7)", ev)
+        return Verdict(False, f"the latch reads 0 and tls_state is ERROR ($FF); "
+                              f"the last state attempted was {name}", ev)
+    return Verdict(False,
+                   f"the latch reads 0; the highest tls_state sampled is "
+                   f"{ev['state_name']} ({tls_state_max}), not CONNECTED "
+                   f"({TLS_STATE_CONNECTED})", ev)
 
 
 def check_http_response(status: int | None, resp_len: int | None,
@@ -1358,6 +1394,78 @@ def check_net_last_error(value: int | None, table: dict) -> Verdict:
                           "byte, or the wrong address", ev)
 
 
+#: net_tcp_send calls in the first completed HTTPS fetch after boot: a TLS
+#: record is two (header, payload) and the fetch sends three records --
+#: ClientHello, client Finished, GET.
+HTTPS_FETCH_SEND_CALLS = 6
+
+
+def check_net_counters(send_calls: int | None, recv_overflow: int | None,
+                       *, expect_sends: int | None = None,
+                       stream_verified: bool = False) -> Verdict:
+    """The adapter's own counters: did the driver try, and did it drop?
+
+    The ambiguity a first-silicon cartridge run is most likely to hit is
+    "the driver never tried" against "it tried and the wire ate it". The
+    wire checks see only the second half.
+
+      ip65_tcp_send_calls  CUMULATIVE since boot, wraps at 256.
+                           src/net/ip65/net.s increments it at the top of
+                           net_tcp_send, before ip65 is called, so a failed
+                           send still counts. NOT c64-wireguard's
+                           ip65_send_attempts, which is per-send and counts
+                           ARP-pump retries: ip65's TCP does its own ARP,
+                           and our adapter has no pump. Different lifetime,
+                           different name, on purpose.
+      tcp_recv_overflow    the consumer-owned ring's full flag (§13.3),
+                           sticky since boot. Set by net_tcp_recv_cb when a
+                           delivery does not fit; ip65 ACKs the whole
+                           delivery anyway, so the dropped tail is gone from
+                           the stream unless it was a retransmitted
+                           duplicate.
+
+    An overflow FAILS unless `stream_verified` -- which the caller may set
+    only when check_http_response passed, i.e. the exact body came out of
+    the C64's own buffer. Every TLS record is AEAD-authenticated and a tag
+    failure aborts (#239), so an exact decrypted body proves no byte the
+    fetch consumed was lost: the overflow dropped retransmitted duplicates,
+    or bytes past the last record the client read (it says nothing about
+    those). That case passes, with `overflow_benign` in the evidence so the
+    finding is still recorded. Measured: the first 48 MHz RR-Net run with this
+    counter (2026-09-25) overflowed on a run whose body was exact.
+
+    `expect_sends` is the exact count the run should have made -- for a
+    completed first fetch, HTTPS_FETCH_SEND_CALLS. An exact compare, not a
+    floor: every call is counted, whoever makes it, so an extra call is as
+    much a surprise as a missing one. Pass None when the
+    run did not complete and only "did it try at all" is meaningful.
+    """
+    ev = {"ip65_tcp_send_calls": send_calls, "tcp_recv_overflow": recv_overflow,
+          "expect_sends": expect_sends, "stream_verified": stream_verified,
+          "overflow_benign": False}
+    if send_calls is None or recv_overflow is None:
+        return Verdict(False, "ip65_tcp_send_calls / tcp_recv_overflow were not "
+                              "read; without them 'nothing on the wire' cannot "
+                              "be told from 'nothing sent'", ev)
+    if send_calls == 0:
+        return Verdict(False, "ip65_tcp_send_calls is 0: net_tcp_send was never "
+                              "called, so the driver never tried to send", ev)
+    if expect_sends is not None and send_calls != expect_sends:
+        return Verdict(False, f"net_tcp_send was called {send_calls} times; a "
+                              f"completed fetch makes exactly {expect_sends}", ev)
+    if recv_overflow and not stream_verified:
+        return Verdict(False, f"tcp_recv_overflow is ${recv_overflow:02X}: the "
+                              "receive ring filled and a delivery was cut short, "
+                              "and nothing proves the stream survived it", ev)
+    if recv_overflow:
+        ev["overflow_benign"] = True
+        return Verdict(True, f"{send_calls} net_tcp_send calls; the receive ring "
+                             f"overflowed (${recv_overflow:02X}) but the exact "
+                             "body decrypted, so nothing the fetch consumed was lost", ev)
+    return Verdict(True, f"{send_calls} net_tcp_send calls, no receive-ring "
+                         "overflow", ev)
+
+
 def check_image_readback(expected: bytes, readback: bytes | None) -> Verdict:
     """The PRG landed in RAM byte-exact before SYS was typed.
 
@@ -1387,6 +1495,8 @@ def check_image_readback(expected: bytes, readback: bytes | None) -> Verdict:
 
 
 DIAG_SYMBOLS = ("net_local_ip", "net_last_error", "tls_state", "tls_last_state",
+                "tls_reached_connected", "ip65_tcp_send_calls",
+                "tcp_recv_overflow",
                 "http_status", "http_resp_len", "http_resp_buf")
 
 

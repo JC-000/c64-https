@@ -40,11 +40,14 @@ Both directions are asserted, from both sides of the wire.
 C64 side — ``src/tls13.s:@error`` stashes the state it died in:
 
     bad  : tls_state == $FF (ERROR) and tls_last_state == 6 (FINISHED)
-           and http_status != 200
-    good : tls_state != $FF (ERROR) and http_status == 200 and the body
+           and tls_reached_connected == 0 and http_status != 200
+    good : tls_state != $FF (ERROR) and tls_reached_connected == 7
+           (CONNECTED) and http_status == 200 and the body
 
 (Not ``tls_state == CONNECTED`` for the good run: ``http_get``'s success path
-calls ``tls_close``, which puts the state back to IDLE.)
+calls ``tls_close``, which puts the state back to IDLE. The latch (#204) is
+set at the same CONNECTED store and ``tls_close`` never clears it; its only
+other writes are clears, at ``tls_connect`` entry and in ``do_https_get``.)
 
 ``tls_last_state`` is what makes this precise rather than merely negative: it
 distinguishes "aborted at Finished" from "aborted earlier at Certificate (4) or
@@ -325,6 +328,7 @@ def _read_c64_state(transport, labels) -> dict:
     return {
         "tls_state": rd("tls_state")[0],
         "tls_last_state": rd("tls_last_state")[0],
+        "tls_reached_connected": rd("tls_reached_connected")[0],
         "http_status": status_raw[0] | (status_raw[1] << 8),
         "http_resp_len": resp_len,
         "http_resp_buf": bytes(
@@ -397,6 +401,9 @@ def _evaluate(mode: str, server_result: dict, c64: dict,
         check(c64["tls_last_state"] == TLS_STATE_FINISHED,
               "abort happened AT Finished, not earlier "
               f"(tls_last_state = {_state_name(c64['tls_last_state'])})")
+        check(c64["tls_reached_connected"] == 0,
+              "the handshake never completed (tls_reached_connected = "
+              f"${c64['tls_reached_connected']:02X})")
         check(c64["http_status"] != 200,
               f"no HTTP 200 was parsed (http_status={c64['http_status']})")
         check(DEFAULT_BODY not in body,
@@ -415,13 +422,16 @@ def _evaluate(mode: str, server_result: dict, c64: dict,
             req = req.encode("latin-1")
         check(req.startswith(b"GET "),
               f"server decrypted a GET request ({req[:40]!r})")
-        # NOT `== CONNECTED`: on the success path http_get calls tls_close,
-        # which sets tls_state back to IDLE (src/tls13.s:tls_close). CONNECTED
-        # is only observable mid-flight. What matters here is that the
-        # handshake never took the error path — measured on hardware, where
-        # the naive CONNECTED assertion failed a genuinely passing run.
+        # NOT `tls_state == CONNECTED`: on the success path http_get calls
+        # tls_close, which sets tls_state back to IDLE (src/tls13.s:
+        # tls_close) — measured on hardware, where that naive assertion
+        # failed a genuinely passing run. The latch (#204) is what outlives
+        # tls_close.
         check(c64["tls_state"] != TLS_STATE_ERROR,
               f"tls_state is not ERROR (got {_state_name(c64['tls_state'])})")
+        check(c64["tls_reached_connected"] == TLS_STATE_CONNECTED,
+              "the handshake completed (tls_reached_connected = "
+              f"${c64['tls_reached_connected']:02X})")
         check(c64["http_status"] == 200,
               f"http_status is 200 (got {c64['http_status']})")
         check(DEFAULT_BODY in body,
@@ -443,7 +453,7 @@ def main() -> int:
         "net_init", "net_initialized",
         "tcp_recv_head", "tcp_recv_tail",
         "http_resp_buf", "http_resp_len", "http_status",
-        "tls_state", "tls_last_state",
+        "tls_state", "tls_last_state", "tls_reached_connected",
     ]
     missing = [n for n in required if n not in labels]
     if missing:
@@ -633,6 +643,8 @@ def main() -> int:
         print("\n--- C64 state ---")
         print(f"  tls_state       = {_state_name(c64['tls_state'])}")
         print(f"  tls_last_state  = {_state_name(c64['tls_last_state'])}")
+        print(f"  tls_reached_connected = "
+              f"{_state_name(c64['tls_reached_connected'])}")
         print(f"  http_status     = {c64['http_status']}")
         print(f"  http_resp_len   = {c64['http_resp_len']}")
         print(f"  http_resp_buf   = "
