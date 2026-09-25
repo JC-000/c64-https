@@ -2,7 +2,8 @@
 """bench_x25519.py -- X25519 key generation benchmark on C64.
 
 Runs x25519_base (scalar * basepoint 9) on the C64 and measures
-wall-clock and jiffy-clock time. Verifies result against RFC 7748.
+wall-clock and C64 time (CIA1 time-of-day clock). Verifies result
+against RFC 7748.
 
 Usage:
     python3 tools/bench_x25519.py [--no-verify] [--no-blank]
@@ -38,7 +39,7 @@ NTSC_CYCLES_PER_SEC = 1_022_727
 
 # Trampoline and result storage in cassette buffer area
 TRAMPOLINE_ADDR = 0x0360
-BENCH_TICKS_ADDR = 0x0350  # 3 bytes for jiffy clock snapshot
+BENCH_TICKS_ADDR = 0x0350  # 4 bytes: CIA1 TOD hours/min/sec/tenths (BCD)
 
 # Test scalar for basepoint multiply (x25519_base clamps this internally)
 BENCH_SCALAR = bytes.fromhex(
@@ -57,8 +58,8 @@ def compute_expected_pubkey(scalar_bytes):
 
 
 def build_trampoline(labels, blank=True):
-    """Build 6502 trampoline: build tables, zero jiffy, [blank VIC], jsr x25519_base,
-    snap jiffy, [unblank], rts."""
+    """Build 6502 trampoline: build tables, zero TOD, [blank VIC], jsr x25519_base,
+    snap TOD, [unblank], rts."""
     code = bytearray()
 
     # The sibling's lookup tables are generated at runtime (src/crypto/
@@ -67,13 +68,14 @@ def build_trampoline(labels, blank=True):
     init = labels["x25519_tables_init"]
     code += bytes([0x20, init & 0xFF, init >> 8])  # JSR x25519_tables_init
 
-    # SEI; zero jiffy clock ($A0-$A2, big-endian)
-    code += bytes([0x78])                       # SEI
+    # Zero and start CIA1's time-of-day clock. NOT the jiffy clock: the
+    # libs/x25519 sibling masks IRQs for the whole scalar mult (sei in
+    # x25519_scalarmult), so the KERNAL jiffy counter stands still across
+    # exactly the interval being timed. TOD counts in hardware regardless.
+    # Writing hours stops TOD; writing tenths restarts it.
     code += bytes([0xA9, 0x00])                 # LDA #$00
-    code += bytes([0x85, 0xA0])                 # STA $A0
-    code += bytes([0x85, 0xA1])                 # STA $A1
-    code += bytes([0x85, 0xA2])                 # STA $A2
-    code += bytes([0x58])                       # CLI
+    for reg in (0xDC0B, 0xDC0A, 0xDC09, 0xDC08):  # hours, min, sec, tenths
+        code += bytes([0x8D, reg & 0xFF, reg >> 8])
 
     # Blank VIC-II (disable DEN bit 4 of $D011). Worth ~6.3%, NOT the
     # "~20-25%" this comment used to claim -- see the measurement in
@@ -88,16 +90,11 @@ def build_trampoline(labels, blank=True):
     addr = labels["x25519_base"]
     code += bytes([0x20, addr & 0xFF, addr >> 8])
 
-    # SEI; snapshot jiffy clock to BENCH_TICKS_ADDR
+    # Snapshot TOD (reading hours latches, reading tenths unlatches).
     bt = BENCH_TICKS_ADDR
-    code += bytes([0x78])                                   # SEI
-    code += bytes([0xA5, 0xA0])                             # LDA $A0
-    code += bytes([0x8D, bt & 0xFF, bt >> 8])               # STA bench_ticks+0
-    code += bytes([0xA5, 0xA1])                             # LDA $A1
-    code += bytes([0x8D, (bt+1) & 0xFF, (bt+1) >> 8])      # STA bench_ticks+1
-    code += bytes([0xA5, 0xA2])                             # LDA $A2
-    code += bytes([0x8D, (bt+2) & 0xFF, (bt+2) >> 8])      # STA bench_ticks+2
-    code += bytes([0x58])                                   # CLI
+    for i, reg in enumerate((0xDC0B, 0xDC0A, 0xDC09, 0xDC08)):
+        code += bytes([0xAD, reg & 0xFF, reg >> 8])            # LDA reg
+        code += bytes([0x8D, (bt + i) & 0xFF, (bt + i) >> 8])  # STA bt+i
 
     # Unblank VIC-II
     if blank:
@@ -109,12 +106,16 @@ def build_trampoline(labels, blank=True):
     return bytes(code)
 
 
-def jiffies_to_str(ticks):
-    secs = ticks / NTSC_HZ
-    if secs < 60:
-        return f"{ticks} jiffies ({secs:.1f}s)"
-    mins = secs / 60
-    return f"{ticks} jiffies ({mins:.1f} min / {secs:.0f}s)"
+def bcd(v):
+    return (v >> 4) * 10 + (v & 0x0F)
+
+
+def tod_seconds(raw):
+    """Elapsed seconds from a TOD snapshot taken after zeroing (hh mm ss t)."""
+    hours, mins, secs, tenths = raw
+    if bcd(hours & 0x1F) not in (0, 12):
+        print(f"  WARNING: TOD hours moved ({hours:#04x}); run exceeded an hour")
+    return bcd(mins) * 60 + bcd(secs) + bcd(tenths) / 10.0
 
 
 def main():
@@ -180,18 +181,15 @@ def main():
         jsr(transport, TRAMPOLINE_ADDR, timeout=7200.0)
         wall_elapsed = time.time() - wall_start
 
-        # Read jiffy ticks (3 bytes, big-endian)
-        ticks_data = read_bytes(transport, BENCH_TICKS_ADDR, 3)
-        ticks = (ticks_data[0] << 16) | (ticks_data[1] << 8) | ticks_data[2]
+        c64_secs = tod_seconds(read_bytes(transport, BENCH_TICKS_ADDR, 4))
 
         # Read result
         result_bytes = read_bytes(transport, labels["x25_result"], 32)
 
-        c64_secs = ticks / NTSC_HZ
         est_cycles = c64_secs * NTSC_CYCLES_PER_SEC
 
         print(f"\n--- Results ---")
-        print(f"  Jiffy clock:   {jiffies_to_str(ticks)}")
+        print(f"  C64 time (TOD): {c64_secs:.1f}s")
         print(f"  Wall clock:    {wall_elapsed:.1f}s ({wall_elapsed/60:.1f} min)")
         if wall_elapsed > 0:
             print(f"  Warp factor:   {c64_secs/wall_elapsed:.1f}x")

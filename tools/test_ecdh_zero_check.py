@@ -296,7 +296,12 @@ def main() -> int:
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=120.0, verbose=False)
+        # Comb builds run the boot precompute first; C64_INIT_TIMEOUT as in
+        # test_ecdsa_kat_oracle.py.
+        grid = wait_for_text(
+            transport, "Q=QUIT",
+            timeout=float(os.environ.get("C64_INIT_TIMEOUT", "120")),
+            verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             mgr.release(inst)

@@ -717,7 +717,9 @@ only re-measured points are 48 MHz UCI REU (80.8 → 82.1 → 82.4 s, n=1; the
   C64U comb (v0.6.0)                —        38.4     31.0
 
   ip65 + onchip, no REU, VICE honest 1 MHz: **2,159.7 s (36.0 min)**,
-  verify stretch 1,416.7 s (+1.4% vs the model), X25519 ~326 s each.
+  verify stretch 1,416.7 s (+1.4% vs the model), X25519 ~326 s each —
+  measured on the retired in-tree X25519. The sibling that replaced it
+  (#245) is slower: `bench_x25519.py` 366 s vs 242 s in-tree onchip.
 
 Best verify today: **16.4 s @ 48 MHz on the U64E (comb)**, 1.73x faster
 than *blanked* onchip at that clock (28.4 s, n=3 — README's figure; the

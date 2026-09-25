@@ -513,7 +513,7 @@ Progress:
 - [x] ip65 submodule integration — 6.8 KB binary blob at $2000 (TCP/UDP/DNS/DHCP/ARP + RR-Net CS8900a)
 - [x] Network wrapper with ZP time-sharing — save/restore $02-$1B around ip65 calls
 - [x] Crypto primitives — ChaCha20, Poly1305, AEAD (from c64-wireguard), SHA-256, HMAC-DRBG (from c64-aes256-ecdsa)
-- [x] Optimized X25519/fe25519 — REU DMA multiply tables, mult66 quarter-square, self-mod code, 4x-unrolled cswap. `tools/bench_x25519.py` measures one basepoint scalar multiply at **12,637 jiffies = 211 s (3.5 min)** of C64 time (NTSC, VIC-II blanked, ~21 s wall clock under VICE warp); the same multiply costs 13,494 jiffies unblanked
+- [x] X25519 — the vendored `libs/x25519` sibling (constant-time per its `docs/CT_ANALYSIS.md`), built on-chip (no REU) on every profile. `tools/bench_x25519.py` measures one basepoint scalar multiply at **366 s** of C64 time (NTSC, VIC-II blanked, CIA1 TOD; 391 s unblanked). The retired in-tree copy took 175 s on the REU profile and 242 s on-chip, measured the same way.
 - [x] VIC-II blanking during the CPU-bound crypto — `src/vic.s`, scoped to the two X25519 scalar multiplies and the ECDSA verify so the on-screen handshake progress markers stay visible between phases. Worth **6.3-6.8%**, measured both in VICE at 1 MHz and on a U64E at 8/16/48 MHz; see the VIC-II blanking section of `CLAUDE.md`
 - [x] HKDF-SHA256 — Extract, Expand, Expand-Label, Derive-Secret (RFC 5869 + TLS 1.3)
 - [x] TLS 1.3 record layer — encrypt/decrypt with ChaCha20-Poly1305, nonce construction, sequence numbers
@@ -571,7 +571,7 @@ sets the wall-clock floor for the whole run.
 
 | suite | assertions |
 |---|---:|
-| `x25519` | 73 |
+| `x25519` | 97 |
 | `x25519_pin` | 2 (reads the submodule off disk) |
 | `net` | 65 |
 | `http` | 61 |
@@ -633,8 +633,8 @@ python3 tools/test_package_verify.py   # pure-logic tests for the release gate (
 python3 tools/test_pytest_boundary.py  # the pytest collection boundary below is intact
 
 # Benchmark
-python3 tools/bench_x25519.py         # X25519 basepoint multiply: 12,637 jiffies / 211 s C64 time (VIC blanked)
-python3 tools/bench_x25519.py --no-blank  # same multiply unblanked: 13,494 jiffies — the badline A/B
+python3 tools/bench_x25519.py         # X25519 basepoint multiply: 366 s C64 time (VIC blanked, CIA1 TOD)
+python3 tools/bench_x25519.py --no-blank  # same multiply unblanked: 391 s — the badline A/B
 
 # Integration tests (require the bridge/TAP rig + dnsmasq; see scripts/setup-bridge-tap.sh below)
 python3 tools/test_dns.py             # 4 tests: DNS resolution via ip65 over TAP (label, known host, second host, unknown host)
