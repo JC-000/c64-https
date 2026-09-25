@@ -79,6 +79,8 @@
         ; fallback block and its VIEWER_EXTERNAL_SINK guard were
         ; deleted at merge resolution, as its header prescribed.)
         .import http_body_total
+        ; Every REU execute goes through src/reu_exec.s (#191, SPEC §8.2).
+        .import reu_execute
 
 ; -----------------------------------------------------------------------------
 ; Constants
@@ -523,7 +525,7 @@ ensure_window:
         lda #0
         sta reu_addr_ctrl
         lda #%10110001                  ; execute + autoload + FETCH (REU->C64)
-        sta reu_command
+        jsr reu_execute
 @done:  rts
 
 ; =============================================================================
@@ -798,7 +800,7 @@ viewer_test_blit:
         lda #$10
         sta reu_len_hi                  ; 4,096 B
         lda #%10110000                  ; execute + autoload + STASH (C64->REU)
-        sta reu_command
+        jsr reu_execute
         lda #0
         sta vw_wok                      ; document changed under the window
         rts
