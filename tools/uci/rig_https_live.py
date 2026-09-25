@@ -96,6 +96,7 @@ from _device_lock_helper import (
     LockTimeoutConfigError, acquire_device_lock,
 )
 from _memory_policy import build_policy_and_arbiter_with_overlay_carveout
+from _rig_lifecycle import guard_socket_teardown
 from _device_prep import DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
 from _temp_gc import gc_temp
@@ -416,6 +417,8 @@ def main() -> int:
 
     client: Ultimate64Client | None = None
     uci_enabled = False
+    fetch_in_flight = False
+    transport = None
     outcome = "UNKNOWN"
     exit_code = 1
     run_start = time.time()
@@ -499,6 +502,7 @@ def main() -> int:
         # Trigger via SYS
         sys_line = f"sys{routine_addr}\r"
         print(f"Triggering: {sys_line.strip()}")
+        fetch_in_flight = True      # #234: from here a socket may be live
         send_text(transport, sys_line)
 
         # --- Poll sentinel, with phase timing (default ON for live runs) ---
@@ -531,6 +535,7 @@ def main() -> int:
                     print(f"  phase +{phase_log[-1][1]:7.1f}s  {phase}")
             if sentinel == SENTINEL_VALUE:
                 print("  sentinel set — routine complete")
+                fetch_in_flight = False     # http_get has returned
                 sentinel_seen = True
                 break
 
@@ -631,6 +636,11 @@ def main() -> int:
             except Exception as exc:
                 print(f"WARNING: failed to remove PASS run dir: {exc}")
 
+        # #234: before disable_uci — the C64 needs the command interface
+        # to issue the SOCKET_CLOSE this waits for.
+        if fetch_in_flight and transport is not None:
+            guard_socket_teardown(transport.read_memory,
+                                  labels.get("net_tcp_state"))
         if uci_enabled and client is not None:
             print("\nDisabling UCI...")
             try:

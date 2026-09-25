@@ -39,6 +39,14 @@ CLOSED, frozen for STALL_ABORT). It prints "STOPPED EARLY, budget not
 exhausted", still sends 'Q', and changes no verdict — only when the loop
 ends.
 
+Issue #247: a handshake failure never reaches the body, so the #226 stop
+could not see it and it burned the whole FETCH_TIMEOUT. `early_stop_step`
+also stops on `tls_state` = ERROR before the body, once `net_tcp_state`
+reads CLOSED — and that read is the close evidence, since `do_https_get`
+prints no "CONNECTION CLOSED" on that path. Issue #234: an abnormal exit
+after 'G' goes through `_rig_lifecycle.guard_socket_teardown` before the
+lock is released.
+
 Device state is `_device_prep.prepare_device` (48 MHz, plus the REU when
 the build needs one), with `preflight_reu` behind it — the same two steps,
 in the same order, as the other five crypto-path rigs.
@@ -80,12 +88,14 @@ from rig_https_local import (  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from http_body_checks import (  # noqa: E402
-    EXIT_FAIL, EXIT_INCONCLUSIVE, EXIT_PASS, STALL_ABORT, STALL_GRACE,
+    EXIT_FAIL, EXIT_INCONCLUSIVE, EXIT_PASS, PARSE_STATE_BODY, STALL_ABORT,
+    STALL_GRACE,
     SYMBOLS, StallTracker, check_body_complete, check_fetch_settled,
     check_http_status, close_confirmed, decide_exit, decode_body_state,
     early_stop_step, poll_until, stall_config_error,
 )
 from ip65_hw_checks import check_shadow_ram_readable  # noqa: E402
+from _rig_lifecycle import guard_socket_teardown  # noqa: E402
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 PRG_PATH = Path(__file__).resolve().parents[2] / "build" / "c64-https.prg"
@@ -196,6 +206,7 @@ def main() -> int:
 
     client = None
     uci_on = False
+    fetch_in_flight = False
     try:
         client = Ultimate64Client(host=HOST, timeout=20.0)
         enable_uci(client)
@@ -278,6 +289,7 @@ def main() -> int:
             return 1
 
         print("Pressing 'G' (HTTPS GET) — reading the banner...")
+        fetch_in_flight = True      # #234: from here a socket may be live
         client.send_text("G", finish_with_return=False)
 
         # decode_screen() returns LOWERCASE letters — only screen_text()
@@ -366,6 +378,18 @@ def main() -> int:
                 return None
             return bytes(client.read_mem(tcp_addr, 1))[0]
 
+        # #247: a handshake failure never reaches parse_state 2, so the #226
+        # conditions cannot see it; tls_state can (early_stop_step).
+        try:
+            tls_addr = label_addr("tls_state")
+        except KeyError:
+            tls_addr = None
+
+        def read_tls_state():
+            if tls_addr is None:
+                return None
+            return bytes(client.read_mem(tls_addr, 1))[0]
+
         started = time.monotonic()
         deadline = started + FETCH_TIMEOUT
         last_print = 0.0
@@ -376,6 +400,7 @@ def main() -> int:
         tracker = StallTracker(started)
         settled = check_fetch_settled(False, 0.0, FETCH_TIMEOUT)
         stopped_early = False
+        closed_before = None
         while time.monotonic() < deadline:
             state = read_state()
             body = check_body_complete(state)
@@ -391,11 +416,16 @@ def main() -> int:
             # socket byte only past the time margin.
             stop, why = early_stop_step(
                 tracker, state, now, read_tcp_state,
-                stall_abort=STALL_ABORT_S, shadow_ok=shadow.ok)
+                stall_abort=STALL_ABORT_S, shadow_ok=shadow.ok,
+                read_tls_state=read_tls_state)
             if stop:
                 print(f"  {state.summary()}")
                 print(f"  {why}")
                 stopped_early = True
+                # A stop before the body is #247's handshake stop, which
+                # read net_tcp_state=CLOSED while it was still readable.
+                if state.parse_state < PARSE_STATE_BODY:
+                    closed_before = why
                 settled = check_fetch_settled(
                     False, now - started, FETCH_TIMEOUT)
                 break
@@ -421,12 +451,13 @@ def main() -> int:
         ok, lines = wait_for(
             client, "CONNECTION CLOSED", 120 * _SCALE, "close",
             also=lambda: close_confirmed(stopped_early, read_shadow_ok,
-                                         read_tcp_state))
+                                         read_tcp_state, closed_before))
         dump(lines, "final screen")
         if not ok:
             print("WARNING: never saw CONNECTION CLOSED — leaving the machine "
                   "as-is rather than resetting it (a reset with a live socket "
                   "poisons the UCI lease; power cycle only).", file=sys.stderr)
+        fetch_in_flight = not ok    # not ok: the #234 guard below re-waits
 
         # THE VERDICT IS COMPUTED FROM THE STATE CAPTURED WHILE THE
         # TRANSPORT WAS LIVE, above, and deliberately NOT re-read here.
@@ -456,6 +487,17 @@ def main() -> int:
         print(report[-1], file=sys.stderr if code else sys.stdout)
         return code
     finally:
+        # #234: before disable_uci — the C64 needs the command interface to
+        # issue the SOCKET_CLOSE this waits for. 'Q' is the nudge: in the
+        # viewer build it is the key that closes the socket.
+        if fetch_in_flight and client is not None:
+            try:
+                tcp_label = label_addr("net_tcp_state")
+            except KeyError:
+                tcp_label = None
+            guard_socket_teardown(
+                client.read_mem, tcp_label,
+                nudge=lambda: client.send_text("Q", finish_with_return=False))
         if uci_on and client is not None:
             try:
                 disable_uci(client)

@@ -22,7 +22,6 @@ from __future__ import annotations
 import os
 import socket
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -39,6 +38,7 @@ from _device_lock_helper import (
 )
 
 from _memory_policy import build_policy_and_arbiter
+from _rig_lifecycle import guard_socket_teardown, start_listener
 
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
@@ -345,22 +345,9 @@ def main() -> int:
     print(f"HTTP port       : {HTTP_PORT}")
     print(f"Expected body   : {EXPECTED_BODY!r}")
 
-    # Start HTTP server
+    # The HTTP server is started once the DeviceLock is held (#246): its
+    # accept timeout must not run while this rig queues for the device.
     server_result: dict = {}
-    server_thread = threading.Thread(
-        target=_run_http_server,
-        args=(test_host_ip, HTTP_PORT, server_result),
-        daemon=True,
-    )
-    server_thread.start()
-    for _ in range(60):
-        if server_result.get("listening"):
-            break
-        time.sleep(0.05)
-    else:
-        print("ERROR: HTTP server failed to start", file=sys.stderr)
-        return 1
-    print(f"HTTP server listening on {test_host_ip}:{HTTP_PORT}")
 
     # Build the 6502 routine
     routine_bytes_raw, host_len_patch = _build_http_routine(labels, HTTP_PORT)
@@ -394,6 +381,8 @@ def main() -> int:
 
     client: Ultimate64Client | None = None
     uci_enabled = False
+    fetch_in_flight = False
+    transport = None
     try:
         client = Ultimate64Client(host=HOST, timeout=15.0)
         transport = Ultimate64Transport(host=HOST, timeout=15.0, client=client)
@@ -406,6 +395,15 @@ def main() -> int:
         print("Resetting machine...")
         client.reset()
         time.sleep(2.5)
+
+        server_thread = start_listener(
+            _run_http_server,
+            args=(test_host_ip, HTTP_PORT, server_result),
+            result=server_result, wait_s=3.0)
+        if server_thread is None:
+            print("ERROR: HTTP server failed to start", file=sys.stderr)
+            return 1
+        print(f"HTTP server listening on {test_host_ip}:{HTTP_PORT}")
 
         print("run_prg(PRG)...")
         client.run_prg(prg)
@@ -438,6 +436,7 @@ def main() -> int:
         # Trigger via SYS
         sys_line = f"sys{ROUTINE_ADDR}\r"
         print(f"Triggering: {sys_line.strip()}")
+        fetch_in_flight = True      # #234: from here a socket may be live
         send_text(transport, sys_line)
 
         # Poll sentinel
@@ -453,6 +452,7 @@ def main() -> int:
                 last_progress = progress
             if sentinel == SENTINEL_VALUE:
                 print("  sentinel set — routine complete")
+                fetch_in_flight = False     # http_get has returned
                 break
         else:
             print(f"TIMEOUT: sentinel not set (progress=0x{last_progress:02X})",
@@ -524,6 +524,11 @@ def main() -> int:
         return 1
 
     finally:
+        # #234: before disable_uci — the C64 needs the command interface
+        # to issue the SOCKET_CLOSE this waits for.
+        if fetch_in_flight and transport is not None:
+            guard_socket_teardown(transport.read_memory,
+                                  labels.get("net_tcp_state"))
         if uci_enabled and client is not None:
             print("\nDisabling UCI...")
             try:
