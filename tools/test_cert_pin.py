@@ -286,6 +286,18 @@ def run_image(r: Run, warn: bool, A, B, name_check: bool):
                 ST_BAD: "mismatched"}[st]
         r.check(f"cert_pin_require, check {what}: C={w}", c == w, f"C={c}")
 
+    # The wrappers tls_connect calls. With no check run, send_finished must
+    # refuse (C=1) without sending; hs_keys must zero the status left by an
+    # earlier connection. (send_finished with a passing status would really
+    # send, so only the refusal is driven here.)
+    write_bytes(t, L["cert_pin_status"], bytes([ST_NONE]))
+    c = jsr_with_carry(t, L["cert_pin_send_finished"])
+    r.check("cert_pin_send_finished, no check ran: C=1 (nothing sent)", c == 1, f"C={c}")
+    write_bytes(t, L["cert_pin_status"], bytes([ST_MATCH]))
+    jsr_with_carry(t, L["cert_pin_hs_keys"], timeout=120.0)
+    st = r.status()
+    r.check("cert_pin_hs_keys clears a stale status", st == ST_NONE, f"status=${st:02X}")
+
 
 def main() -> int:
     os.chdir(PROJECT_ROOT)
@@ -352,6 +364,7 @@ def main() -> int:
         print(f"  PRG sha256 {h}")
         labels = Labels.from_file(LABELS_PATH)
         need = ["x509_extract_pubkey", "cert_pin_check", "cert_pin_require",
+                "cert_pin_hs_keys", "cert_pin_send_finished",
                 "cert_pin_status", "cert_buf", "cert_data_ptr", "cert_data_len_lo",
                 "cert_data_len_hi", "tls_hostname", "tls_hostname_len",
                 "ecdsa_pubkey_x", "ecdsa_pubkey_y", "ecdsa_curve_id"]
@@ -360,10 +373,10 @@ def main() -> int:
             print(f"CANNOT RUN: labels missing from the {mode} image: {missing}", file=sys.stderr)
             return 2
 
-        wired = "tls13.o" in " ".join(imports_of("cert_pin_require")) and \
-                "tls13.o" in " ".join(imports_of("cert_pin_status"))
-        print(f"  [{'PASS' if wired else 'FAIL'}] map: tls13.o imports cert_pin_require"
-              " and cert_pin_status (the interlock is linked into tls_connect)")
+        wired = "tls13.o" in " ".join(imports_of("cert_pin_hs_keys")) and \
+                "tls13.o" in " ".join(imports_of("cert_pin_send_finished"))
+        print(f"  [{'PASS' if wired else 'FAIL'}] map: tls13.o imports cert_pin_hs_keys"
+              " and cert_pin_send_finished (the interlock is linked into tls_connect)")
         passed += wired
         failed += not wired
 
