@@ -116,6 +116,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _device_lock_helper import (  # noqa: E402
     LockTimeoutConfigError, acquire_device_lock,
 )
+from _prg_load import PrgLoadError, load_verified_and_run  # noqa: E402
 from _memory_policy import build_policy_and_low_ram_arbiter  # noqa: E402
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
@@ -610,8 +611,12 @@ def main() -> int:
             print("ERROR: listener failed to come up", file=sys.stderr)
             return 2
 
-        print("run_prg(PRG)...")
-        client.run_prg(prg)
+        print("load_prg(PRG), verify, SYS (#199)...")
+        try:
+            load_verified_and_run(client, prg)
+        except PrgLoadError as exc:
+            print(f"[fatal] {exc}", file=sys.stderr)
+            return 4
         time.sleep(float(os.environ.get("C64_INIT_WAIT", "22")) * _TIMEOUT_SCALE)
 
         init_flag = transport.read_memory(labels["net_initialized"], 1)[0]

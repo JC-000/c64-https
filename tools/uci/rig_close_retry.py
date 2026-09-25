@@ -47,7 +47,7 @@ Needs a BACKEND=uci build in build/ (any profile; the comb build's boot
 precompute is waited out like the other rigs do).
 
 Exit: 0 pass, 1 fail, 2 fatal (build/labels/stub), 3 DeviceLock timeout,
-4 device prep / REU preflight.
+4 device prep / REU preflight / PRG load verify (#199).
 
     U64_HOST=10.43.23.81 tools/uci/rig_close_retry.py
     tools/uci/rig_close_retry.py --selfcheck      # offline, no device
@@ -72,6 +72,7 @@ from _device_lock_helper import (  # noqa: E402
     LockTimeoutConfigError, acquire_device_lock,
 )
 from _rig_lifecycle import guard_socket_teardown  # noqa: E402
+from _prg_load import PrgLoadError, load_verified_and_run  # noqa: E402
 from _memory_policy import (  # noqa: E402
     build_policy_and_arbiter_with_overlay_carveout,
 )
@@ -413,7 +414,12 @@ def main() -> int:
             return exit_code
         client.reset()
         time.sleep(2.5)
-        client.run_prg(prg)
+        try:
+            load_verified_and_run(client, prg)
+        except PrgLoadError as exc:
+            print(f"[fatal] {exc}", file=sys.stderr)
+            outcome, exit_code = "PRG_LOAD", 4
+            return exit_code
         time.sleep(init_wait * _SCALE)
         if tr.read_memory(labels["net_initialized"], 1)[0] == 0:
             print("WARNING: net_initialized is 0 — auto-init may have failed")

@@ -58,6 +58,7 @@ from c64_test_harness.uci_network import disable_uci, enable_uci
 from _device_lock_helper import (
     LockTimeoutConfigError, acquire_device_lock,
 )
+from _prg_load import PrgLoadError, load_verified_and_run
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 BACKEND = os.environ.get("BACKEND", "uci").strip().lower()
@@ -304,8 +305,12 @@ def main() -> int:
         client.reset()
         time.sleep(2.5)  # let KERNAL boot
 
-        print("run_prg(PRG)...")
-        client.run_prg(prg)
+        print("load_prg(PRG), verify, SYS (#199)...")
+        try:
+            load_verified_and_run(client, prg)
+        except PrgLoadError as exc:
+            print(f"[fatal] {exc}", file=sys.stderr)
+            return 4
 
         # Boot does entropy + sqtab + reu_mul_init (~15-18 s on the U64E)
         # before do_net_init and the menu, so poll for the menu rather
