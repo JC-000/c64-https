@@ -125,7 +125,8 @@ CONNECT_BYTES = (bytes([TARGET_NETWORK, CMD_TCP_CONNECT, PORT & 0xFF,
 ABORT_LATENCY = 4
 
 LABELS_NEEDED = ("net_init", "net_tcp_connect", "net_tcp_close", "net_poll",
-                 "net_tcp_send", "net_send_len",
+                 "net_tcp_send", "net_send_len", "net_recv_byte",
+                 "tcp_recv_buf",
                  "tcp_recv_head", "tcp_recv_tail",
                  "uci_host_buf", "uci_socket_id", "net_last_error",
                  "net_tcp_state", "uci_status_len", "uci_status_force")
@@ -753,6 +754,47 @@ def test_poll_no_data_keeps_the_socket():
         % _state(mem, labels)))
 
 
+def test_eof_keeps_the_bytes_already_in_the_ring():
+    """The body's last bytes and the EOF cannot share a reply (read_socket
+    answers data OR 0), but they can share a moment: the data poll fills
+    the ring, the EOF poll runs before the HTTP/TLS layer has drained it.
+    Flipping to CLOSED must not drop them: the ring is untouched and
+    net_recv_byte (which never reads net_tcp_state) still hands out every
+    byte; only further SOCKET_READs stop. http_recv_body's verdict is then
+    decided by the body's own framing, as test_body_truncation.py pins."""
+    uci = AbortModel([(b"\x00\x00", b"01,CONNECTION CLOSED BY HOST")])
+    cpu, mem, labels = _require(uci)
+    mem.write(labels["uci_socket_id"], 1)
+    mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
+    tail = b"0\r\n\r\n" + bytes(range(0x40, 0x4B))   # a body's last bytes
+    for i, b in enumerate(tail):
+        mem.write(labels["tcp_recv_buf"] + i, b)
+    mem.write(labels["tcp_recv_tail"], len(tail))
+    cpu.call(labels["net_poll"], budget=8_000_000)
+    base._check(_state(mem, labels) == NET_TCP_CLOSED,
+                "premise: the EOF poll left net_tcp_state=$%02X"
+                % _state(mem, labels))
+    head = mem.read(labels["tcp_recv_head"]) | mem.read(labels["tcp_recv_head"] + 1) << 8
+    tl = mem.read(labels["tcp_recv_tail"]) | mem.read(labels["tcp_recv_tail"] + 1) << 8
+    base._check((head, tl) == (0, len(tail)), (
+        "the EOF poll moved the ring: head=%d tail=%d, expected 0/%d"
+        % (head, tl, len(tail))))
+    got = []
+    for _ in range(len(tail) + 1):
+        carry = cpu.call(labels["net_recv_byte"])
+        if carry:
+            break
+        got.append(cpu.a)
+    base._check(bytes(got) == tail, (
+        "after the EOF net_recv_byte returned %r, expected %r"
+        % (bytes(got), tail)))
+    parsed = len(uci.parsed)
+    cpu.call(labels["net_poll"], budget=8_000_000)
+    base._check(len(uci.parsed) == parsed,
+                "net_poll issued another command after the EOF: %r"
+                % uci.parsed[parsed:])
+
+
 UCI_ERR_SHORT_WRITE = 0x87
 CMD_SOCKET_WRITE = 0x11
 
@@ -808,6 +850,7 @@ TESTS = (
     test_clean_connect_close_connect_never_aborts,
     test_poll_eof_closes_the_socket_state,
     test_poll_no_data_keeps_the_socket,
+    test_eof_keeps_the_bytes_already_in_the_ring,
     test_send_error_is_not_a_length,
 )
 
