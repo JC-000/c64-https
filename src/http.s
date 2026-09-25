@@ -1042,9 +1042,9 @@ http_state_body:
 ;       the response (http_line_idx is reused as a line-nonempty flag —
 ;       header parsing is over, so the buffer index is free)
 ;
-; http_chunk_rem is 24-bit (#147): github.com sends 65536 B and 67880 B
-; chunks, and a 16-bit count read "10000" as the terminal chunk (a false
-; complete) and 0x10928 as 0x0928 (a desync). A size that would shift out
+; http_chunk_rem is 24-bit (#147): github.com sends chunks over 64 KB, and
+; a 16-bit count read e.g. "10000" as the terminal chunk (a false
+; complete) and "10928" as 0x0928 (a desync). A size that would shift out
 ; of 24 bits saturates to $FFFFFF instead of wrapping, so it can never
 ; read as a small chunk or as the terminal one.
 ; -----------------------------------------------------------------------------

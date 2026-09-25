@@ -381,8 +381,8 @@ def test_chunked_truncation(transport, labels):
 
 
 def test_chunked_over_64k(transport, labels):
-    """#147: chunks of 65536 and 67880 B, the sizes github.com sends. With
-    a 16-bit count "10000" read as the terminal chunk, so the payload's
+    """#147: chunks over 64 KB, which github.com sends (sizes vary per
+    response). With a 16-bit count "10000" read as the terminal chunk, so the payload's
     first blank line ended the response (a false complete), and "10928"
     read as 0x0928 (a desync). The payload carries blank lines on purpose:
     HTML does."""
@@ -410,6 +410,24 @@ def test_chunked_over_64k(transport, labels):
         print(f"  FAIL: http_body_total = {total}, expected {need}")
         f += 1
     return p, f
+
+
+def test_chunked_seven_digit_size(transport, labels):
+    """A 7-digit size that still fits 24 bits ("0100000" = 1 MiB, leading
+    zero included) must be taken exactly, not saturated: the overflow test
+    looks at the top nibble only."""
+    wire = (b"HTTP/1.1 200 OK\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n0100000\r\nxy")
+    carry = _run_span_response(transport, labels, [wire])
+    rem = _read_u24(transport, labels, "http_chunk_rem")
+    state = read_bytes(transport, labels.address("http_chunk_state"), 1)[0]
+    if carry == 1 and state == 2 and rem == 0x0FFFFE:
+        print(f"  PASS: 1 MiB chunk taken exactly (rem=${rem:06X}, state 2)")
+        return 1, 0
+    print(f"  FAIL: carry={carry} (exp 1), http_chunk_state={state} (exp 2), "
+          f"http_chunk_rem=${rem:06X} (exp $0FFFFE)")
+    return 0, 1
 
 
 def test_chunked_size_saturates(transport, labels):
@@ -999,8 +1017,13 @@ def run_tests(transport, labels, verbose=False):
     total_passed += p
     total_failed += f
 
-    print("\n--- Chunked: 65536 B and 67880 B chunks (#147) ---")
+    print("\n--- Chunked: chunks over 64 KB (#147) ---")
     p, f = test_chunked_over_64k(transport, labels)
+    total_passed += p
+    total_failed += f
+
+    print("\n--- Chunked: 7-digit size within 24 bits (#147) ---")
+    p, f = test_chunked_seven_digit_size(transport, labels)
     total_passed += p
     total_failed += f
 
