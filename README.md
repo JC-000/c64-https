@@ -60,8 +60,8 @@ changed between v0.4.2 and v0.4.3**:
 Either way, point the name at the bundled test listener via your local DNS, or
 rebuild with your own `HTTPS_HOST=`. New in v0.4.2: the two **UCI** images
 check the server's certificate actually names the host they asked for.
-`ip65-onchip` does not — the check is 491 B and that layout's largest free
-block is 56 B (issue #135). Read ["What this client does NOT
+`ip65-onchip` does not — the check is 491 B and no free block in that layout
+comes close (issue #135). Read ["What this client does NOT
 authenticate"](#what-this-client-does-not-authenticate) before relying on
 either: there is still no certificate chain validation on any image, so this
 is not server authentication.
@@ -186,8 +186,8 @@ otherwise, and nothing here said it before:
   `dNSName` entries against the host you built for, case-insensitively, with
   leftmost-label wildcards, rejecting a certificate that carries no SAN.
   `ip65-onchip` does **not** — the routine is 491 B (`X509_NAME_CODE` in the
-  map) and that layout's largest free block is 56 B. See the free-space table
-  under Memory Map, and issue #135.
+  map) and no free block in that layout comes close — `tools/measure_margins.py`
+  measures them. See issue #135.
 
 What the client *does* prove is that the peer holds the private key for the
 leaf certificate it presented (the CertificateVerify signature is genuinely
@@ -346,47 +346,24 @@ $E000-$FDFF  OVERLAY_BLOB_CURVE_RAM  P-384 curve overlay blob slot (empty
                                  by default — P-384 is not built)
 ```
 
-An earlier version of this section called `CRYPTO_OVERLAY` "empty in the
-shipped build". That was wrong by about two orders of magnitude, and it is
-the kind of error that invites someone to put 2 KB there. The measured
-free space in every region of every shipped product — first free address to
-the end of the region — re-measured off `build/c64-https.map` at the
-`libs/nistcurves` **v0.14.0** pin, with the unreachable P-384 objects gated
-out of the link:
+`CRYPTO_OVERLAY` is not empty in any shipped UCI image — it holds the
+resident tenants listed above. Free space per region is **measured, not
+tabulated here**, because it differs per profile and every hand-kept table
+drifted:
 
-| region | `ip65-onchip` | `uci-onchip` | `uci-comb` |
-|---|---:|---:|---:|
-| `LOADER` | 21 B | 148 B | 122 B |
-| `NET_CODE` | 56 B | 366 B | 366 B |
-| `NET_BSS_TAIL` | — | 43 B | 43 B |
-| `CRYPTO_OVERLAY` | 152 B | 1,804 B | **153 B** |
-| `CRYPTO_RESIDENT` / `CRYPTO_HOT` | 145 B | 203 B | 93 B |
-| `CRYPTO_COLD_SHADOW` (gap below the `$BA00` `TABLES_BSS` pin) | 43 B | 1,577 B | 1,577 B |
+```
+python3 tools/measure_margins.py --build   # all five profiles + the wikipedia target
+python3 tools/measure_margins.py           # just the build in build/
+```
 
-Where a cell moved it moved for its own reason, and the reasons do not
-generalise across profiles — **read them per profile, and re-measure all three
-when you change one.** The UCI `NET_CODE` gain is the
-299 B of `CRYPTO_AUX_CODE` that `ecdsa_verify_384.o` occupied in every image
-while being reachable from none; `uci-onchip`'s overlay lost ground because
-`LIB_NISTCURVES_P256_RODATA` moved there to absorb the v0.12.0 REU-settle
-call sites, while `uci-comb`'s `CRYPTO_HOT` fell to 93 B because its cfg
-already routed `CRYPTO_RODATA` to the overlay, so its share of the recovery
-landed there instead. Four cells did not move at all (`LOADER` and `NET_CODE`
-on ip65, `LOADER` on `uci-onchip`, both `NET_BSS_TAIL` cells), which is its own
-warning: an unchanged number here is not evidence that a region was left alone.
-The single byte off each `CRYPTO_COLD_SHADOW` cell is real segment growth, not
-a re-count of the old one — v0.14.0 adds a 3 B `LIB_NISTCURVES_BSS` while `BSS`
-shrinks by 2, which walks `CRYPTO_BSS`'s last address from `$B9D3` to `$B9D4`
-on ip65 and from `$B3D5` to `$B3D6` under UCI.
-
-So ip65 is still genuinely full — 152 B is its largest block now, and the
-56 B `NET_CODE` tail is still the budget a longer `HTTPS_HOST`/`HTTPS_PATH`
-eats into. Note that ip65's `CRYPTO_OVERLAY` and `CRYPTO_RESIDENT` are
-**adjacent** ($4F8C-$5FFF and $6000-$9FFF), so they are one 20,596 B pool and
-moving segments between them creates nothing; the 332 B this bump recovered by
-gating P-384 out of the link is what made the v0.14.0 pin fit at all.
-`uci-onchip` is the roomy one, and only because it ships neither the comb
-tables nor the comb rodata.
+It reads region bounds from the linked cfg's MEMORY block and occupancy from
+`build/c64-https.map`, and stamps each table with the PRG sha256. What does
+not drift: ip65 is genuinely full, and its `NET_CODE` tail is the budget a
+longer `HTTPS_HOST`/`HTTPS_PATH` eats into. ip65's `CRYPTO_OVERLAY` and
+`CRYPTO_RESIDENT` are **adjacent** ($4F8C-$5FFF and $6000-$9FFF), so they are
+one pool and moving segments between them creates nothing. `uci-onchip` is the
+roomy one, and only because it ships neither the comb tables nor the comb
+rodata; `uci-comb`'s `CRYPTO_OVERLAY` tail is small.
 
 **PRG size is not a headroom gauge.** Both UCI products are 62,977 B and both
 ip65 profiles are 47,105 B, because the ld65 configs mark the inter-region

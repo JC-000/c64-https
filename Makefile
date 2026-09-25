@@ -83,9 +83,9 @@ ifeq ($(BACKEND),uci)
 CA65FLAGS += -D BACKEND_UCI=1
 # Issue #135: server name validation (src/x509_name.s) is UCI-only.
 #
-# Not a scope judgement — a size one, and the numbers are why. The routine is
-# 491 B. ip65's largest free block is 170 B (NET_CODE tail); its other regions
-# hold 40 B (CRYPTO_RESIDENT), 22 B (CRYPTO_OVERLAY) and 16 B (LOADER). There
+# Not a scope judgement — a size one. The routine is
+# 491 B, and no ip65 region has a free block anywhere near that
+# (tools/measure_margins.py). There
 # is nowhere to put it without a memory-map restructure, and ip65 cannot reach
 # a real internet server anyway (~36 min/handshake against ~45-100 s of server
 # patience), so the check has the least to do exactly where it does not fit.

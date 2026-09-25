@@ -1431,9 +1431,10 @@ http_host_zimmers_len = 15
 ;         area 'CRYPTO_HOT' by 34 bytes
 ;
 ; Isolating them means the knob's cost lands in ONE segment, which each cfg
-; routes to a region that has room for the asserted maxima below (63 B host
-; + 100 B path + 63 B SNI). Growth in a build flag now hits the flag's own
-; region, not an unrelated library's rodata.
+; routes to its roomiest region. The asserted maxima below (63 B host + 100 B
+; path + 63 B SNI) are per-string guards, NOT a joint fit: at the maxima the
+; link fails on both ip65 profiles and on uci-comb. Growth in a build flag
+; now fails in the flag's own region, not an unrelated library's rodata.
         .segment "HTTPS_TARGET_RODATA"
 
 http_host_target:
