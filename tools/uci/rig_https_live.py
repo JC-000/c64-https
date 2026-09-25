@@ -95,6 +95,7 @@ from c64_test_harness.labels import Labels
 from _device_lock_helper import (
     LockTimeoutConfigError, acquire_device_lock,
 )
+from _prg_load import PrgLoadError, load_verified_and_run
 from _memory_policy import build_policy_and_arbiter_with_overlay_carveout
 from _device_prep import DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
@@ -471,8 +472,12 @@ def main() -> int:
         client.reset()
         time.sleep(2.5)
 
-        print("run_prg(PRG)...")
-        client.run_prg(prg)
+        print("load_prg(PRG), verify, SYS (#199)...")
+        try:
+            load_verified_and_run(client, prg)
+        except PrgLoadError as exc:
+            print(f"[fatal] {exc}", file=sys.stderr)
+            return 4
         print(f"Waiting {init_wait * _TIMEOUT_SCALE:.0f} s for auto-init "
               "(entropy, REU init, comb precompute, DHCP)...")
         time.sleep(init_wait * _TIMEOUT_SCALE)

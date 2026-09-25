@@ -91,6 +91,17 @@ ON.
 Policy and tests: `tools/uci/_device_prep.py`, `tools/test_device_prep.py`
 (faked client, no hardware).
 
+## Loading the PRG (#199)
+
+No rig calls `client.run_prg` any more: `_prg_load.load_verified_and_run`
+does `load_prg` (the same firmware runner, minus the run), reads
+$0801-$9FFF back and compares it to the file (the `$A000+` tail is zero fill
+that reads as BASIC ROM until boot banks it out, so it is checked for
+all-zeros in the file instead), reloads once on a mismatch, and only then
+types `SYS<entry>` from the image's own stub. A second mismatch exits 4 with
+the first differing address and starts nothing. Pinned by
+`tools/test_prg_load.py` (no hardware).
+
 ## Running them
 
 ```sh

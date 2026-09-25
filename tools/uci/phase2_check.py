@@ -41,6 +41,7 @@ from c64_test_harness.uci_network import enable_uci, disable_uci
 from _device_lock_helper import (
     LockTimeoutConfigError, acquire_device_lock,
 )
+from _prg_load import PrgLoadError, load_verified_and_run
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -148,8 +149,12 @@ def main() -> int:
         client.reset()
         time.sleep(2.5)  # let KERNAL boot
 
-        print("run_prg(PRG)...")
-        client.run_prg(prg)
+        print("load_prg(PRG), verify, SYS (#199)...")
+        try:
+            load_verified_and_run(client, prg)
+        except PrgLoadError as exc:
+            print(f"[fatal] {exc}", file=sys.stderr)
+            return 4
         # Let the PRG run entropy_init, drbg_init_entropy, sqtab_init,
         # reu_mul_init (~128 KB REU stash — empirically ~15-18 s on the
         # U64E), and our new auto-init (net_init + GET_IPADDR).
