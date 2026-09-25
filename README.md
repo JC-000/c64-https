@@ -168,7 +168,7 @@ anywhere in `src/crypto/`.
 
 - **AEAD:** ChaCha20-Poly1305 — in-tree `src/crypto/{chacha20,poly1305,aead}.s`, originally from [c64-wireguard](https://github.com/JC-000/c64-wireguard)
 - **Hash:** SHA-256 — in-tree `src/crypto/sha256.s`, originally from [c64-aes256-ecdsa](https://github.com/JC-000/c64-aes256-ecdsa)
-- **Key exchange:** ECDHE with X25519 only — `supported_groups` and `key_share` carry the single group 0x001D (`src/tls_handshake.s`, grep `group = x25519`); in-tree `src/crypto/{x25519,fe25519}.s`
+- **Key exchange:** ECDHE with X25519 only — `supported_groups` and `key_share` carry the single group 0x001D (`src/tls_handshake.s`, grep `group = x25519`); the vendored `libs/x25519` sibling, built on-chip (no REU) on every profile
 - **Certificate signatures:** ECDSA P-256 (`ecdsa_secp256r1_sha256`, 0x0403) from the [c64-nist-curves](https://github.com/JC-000/c64-nist-curves) submodule at `libs/nistcurves`, via the thin dispatcher `src/crypto/ecdsa_verify.s`. P-384 (0x0503) is **no longer advertised** and is rejected — parked as roadmap work, see Known Issues.
 - **Key derivation:** HKDF-SHA256, built from HMAC-SHA256 (`src/hkdf.s`)
 - **PRNG:** HMAC-DRBG seeded from SID voice 3 noise + CIA timer entropy (`src/entropy.s`, `src/crypto/hmac_drbg.s`)
@@ -242,21 +242,23 @@ Under the ip65 backend, the crypto modules and ip65 overlap on zero page $02-$1B
 $02-$03   Shared tmp (save/restore around ip65 calls)
 $04-$09   word32 pointers (ChaCha20 / Poly1305)
 $0A-$12   SHA-256 accumulators
-$14-$17   mult66 pointers (fe25519) / ChaCha20 vars (time-shared)
+$14-$17   ChaCha20 vars / X25519 sibling CT masks (time-shared)
 $18-$1D   ChaCha20 + Poly1305 vars
 $1E-$21   TLS record layer (record pointer, index, direction)
 $22-$2B   ECDSA bignum pointers (fp_src1..fp_loop)
-$2C-$37   fe25519 field arithmetic
-$38-$3A   x25519 ladder state (shares $39-$3A with fp_mul_i/j)
+$1E-$2F   X25519 sibling field/ladder slots (time-shared with the above)
+$39-$3A   fp_mul_i/j
 $3B-$3C   ec_scalar_ptr
 $3D       nistcurves_zp_ptr2 (the sibling's ZP override slot)
+$40-$7F   fe_wide, the X25519 sibling's 64-byte product (ZP_WIDE)
 $FB-$FF   General pointers (save/restore around ip65 calls)
 ```
 
-Nothing here is `.importzp`'d: every slot is defined locally, in
-`src/constants.inc` and `src/crypto/shared/zp_canon.inc`. The sibling
-library's slots are requested by name at build time, so the place to confirm
-what actually landed is `build/labels.txt`.
+Nothing here is `.importzp`'d: every c64-https slot is defined locally, in
+`src/constants.inc` and `src/crypto/shared/zp_canon.inc`. The nistcurves
+sibling's slots are requested by name at build time, so the place to confirm
+what actually landed is `build/labels.txt`. The X25519 sibling's slots are its
+own `libs/x25519/src/zp_config.s` defaults and do not appear in `labels.txt`.
 
 The authoritative list is `src/constants.inc`; the table above is a
 summary of it.
@@ -424,7 +426,6 @@ The knobs, all read straight from the Makefile:
 | `HTTPS_PORT=` | default 443. |
 | `HTTPS_BODY_TO_REU=1` | stream the response body into the REU instead of `http_resp_buf`. UCI only. |
 | `VIC_BLANK=0` | degrade `vic_blank`/`vic_unblank` to `RTS`. A/B measurement control. |
-| `USE_X25519_SIBLING=1` | the `libs/x25519` sibling. Off by default; see Known Issues. |
 | `CA65`, `LD65`, `VICE` | toolchain overrides. |
 
 `ENABLE_P384_VERIFY`, `EMBED_P256_OVERLAY` and `USE_OVERLAY_P384_EMBED` also
@@ -536,7 +537,6 @@ Progress:
 
 - **The handshake is slow, and the ECDSA P-256 verify dominates it.** Every figure here is quoted from the measurement record in `CLAUDE.md`. Except where noted they were taken at the **`libs/nistcurves` v0.6.0 pin**, and the pin is now v0.14.0, so treat them as a baseline rather than as current. The one profile re-measured since is comb, at the v0.11.2 pin: 46.986 / 24.440 / 16.402 s verify at 16 / 32 / 48 MHz (U64E, n=3, VIC blanking active). End-to-end handshake + GET against the local listener, U64E, master 2ceb5b1: **80.8 s** (REU profile, 48 MHz), **45.5 s** (onchip profile, 48 MHz), **1,157.7 s** (REU, stock 1 MHz). One point of that sweep has been carried forward: 48 MHz REU measures **82.1 s** at v0.9.1 and **82.4 s** at v0.10.1 (n=1 each, so the 0.4% step between them is noise; the 1.6% from v0.6.0 is the FIPS 186-5 public-key validation gate v0.7.0 added). No other clock or profile has been re-measured. On the REU-less stock-C64 path (ip65 + onchip, no REU, honest 1 MHz in VICE) the whole run measured **2,159.7 s = 36.0 min**, of which the verify stretch alone was 1,416.7 s. That is fine for the local listener, which holds the connection open; it exceeds a typical 10-30 s real-world server handshake window.
 - **P-384 is parked, and doubly gated — it is not merely "stubbed".** An earlier version of this entry said the dispatcher "advertises `ecdsa_secp384r1_sha384` (0x0503)". It does not, and has not since v0.4.1: `sig_algs_ext_data` in `src/tls_handshake.s` carries exactly one scheme, `ecdsa_secp256r1_sha256` (0x0403), and `src/crypto/ecdsa_verify.s` compiles its P-384 arm to a `sec` reject unless `ENABLE_P384_VERIFY=1`. Both gates matter, because the curve comes from the certificate rather than from what we advertised — that combination is what closed the v0.4.0 hang in which a P-384 certificate made the overlay swap DMA over live resident code. Separately, **no P-384 build target has ever completed**: `make p384-overlay` from a clean tree stops at `No rule to make target 'build/labels.txt'`, and once a main build has produced that file it stops at `Segment 'LIB_NISTCURVES_SHA384_TABLES' overflows memory area 'OVERLAY_REGION' by 1536 bytes`. Certificates requiring P-384 are rejected, not verified. From the v0.14.0 pin the lane is gated at the **link line** as well: `src/crypto/ecdsa_verify_384.s` and `src/crypto/p384_force_link.s` link only under `ENABLE_P384_VERIFY=1`. They used to be in every shipped image and reachable from none of it — ca65 emits no import record for an `.import` nothing references, so the wildcard pulled them in — at a cost of 332 B (299 B of `CRYPTO_AUX_CODE` + 33 B of `CRYPTO_RODATA`), which is the space that made the v0.14.0 bump fit on ip65 at all. `ENABLE_P384_VERIFY=1` now also applies on all five profiles: it used to be silently dropped by the two REU-profile builds, which is issue #207 — the mutation control that was supposed to fail under it passed vacuously there.
-- **`USE_X25519_SIBLING=1` links under neither backend, and each backend dies on a different segment.** The duplicate-symbol failure this entry used to record — `ld65: Error: Duplicate external identifier: 'reu_mul_tables_init'`, on **both** backends — was closed by the `libs/nistcurves` v0.10.1 / `libs/x25519` v0.11.0 bump plus a build-time deferral: `tools/integration/build_nistcurves_p256.sh` passes `-D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH` through `CONTRACT_DEFINES`, so the library gates out its own copy of the SPEC §8.2 `reu_mul` provider that `src/boot.s` supplies itself. (This entry used to describe an archive-surgery workaround — dropping `reu_mul_init.o`. That is gone: the wrapper `cp`s the upstream archive unmodified, which is what §6.1 requires.) What replaced it is a placement problem, not a symbol collision. Measured at the `libs/x25519` **v0.16.0** pin and identical at v0.13.0, `make clean && make ... USE_X25519_SIBLING=1` stops with `Segment 'X25519_BSS' overflows memory area 'CRYPTO_OVERLAY' by 1536 bytes` under UCI and `Segment 'X25519_RODATA' overflows memory area 'CRYPTO_OVERLAY' by 3840 bytes` under ip65 (ip65's overlay slot is 4,212 B against UCI's 7,680 B). **An earlier version of this entry claimed the UCI link succeeded, and quoted 3,584 B for ip65. Both were wrong** — the UCI link has not produced a PRG, and 3,584 was a figure from a tree in which `HTTP_AUX_CODE` was not yet a `CRYPTO_OVERLAY` tenant. **Neither number is a total deficit, either:** ld65 warns once per memory area, at the first segment that tips it over, so everything placed after that segment is uncounted. ip65's real shortfall is **5,376 B**. The derivation, and the wrong explanation that fit the evidence first, are in `docs/engineering-notes.md` under "`USE_X25519_SIBLING=1` overflow — two relink experiments". The flag remains **off by default** and no shipped artifact contains the sibling; the in-tree X25519 in `src/crypto/{x25519,fe25519}.s` is what every release PRG is built from. Flipping the default is not a decision anyone can take on byte grounds today.
 - **Real-server reach is UCI/comb + turbo only, and has size limits.** The public-internet HTTPS above works on the comb profile at turbo; the stock-C64 ip65 path is far too slow for a real server's connection window (~36 min/handshake). Among real leaves, en.wikipedia.org's 1636 B leaf needs the 2048 B UCI `cert_buf` (fits); anything larger, or a server that ignores `max_fragment_length` and sends >548 B records (e.g. Cloudflare), is out of scope. Cloudflare additionally enforces a ~15 s connect-to-first-request deadline the C64 cannot meet and is deliberately unsupported.
 - **The wikipedia stall was a client bug, now fixed.** Historical note for anyone bisecting: TLS flights larger than the ~4 KB UCI receive ring used to stall permanently, because `net_poll` requested a fixed 512 B and its fill loop dropped bytes past the ring's current free space (discarded as "delivered"). Fixed by clamping the `SOCKET_READ` request to ring free space (`src/net/uci/net.s`). It was never a firmware bug; github/browserleaks/lwn flights are under 4 KB and were unaffected. **That fix is not the end of the large-body story** — the body path still terminates early and reports success, intermittently, on both trees (issue #211). Do not read this bullet as saying large fetches are now sound.
 - **VICE 3.9** previously appeared to crash on chained HMAC-SHA256 calls (backend-independent — affects the crypto-only test suites), but this was caused by hardcoded port numbers bypassing the test harness port allocator. With proper `ViceInstanceManager` usage (no hardcoded ports), all N=1..10 chained calls succeed reliably.

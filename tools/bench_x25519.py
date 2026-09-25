@@ -57,9 +57,15 @@ def compute_expected_pubkey(scalar_bytes):
 
 
 def build_trampoline(labels, blank=True):
-    """Build 6502 trampoline: zero jiffy, [blank VIC], jsr x25519_base,
+    """Build 6502 trampoline: build tables, zero jiffy, [blank VIC], jsr x25519_base,
     snap jiffy, [unblank], rts."""
     code = bytearray()
+
+    # The sibling's lookup tables are generated at runtime (src/crypto/
+    # x25519_tables.s); src/tls_ecdh.s runs this before every scalar mult,
+    # so do the same, outside the timed window.
+    init = labels["x25519_tables_init"]
+    code += bytes([0x20, init & 0xFF, init >> 8])  # JSR x25519_tables_init
 
     # SEI; zero jiffy clock ($A0-$A2, big-endian)
     code += bytes([0x78])                       # SEI

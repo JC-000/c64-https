@@ -25,12 +25,6 @@
 cert_buf_size = CERT_BUF_SIZE
 .export cert_buf_size
 
-; Promote the fe25519 ZP equates so tools/test_x25519.py can resolve
-; them via labels.txt.
-.export fe_src1
-.export fe_src2
-.export fe_dst
-
 ; Phase F fallout: tools/test_crypto.py resolves these ZP equates via
 ; labels.txt and failed under both backends because the equates were
 ; never linker-visible. Promote them here — they have stable addresses

@@ -15,45 +15,19 @@ the bump gets read by a person instead of riding in silently. If it is
 green, the only thing you know is that nobody moved the pin since the
 expectations below were written down.
 
-Why a Python tripwire and not a link-time assert
-------------------------------------------------
-The obvious guard is the one the contract recommends and that every other
-sibling gets — an import plus a deferred assert in a staged source::
+Relation to the link-time assert
+--------------------------------
+Since issue #245 every build links the sibling, and the wrapper stages
+``lib_version.s`` so ``src/lib_contract_asserts.s`` can assert
+``LIB_X25519_ABI_VERSION`` at link time. That gate needs a build; this one
+does not, and it also pins MINOR, which the link gate does not. A pin move
+therefore goes red here in milliseconds under ``pytest`` before anyone
+builds. Keep the two expectations in step.
 
-    .import LIB_X25519_ABI_VERSION
-    .assert LIB_X25519_ABI_VERSION = 4, lderror, "c64-x25519 ABI moved"
-
-That is unreachable here, and not for the reason it first looks like.
-
-The blocker is not that ``lib_version.s`` happens to be unstaged. It is
-that the archive carrying it would only ever enter a link under ``make
-USE_X25519_SIBLING=1``, and that configuration does not link, on either
-backend, by design and by measurement (see the Known issues section of
-CLAUDE.md). A guard that can only fire inside a build that never
-completes is not a guard. Staging one more file would not change that,
-so the whitelist is a choice here, not the constraint.
-
-An assemble-time gate via ``.include`` --- pulling the submodule's
-``lib_version.s``, which is pure equates and no code, into a source
-that IS always assembled --- was considered and not pursued. No defect
-is alleged against that route; the tripwire simply needs no build at
-all and runs under ``pytest``, which nothing gated on
-``USE_X25519_SIBLING=1`` can. If a later reader wants the gate at
-assemble time instead, that is where to start.
-
-So the sibling's version constants are, uniquely among this project's
-submodules, outside the reach of any build that actually happens. That
-is the gap this file covers, and it covers it in the only place left:
-outside the toolchain entirely.
-
-For the record, since the number carries the inertness argument
-elsewhere: ``build_x25519.sh:269-279`` copies SIX upstream files, of
-which THREE are assembled as translation units (``fe25519.s``,
-``x25519.s``, ``x25519_init.s``). The other three — ``constants.s`` and
-its two transitive includes ``zp_config.s`` / ``reu_config.s`` — exist
-only so the ``.include "constants.s"`` at the top of each of those
-three resolves; no ``.o`` is emitted from them. ``lib_version.s`` is in
-neither set.
+The staged translation units are ``fe25519.s``, ``x25519.s``,
+``x25519_init.s`` and ``lib_version.s``; ``constants.s`` and its two
+transitive includes ``zp_config.s`` / ``reu_config.s`` are copied only so
+the ``.include "constants.s"`` in each resolves.
 
 What it reads, and what it does not
 -----------------------------------

@@ -56,9 +56,7 @@
         .import http_body_total
         .import http_body_sink
         .import http_reu_cursor
-.ifndef USE_X25519_SIBLING
         .import mul_dma_lo      ; REU-latch restore in http_body_finish
-.endif
 
         ; ---- imports: data.asm BSS (TLS app data) ----
         ; (tcp_recv_head/tail imports dropped in the issue #72 redesign —
@@ -1392,7 +1390,6 @@ http_body_finish:
         sta reu_command
 @restore:
 .ifndef USE_NISTCURVES_ONCHIP
-.ifndef USE_X25519_SIBLING
         ; Re-latch the reu_fetch_mul_row register state that
         ; reu_mul_init pre-set at boot (this sink clobbered it).  A
         ; REU-profile build doing a SECOND handshake in the same
@@ -1411,7 +1408,6 @@ http_body_finish:
         sta reu_addr_ctrl
         lda #2
         sta reu_len_hi          ; 512 B row fetches
-.endif
 .endif
 @rts:
         rts

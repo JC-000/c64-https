@@ -129,9 +129,9 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; The v0.6.0 pin predates contract v0.7.0, so it exports only the
 ; DEPRECATED bare `LIB_VERSION_*` / `LIB_ABI_VERSION` names — there is
 ; no `LIB_NISTCURVES_VERSION_MAJOR` to import yet. Importing the bare
-; names is safe *only* because exactly one contract library is in the
-; link: `USE_X25519_SIBLING=1` does not link on either backend, so the
-; two-library #43 collision is unreachable in every shipping config.
+; names was safe *only* while exactly one contract library was in the
+; link. (Both libraries now link in every build, issue #245, and both
+; are built with LIB_NO_BARE_EXPORTS; see the prefixed gates below.)
 ;
 ; WHEN A SECOND CONTRACT LIBRARY EVER LINKS: build both with
 ; `ca65 -D LIB_NO_BARE_EXPORTS=1` and switch the import below to the
@@ -240,6 +240,15 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; contract library entering the link.
 .import LIB_NISTCURVES_ABI_VERSION
 .assert LIB_NISTCURVES_ABI_VERSION = 4, lderror, "libs/nistcurves: exported-surface generation changed (LIB_NISTCURVES_ABI_VERSION != 4) — re-check the integration, then bump the expected value in src/lib_contract_asserts.s"
+
+; Same gate for libs/x25519, linked into every build since issue #245. The
+; wrapper stages lib_version.s (with LIB_NO_BARE_EXPORTS) for exactly this.
+; It moved 3 -> 4 at v0.15.0; the pin is v0.16.0. Note what it does NOT
+; cover: the wrapper stages fe25519.s / x25519.s / x25519_init.s directly,
+; so a behaviour change inside them that upstream ships without an ABI bump
+; reaches us with no gate — tools/test_x25519.py is that coverage.
+.import LIB_X25519_ABI_VERSION
+.assert LIB_X25519_ABI_VERSION = 4, lderror, "libs/x25519: exported-surface generation changed (LIB_X25519_ABI_VERSION != 4) — re-check tools/integration/build_x25519.sh against the new surface, then bump the expected value in src/lib_contract_asserts.s"
 
 
 ; =====================================================================

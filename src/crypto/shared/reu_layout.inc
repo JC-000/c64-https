@@ -107,12 +107,11 @@ REU_OVERLAY_P256_VERIFY    = REU_OVERLAY_P256
 ; is actually linked and actually owns the bank. Keeping the default
 ; arm at $30000 leaves both default PRGs byte-identical (verified by
 ; sha256), which is what makes this diff reviewable.
+; Since issue #245 the sibling is always linked, but built on-chip: it
+; claims NO REU bank, so the bank-6 arm this used to carry (for the
+; retired REU-profile USE_X25519_SIBLING build) is gone.
 .ifndef REU_OVERLAY_X25519
-.ifdef USE_X25519_SIBLING
-REU_OVERLAY_X25519         = $60000
-.else
 REU_OVERLAY_X25519         = $30000
-.endif
 .endif
 
 ; --- P-256 precompute (1 bank) ---

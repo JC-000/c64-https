@@ -58,10 +58,6 @@
 poly_prod_lo:   .res 1
 poly_prod_hi:   .res 1
 
-mul_a:          .res 1
-mul_b:          .res 1
-mul_s_pg:       .res 1
-
 ; Temporaries for sqtab_init
 sq_acc:         .res 3          ; 24-bit accumulator for i^2
 sq_sh:          .res 3          ; 24-bit shifted result (i^2 / 4)
@@ -223,31 +219,15 @@ sqtab_init:
 ; Uses identity: a*b = sqtab[a+b] - sqtab[|a-b|]
 ; Clobbers: A, X, Y
 ; =============================================================================
-.if .defined(USE_NISTCURVES_ONCHIP) .or .defined(USE_X25519_SIBLING)
-; --- c64-lib-contract §8.3 canonical body (issue #69 integration) ---
-; The sibling's FP_ONCHIP_MUL row generator (og_common, rebuilt with
-; SHARED_CT_MUL_8X8) imports ct_mul_8x8 + the SMC bake sites from the
-; consumer. Body copied verbatim from libs/nistcurves/src/mul_8x8.s
-; (the §8.3 reference copy). Convention: caller bakes `a` into
-; smc_sum_a_imm+1 / smc_diff_a_imm+1 once per row, passes b in Y.
-; The legacy in-tree convention (A=a, X=b, re-baked per call) is kept
-; as the thin `mul_8x8` shim for poly1305/fe25519 call sites.
-;
-; USE_X25519_SIBLING selects this body too, as of the c64-x25519
-; v0.10.0 bump. From v0.7.0 the sibling's x25519_init.s imports
-; ct_mul_8x8 + both SMC bake sites UNCONDITIONALLY (it used to carry
-; its own copy in mul_8x8.s, which this wrapper does not stage because
-; that file's other exports collide with in-tree ones). Without this
-; arm the sibling link dies on three unresolved externals — and it
-; dies *behind* the memory-area overflows, so it only becomes visible
-; once the placement problem is solved.
-;
-; The two arms are functionally equivalent implementations of the same
-; a*b -> poly_prod_lo/hi contract, so widening the gate is a strict
-; no-op for every configuration that does not set one of these flags:
-; the default REU builds on both backends stay byte-identical (verified
-; by PRG sha256, not by inspection). The two flags are mutually
-; exclusive at Makefile:90, so this arm is never selected twice.
+; --- c64-lib-contract §8.3 canonical body, every profile ---
+; Both siblings import ct_mul_8x8 + the SMC bake sites from the consumer:
+; libs/nistcurves' FP_ONCHIP_MUL row generator (og_common, rebuilt with
+; SHARED_CT_MUL_8X8) and the X25519 sibling's onchip fe25519_mul, which
+; every build links (issue #245). Body copied verbatim from
+; libs/nistcurves/src/mul_8x8.s (the §8.3 reference copy). Convention:
+; caller bakes `a` into smc_sum_a_imm+1 / smc_diff_a_imm+1 once per row,
+; passes b in Y. The legacy in-tree convention (A=a, X=b, re-baked per
+; call) is kept as the thin `mul_8x8` shim for poly1305 and reu_mul_init.
 .export ct_mul_8x8
 .export smc_sum_a_imm, smc_diff_a_imm
 
@@ -299,52 +279,6 @@ smc_hi_addr:
 
 ct_diff_raw:    .byte 0
 ct_sign_mask:   .byte 0
-
-.else
-mul_8x8:
-        sta mul_a               ; save A
-        stx mul_b               ; save X
-
-        ; Compute sum = a + b
-        clc
-        adc mul_b               ; A = a + b (low byte)
-        tax                     ; X = sum low byte
-        lda #0
-        adc #0                  ; carry -> sum page (0 or 1)
-        sta mul_s_pg            ; sum page
-
-        ; Compute |a - b|
-        lda mul_a
-        sec
-        sbc mul_b
-        bcs :+
-        eor #$ff
-        adc #1                  ; negate (carry was clear, so ADC adds 1)
-:       tay                     ; Y = |a-b| (always page 0, <=255)
-
-        ; sqtab[sum] - sqtab[|diff|]
-        lda mul_s_pg
-        beq @s0
-        ; sum is in page 1 (256..510)
-        lda sqtab_lo+256,x
-        sec
-        sbc sqtab_lo,y
-        sta poly_prod_lo
-        lda sqtab_hi+256,x
-        sbc sqtab_hi,y
-        sta poly_prod_hi
-        rts
-@s0:
-        ; sum is in page 0 (0..255)
-        lda sqtab_lo,x
-        sec
-        sbc sqtab_lo,y
-        sta poly_prod_lo
-        lda sqtab_hi,x
-        sbc sqtab_hi,y
-        sta poly_prod_hi
-        rts
-.endif ; USE_NISTCURVES_ONCHIP / USE_X25519_SIBLING
 
 ; =============================================================================
 ; poly1305_multiply - Multiply h (17 bytes) by r (16 bytes), reduce mod 2^130-5

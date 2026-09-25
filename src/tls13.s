@@ -484,6 +484,22 @@ tls_recv_server_hello:
         lda #$05
         sta tls_recv_progress
 
+        ; Fold ServerHello into the transcript NOW, before the drain and the
+        ; shared-secret mult: this is the last read of tls_rec_buf for this
+        ; record, and the X25519 sibling's field buffers overlay tls_rec_buf
+        ; (X25519_SCRATCH in the cfgs, issue #245), so the mult below
+        ; overwrites it. Order-independent otherwise: the transcript hash of
+        ; SH does not depend on the shared secret.
+        lda #<tls_rec_buf
+        sta zp_ptr
+        lda #>tls_rec_buf
+        sta zp_ptr+1
+        lda tls_rec_len
+        sta zp_count
+        lda tls_rec_len+1
+        sta zp_count+1
+        jsr tls_transcript_update
+
         ; Drain frames already at the NIC and ACK them BEFORE the
         ; multi-minute ECDHE stall. The server's post-SH flight is on
         ; the wire/in the chip by now (it splits at the 512 B default
@@ -529,17 +545,6 @@ tls_recv_server_hello:
         ; src/tls_ecdh.s. This used to be an unconditional `clc`.
         jsr tls_ecdh_compute_shared
         bcs @sh_error
-
-        ; update transcript with ServerHello
-        lda #<tls_rec_buf
-        sta zp_ptr
-        lda #>tls_rec_buf
-        sta zp_ptr+1
-        lda tls_rec_len
-        sta zp_count
-        lda tls_rec_len+1
-        sta zp_count+1
-        jsr tls_transcript_update
 
         clc
         rts

@@ -19,6 +19,8 @@
 ;   x25_result (32 bytes) = output
 ;   x25519_base           = scalar * basepoint(9) (clamps + scalarmult)
 ;   x25519_scalarmult     = scalar * u (raw, caller must clamp)
+;   x25519_tables_init    = fill the sibling's lookup tables; called ahead
+;                           of every scalar mult (src/crypto/x25519_tables.s)
 
 .include "constants.inc"
 
@@ -27,6 +29,7 @@
 
 .import x25519_base
 .import x25519_scalarmult
+.import x25519_tables_init
 .import vic_blank
 .import vic_unblank
 .import x25519_clamp
@@ -56,6 +59,8 @@ tls_ecdh_generate_keypair:
         sta x25_scalar,x
         dex
         bpl @copy_priv
+
+        jsr x25519_tables_init
 
         ; Compute public key = scalar * basepoint(9)
         ; x25519_base handles clamping and copies basepoint to x25_u.
@@ -104,6 +109,7 @@ tls_ecdh_compute_shared:
         bpl @copy_srv
 
         ; Compute shared secret = scalar * server_pubkey
+        jsr x25519_tables_init
         jsr vic_blank
         jsr x25519_scalarmult
         jsr vic_unblank

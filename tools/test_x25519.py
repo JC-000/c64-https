@@ -1,34 +1,39 @@
 #!/usr/bin/env python3
-"""test_x25519.py -- fe25519 field arithmetic and X25519 key exchange tests.
+"""test_x25519.py -- X25519 field arithmetic and key exchange tests.
 
-Tests fe_add, fe_sub, fe_mul, fe_sqr, fe_inv, fe_cswap, fe_mul_a24,
-fe_copy, fe_zero, fe_one, x25519_clamp, and x25519_scalarmult against
-Python reference implementations and RFC 7748 test vectors.
+Drives the libs/x25519 sibling that every build links (issue #245 retired
+the in-tree src/crypto/{x25519,fe25519}.s): fe25519_add / sub / mul / sqr /
+inv / cswap / mul_a24 / copy / zero / one, fe_reduce_wide, x25519_clamp and
+x25519_scalarmult, against Python reference implementations and RFC 7748
+test vectors. Also checks src/crypto/x25519_tables.s, which generates the
+sibling's lookup tables at runtime instead of shipping them as RODATA.
 
-The two RFC 7748 scalarmult vectors run BY DEFAULT. They are the only
-end-to-end `x25519_scalarmult` coverage in this file -- everything else
-is field arithmetic -- so a run that omits them certifies nothing about
-X25519 itself. They used to be gated behind `--slow` on the strength of
-a "~100 min each" comment; measured under VICE warp on the in-tree ip65
-build they cost **~16.5 s each** (full suite 37.9 s with them, 4.8 s
-without). The gate was buying 33 seconds and hiding the only test that
-matters. `--fast` still skips them, and any skip is now named in the
-summary line rather than silently leaving the denominator.
+The end-to-end scalarmult groups (RFC 7748 vectors, the #242 capture, the
+#244 a24 trap, and a random-scalar loop against a Python RFC 7748 ladder)
+run by default; each scalar mult is ~15 s under VICE warp. `--fast` skips
+them and says so in the summary line.
 
 Uses the binary monitor test harness -- jsr() is event-based via
 checkpoints, so no polling or retry wrappers are needed.
 
 Usage:
-    python3 tools/test_x25519.py [--seed S] [--verbose] [--fast]
+    python3 tools/test_x25519.py [--seed S] [--verbose] [--fast] [--keygen N]
 
-    --fast   skip the RFC 7748 scalarmult vectors (~33 s). The summary
-             line then reports them as SKIPPED.
-    --slow   accepted and ignored; the vectors it used to enable are
-             now the default.
+    --fast      skip every scalarmult group. The summary line then reports
+                them as SKIPPED.
+    --keygen N  random scalar mults checked against the Python ladder
+                (default 4). #242 was a ~1.3%-per-mult defect, so the
+                default loop is a smoke test, not a rate bound; run a few
+                hundred to bound a rate.
+    --keygen-only  run only the table check and the random-scalar loop (for
+                long rate-bounding batches; parallel copies with distinct
+                --seed values and C64_SKIP_BUILD=1 share one PRG).
+    --slow      accepted and ignored.
 """
 
 import os
 import random
+import re
 import subprocess
 import sys
 
@@ -46,6 +51,32 @@ LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 
 VERBOSE = False
 FAST = False
+KEYGEN_N = 4
+KEYGEN_ONLY = False
+
+# The sibling's ZP slots are its own zp_config.s defaults (the wrapper passes
+# no overrides, tools/integration/build_x25519.sh ZP_DEFINES=()), and they are
+# not in labels.txt: constants.s includes zp_config.s with exports suppressed.
+# Read them from the pinned source rather than restating addresses here.
+X25519_SRC = os.path.join(PROJECT_ROOT, "libs", "x25519", "src")
+
+
+def load_sibling_zp():
+    zp = {}
+    pat = re.compile(r"^\s*([a-z0-9_]+)\s*=\s*\$([0-9a-fA-F]{2})\b")
+    for name in ("zp_config.s", "constants.s"):
+        with open(os.path.join(X25519_SRC, name)) as f:
+            for line in f:
+                m = pat.match(line)
+                if m:
+                    zp.setdefault(m.group(1), int(m.group(2), 16))
+    for need in ("fe25519_src1", "fe25519_src2", "fe25519_dst", "fe_wide"):
+        if need not in zp:
+            raise SystemExit(f"FATAL: {need} not found in libs/x25519 zp_config.s/constants.s")
+    return zp
+
+
+ZP = {}
 
 # p = 2^255 - 19
 P = (1 << 255) - 19
@@ -120,15 +151,15 @@ EXPECTED_2 = bytes.fromhex(
 # ============================================================================
 
 def set_fe_ptrs(transport, labels, src1=None, src2=None, dst=None):
-    """Set fe_src1, fe_src2, fe_dst zero-page pointers."""
+    """Set the sibling's fe25519_src1 / src2 / dst zero-page pointers."""
     if src1 is not None:
-        write_bytes(transport, labels["fe_src1"],
+        write_bytes(transport, ZP["fe25519_src1"],
                     bytes([src1 & 0xFF, src1 >> 8]))
     if src2 is not None:
-        write_bytes(transport, labels["fe_src2"],
+        write_bytes(transport, ZP["fe25519_src2"],
                     bytes([src2 & 0xFF, src2 >> 8]))
     if dst is not None:
-        write_bytes(transport, labels["fe_dst"],
+        write_bytes(transport, ZP["fe25519_dst"],
                     bytes([dst & 0xFF, dst >> 8]))
 
 
@@ -144,96 +175,96 @@ def read_fe(transport, addr):
 
 def c64_fe_add(transport, labels, a, b):
     """Compute a + b mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
-    write_fe(transport, labels["fe_tmp2"], b)
+    write_fe(transport, labels["fe25519_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp2"], b)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                src2=labels["fe_tmp2"],
-                dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_add"])
-    return read_fe(transport, labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                src2=labels["fe25519_tmp2"],
+                dst=labels["fe25519_tmp3"])
+    jsr(transport, labels["fe25519_add"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_sub(transport, labels, a, b):
     """Compute a - b mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
-    write_fe(transport, labels["fe_tmp2"], b)
+    write_fe(transport, labels["fe25519_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp2"], b)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                src2=labels["fe_tmp2"],
-                dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_sub"])
-    return read_fe(transport, labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                src2=labels["fe25519_tmp2"],
+                dst=labels["fe25519_tmp3"])
+    jsr(transport, labels["fe25519_sub"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_mul(transport, labels, a, b):
     """Compute a * b mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
-    write_fe(transport, labels["fe_tmp2"], b)
+    write_fe(transport, labels["fe25519_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp2"], b)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                src2=labels["fe_tmp2"],
-                dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_mul"], timeout=120.0)
-    return read_fe(transport, labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                src2=labels["fe25519_tmp2"],
+                dst=labels["fe25519_tmp3"])
+    jsr(transport, labels["fe25519_mul"], timeout=120.0)
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_sqr(transport, labels, a):
     """Compute a^2 mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp1"], a)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_sqr"], timeout=120.0)
-    return read_fe(transport, labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                dst=labels["fe25519_tmp3"])
+    jsr(transport, labels["fe25519_sqr"], timeout=120.0)
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_inv(transport, labels, a):
     """Compute a^(p-2) mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp1"], a)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                dst=labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                dst=labels["fe25519_tmp3"])
     # fe_inv takes ~253 squarings + 11 muls -- very slow
-    jsr(transport, labels["fe_inv"], timeout=600.0)
-    return read_fe(transport, labels["fe_tmp3"])
+    jsr(transport, labels["fe25519_inv"], timeout=600.0)
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_mul_a24(transport, labels, a):
     """Compute a * 121665 mod p on C64."""
-    write_fe(transport, labels["fe_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp1"], a)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_mul_a24"], timeout=60.0)
-    return read_fe(transport, labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                dst=labels["fe25519_tmp3"])
+    jsr(transport, labels["fe25519_mul_a24"], timeout=60.0)
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_copy(transport, labels, a):
     """Copy a field element via fe_copy."""
-    write_fe(transport, labels["fe_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp1"], a)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_copy"])
-    return read_fe(transport, labels["fe_tmp3"])
+                src1=labels["fe25519_tmp1"],
+                dst=labels["fe25519_tmp3"])
+    jsr(transport, labels["fe25519_copy"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_zero(transport, labels):
     """Zero a field element via fe_zero."""
     # Write nonzero first to prove it gets zeroed
-    write_fe(transport, labels["fe_tmp3"], P - 1)
-    set_fe_ptrs(transport, labels, dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_zero"])
-    return read_fe(transport, labels["fe_tmp3"])
+    write_fe(transport, labels["fe25519_tmp3"], P - 1)
+    set_fe_ptrs(transport, labels, dst=labels["fe25519_tmp3"])
+    jsr(transport, labels["fe25519_zero"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_fe_one(transport, labels):
     """Set a field element to 1 via fe_one."""
-    write_fe(transport, labels["fe_tmp3"], P - 1)
-    set_fe_ptrs(transport, labels, dst=labels["fe_tmp3"])
-    jsr(transport, labels["fe_one"])
-    return read_fe(transport, labels["fe_tmp3"])
+    write_fe(transport, labels["fe25519_tmp3"], P - 1)
+    set_fe_ptrs(transport, labels, dst=labels["fe25519_tmp3"])
+    jsr(transport, labels["fe25519_one"])
+    return read_fe(transport, labels["fe25519_tmp3"])
 
 
 def c64_x25519_clamp(transport, labels, scalar):
@@ -261,6 +292,13 @@ def c64_x25519_scalarmult(transport, labels, scalar, u):
 
 # ============================================================================
 # Test functions -- fe25519 field operations
+#
+# The sibling's field ops return any 32-byte value congruent to the result
+# (R < 2^256 = 2p + 38; only fe25519_reduce_final and the end of
+# x25519_scalarmult canonicalize — libs/x25519 fe25519.s, "Inv3"), so the
+# checks below compare mod p. The retired in-tree copy happened to return
+# canonical values; exact comparison against the sibling fails on e.g.
+# 1^2 = p + 1.
 # ============================================================================
 
 def test_fe_copy_zero_one(transport, labels):
@@ -320,7 +358,7 @@ def test_fe_add(transport, labels, rng):
     for name, a, b in cases:
         expected = fe_add_ref(a, b)
         result = c64_fe_add(transport, labels, a, b)
-        if result == expected:
+        if result % P == expected:
             passed += 1
             if VERBOSE:
                 print(f"  PASS add {name}")
@@ -350,7 +388,7 @@ def test_fe_sub(transport, labels, rng):
     for name, a, b in cases:
         expected = fe_sub_ref(a, b)
         result = c64_fe_sub(transport, labels, a, b)
-        if result == expected:
+        if result % P == expected:
             passed += 1
             if VERBOSE:
                 print(f"  PASS sub {name}")
@@ -380,7 +418,7 @@ def test_fe_mul(transport, labels, rng):
     for name, a, b in cases:
         expected = fe_mul_ref(a, b)
         result = c64_fe_mul(transport, labels, a, b)
-        if result == expected:
+        if result % P == expected:
             passed += 1
             if VERBOSE:
                 print(f"  PASS mul {name}")
@@ -404,7 +442,7 @@ def test_fe_sqr(transport, labels, rng):
     for i, a in enumerate(cases):
         expected = fe_sqr_ref(a)
         result = c64_fe_sqr(transport, labels, a)
-        if result == expected:
+        if result % P == expected:
             passed += 1
             if VERBOSE:
                 print(f"  PASS sqr #{i}")
@@ -430,7 +468,7 @@ def test_fe_inv(transport, labels, rng):
         inv_a = c64_fe_inv(transport, labels, a)
         expected = fe_inv_ref(a)
 
-        if inv_a == expected:
+        if inv_a % P == expected:
             passed += 1
             print(" PASS" if VERBOSE else " ok")
         else:
@@ -451,22 +489,22 @@ def test_fe_cswap(transport, labels, rng):
     a = rand_fe(rng)
     b = rand_fe(rng)
 
-    cswap_addr = labels["fe_cswap"]
+    cswap_addr = labels["fe25519_cswap"]
     trampoline = labels["input_buffer"]
 
     # No-swap test (mask = $00)
-    write_fe(transport, labels["fe_tmp1"], a)
-    write_fe(transport, labels["fe_tmp2"], b)
+    write_fe(transport, labels["fe25519_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp2"], b)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                src2=labels["fe_tmp2"])
+                src1=labels["fe25519_tmp1"],
+                src2=labels["fe25519_tmp2"])
     write_bytes(transport, trampoline, bytes([
         0xA9, 0x00,                                        # LDA #$00
         0x4C, cswap_addr & 0xFF, cswap_addr >> 8,         # JMP fe_cswap
     ]))
     jsr(transport, trampoline)
-    r_a = read_fe(transport, labels["fe_tmp1"])
-    r_b = read_fe(transport, labels["fe_tmp2"])
+    r_a = read_fe(transport, labels["fe25519_tmp1"])
+    r_b = read_fe(transport, labels["fe25519_tmp2"])
 
     if r_a == a and r_b == b:
         passed += 1
@@ -477,18 +515,18 @@ def test_fe_cswap(transport, labels, rng):
         print(f"  FAIL cswap no-swap: a changed={r_a != a}, b changed={r_b != b}")
 
     # Swap test (mask = $FF)
-    write_fe(transport, labels["fe_tmp1"], a)
-    write_fe(transport, labels["fe_tmp2"], b)
+    write_fe(transport, labels["fe25519_tmp1"], a)
+    write_fe(transport, labels["fe25519_tmp2"], b)
     set_fe_ptrs(transport, labels,
-                src1=labels["fe_tmp1"],
-                src2=labels["fe_tmp2"])
+                src1=labels["fe25519_tmp1"],
+                src2=labels["fe25519_tmp2"])
     write_bytes(transport, trampoline, bytes([
         0xA9, 0xFF,                                        # LDA #$FF
         0x4C, cswap_addr & 0xFF, cswap_addr >> 8,         # JMP fe_cswap
     ]))
     jsr(transport, trampoline)
-    r_a = read_fe(transport, labels["fe_tmp1"])
-    r_b = read_fe(transport, labels["fe_tmp2"])
+    r_a = read_fe(transport, labels["fe25519_tmp1"])
+    r_b = read_fe(transport, labels["fe25519_tmp2"])
 
     if r_a == b and r_b == a:
         passed += 1
@@ -512,7 +550,7 @@ def test_fe_mul_a24(transport, labels, rng):
     for i, a in enumerate(cases):
         expected = fe_mul_a24_ref(a)
         result = c64_fe_mul_a24(transport, labels, a)
-        if result == expected:
+        if result % P == expected:
             passed += 1
             if VERBOSE:
                 print(f"  PASS mul_a24 #{i}")
@@ -533,7 +571,7 @@ def test_fe_add_sub_inverse(transport, labels, rng):
         b = rand_fe(rng)
         sum_ab = c64_fe_add(transport, labels, a, b)
         result = c64_fe_sub(transport, labels, sum_ab, b)
-        if result == a:
+        if result % P == a:
             passed += 1
             if VERBOSE:
                 print(f"  PASS add_sub_inverse #{i}")
@@ -679,9 +717,9 @@ def test_fe_reduce_wide_carry(transport, labels):
     """fe_reduce_wide must propagate its final-fold carry through $FF bytes."""
     passed = failed = 0
     for name, wide in REDUCE_WIDE_VECTORS:
-        write_bytes(transport, labels["fe_wide"], wide)
+        write_bytes(transport, ZP["fe_wide"], wide)
         jsr(transport, labels["fe_reduce_wide"], timeout=60.0)
-        got = le32_to_int(bytes(read_bytes(transport, labels["fe_wide"], 32)))
+        got = le32_to_int(bytes(read_bytes(transport, ZP["fe_wide"], 32)))
         want = int.from_bytes(wide, "little") % P
         if got % P == want:
             passed += 1
@@ -802,58 +840,146 @@ def test_x25519_issue_242_keygen(transport, labels):
     return passed, failed
 
 
+# ----------------------------------------------------------------------------
+# src/crypto/x25519_tables.s generates the sibling's lookup tables at
+# runtime. A wrong entry is a wrong field op on some inputs only, which the
+# vectors above may never touch, so compare all 2 KB against upstream's
+# definitions (libs/x25519/src/data.s).
+# ----------------------------------------------------------------------------
+
+def expected_tables():
+    t = {}
+    t["mul38_lo_tab"] = bytes((i * 38) & 0xFF for i in range(256))
+    t["mul38_hi_tab"] = bytes((i * 38) >> 8 for i in range(256))
+    t["sqr_lo"] = bytes((i * i) & 0xFF for i in range(256))
+    t["sqr_hi"] = bytes((i * i) >> 8 for i in range(256))
+    for k in range(4):
+        t[f"a24_b{k}"] = bytes(((121665 * i) >> (8 * k)) & 0xFF
+                               for i in range(256))
+    return t
+
+
+def test_x25519_tables(transport, labels):
+    """Every generated table byte equals upstream's .repeat definition."""
+    passed = failed = 0
+    for name, want in expected_tables().items():
+        addr = labels[name]
+        got = bytes(read_bytes(transport, addr, 256))
+        if addr & 0xFF:
+            failed += 1
+            print(f"  FAIL {name} at ${addr:04X} is not page-aligned")
+        elif got == want:
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS {name}")
+        else:
+            failed += 1
+            bad = [i for i in range(256) if got[i] != want[i]]
+            print(f"  FAIL {name}: {len(bad)} wrong entries, first i={bad[0]}"
+                  f" want {want[bad[0]]:#04x} got {got[bad[0]]:#04x}")
+    return passed, failed
+
+
+# ----------------------------------------------------------------------------
+# Random scalars against a Python RFC 7748 ladder. This is the group that can
+# see a rare-input defect like #242 (~1.3% of mults); the fixed vectors above
+# cannot. `--keygen N` sets the count.
+# ----------------------------------------------------------------------------
+
+def x25519_ref(k, u):
+    """RFC 7748 §5 X25519 (decodeScalar25519 + decodeUCoordinate + ladder)."""
+    k = bytearray(k)
+    k[0] &= 248
+    k[31] &= 127
+    k[31] |= 64
+    k = int.from_bytes(k, "little")
+    x1 = int.from_bytes(u, "little") & ((1 << 255) - 1)
+    x2, z2, x3, z3, swap = 1, 0, x1, 1, 0
+    for t in reversed(range(255)):
+        kt = (k >> t) & 1
+        swap ^= kt
+        if swap:
+            x2, x3, z2, z3 = x3, x2, z3, z2
+        swap = kt
+        a, b = (x2 + z2) % P, (x2 - z2) % P
+        aa, bb = a * a % P, b * b % P
+        e = (aa - bb) % P
+        c, d = (x3 + z3) % P, (x3 - z3) % P
+        da, cb = d * a % P, c * b % P
+        x3 = (da + cb) ** 2 % P
+        z3 = x1 * (da - cb) ** 2 % P
+        x2 = aa * bb % P
+        z2 = e * (aa + 121665 * e) % P
+    if swap:
+        x2, z2 = x3, z3
+    return (x2 * pow(z2, P - 2, P) % P).to_bytes(32, "little")
+
+
+def test_x25519_random_keygen(transport, labels, rng):
+    """N random scalars: keygen (u=9) and a random-u mult, vs x25519_ref."""
+    passed = failed = 0
+    assert x25519_ref(SCALAR_1, U_1) == EXPECTED_1  # the reference itself
+    for i in range(KEYGEN_N):
+        k = bytes(rng.getrandbits(8) for _ in range(32))
+        u = (9).to_bytes(32, "little") if i % 2 == 0 else \
+            bytes(rng.getrandbits(8) for _ in range(32))
+        want = x25519_ref(k, u)
+        got = c64_x25519_scalarmult(transport, labels, k, u)
+        if got == want:
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS random #{i}")
+        else:
+            failed += 1
+            print(f"  FAIL random #{i}: k={k.hex()} u={u.hex()}")
+            print(f"    expected: {want.hex()}")
+            print(f"    got:      {bytes(got).hex()}")
+    return passed, failed
+
+
 # ============================================================================
 # Main
 # ============================================================================
 
 def run_tests(transport, labels, seed):
-    """Run all test groups. Returns (passed, failed)."""
+    """Run all test groups. Returns (passed, failed, skipped_groups)."""
     rng = random.Random(seed)
     total_passed = 0
     total_failed = 0
 
-    # A USE_X25519_SIBLING=1 link contains no src/crypto/fe25519.s, so its
-    # private fe_* entry points are absent and these nine groups cannot
-    # run. main() has already verified that the absence is total (see the
-    # required-label split there) rather than a partial link.
-    sibling_build = labels.address("fe_copy") is None
+    # The sibling's lookup tables are generated, not loaded; tls_ecdh.s
+    # builds them ahead of every scalar mult, and so must a harness that
+    # calls the field ops directly.
+    jsr(transport, labels["x25519_tables_init"], timeout=60.0)
 
-    fe_groups = [
-        ("fe_copy/zero/one",
+    test_groups = [
+        ("x25519_tables_init",
+         lambda: test_x25519_tables(transport, labels)),
+        ("fe25519 copy/zero/one",
          lambda: test_fe_copy_zero_one(transport, labels)),
-        ("fe_add",
+        ("fe25519_add",
          lambda: test_fe_add(transport, labels, rng)),
-        ("fe_sub",
+        ("fe25519_sub",
          lambda: test_fe_sub(transport, labels, rng)),
-        ("fe_add/sub inverse",
+        ("fe25519 add/sub inverse",
          lambda: test_fe_add_sub_inverse(transport, labels, rng)),
-        ("fe_mul",
+        ("fe25519_mul",
          lambda: test_fe_mul(transport, labels, rng)),
-        ("fe_sqr",
+        ("fe25519_sqr",
          lambda: test_fe_sqr(transport, labels, rng)),
-        ("fe_mul_a24",
+        ("fe25519_mul_a24",
          lambda: test_fe_mul_a24(transport, labels, rng)),
-        ("fe_cswap",
+        ("fe25519_cswap",
          lambda: test_fe_cswap(transport, labels, rng)),
-        ("fe_inv",
+        ("fe25519_inv",
          lambda: test_fe_inv(transport, labels, rng)),
         ("fe_reduce_wide carry (#242)",
          lambda: test_fe_reduce_wide_carry(transport, labels)),
-        ("fe_mul_a24 fold carry (#244 review)",
+        ("fe25519_mul_a24 fold carry (#244)",
          lambda: test_fe_mul_a24_fold_carry(transport, labels)),
-    ]
-
-    skipped_groups = []
-    if sibling_build:
-        skipped_groups += [name for name, _ in fe_groups]
-        test_groups = []
-    else:
-        test_groups = list(fe_groups)
-
-    # x25519_clamp is public: both implementations export it.
-    test_groups.append(
         ("x25519_clamp",
-         lambda: test_x25519_clamp(transport, labels, rng)))
+         lambda: test_x25519_clamp(transport, labels, rng)),
+    ]
     scalarmult_groups = [
         ("x25519 RFC 7748 vector 1",
          lambda: test_x25519_rfc7748_vector1(transport, labels)),
@@ -861,15 +987,21 @@ def run_tests(transport, labels, seed):
          lambda: test_x25519_rfc7748_vector2(transport, labels)),
         ("x25519 #242 captured keygen",
          lambda: test_x25519_issue_242_keygen(transport, labels)),
-        ("x25519 fe_mul_a24 trap u",
+        ("x25519 fe25519_mul_a24 trap u (#244)",
          lambda: test_x25519_a24_trap_u(transport, labels)),
+        (f"x25519 random scalars x{KEYGEN_N}",
+         lambda: test_x25519_random_keygen(transport, labels, rng)),
     ]
-    if FAST:
+    skipped_groups = []
+    if KEYGEN_ONLY:
+        skipped_groups += [name for name, _ in test_groups[1:]
+                           + scalarmult_groups[:-1]]
+        test_groups = test_groups[:1] + scalarmult_groups[-1:]
+    elif FAST:
         # A skipped group must not silently leave the denominator: record
-        # it so the verdict can name it. These two are the only end-to-end
-        # x25519_scalarmult coverage in the file.
+        # it so the verdict can name it.
         skipped_groups += [name for name, _ in scalarmult_groups]
-        print("\n  (--fast: skipping x25519 scalarmult vectors, ~33 s)")
+        print("\n  (--fast: skipping every x25519 scalarmult group)")
     else:
         test_groups += scalarmult_groups
 
@@ -891,7 +1023,7 @@ def run_tests(transport, labels, seed):
 
 
 def main():
-    global VERBOSE, FAST
+    global VERBOSE, FAST, KEYGEN_N, KEYGEN_ONLY, ZP
     os.chdir(PROJECT_ROOT)
 
     seed = random.randint(0, 2**32 - 1)
@@ -907,6 +1039,12 @@ def main():
         elif args[i] == "--fast":
             FAST = True
             i += 1
+        elif args[i] == "--keygen-only":
+            KEYGEN_ONLY = True
+            i += 1
+        elif args[i] == "--keygen" and i + 1 < len(args):
+            KEYGEN_N = int(args[i + 1])
+            i += 2
         elif args[i] == "--slow":
             # Back-compat no-op: the vectors --slow used to enable now
             # run by default. Kept so existing invocations don't break.
@@ -918,13 +1056,12 @@ def main():
     print(f"Random seed: {seed} (reproduce with --seed {seed})")
 
     # Build
-    # BACKEND env var (ip65 or uci) selects the linker cfg. Defaults to
-    # ip65 so the legacy test path is unchanged; under uci the c64-x25519
-    # sibling archive (REU overlay) provides fe25519/x25519 instead of
-    # the in-tree sources.
+    # BACKEND (ip65|uci) and MAKE_ARGS (e.g. "USE_NISTCURVES_ONCHIP=1")
+    # select the profile. Every profile links the same X25519 archive, but
+    # its buffers sit in different unions per cfg, so run more than one.
     backend = os.environ.get("BACKEND", "ip65")
-    make_args = [f"BACKEND={backend}"]
-    print(f"\n=== Building (BACKEND={backend}) ===")
+    make_args = [f"BACKEND={backend}"] + os.environ.get("MAKE_ARGS", "").split()
+    print(f"\n=== Building ({' '.join(make_args)}) ===")
     if os.environ.get("C64_SKIP_BUILD") != "1":
         subprocess.run(["make", "clean"] + make_args,
                        capture_output=True, cwd=PROJECT_ROOT)
@@ -942,73 +1079,20 @@ def main():
     # Load labels
     labels = Labels.from_file(LABELS_PATH)
 
-    # The fe_* unit-test groups drive the IN-TREE src/crypto/fe25519.s by
-    # its private symbol names. A `USE_X25519_SIBLING=1` build evicts that
-    # file from the link (Makefile CRYPTO_SRCS_EFFECTIVE) and the sibling
-    # exports the contract's `fe25519_*` surface instead, so none of these
-    # labels exist there and the script used to abort at
-    # `FATAL: 'fe_copy' label not found` before launching VICE — i.e. the
-    # sibling had NO runnable coverage at all, which is a bad thing to
-    # discover only after deciding to flip the default.
-    #
-    # The public path is spelled identically by both implementations, so
-    # the RFC 7748 vectors — the only end-to-end scalarmult coverage in
-    # this file — run against either. Split the requirement list
-    # accordingly: the public set is mandatory always, the fe_* set is
-    # mandatory only when the build claims to contain it.
-    #
-    # Detection is by ABSENCE OF THE WHOLE FAMILY, never by one probe
-    # label: a partially-linked in-tree build must still fail loudly
-    # rather than quietly downgrade itself to two vectors.
-    required_public = [
-        "x25519_clamp", "x25519_scalarmult",
+    ZP = load_sibling_zp()
+    required = [
+        "x25519_clamp", "x25519_scalarmult", "x25519_tables_init",
         "x25_scalar", "x25_u", "x25_result",
+        "fe25519_copy", "fe25519_zero", "fe25519_one",
+        "fe25519_add", "fe25519_sub", "fe25519_mul", "fe25519_sqr",
+        "fe25519_inv", "fe25519_cswap", "fe25519_mul_a24", "fe_reduce_wide",
+        "fe25519_tmp1", "fe25519_tmp2", "fe25519_tmp3",
         "input_buffer",
-    ]
-    # Detection reads the ROUTINE entry points only. `fe_src1/2/dst` are ZP
-    # equates from src/constants.inc and are present in every link,
-    # sibling or not (measured: those three are exactly what survives), so
-    # including them in the probe set makes it never fire.
-    required_intree_fe_routines = [
-        "fe_copy", "fe_zero", "fe_one",
-        "fe_add", "fe_sub", "fe_mul", "fe_sqr", "fe_inv",
-        "fe_cswap", "fe_mul_a24", "fe_reduce_wide",
-    ]
-    required_intree_fe_data = [
-        "fe_src1", "fe_src2", "fe_dst",
-        "fe_tmp1", "fe_tmp2", "fe_tmp3", "fe_wide",
-    ]
-    required_intree_fe = required_intree_fe_routines + required_intree_fe_data
-
-    fe_present = [n for n in required_intree_fe_routines
-                  if labels.address(n) is not None]
-    sibling_build = len(fe_present) == 0
-    if fe_present and len(fe_present) != len(required_intree_fe_routines):
-        # Partial presence is neither an in-tree build nor a sibling one.
-        # Fail rather than guess: silently downgrading to two vectors here
-        # is how a broken link passes as a green run.
-        missing = [n for n in required_intree_fe_routines
-                   if labels.address(n) is None]
-        print("FATAL: in-tree fe25519 is only partially linked — present "
-              f"{fe_present}, missing {missing}. Neither an in-tree nor a "
-              "USE_X25519_SIBLING build; not guessing.")
-        sys.exit(1)
-
-    required = list(required_public)
-    if not sibling_build:
-        required += required_intree_fe
-
+    ] + list(expected_tables())
     for name in required:
         if labels.address(name) is None:
             print(f"FATAL: '{name}' label not found in {LABELS_PATH}")
             sys.exit(1)
-
-    if sibling_build:
-        print("  NOTE: no in-tree fe_* symbols in this link — treating it as a")
-        print("        USE_X25519_SIBLING=1 build. The fe_* unit groups are")
-        print("        SKIPPED (they test src/crypto/fe25519.s internals, which")
-        print("        this PRG does not contain); the RFC 7748 end-to-end")
-        print("        vectors still run and are the whole of the coverage.")
 
     print(f"  Labels loaded: {len(required)} required labels verified")
 
@@ -1021,7 +1105,11 @@ def main():
         transport = inst.transport
         print(f"VICE PID={inst.pid}, port={inst.port}")
 
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        # Comb builds run the boot precompute first (C64_INIT_TIMEOUT, as in
+        # test_ecdsa_kat_oracle.py).
+        grid = wait_for_text(transport, "Q=QUIT",
+                             timeout=float(os.environ.get("C64_INIT_TIMEOUT", "60")),
+                             verbose=False)
         if grid is None:
             print("FATAL: Program menu did not appear")
             sys.exit(1)
@@ -1046,21 +1134,9 @@ def main():
         summary += (f" -- {len(skipped_groups)} group(s) SKIPPED: "
                     + ", ".join(skipped_groups))
     print(summary)
-    # Two different skips are possible and they mean opposite things, so
-    # the warning must name the one that actually happened rather than
-    # firing on any skip at all. --fast drops the only end-to-end
-    # coverage; a sibling build drops the field-arithmetic units but
-    # KEEPS the end-to-end vectors.
-    scalarmult_skipped = any(g.startswith("x25519 RFC 7748")
-                             for g in skipped_groups)
-    fe_skipped = any(g.startswith("fe_") for g in skipped_groups)
-    if scalarmult_skipped:
-        print("WARNING: end-to-end x25519_scalarmult coverage did NOT run; "
-              "this run does not certify X25519.")
-    elif fe_skipped:
-        print("NOTE: field-arithmetic unit coverage did NOT run (no in-tree "
-              "fe25519 in this link). The RFC 7748 end-to-end vectors did, "
-              "and are the whole of this run's evidence.")
+    if skipped_groups:
+        print("WARNING: not every group ran (see SKIPPED above); this run "
+              "does not certify X25519 on its own.")
     print(f"{'='*60}")
     sys.exit(verdict(passed, failed, certifies="X25519"))
 
