@@ -125,6 +125,7 @@ CONNECT_BYTES = (bytes([TARGET_NETWORK, CMD_TCP_CONNECT, PORT & 0xFF,
 ABORT_LATENCY = 4
 
 LABELS_NEEDED = ("net_init", "net_tcp_connect", "net_tcp_close", "net_poll",
+                 "net_tcp_send", "net_send_len",
                  "tcp_recv_head", "tcp_recv_tail",
                  "uci_host_buf", "uci_socket_id", "net_last_error",
                  "net_tcp_state", "uci_status_len", "uci_status_force")
@@ -752,6 +753,39 @@ def test_poll_no_data_keeps_the_socket():
         % _state(mem, labels)))
 
 
+UCI_ERR_SHORT_WRITE = 0x87
+CMD_SOCKET_WRITE = 0x11
+
+
+def test_send_error_is_not_a_length():
+    """SOCKET_WRITE answering written=$FFFF is lwip_send's -1 (a peer that
+    has closed). Read as a length it moved the source back a byte and grew
+    the remaining count by one per round trip: ~65k SOCKET_WRITEs, ~45 min
+    on the device, then C=0. Live: browserleaks.com closes during the
+    onchip handshake and the client Finished write hung for the rig's
+    whole 900 s. It must fail at once: C=1, $87, one write."""
+    uci = AbortModel([(b"\xff\xff", b"12,SEND ERROR: 9")] * 4)
+    cpu, mem, labels = _require(uci)
+    mem.write(labels["uci_socket_id"], 1)
+    mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
+    mem.write(labels["net_send_len"], 58)
+    mem.write(labels["net_send_len"] + 1, 0)
+    cpu.a, cpu.x = 0x00, 0x04
+    try:
+        carry = cpu.call(labels["net_tcp_send"], budget=4_000_000)
+    except CPUError as exc:
+        raise AssertionError(
+            "net_tcp_send did not return after a -1 write (%d SOCKET_WRITEs "
+            "parsed): %s" % (sum(1 for b, _ in uci.parsed
+                                 if b[1:2] == bytes([CMD_SOCKET_WRITE])), exc))
+    writes = [b for b, _ in uci.parsed if b[1:2] == bytes([CMD_SOCKET_WRITE])]
+    base._check(carry is True and _err(mem, labels) == UCI_ERR_SHORT_WRITE
+                and len(writes) == 1, (
+        "a -1 write returned C=%d, net_last_error=$%02X after %d "
+        "SOCKET_WRITE(s); expected C=1, $87, one"
+        % (carry, _err(mem, labels), len(writes))))
+
+
 TESTS = (
     test_prompt_abort_control,
     test_connect_after_a_delayed_abort,
@@ -774,6 +808,7 @@ TESTS = (
     test_clean_connect_close_connect_never_aborts,
     test_poll_eof_closes_the_socket_state,
     test_poll_no_data_keeps_the_socket,
+    test_send_error_is_not_a_length,
 )
 
 

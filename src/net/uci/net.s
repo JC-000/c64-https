@@ -866,6 +866,20 @@ net_tcp_send:
         ; rem and post-chunk rem by using the written count directly.
         ; Simpler: if written_hi/lo both match what we just dec'd off, OK.
         ; For MVP we only flag if written == 0 but we asked for > 0.
+        ;
+        ; A negative count is lwip_send's -1 (write_socket passes ret
+        ; through; "12,SEND ERROR: n" on the status channel), e.g. a peer
+        ; that has closed. Taken as a length it moved the pointer back one
+        ; and GREW uci_send_rem by one per round trip, so the loop ran
+        ; ~65k SOCKET_WRITEs (~45 min) before rem wrapped to zero and it
+        ; returned C=0. A chunk is at most 800 B, so bit 15 is never a count.
+        lda uci_write_resp+1
+        bpl @sb_counted
+        lda #UCI_ERR_SHORT_WRITE
+        sta net_last_error
+        sec
+        rts
+@sb_counted:
         lda uci_write_resp+0
         ora uci_write_resp+1
         bne @sb_had_write
