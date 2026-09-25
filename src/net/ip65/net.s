@@ -316,6 +316,17 @@ cb_load_len_lo:
 cb_load_len_hi:
         lda $ffff               ; SMC: patched to addr of tcp_inbound_data_length+1
         sta cb_remaining+1
+        ; Length $FFFF is not data: ip65 tcp.s signals the peer's FIN and RST
+        ; that way, with tcp_inbound_data_ptr left stale. Copying it filled
+        ; the ring with ~4 KB of old buffer and latched tcp_recv_overflow on
+        ; every close. No real segment reaches $FF00 (MSS <= 1460), so the
+        ; high byte alone identifies it.
+        cmp #$ff
+        bne cb_not_closed
+        lda #NET_TCP_CLOSED     ; FIN or RST: ip65 has closed its end
+        sta net_tcp_state
+        rts
+cb_not_closed:                  ; A still holds the high byte
         ; if length == 0, nothing to copy
         ora cb_remaining
         bne :+
@@ -358,14 +369,14 @@ cb_loop:
         bne cb_not_full
         ; ring full — record overflow and stop copying this delivery.
         ; Semantics (issue #72): ip65 ACKs the full inbound length
-        ; regardless of what we copy (see the PR #27 clamp history), so
-        ; if the dropped tail was NEW in-sequence data it is genuinely
-        ; lost to the stream — the TLS layer will then fail on a broken
-        ; record. In practice the flag has only been observed latching
-        ; during TCP retransmission bursts, where the dropped delivery
-        ; duplicated bytes already consumed and the stream survived.
-        ; Treat a set flag as a diagnostic breadcrumb, not proof of
-        ; corruption — but investigate if TLS errors follow.
+        ; regardless of what we copy (see the PR #27 clamp history), and
+        ; it delivers only the next in-sequence segment (tcp.s rejects
+        ; any other sequence number), so the dropped tail is ACKed bytes
+        ; lost to the stream for good — the TLS layer then fails on a
+        ; broken record. The flag used to latch on every connection
+        ; close, when ip65's FIN/RST length ($FFFF) was copied as data;
+        ; the $FFFF check at the top of the callback drops that now, so a
+        ; set flag is real loss.
         lda #1
         sta tcp_recv_overflow
         jmp cb_done

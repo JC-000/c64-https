@@ -993,18 +993,13 @@ def test_net_counters_red_green() -> None:
     # Tried, but not the whole fetch -- and not MORE than the whole fetch.
     assert not hw.check_net_counters(2, 0, expect_sends=N).ok
     assert not hw.check_net_counters(N + 1, 0, expect_sends=N).ok
-    # The ring overflowed: fails even with the exact send count, unless the
-    # caller has an exact decrypted body to prove only duplicates went.
+    # The ring overflowed: ACKed bytes lost, even with the exact send count
+    # -- and even on a run whose body came out right.
     v = hw.check_net_counters(N, 1, expect_sends=N)
     assert not v.ok and v.evidence["tcp_recv_overflow"] == 1
-    v = hw.check_net_counters(N, 1, expect_sends=N, stream_verified=True)
-    assert v.ok and v.evidence["overflow_benign"] is True
-    # stream_verified never excuses a missing send.
-    assert not hw.check_net_counters(2, 1, expect_sends=N,
-                                     stream_verified=True).ok
+    assert not hw.check_net_counters(2, 1).ok
     # Green.
-    v = hw.check_net_counters(N, 0, expect_sends=N)
-    assert v.ok and v.evidence["overflow_benign"] is False
+    assert hw.check_net_counters(N, 0, expect_sends=N).ok
     assert hw.check_net_counters(2, 0).ok          # incomplete run: "it tried"
 
 

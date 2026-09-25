@@ -1401,8 +1401,7 @@ HTTPS_FETCH_SEND_CALLS = 6
 
 
 def check_net_counters(send_calls: int | None, recv_overflow: int | None,
-                       *, expect_sends: int | None = None,
-                       stream_verified: bool = False) -> Verdict:
+                       *, expect_sends: int | None = None) -> Verdict:
     """The adapter's own counters: did the driver try, and did it drop?
 
     The ambiguity a first-silicon cartridge run is most likely to hit is
@@ -1419,20 +1418,14 @@ def check_net_counters(send_calls: int | None, recv_overflow: int | None,
                            different name, on purpose.
       tcp_recv_overflow    the consumer-owned ring's full flag (§13.3),
                            sticky since boot. Set by net_tcp_recv_cb when a
-                           delivery does not fit; ip65 ACKs the whole
-                           delivery anyway, so the dropped tail is gone from
-                           the stream unless it was a retransmitted
-                           duplicate.
-
-    An overflow FAILS unless `stream_verified` -- which the caller may set
-    only when check_http_response passed, i.e. the exact body came out of
-    the C64's own buffer. Every TLS record is AEAD-authenticated and a tag
-    failure aborts (#239), so an exact decrypted body proves no byte the
-    fetch consumed was lost: the overflow dropped retransmitted duplicates,
-    or bytes past the last record the client read (it says nothing about
-    those). That case passes, with `overflow_benign` in the evidence so the
-    finding is still recorded. Measured: the first 48 MHz RR-Net run with this
-    counter (2026-09-25) overflowed on a run whose body was exact.
+                           delivery does not fit. ip65 ACKs the whole
+                           delivery anyway and delivers only in-sequence
+                           segments, so a set flag is ACKed bytes lost for
+                           good -- a FAILURE even on a run whose body came
+                           out right, since the loss can fall past the last
+                           byte the client read. ip65's FIN/RST signal
+                           (length $FFFF) no longer reaches the ring; it
+                           used to set this flag on every close.
 
     `expect_sends` is the exact count the run should have made -- for a
     completed first fetch, HTTPS_FETCH_SEND_CALLS. An exact compare, not a
@@ -1441,8 +1434,7 @@ def check_net_counters(send_calls: int | None, recv_overflow: int | None,
     run did not complete and only "did it try at all" is meaningful.
     """
     ev = {"ip65_tcp_send_calls": send_calls, "tcp_recv_overflow": recv_overflow,
-          "expect_sends": expect_sends, "stream_verified": stream_verified,
-          "overflow_benign": False}
+          "expect_sends": expect_sends}
     if send_calls is None or recv_overflow is None:
         return Verdict(False, "ip65_tcp_send_calls / tcp_recv_overflow were not "
                               "read; without them 'nothing on the wire' cannot "
@@ -1453,15 +1445,9 @@ def check_net_counters(send_calls: int | None, recv_overflow: int | None,
     if expect_sends is not None and send_calls != expect_sends:
         return Verdict(False, f"net_tcp_send was called {send_calls} times; a "
                               f"completed fetch makes exactly {expect_sends}", ev)
-    if recv_overflow and not stream_verified:
-        return Verdict(False, f"tcp_recv_overflow is ${recv_overflow:02X}: the "
-                              "receive ring filled and a delivery was cut short, "
-                              "and nothing proves the stream survived it", ev)
     if recv_overflow:
-        ev["overflow_benign"] = True
-        return Verdict(True, f"{send_calls} net_tcp_send calls; the receive ring "
-                             f"overflowed (${recv_overflow:02X}) but the exact "
-                             "body decrypted, so nothing the fetch consumed was lost", ev)
+        return Verdict(False, f"tcp_recv_overflow is ${recv_overflow:02X}: the "
+                              "receive ring filled and ACKed bytes were lost", ev)
     return Verdict(True, f"{send_calls} net_tcp_send calls, no receive-ring "
                          "overflow", ev)
 

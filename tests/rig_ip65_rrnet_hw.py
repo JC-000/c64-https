@@ -700,9 +700,8 @@ def stage_fetch(tr, labels: dict) -> str:
                                max(1, min(resp_len + 16, 512))))
     RUN["http_status"] = status
     RUN["http_resp_len"] = resp_len
-    body_v = hw.check_http_response(status, resp_len, buf,
-                                    RESPONSE_BODY.encode())
-    RES.verdict(body_v,
+    RES.verdict(hw.check_http_response(status, resp_len, buf,
+                                       RESPONSE_BODY.encode()),
                 "HTTP 200 and the exact response body, out of the C64's buffer")
 
     err = tr.read_memory(labels["net_last_error"], 1)[0]
@@ -717,8 +716,7 @@ def stage_fetch(tr, labels: dict) -> str:
     RUN["tcp_recv_overflow"] = overflow
     RES.verdict(hw.check_net_counters(
         sends, overflow,
-        expect_sends=hw.HTTPS_FETCH_SEND_CALLS if result == "pass" else None,
-        stream_verified=body_v.ok),
+        expect_sends=hw.HTTPS_FETCH_SEND_CALLS if result == "pass" else None),
         "the adapter sent the whole fetch and dropped nothing")
     if result == "timeout":
         RES.check(False, "the fetch completed inside its budget",
