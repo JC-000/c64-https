@@ -1,10 +1,9 @@
 """Shared MemoryPolicy / MemoryArbiter factory for the c64-https tools/uci/* scripts.
 
-The c64-https build can lay out its memory map in several different ways
-depending on the BACKEND (ip65 vs uci) and the USE_X25519_SIBLING flag.
-Hand-coding scratch DMA addresses in each test script invites silent
-collisions when the layout changes (see issue surfaced by PR #41:
-ROUTINE_ADDR=$4200 clobbered X25519_RODATA under USE_X25519_SIBLING=1).
+The c64-https build lays out its memory map differently per BACKEND and
+profile. Hand-coding scratch DMA addresses in each test script invites
+silent collisions when the layout changes (PR #41: a hardcoded
+ROUTINE_ADDR=$4200 clobbered linked crypto tables).
 
 This module is the single source of truth for "where is c64-https
 holding RAM under the current build?". It reads ``build/labels.txt``
@@ -61,12 +60,9 @@ from c64_test_harness.verify import PrgFile
 # arbiter to look for unused space *between* declared regions (e.g.
 # $A000-$BFFF on UCI, $D000+ KERNAL ROM shadow, etc.).
 #
-# The CRYPTO_OVERLAY case is the deliberate exception: under
-# USE_X25519_SIBLING=1 the X25519_RODATA + _BSS segments only fill the
-# first $F00 bytes; the tail $5100-$5FFF is genuinely intended as
-# harness scratch (the cfg comment says so explicitly). We re-add that
-# tail as a safe_region in :func:`build_policy` so the arbiter can
-# allocate there.
+# The CRYPTO_OVERLAY case is the deliberate exception: only its used
+# portion is reserved, so the older rigs can still carve its tail (see
+# :func:`build_policy`). The HTTPS trampoline rigs no longer do (#209).
 _SEGMENT_RX = re.compile(
     r"^al\s+(?:C:)?([0-9A-Fa-f]+)\s+\.__([A-Za-z0-9_]+)_(START|LAST|SIZE)__\s*$"
 )
@@ -255,11 +251,10 @@ def build_arbiter(
 
     The default window targets the $4000-$5FFF span — under ip65 most
     of this is filled by NET_BSS ($4000-$4F8B) + NET_BSS_TAIL
-    ($4F8C-$5FFF), but under UCI the CRYPTO_OVERLAY's tail ($5100-$5FFF
-    when USE_X25519_SIBLING=1, or all of $4200-$5FFF when not) is the
-    natural home for harness scratch: it's RAM-backed, inside the
-    LOADER/NET_CODE write-banked region, and not used by any code
-    that the PRG ships with under normal operation.
+    ($4F8C-$5FFF), and under UCI whatever tail CRYPTO_OVERLAY's resident
+    tenants leave is all that is free — it moves with every link, which is
+    why the HTTPS trampoline rigs use :func:`build_policy_and_low_ram_arbiter`
+    instead (#209).
 
     Pass ``window=(0xC000, 0xCFFF)`` to allocate inside the TCP_BUF
     range instead, but be aware that ``tcp_recv_buf`` lives there and
@@ -337,7 +332,7 @@ def build_policy_and_arbiter_with_overlay_carveout(
       3. ``CRYPTO_OVERLAY`` — the 7,680 B swap slot at $4200-$5FFF.
          Conditional fallback: usable ONLY when the build has no
          overlay blob linked into the slot. The default UCI build
-         (no ``USE_X25519_SIBLING=1`` / no ``EMBED_P256_OVERLAY=1`` /
+         (no ``EMBED_P256_OVERLAY=1`` /
          no ``USE_OVERLAY_P384_EMBED=1``) leaves CRYPTO_OVERLAY
          zero-filled in the PRG with nothing reading from it at
          runtime, which is a natural scratch home.
@@ -355,13 +350,12 @@ def build_policy_and_arbiter_with_overlay_carveout(
          it returns the same RuntimeError it raised before this
          candidate was added.
 
-         Unlike candidates (1) and (2), CRYPTO_OVERLAY is fully unused
-         (no ``__CRYPTO_OVERLAY_*_LAST__`` records any byte being
-         written — the region's "used end" tracks the MEMORY entry's
-         ``define = yes`` markers, not actual segment placement). When
-         this candidate is selected we therefore carve from the
-         region's *start* address rather than from a page-aligned
-         used-end.
+         NOTE: on every current UCI build CRYPTO_OVERLAY is NOT unused —
+         it holds resident tenants (deframer, cert_buf, name check, ...).
+         The window below starts at the region's start, but
+         :func:`build_policy` still reserves CRYPTO_OVERLAY up to its
+         ``__LAST__``, so the arbiter only ever hands out the tail. That
+         tail moves with the link; see :func:`build_policy_and_low_ram_arbiter`.
 
     For the chosen region we:
       - round the region's used-end up to the next $100 boundary (cheap

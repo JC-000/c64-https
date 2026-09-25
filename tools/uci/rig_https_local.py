@@ -195,32 +195,11 @@ def _ensure_certs_or_fail() -> int:
         return 2
     return 0
 
-# NOTE: ROUTINE_ADDR and friends MUST sit in a region that does NOT
-# collide with the production CRYPTO_OVERLAY layout.  Under
-# USE_X25519_SIBLING=1 the sibling X25519 rodata + bss buffers occupy
-# $4200-$50FF (see cfg/c64-https-uci.cfg X25519_RODATA / X25519_BSS).
-# Placing the DMA routine at $4200 (the historical value) silently
-# clobbered x25_basepoint, fe_p, mul38_lo_tab, etc., producing wrong
-# X25519 output during the TLS handshake.
-#
-# These scratch addresses used to be hardcoded ($4200 originally, then
-# $5100 to dodge the X25519 RODATA/BSS span under
-# USE_X25519_SIBLING=1).  The hardcoded layout was the antipattern that
-# made the X25519 collision possible in the first place — silently
-# wrong-but-deterministic crypto output, with no diagnostic until the
-# TLS handshake failed half a minute later.
-#
-# They are now assigned by a :class:`MemoryArbiter` (see
-# ``tools/uci/_memory_policy.py``) at runtime, after we have read
-# ``build/labels.txt`` and built a :class:`MemoryPolicy` reflecting the
-# *current* build's memory map (BACKEND + USE_X25519_SIBLING are
-# observed via the segment markers ld65 emits).  The transport's
-# memory_policy will then catch any future stray write into a
+# Scratch addresses are never hardcoded: a hardcoded $4200 once silently
+# clobbered linked crypto tables (PR #41). They come from a MemoryArbiter
+# (tools/uci/_memory_policy.py) over a MemoryPolicy built from this build's
+# labels.txt, and the transport's policy catches any stray write into a
 # c64-https segment before the byte crosses the wire.
-#
-# Sizes are conservative — the trampoline is ~110 B today; we allow
-# 256 B for headroom.  HOST/PATH strings are ASCII-NUL-terminated and
-# fit easily inside their 64-byte slots.
 ROUTINE_ADDR: int = -1     # arbiter.alloc(<routine length>, "trampoline")
 HOST_STR_ADDR: int = -1    # arbiter.alloc(HOST_STR_BYTES, "host_str")
 PATH_STR_ADDR: int = -1    # arbiter.alloc(PATH_STR_BYTES, "path_str")
