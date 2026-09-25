@@ -44,6 +44,7 @@
 ; --- TLS BSS / data (data.asm) ---
 .import tls_state
 .import tls_last_state
+.import tls_reached_connected
 .import tls_client_random
 .import tls_ecdhe_privkey
 .import tls_rec_buf
@@ -63,6 +64,7 @@
 .import tls_record_send_plaintext
 .import tls_record_send_encrypted
 .import tls_record_recv_and_decrypt
+.import tls_rx_reset
 
 ; --- ClientHello / ServerHello builders & parsers (tls_handshake) ---
 .import tls_build_client_hello
@@ -132,9 +134,12 @@
 ; Output: C=0 success (CONNECTED state), C=1 failure
 ; =============================================================================
 tls_connect:
+        jsr tls_rx_reset        ; #239: drop an earlier connection's unread
+                                ;  ring bytes + reset the record reader
         ; init state
         lda #TLS_STATE_IDLE
         sta tls_state
+        sta tls_reached_connected ; #204: this attempt has not connected yet
 
         ; generate client random (32 bytes)
         lda #<tls_client_random
@@ -302,15 +307,18 @@ tls_connect:
         ; connected!
         lda #TLS_STATE_CONNECTED
         sta tls_state
+        sta tls_reached_connected ; #204: the only set; tls_close keeps it
         clc
         rts
 
 @error:
         lda tls_state           ; preserve last attempted state
+        bmi :+                  ; already ERROR: the record layer aborted
+                                ;  (#239) and recorded the state itself
         sta tls_last_state
         lda #TLS_STATE_ERROR
         sta tls_state
-        sec
+:       sec
         rts
 
 ; =============================================================================
@@ -375,13 +383,18 @@ tls_recv:
 
 ; =============================================================================
 ; tls_close - send close_notify alert and tear down
+; Deliberately leaves tls_reached_connected alone (#204).
+; In TLS_CODE, not CODE: jsr-only, and moving its 6 B out of ip65's LOADER
+; pays for the #204 latch stores there (TLS_CODE is CRYPTO_OVERLAY on ip65).
 ; =============================================================================
+.segment "TLS_CODE"
 tls_close:
         ; jsr tls_send_alert            ; TODO: close_notify
         ; jsr net_tcp_close
         lda #TLS_STATE_IDLE
         sta tls_state
         rts
+.segment "CODE"
 
 ; =============================================================================
 ; tls_send_client_hello - build and send ClientHello, init transcript
@@ -575,11 +588,13 @@ tls_recv_encrypted:
         jsr net_poll
         jsr tls_record_recv_and_decrypt
         bcc @enc_got_record
+        bit tls_state           ; ERROR (bit 7): AEAD tag failure, the
+        bmi @enc_abort          ;  connection is aborted — not idle (#239)
         inc enc_timeout
         bne @enc_wait
         inc enc_timeout+1
         bne @enc_wait
-        ; timeout
+@enc_abort:                     ; timeout, or #239 abort
         sec
         rts
 @enc_got_record:
@@ -629,11 +644,13 @@ tls_recv_encrypted:
         clc
         jmp @enc_got_record
 :
+        bit tls_state           ; ERROR (bit 7): AEAD tag failure, the
+        bmi @enc_abort          ;  connection is aborted — not idle (#239)
         inc enc_timeout
         bne @enc_wait
         inc enc_timeout+1
         bne @enc_wait
-        ; timeout
+@enc_abort:                     ; timeout, or #239 abort
         sec
         rts
 @enc_got_record:

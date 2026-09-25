@@ -67,6 +67,8 @@ but not `http.o`, which cost a false negative on #141) and no link at all
 exit 0). Because the stamp holds the expanded command lines rather than a
 list of knob names, a new flag is covered the day it is added. The suite
 also pins the inverse — an unchanged flag set must still rebuild nothing.
+`flags.stamp` and `https_host.inc` (below) delete `.map`/`labels.txt`/`.dbg` with the PRG;
+a goal set made only of `clean`/`ip65-libs`/`ip65-blob` skips both (#220).
 
 Parse time includes a dry run, so `make -n` used to delete the tree while
 answering "what would this build?". **`-n`/`-q`/`-t` are now exempt
@@ -155,7 +157,7 @@ Variables:
   - `HTTPS_HOST` / `HTTPS_PATH` / `HTTPS_SNI` / `HTTPS_PORT` /
     `HTTPS_BODY_TO_REU=1` — build-time target. Hosts >63 chars are a build
     error. The strings live in their own `HTTPS_TARGET_RODATA` segment
-    (#126): `CRYPTO_OVERLAY` under UCI, `NET_CODE` tail (186 B, a joint
+    (#126): `CRYPTO_OVERLAY` under UCI, `NET_CODE` tail (56 B, a joint
     budget) under ip65 — a longer target used to overflow an unrelated
     library segment in `CRYPTO_HOT`. Do not read ld65's `NET_BSS … EMPTY`
     as headroom; that span is the ip65 blob's own BSS.
@@ -345,9 +347,10 @@ drops a symbol fails the link by name on both backends. Surface:
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
     is now `print_local_ip` in `boot.s`, one copy for both backends.
   - Byte accounting on ip65 (the tight one): LOADER went from 16 B free to
-    58 B **at the time of #142**; it is **17 B** at the v0.14.0 pin with
+    58 B **at the time of #142**; it was 17 B at the v0.14.0 pin with
     #211's fix in (21 B before it — the 4 B is `http.o`'s `CODE` growth in
-    that fix, measured), which is the number the
+    that fix, measured), 14 B after #204, and **26 B** with #239 in (re-measured
+    on the merged tree), which is the number the
     Memory layout section carries and the one to use.
     `print_local_ip` rides LOADER_OVERFLOW, so the NET_CODE tail that is
     `HTTPS_HOST`/`HTTPS_PATH`'s ip65 budget shrank from 170 to ~60 B beyond
@@ -596,8 +599,8 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH`), not by dropping
     `reu_mul_init.o` — the wrapper does no member surgery at all any
     more (§6.1), it `cp`s the upstream archive. `reu_mul` is APP_OWNED
-    here. Flag stays off; the in-tree X25519 is correct (RFC 7748
-    vector 2 passes) and ships.
+    here. Flag off; in-tree X25519 ships. RFC vectors passed, but ~1.3%
+    of X25519 scalar mults failed (#242); a24 bug: peer-forced (#244).
   - **P-384 build is broken**, one link deeper than before: the `ar65`
     member-name bug was ours (fixed), and the chain now stops at
     `LIB_NISTCURVES_SHA384_TABLES` overflowing `OVERLAY_REGION` by 1,536 B
@@ -689,7 +692,7 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
       - inline in `CODE` took ip65's LOADER from the 21 B free it had
         *then* to **zero** — it fit exactly, so the *next* byte anyone
         added would not link. The routine landed in `HTTP_AUX_CODE2`
-        instead, and LOADER measures **17 B** free today. The 4 B is
+        instead, and LOADER measured **17 B** free (26 B with #204 and #239 in). The 4 B is
         `http.o`'s own `CODE` growth in that same fix: rebuilding
         ip65-onchip with only `src/http.s` reverted to `60022de` moves
         `http.o`'s `CODE` from $35E to $35A and the whole `CODE` segment
@@ -706,9 +709,9 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     room. **Before adding to ip65 `NET_CODE`, build the wikipedia target
     — the default target's "bytes free" will not tell you**, and neither
     will PRG size.
-  - Region margins measured at #211's fix (they drift, so re-measure
-    rather than cite): ip65 **17 B** LOADER, **56 B** NET_CODE tail
-    (14 B with the wikipedia target), **125 B** CRYPTO_OVERLAY. UCI comb
+  - Region margins measured on master `35ea3b9` + #239 (they drift, so re-measure
+    rather than cite): ip65 **26 B** LOADER, **56 B** NET_CODE tail
+    (14 B with the wikipedia target), **70 B** CRYPTO_OVERLAY, **44 B** CRYPTO_RESIDENT. UCI comb
     **126 B** CRYPTO_OVERLAY, down from 153 B — that tail is what the
     rigs' `MemoryArbiter` hands out, so re-check `rig_https_wiki.py`
     scratch after any tenant lands there. The "~223 B" comb figure
@@ -887,13 +890,13 @@ segment recovered in one profile can land in a different region in another
 
 ip65 is essentially full. Measured on **ip65-onchip** — the shipped
 product — at the v0.14.0 pin, with the P-384 objects gated out of the
-link and #211's fix in: 56 B NET_CODE tail (on top of the 20 B the
-default target strings already use), 145 B CRYPTO_RESIDENT, 125 B
-CRYPTO_OVERLAY, 17 B LOADER, and a 43 B hole
+link, on master `35ea3b9` + #239: 56 B NET_CODE tail (on top of the 20 B the
+default target strings already use), 44 B CRYPTO_RESIDENT, 70 B
+CRYPTO_OVERLAY, 26 B LOADER, and a 42 B hole
 below TABLES_BSS in
 CRYPTO_COLD_SHADOW. The unshipped ip65 REU profile matches on three of
 those (LOADER, CRYPTO_OVERLAY, NET_CODE) but **not** on CRYPTO_RESIDENT,
-where it has 231 B free: `LIB_NISTCURVES_MUL_CODE` is $27 there against
+where it has 130 B free: `LIB_NISTCURVES_MUL_CODE` is $27 there against
 $A2 onchip, so the onchip figure is the conservative one and the one to
 size against. PRG size is not a headroom gauge. **CRYPTO_OVERLAY and
 CRYPTO_RESIDENT are ADJACENT ($4F8C-$5FFF and $6000-$9FFF), so they are one
@@ -1055,15 +1058,17 @@ both flags load-bearing). Stock 1 MHz, ~40-80 min.
     (pytest testpaths, no hardware, ms) proves each alarms on a known-bad
     input, and `tools/mutate_ip65_hw_checks.py` breaks each one to prove
     the suite goes red. Adding a `check_*` without a red case fails that
-    suite by introspection. **The rig is not judgment-free, though**: 15
+    suite by introspection. **The rig is not judgment-free, though**: 16
     delegated verdicts against 19 of its own `RES.check()` assertions
     (screen scrapes, config writes, the clock assertion, the listener
     probe, the selftests), which have no red case. Do not attribute a
     run's whole check count to the cartridge — 8 of the 24 in the first
     passing run touched neither the cartridge nor the 6510. **A stock
-    re-run reports 25, not 24**: the clock assertion arrived with
+    re-run reports 26, not 24**: the clock assertion arrived with
     `TURBO_MHZ` and fires at 1 MHz too, landing in that host-side group.
-    The first run's decomposition is history and stays as written.
+    #202 added the 26th (ip65 config fields, 6510-side; counted from the
+    code, not yet observed on a run). The first run's
+    decomposition is history and stays as written.
   - Two stations on the cable and the Mac is one of them, so every wire
     assertion discriminates by **Ethernet source address**; a third MAC
     is a hard failure. The cleartext-absence check needs a positive
@@ -1099,10 +1104,10 @@ both flags load-bearing). Stock 1 MHz, ~40-80 min.
     1,979 s at 1 MHz (46x), CS8900a fine, DHCP on the automatic
     attempt.** One check goes red there and must stay red:
     `check_tls_connected` samples `tls_state`, which lives only between
-    `tls13.s:303-304` and `tls_close` (`:382-383`), and at 48 MHz that
+    `tls_connect`'s CONNECTED store and `tls_close`, and at 48 MHz that
     window fits inside
     one poll (`tls_last_state` is written only on the ERROR path, so it
-    is no fallback). A turbo run's handshake verdict is inference.
+    is no fallback). Inference until the rig reads `tls_reached_connected` (#204).
   - **CIA timers are realtime under turbo** — 1023.2 ticks/wall-s at
     1 MHz vs 1022.9 at 48 MHz, ratio 1.000, both within 0.05% of NTSC
     phi2/1000. So ip65's `timer_read` (CIA2 timer B, 1000-cycle cascade)

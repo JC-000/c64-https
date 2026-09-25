@@ -28,8 +28,9 @@ known-bad input off-device, and each mutation-tested by
 those are the claims a release would cite.
 
 **This file is NOT free of judgment, and an earlier draft of this
-docstring said it was.** Counted: 15 `RES.verdict()` calls delegate to the
-library; 19 `RES.check()` calls are the rig's own opinion, with no red
+docstring said it was.** Counted: 16 `RES.verdict()` calls delegate to the
+library (15 before #202 added the ip65 config-field check); 19
+`RES.check()` calls are the rig's own opinion, with no red
 case and outside the introspection backstop (which enumerates only
 `check_*` in the module). Several of those fire on the green path and
 count toward the total — the boot-menu and DHCP screen scrapes, the
@@ -39,13 +40,16 @@ assertions. They are ordinary procedural assertions, not wire evidence,
 and a run's headline number should not be attributed to the cartridge
 wholesale.
 
-**A stock re-run now reports 25 checks, not the 24 of the first passing
+**A stock re-run now reports 26 checks (25 before #202's config-field
+verdict; 26 is counted from the code, not yet observed on a run), not the
+24 of the first passing
 run.** The clock assertion ("the device is running at the requested
 N MHz") came in with `TURBO_MHZ` and fires unconditionally, including at
 the default 1 MHz, so it lands in the host-side-precondition group and
-shifts the total by one. Nothing else about a default run changed: the
+shifts the total by one; #202's config-field verdict (read from ip65's own
+RAM, so a 6510-side check) is the other. Nothing else changed: the
 recorded decomposition of the first passing run stands as history, and
-the extra check is not a cartridge check. It is here because a device
+the clock check is not a cartridge check. It is here because a device
 that silently ignores the clock write is exactly the failure the turbo
 probe's negative control guards against from the other side.
 
@@ -134,9 +138,9 @@ first 48 MHz run (2026-09-06, 43.1 s 'G' to CONNECTION CLOSED against
 that check while every other check passed, HTTP 200 and the exact body
 came out of the C64's own buffer, and `net_last_error` was $00.
 
-`src/tls13.s:303-304` sets tls_state = CONNECTED right after the
-traffic-key derivation, and `tls_close` (`src/tls13.s:379`, storing IDLE
-at `:382-383`) writes it back to IDLE, so
+`tls_connect` in `src/tls13.s` (grep `lda #TLS_STATE_CONNECTED`) sets
+tls_state = CONNECTED right after the traffic-key derivation, and
+`tls_close` (grep `^tls_close:`) writes it back to IDLE, so
 the value only exists between them — which is why the rig polls rather
 than reading it afterwards. At 1 MHz that window is minutes wide. At
 48 MHz the client Finished, the GET, the response and the close all fit
@@ -618,10 +622,28 @@ def stage_boot_and_dhcp(tr, labels: dict) -> bool:
 
     local_ip = bytes(tr.read_memory(labels["net_local_ip"], 4))
     RUN["c64_ip"] = hw.fmt_ip(local_ip)
-    return RES.verdict(
+    lease_ok = RES.verdict(
         hw.check_dhcp_lease(local_ip, subnet=SUBNET, host_ip=HOST_IP,
                             expect_ip=C64_IP),
         f"the C64 holds the pinned lease {C64_IP} (read from its own memory)")
+
+    # ip65's own config fields, through the blob's pointer table (#202). Not
+    # a gate on the fetch: a field left at its build-time default is recorded
+    # as a failure, and the run goes on to collect the rest of the evidence.
+    cfg, ptrs = hw.read_ip65_config(lambda a, n: bytes(tr.read_memory(a, n)))
+    RUN["ip65_cfg_pointers"] = {k: (None if v is None else f"${v:04X}")
+                                for k, v in ptrs.items()}
+    RUN["device_cfg_mac"] = (None if cfg["cfg_mac"] is None
+                             else hw.fmt_mac(cfg["cfg_mac"]))
+    RES.verdict(
+        hw.check_ip65_config_written(cfg["cfg_ip"], cfg["cfg_netmask"],
+                                     cfg["cfg_gateway"], cfg["cfg_mac"],
+                                     expect_ip=hw.ip4_bytes(C64_IP),
+                                     expect_gateway=hw.ip4_bytes(HOST_IP),
+                                     expect_mac=bytes(C64_MAC)),
+        f"ip65's cfg_ip / cfg_gateway / cfg_mac hold {C64_IP} / {HOST_IP} / "
+        f"{hw.fmt_mac(C64_MAC)} (read from its own RAM)")
+    return lease_ok
 
 
 def stage_fetch(tr, labels: dict) -> str:
@@ -754,9 +776,14 @@ def stage_wire(started_at: float, ended_at: float) -> None:
 
     RES.verdict(hw.check_c64_originated(corpus, C64_MAC, host_mac, min_frames=4),
                 "frames on the cable came FROM the RR-Net, not only the Mac")
-    RES.verdict(hw.check_mac_on_wire(corpus, C64_MAC, host_mac, min_frames=4),
-                f"the RR-Net's MAC {hw.fmt_mac(C64_MAC)} is an Ethernet SOURCE "
-                "on the cable")
+    # The MAC READ FROM THE DEVICE, not the rig constant (#202): memory must
+    # agree with the wire. None (never read) fails closed inside the check.
+    device_mac = (hw.parse_mac(RUN["device_cfg_mac"])
+                  if RUN.get("device_cfg_mac") else None)
+    RES.verdict(hw.check_mac_on_wire(corpus, device_mac, host_mac, min_frames=4),
+                "the MAC in ip65's cfg_mac "
+                f"({'unread' if device_mac is None else hw.fmt_mac(device_mac)}) "
+                "is an Ethernet SOURCE on the cable")
     RES.verdict(hw.check_dns_query_on_wire(corpus, C64_MAC, TEST_HOST),
                 f"the C64 resolved {TEST_HOST} over the cartridge")
     RES.verdict(hw.check_client_hello_on_wire(corpus, C64_MAC, port=HTTPS_PORT,

@@ -98,6 +98,7 @@ RED_CASES = {
     "check_http_response": "test_http_response_red_green",
     "check_net_last_error": "test_net_last_error_red_green",
     "check_image_readback": "test_image_readback_red_green",
+    "check_ip65_config_written": "test_ip65_config_written_red_green",
 }
 
 
@@ -615,18 +616,20 @@ def test_body_not_on_wire_red_green() -> None:
     v = hw.check_body_not_on_wire(leaky, body, control)
     assert not v.ok and v.status == "fail" and v.evidence["secret_hits"] >= 1
 
-    # 4. A body split across two TCP segments is still found -- per-frame
-    #    searching alone would miss it, stream reassembly catches it.
-    half = len(body) // 2
+    # 4. A body split across TCP segments is still found -- per-frame
+    #    searching alone would miss it, stream reassembly catches it. The
+    #    pieces are SHORTER than the partial-run floor (#202): with two
+    #    11-byte halves the per-frame partial search found each half on its
+    #    own, and dropping reassembly entirely went unnoticed (#201).
+    step = hw.PARTIAL_RUN_MIN - 1
     split = hw.parse_pcap(_pcap([
         f.raw for f in _good_capture(now, body)] + [
-        _tcp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, PORT, 1025, 20000,
-                   body[:half]),
-        _tcp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, PORT, 1025,
-                   20000 + half, body[half:]),
+        _tcp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, PORT, 1025, 20000 + at,
+                   body[at:at + step]) for at in range(0, len(body), step)
     ], ts0=now))
     assert naive_absent(split, body), "naive arm no longer fires"
-    assert not hw.check_body_not_on_wire(split, body, control).ok
+    v = hw.check_body_not_on_wire(split, body, control)
+    assert not v.ok and v.evidence["secret_hits"] >= 1, v.evidence
 
     # 5. Green: control found, body absent.
     clean = _good_capture(now, body)
@@ -635,6 +638,207 @@ def test_body_not_on_wire_red_green() -> None:
     # ...and a missing needle or control is a refusal, not a pass.
     assert not hw.check_body_not_on_wire(clean, b"", control).ok
     assert not hw.check_body_not_on_wire(clean, body, b"").ok
+    # An empty secret is a CALLER bug, so it is a FAIL even where the corpus
+    # is empty -- not the INCONCLUSIVE an empty capture would earn. Without
+    # this, the guard was subsumed: b"" is in every corpus, so the leak
+    # branch failed the green capture above anyway (#201).
+    v = hw.check_body_not_on_wire([], b"", control)
+    assert not v.ok and v.status == "fail"
+
+    # 6. A leak in a NON-TCP frame. Reassembly covers TCP only, so the
+    #    per-frame search is the one that must find this; every leak above
+    #    rides TCP and is found by the streams as well (#201).
+    udp_leak = hw.parse_pcap(_pcap(
+        [f.raw for f in _good_capture(now, body)]
+        + [_udp_frame(C64_MAC, HOST_MAC, C64_IP, HOST_IP, 1030, 9999,
+                      b"\x00" + body + b"\x00")], ts0=now))
+    v = hw.check_body_not_on_wire(udp_leak, body, control)
+    assert not v.ok and v.status == "fail" and v.evidence["secret_hits"] >= 1
+
+
+# ===========================================================================
+# #202 — the leak search covers what a C64 would actually transmit
+# ===========================================================================
+def test_body_leak_in_the_petscii_shifted_block_is_found() -> None:
+    """The rig's body is UPPERCASE: only the shifted form does work there.
+
+    c64-wireguard's docstring for this form says it "must not be lost when
+    that tool moves onto this library", and #202 records that it was.
+    NAIVE ARM: the pre-#202 search, a whole-needle `in` over the staged
+    ASCII bytes -- it passes a capture carrying the body in the shifted
+    block, because none of those bytes equal the ASCII ones.
+    """
+    now = time.time()
+    body = b"TLS13 OK OVER REAL RRNET"            # the rig's RESPONSE_BODY shape
+    shifted = bytes(b + 0x80 if 0x41 <= b <= 0x5A else b for b in body)
+    frames = hw.parse_pcap(_pcap(
+        [f.raw for f in _good_capture(now, body)]
+        + [_tcp_frame(C64_MAC, HOST_MAC, C64_IP, HOST_IP, 1025, PORT, 60000,
+                      b"\x17\x03\x03\x00\x20" + shifted)], ts0=now))
+
+    def naive_absent(fs, secret) -> bool:
+        return not any(secret in f.raw for f in fs)
+
+    assert naive_absent(frames, body), "naive arm no longer fires"
+    v = hw.check_body_not_on_wire(frames, body, SNI.encode())
+    assert not v.ok and v.status == "fail", v.reason
+    assert v.evidence["secret_hit_forms"] == ["petscii-shifted"], v.evidence
+
+
+def test_body_leak_in_the_petscii_folded_form_is_found() -> None:
+    """A lowercase body leaves a C64 as uppercase bytes; that is still it.
+
+    PETSCII folds a-z onto $41-$5A. NAIVE ARM: search for the staged ASCII.
+    """
+    now = time.time()
+    body = "".join(RNG.choice(string.ascii_lowercase) for _ in range(20)).encode()
+    frames = hw.parse_pcap(_pcap(
+        [f.raw for f in _good_capture(now, body)]
+        + [_tcp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, PORT, 1025, 60000,
+                      b"HTTP/1.1 200 OK\r\n\r\n" + body.upper())], ts0=now))
+    assert not any(body in f.raw for f in frames), "naive arm no longer fires"
+    v = hw.check_body_not_on_wire(frames, body, SNI.encode())
+    assert not v.ok and v.evidence["secret_hit_forms"] == ["petscii"], v.evidence
+
+
+def test_body_partial_leak_is_found() -> None:
+    """23 of 24 bytes on the wire is a leak, not an absence (#202 item 2).
+
+    NAIVE ARM: the pre-#202 whole-needle test, which reads every
+    proper-prefix leak as absent.
+    """
+    now = time.time()
+    body = _rand_body(24)
+    control = SNI.encode()
+
+    def with_payload(payload: bytes):
+        return hw.parse_pcap(_pcap(
+            [f.raw for f in _good_capture(now, body)]
+            + [_tcp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, PORT, 1025, 70000,
+                          b"\x00" + payload + b"\x00")], ts0=now))
+
+    most = with_payload(body[:-1])
+    assert not any(body in f.raw for f in most), "naive arm no longer fires"
+    v = hw.check_body_not_on_wire(most, body, control)
+    assert not v.ok and v.status == "fail", v.reason
+    assert v.evidence["partial_longest"] == len(body) - 1, v.evidence
+    # A PARTIAL-only leak is attributed too, not just a full hit.
+    assert v.evidence["secret_hits"] == 0
+    assert v.evidence["leak_sources"] == [hw.fmt_mac(HOST_MAC)], v.evidence
+
+    # The floor, exactly: PARTIAL_RUN_MIN bytes are reported, one fewer are
+    # not. \x00 delimiters cannot extend a run of an uppercase body.
+    k = hw.PARTIAL_RUN_MIN
+    v = hw.check_body_not_on_wire(with_payload(body[5:5 + k]), body, control)
+    assert not v.ok and v.evidence["partial_longest"] == k, v.evidence
+    v = hw.check_body_not_on_wire(with_payload(body[5:5 + k - 1]), body, control)
+    assert v.ok and v.evidence["partial_hits"] == 0, v.reason
+    # ...and a caller's own floor is honoured, not the module default.
+    v = hw.check_body_not_on_wire(with_payload(body[:-1]), body, control,
+                                  partial_min=len(body))
+    assert v.ok, v.reason
+
+    # A partial run in the SHIFTED block is still found: the partial search
+    # covers every form, not just the staged bytes.
+    shifted = hw.petscii_shifted_form(body)
+    v = hw.check_body_not_on_wire(with_payload(shifted[:-2]), body, control)
+    assert not v.ok and v.evidence["partial_detail"][0]["form"] == \
+        "petscii-shifted", v.evidence
+
+
+def test_partial_run_floor_is_eight_bytes() -> None:
+    """The floor as a LITERAL, not read back from the module.
+
+    The floor case above uses `hw.PARTIAL_RUN_MIN`, so it moves with the
+    constant and cannot tell 8 from 9 or 12. This pins the number
+    c64-wireguard chose and #202 ported: 7 contiguous body bytes pass, 8
+    fail, at the default floor.
+    """
+    now = time.time()
+    body = _rand_body(24)
+    for n, leaks in ((7, False), (8, True)):
+        frames = hw.parse_pcap(_pcap(
+            [f.raw for f in _good_capture(now, body)]
+            + [_udp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, 9, 9,
+                          b"\x00" + body[3:3 + n] + b"\x00")], ts0=now))
+        v = hw.check_body_not_on_wire(frames, body, SNI.encode())
+        assert v.ok is not leaks, (n, v.reason)
+
+
+def test_body_partial_leak_split_across_segments_is_found() -> None:
+    """A partial run that exists only in the REASSEMBLED stream is found.
+
+    12 body bytes split 6 + 6 across two TCP segments of one connection:
+    each frame holds 6 (under the floor), the stream holds 12. Only the
+    partial search over stream corpora can report it.
+    """
+    now = time.time()
+    body = _rand_body(24)
+    leak = body[4:16]
+    frames = hw.parse_pcap(_pcap(
+        [f.raw for f in _good_capture(now, body)] + [
+            _tcp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, PORT, 1025, 50000,
+                       leak[:6]),
+            _tcp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, PORT, 1025, 50006,
+                       leak[6:])], ts0=now))
+    assert not any(longest > 6 for longest in (
+        hw.longest_run(f.raw, body)[0] for f in frames)), "a frame alone crosses the floor"
+    v = hw.check_body_not_on_wire(frames, body, SNI.encode())
+    assert not v.ok and v.evidence["partial_longest"] == 12, v.evidence
+    assert v.evidence["partial_detail"][0]["kind"] == "stream", v.evidence
+    # ...attributed to the station whose stream it is. frames[0] of this
+    # capture is the C64's DHCP request, so a stream credited to the
+    # capture's first frame would name the wrong box.
+    assert v.evidence["partial_detail"][0]["eth_src"] == hw.fmt_mac(HOST_MAC)
+    assert v.evidence["leak_sources"] == [hw.fmt_mac(HOST_MAC)], v.evidence
+
+
+def test_leak_evidence_names_the_source() -> None:
+    """Now that a hit FAILS without the control, the evidence has to say
+    WHO put it on the cable: a listener sending cleartext and a C64 leaking
+    its own buffer are different defects."""
+    now = time.time()
+    body = _rand_body(22)
+    for src, dst in ((HOST_MAC, C64_MAC), (C64_MAC, HOST_MAC)):
+        frames = hw.parse_pcap(_pcap(
+            [f.raw for f in _good_capture(now, body)]
+            + [_udp_frame(src, dst, C64_IP, HOST_IP, 9, 9, body)], ts0=now))
+        v = hw.check_body_not_on_wire(frames, body, SNI.encode())
+        assert not v.ok and v.evidence["leak_sources"] == [hw.fmt_mac(src)], \
+            v.evidence
+        assert v.evidence["secret_hit_detail"][0]["kind"] == "frame"
+
+
+def test_body_leak_fails_even_with_no_control_hit() -> None:
+    """A FOUND leak is a FAIL, not INCONCLUSIVE, whatever the control did.
+
+    The control exists to prove the searcher can find things; a secret hit
+    proves that on its own. Before #202 a capture carrying the body in the
+    clear but not the SNI came back INCONCLUSIVE (exit 78) rather than as
+    the leak it is -- c64-wireguard reports the leak first for this reason.
+    """
+    now = time.time()
+    body = _rand_body(22)
+    leak_only = hw.parse_pcap(_pcap([
+        _tcp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, PORT, 1025, 1,
+                   b"HTTP/1.1 200 OK\r\n\r\n" + body)], ts0=now))
+    v = hw.check_body_not_on_wire(leak_only, body, SNI.encode())
+    assert v.evidence["control_hits"] == 0
+    assert not v.ok and v.status == "fail", (v.status, v.reason)
+
+
+def test_petscii_forms_and_longest_run() -> None:
+    """The encodings at their boundaries, and the run finder."""
+    assert hw.petscii_form(b"`az{19") == b"`AZ{19"      # $60/$7B untouched
+    assert hw.petscii_shifted_form(b"@AZ[az9") == b"@\xc1\xda[\xc1\xda9"
+    # Forms that coincide are searched once, and named once.
+    assert [n for n, _ in hw.secret_forms(b"ABC1")] == ["exact", "petscii-shifted"]
+    assert [n for n, _ in hw.secret_forms(b"abc")] == \
+        ["exact", "petscii", "petscii-shifted"]
+    assert [n for n, _ in hw.secret_forms(b"1234")] == ["exact"]
+    assert hw.longest_run(b"xxBCDEyy", b"ABCDEF") == (4, 1)
+    assert hw.longest_run(b"nothing", b"ABC") == (0, -1)
+    assert hw.longest_run(b"..ABC..", b"ABC") == (3, 0)
 
 
 # ===========================================================================
@@ -742,6 +946,359 @@ def test_image_readback_red_green() -> None:
     assert not hw.check_image_readback(img, img[:-1]).ok
     assert not hw.check_image_readback(img, None).ok
     assert hw.check_image_readback(img, img).ok
+
+
+# ===========================================================================
+# #202 item 4 — ip65's own config fields
+# ===========================================================================
+_HEALTHY_CFG = {
+    "cfg_ip": hw.ip4_bytes(C64_IP),
+    "cfg_netmask": bytes(hw.IP65_DEFAULT_CFG_NETMASK),   # correct on the /24
+    "cfg_gateway": hw.ip4_bytes(HOST_IP),
+    "cfg_mac": C64_MAC,
+}
+
+
+def _cfg(**over):
+    d = dict(_HEALTHY_CFG)
+    d.update(over)
+    return hw.check_ip65_config_written(d["cfg_ip"], d["cfg_netmask"],
+                                        d["cfg_gateway"], d["cfg_mac"])
+
+
+def test_ip65_config_written_red_green() -> None:
+    """Every decisive field still at its build-time constant fails ON ITS OWN.
+
+    NAIVE ARM: "every field is populated". ip65/ip65/config.s ships all four
+    non-zero, so a machine that never ran eth_init or DHCP satisfies it.
+    """
+    defaults = {"cfg_ip": bytes(hw.IP65_DEFAULT_CFG_IP),
+                "cfg_netmask": bytes(hw.IP65_DEFAULT_CFG_NETMASK),
+                "cfg_gateway": bytes(hw.IP65_DEFAULT_CFG_GATEWAY),
+                "cfg_mac": bytes(hw.IP65_DEFAULT_CFG_MAC)}
+
+    def naive_written(d) -> bool:
+        return all(any(v) for v in d.values())
+
+    assert naive_written(defaults), "naive arm no longer fires"
+    v = _cfg(**defaults)
+    assert not v.ok and sorted(v.evidence["still_default"]) == \
+        ["cfg_gateway", "cfg_ip", "cfg_mac"], v.evidence
+
+    # Each decisive field, isolated: the other three are healthy.
+    for name in ("cfg_ip", "cfg_gateway", "cfg_mac"):
+        v = _cfg(**{name: defaults[name]})
+        assert not v.ok and v.evidence["still_default"] == [name], (name, v.evidence)
+    # The netmask default is ALSO the right answer on this /24: reported,
+    # never asserted -- a healthy run must pass with it.
+    v = _cfg()
+    assert v.ok, v.reason
+    assert v.evidence["default_but_not_decisive"] == ["cfg_netmask"]
+    assert _cfg(cfg_netmask=bytes([255, 255, 0, 0])).evidence[
+        "default_but_not_decisive"] == []
+
+    # Unread, and read at the wrong width, fail -- for every field.
+    for name, size in (("cfg_ip", 4), ("cfg_netmask", 4),
+                       ("cfg_gateway", 4), ("cfg_mac", 6)):
+        v = _cfg(**{name: None})
+        assert not v.ok and v.evidence["unread"] == [name], (name, v.evidence)
+        v = _cfg(**{name: bytes(range(1, size))})
+        assert not v.ok and v.evidence["unread"] == [name], (name, v.evidence)
+
+
+def test_ip65_config_written_asserts_the_values_it_is_given() -> None:
+    """Not-the-default is not written. All-zero RAM and a failed DHCP both
+    pass a defaults-only test; the expected values close that.
+
+    `dhcp_init` zeroes cfg_ip before sending anything (ip65/ip65/dhcp.s),
+    so a DHCP exchange that dies after the OFFER leaves 0.0.0.0 there --
+    with the gateway already written from the OFFER's router option.
+    """
+    expect = {"expect_ip": hw.ip4_bytes(C64_IP),
+              "expect_gateway": hw.ip4_bytes(HOST_IP),
+              "expect_mac": C64_MAC}
+
+    def cfg(**over):
+        d = dict(_HEALTHY_CFG)
+        d.update(over)
+        return hw.check_ip65_config_written(d["cfg_ip"], d["cfg_netmask"],
+                                            d["cfg_gateway"], d["cfg_mac"],
+                                            **expect)
+
+    assert cfg().ok and cfg().evidence["asserted"] == [
+        "cfg_ip", "cfg_gateway", "cfg_mac"]
+    # All-zero memory, even with NO expectations supplied.
+    z = hw.check_ip65_config_written(bytes(4), bytes(4), bytes(4), bytes(6))
+    assert not z.ok and z.evidence["zeroed"] == ["cfg_ip", "cfg_mac"], z.evidence
+    # Each zeroed field on its own, no expectations.
+    assert _cfg(cfg_ip=bytes(4)).evidence["zeroed"] == ["cfg_ip"]
+    assert not _cfg(cfg_ip=bytes(4)).ok
+    assert _cfg(cfg_mac=bytes(6)).evidence["zeroed"] == ["cfg_mac"]
+    assert not _cfg(cfg_mac=bytes(6)).ok
+    # A gateway of 0.0.0.0 is only wrong for a caller that knows better.
+    assert _cfg(cfg_gateway=bytes(4)).ok
+    # Wrong but plausible values, one field at a time: only the expectation
+    # can reject them.
+    # Differences in the LAST byte, the FIRST byte, and byte ORDER: a
+    # compare of only some bytes, or an order-insensitive one, passes at
+    # least one of these.
+    for name, bad in (("cfg_ip", hw.ip4_bytes("10.0.66.42")),
+                      ("cfg_ip", hw.ip4_bytes("11.0.66.200")),
+                      ("cfg_ip", hw.ip4_bytes(C64_IP)[::-1]),
+                      ("cfg_gateway", hw.ip4_bytes("10.0.66.254")),
+                      ("cfg_gateway", hw.ip4_bytes("11.0.66.1")),
+                      ("cfg_gateway", hw.ip4_bytes(HOST_IP)[::-1]),
+                      ("cfg_gateway", bytes(4)),
+                      ("cfg_mac", bytes.fromhex("000e3a646465")),
+                      ("cfg_mac", bytes.fromhex("020e3a646464")),
+                      ("cfg_mac", C64_MAC[::-1])):
+        assert _cfg(**{name: bad}).ok, name          # defaults-only: passes
+        v = cfg(**{name: bad})
+        assert not v.ok and [w["field"] for w in v.evidence["wrong_value"]] \
+            == [name], (name, v.evidence)
+
+
+def _fake_memory(image: dict):
+    """read_memory(addr, n) over a sparse {addr: byte} map; unset reads 0."""
+    def read(addr, n):
+        return bytes(image.get(a, 0) for a in range(addr, addr + n))
+    return read
+
+
+def _vt_image(pointers: dict, values: dict) -> dict:
+    mem: dict = {}
+    for name, off, _size in hw.IP65_VT_FIELDS:
+        ptr = pointers[name]
+        mem[hw.IP65_VT_ADDR + off] = ptr & 0xFF
+        mem[hw.IP65_VT_ADDR + off + 1] = ptr >> 8
+        for i, b in enumerate(values.get(name, b"")):
+            mem[ptr + i] = b
+    return mem
+
+
+_BLOB_PTRS = {"cfg_mac": 0x3A84, "cfg_ip": 0x3A8A,
+              "cfg_netmask": 0x3A8E, "cfg_gateway": 0x3A92}
+
+
+def test_read_ip65_config_follows_the_pointer_table() -> None:
+    """The fields are read THROUGH the blob's table, and a pointer that
+    cannot be ip65's is reported unread rather than followed."""
+    fields, ptrs = hw.read_ip65_config(_fake_memory(_vt_image(_BLOB_PTRS,
+                                                              _HEALTHY_CFG)))
+    assert ptrs == _BLOB_PTRS, ptrs
+    assert fields == _HEALTHY_CFG, fields
+    assert hw.check_ip65_config_written(fields["cfg_ip"], fields["cfg_netmask"],
+                                        fields["cfg_gateway"],
+                                        fields["cfg_mac"]).ok
+
+    # No PRG / zeroed RAM: every pointer is $0000, every field unread, and
+    # the verdict fails rather than judging zero-page bytes as ip65's.
+    fields, ptrs = hw.read_ip65_config(_fake_memory({}))
+    assert set(ptrs.values()) == {0} and set(fields.values()) == {None}
+    assert not hw.check_ip65_config_written(*(fields[n] for n in (
+        "cfg_ip", "cfg_netmask", "cfg_gateway", "cfg_mac"))).ok
+
+    # The range edge: a field must FIT below the end of ip65's space.
+    lo, hi = hw.IP65_VT_TARGET_RANGE
+    fits = dict(_BLOB_PTRS, cfg_mac=hi - 6)
+    fields, _ = hw.read_ip65_config(_fake_memory(_vt_image(fits, _HEALTHY_CFG)))
+    assert fields["cfg_mac"] == _HEALTHY_CFG["cfg_mac"]
+    overhangs = dict(_BLOB_PTRS, cfg_ip=hi - 3)
+    fields, _ = hw.read_ip65_config(_fake_memory(_vt_image(overhangs,
+                                                           _HEALTHY_CFG)))
+    assert fields["cfg_ip"] is None, "a 4-byte field starting 3 bytes from the end"
+    below = dict(_BLOB_PTRS, cfg_gateway=lo - 1)
+    fields, _ = hw.read_ip65_config(_fake_memory(_vt_image(below, _HEALTHY_CFG)))
+    assert fields["cfg_gateway"] is None
+
+    # A transport that returns short reads the field as unread.
+    short = _fake_memory(_vt_image(_BLOB_PTRS, _HEALTHY_CFG))
+    fields, _ = hw.read_ip65_config(lambda a, n: short(a, n)[:max(0, n - 1)]
+                                    if a != hw.IP65_VT_ADDR else short(a, n))
+    assert set(fields.values()) == {None}, fields
+
+
+def test_ip65_vt_layout_matches_the_blob_sources() -> None:
+    """IP65_VT_ADDR and the slot order are READ against the tree, not trusted.
+
+    Two sources: src/net/ip65/ip65_symbols.inc (the equates net.s is built
+    against) and ip65-build/ip65_stub.s (the `.word` table the blob is
+    linked from). A copy of either here would go stale silently and point
+    the read at a neighbouring field.
+    """
+    import re
+    inc = (REPO / "src" / "net" / "ip65" / "ip65_symbols.inc").read_text()
+    base = int(re.search(r"^ip65_base\s*=\s*\$([0-9a-fA-F]+)", inc, re.M).group(1), 16)
+    vt = int(re.search(r"^ip65_vt\s*=\s*ip65_base\s*\+\s*(\d+)", inc, re.M).group(1))
+    assert hw.IP65_BLOB_BASE == base and hw.IP65_VT_ADDR == base + vt
+    for name, off, _size in hw.IP65_VT_FIELDS:
+        m = re.search(rf"^ip65_vt_{name}\s*=\s*ip65_vt\s*\+\s*(\d+)", inc, re.M)
+        assert m and int(m.group(1)) == off, (name, off)
+    stub = (REPO / "ip65-build" / "ip65_stub.s").read_text()
+    words = re.findall(r"^\.word\s+(\w+)\s*;\s*\+(\d+)", stub, re.M)
+    slot = {w: int(o) - vt for w, o in words}
+    for name, off, _size in hw.IP65_VT_FIELDS:
+        assert slot.get(name) == off, (name, off, slot)
+
+
+# ===========================================================================
+# #201 — defence-in-depth branches, each reached ON ITS OWN
+# ===========================================================================
+def test_pcap_decoder_refusals_isolated() -> None:
+    """Short, non-pcap and absurd-length inputs raise PcapError, and a
+    half-written trailing record is skipped rather than decoded."""
+    for bad, why in ((b"\xd4\xc3\xb2\xa1" + bytes(10), "short"),
+                     (b"PK\x03\x04" + bytes(40), "not a pcap"),
+                     (b"\x0a\x0d\x0d\x0a" + bytes(40), "pcapng")):
+        try:
+            hw.parse_pcap(bad)
+        except hw.PcapError:
+            continue
+        raise AssertionError(f"parse_pcap accepted {why}")
+    header = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 262144, 1)
+    try:
+        hw.parse_pcap(header + struct.pack("<IIII", 0, 0, 300000, 300000))
+    except hw.PcapError:
+        pass
+    else:
+        raise AssertionError("a 300 kB record claim was accepted")
+    raw = [f.raw for f in _good_capture(time.time(), b"X" * 22)]
+    whole = _pcap(raw)
+    torn = whole + struct.pack("<IIII", 0, 0, len(raw[3]), len(raw[3])) \
+        + raw[3][:40]
+    assert len(hw.parse_pcap(torn)) == len(raw)
+
+
+def test_tcp_stream_keeps_the_longest_copy_of_a_segment() -> None:
+    """A retransmission that carries MORE than the first copy wins."""
+    payload = _rand_body(40)
+    frames = hw.parse_pcap(_pcap([
+        _tcp_frame(C64_MAC, HOST_MAC, C64_IP, HOST_IP, 1025, PORT, 7000,
+                   payload[:10]),
+        _tcp_frame(C64_MAC, HOST_MAC, C64_IP, HOST_IP, 1025, PORT, 7000, payload),
+    ]))
+    assert hw.tcp_stream(frames, eth_src=C64_MAC, dport=PORT) == payload
+
+
+def test_tls_records_need_a_tls_version() -> None:
+    """A record header with a non-3.x version is not a record."""
+    ch = _client_hello(SNI)
+    assert hw.parse_tls_records(b"\x16\x03\x03" + struct.pack(">H", len(ch)) + ch)
+    assert hw.parse_tls_records(b"\x16\x00\x00" + struct.pack(">H", len(ch)) + ch) == []
+
+
+def test_c64_originated_branches_isolated() -> None:
+    now = time.time()
+    good = _good_capture(now, b"X" * 22)
+    c64_only = [f for f in good if bytes(f.eth_src) == C64_MAC]
+    # c64_mac == host_mac on a capture with no third station: only the
+    # same-address guard can reject it.
+    assert not hw.check_c64_originated(c64_only, C64_MAC, C64_MAC).ok
+    # The C64 spoke -- DHCP and TCP -- but never on the port under test.
+    off_port = hw.parse_pcap(_pcap([
+        _udp_frame(C64_MAC, b"\xff" * 6, "0.0.0.0", "255.255.255.255", 68, 67,
+                   bytes(300)),
+        _tcp_frame(C64_MAC, HOST_MAC, C64_IP, HOST_IP, 1025, 80, 1, b"x"),
+    ], ts0=now))
+    v = hw.check_c64_originated(off_port, C64_MAC, HOST_MAC, tcp_port=PORT)
+    assert not v.ok and v.evidence["from_c64_on_port"] == 0
+
+
+def test_mac_on_wire_value_rejections_isolated() -> None:
+    """Each bad MAC is ALSO an Ethernet source in the capture, so the value
+    rejection is the only thing that can fail it. Before #201 none of them
+    was, and the frame count rejected them all."""
+    now = time.time()
+    good = [f.raw for f in _good_capture(now, b"X" * 22)]
+    for bad, why in ((b"\x00" * 6, "never programmed"),
+                     (b"\xff" * 6, "broadcast"),
+                     (bytes([0x01, 0, 0x5E, 0, 0, 1]), "multicast"),
+                     (bytes(hw.IP65_DEFAULT_CFG_MAC), "ip65 build-time default")):
+        frames = hw.parse_pcap(_pcap(good + [
+            _tcp_frame(bad, HOST_MAC, C64_IP, HOST_IP, 1025, PORT, 1, b"y")],
+            ts0=now))
+        v = hw.check_mac_on_wire(frames, bad, HOST_MAC)
+        assert not v.ok and "frames_with_that_source" not in v.evidence, why
+    # Not six bytes: with min_frames=0 nothing else can reject it.
+    assert not hw.check_mac_on_wire([], C64_MAC[:5], HOST_MAC, min_frames=0).ok
+    assert hw.check_mac_on_wire([], C64_MAC, HOST_MAC, min_frames=0).ok
+    # Unread fails closed rather than raising.
+    v = hw.check_mac_on_wire(hw.parse_pcap(_pcap(good, ts0=now)), None, HOST_MAC)
+    assert not v.ok and v.evidence["c64_mac"] is None
+
+
+def test_dhcp_lease_value_rejections_isolated() -> None:
+    """Each reserved address fails with NO subnet/host/expect constraint;
+    the pre-#201 cases all passed subnet=, which rejected them anyway."""
+    for bad in (b"\x00\x00\x00\x00", bytes([127, 0, 0, 1]), bytes([224, 0, 0, 1]),
+                b"\xff\xff\xff\xff", bytes([169, 254, 3, 4])):
+        assert not hw.check_dhcp_lease(bad).ok, bad.hex()
+    assert hw.check_dhcp_lease(bytes([169, 253, 3, 4])).ok
+    assert hw.check_dhcp_lease(bytes([223, 1, 2, 3])).ok
+
+
+def test_dns_query_branches_isolated() -> None:
+    now = time.time()
+    # The Mac querying port 53 itself: only the Ethernet-source filter
+    # rejects it (the old red case was a RESPONSE, rejected by the port).
+    mac_asks = hw.parse_pcap(_pcap([
+        _udp_frame(HOST_MAC, C64_MAC, HOST_IP, C64_IP, 1024, 53, _dns_query(SNI))],
+        ts0=now))
+    assert not hw.check_dns_query_on_wire(mac_asks, C64_MAC, SNI).ok
+    # The C64 asking on mDNS is not the C64 asking this segment's resolver.
+    mdns = hw.parse_pcap(_pcap([
+        _udp_frame(C64_MAC, HOST_MAC, C64_IP, HOST_IP, 5353, 5353, _dns_query(SNI))],
+        ts0=now))
+    assert not hw.check_dns_query_on_wire(mdns, C64_MAC, SNI).ok
+    # A longer name that CONTAINS the wanted one is a different name.
+    longer = hw.parse_pcap(_pcap([
+        _udp_frame(C64_MAC, HOST_MAC, C64_IP, HOST_IP, 1024, 53,
+                   _dns_query(SNI + ".example"))], ts0=now))
+    v = hw.check_dns_query_on_wire(longer, C64_MAC, SNI)
+    assert not v.ok and v.evidence["names_seen"] == [SNI + ".example"]
+
+
+def test_client_hello_branches_isolated() -> None:
+    now = time.time()
+    # Content type 23 whose first body byte happens to be 1: only the
+    # content-type test rejects it (the old red case's first byte was a
+    # random letter, which the ClientHello-type test rejected anyway).
+    looks_like_ch = hw.parse_pcap(_pcap([
+        _tcp_frame(C64_MAC, HOST_MAC, C64_IP, HOST_IP, 1025, PORT, 1,
+                   _tls_record(hw.TLS_CONTENT_APPDATA, _client_hello(SNI)))],
+        ts0=now))
+    assert not hw.check_client_hello_on_wire(looks_like_ch, C64_MAC, port=PORT).ok
+    # A handshake record that is not a ClientHello (ServerHello, type 2).
+    sh = b"\x02" + _client_hello(SNI)[1:]
+    not_ch = hw.parse_pcap(_pcap([
+        _tcp_frame(C64_MAC, HOST_MAC, C64_IP, HOST_IP, 1025, PORT, 1,
+                   _tls_record(hw.TLS_CONTENT_HANDSHAKE, sh))], ts0=now))
+    assert not hw.check_client_hello_on_wire(not_ch, C64_MAC, port=PORT).ok
+
+
+def test_http_response_guards_isolated() -> None:
+    """The vacuous and unread guards, each reached without a length mismatch."""
+    body = _rand_body(22)
+    # Nothing expected and nothing recorded: only the vacuity guard rejects.
+    assert not hw.check_http_response(200, 0, b"", b"").ok
+    # Status and length read, buffer not: must be a FAIL verdict, not a raise.
+    assert not hw.check_http_response(200, len(body), None, body).ok
+    # The length test is NOT subsumed by the content compare (it used to be
+    # listed as known-equivalent): slicing clamps an over-long resp_len, and
+    # a negative one slices from the end, so both of these leave `got` equal
+    # to the body. A C64 that recorded 30 bytes for a 22-byte body, or a
+    # length read as garbage, must not pass on content alone.
+    assert not hw.check_http_response(200, len(body) + 8, body, body).ok
+    assert not hw.check_http_response(200, -1, body + b"X", body).ok
+
+
+def test_net_last_error_names_a_defined_code() -> None:
+    """A defined code is DECODED, not just failed: the name is the point."""
+    src = (REPO / "src" / "net" / "ip65" / "ip65_errors.inc").read_text()
+    table = hw.net_error_table(src)
+    v = hw.check_net_last_error(0x42, table)
+    assert not v.ok and v.evidence.get("name") == "NET_ERR_IP65_DHCP", v.evidence
+    assert "name" not in hw.check_net_last_error(0x99, table).evidence
 
 
 # ===========================================================================

@@ -623,6 +623,185 @@ def test_x25519_rfc7748_vector2(transport, labels):
     return passed, failed
 
 
+# ----------------------------------------------------------------------------
+# Issue #242: fe_reduce_wide dropped a carry past byte 2 of its final fold.
+#
+# @reduce1_check folds the first pass's leftover carry (x38) into bytes 0-1
+# and ripples the carry through @prop2 with `adc #0 / inx / cpx #32 / bcc`.
+# `cpx` rewrites C, so from byte 3 on the loop added 0 instead of 1: a
+# fold that carried out of byte 2 silently lost 2^24 (and @prop3, the wrap
+# past byte 31, was unreachable). ~1.3% of X25519 scalar mults hit it
+# (byte-faithful model, 2,000 random keygens), which on hardware is a
+# ClientHello key_share that does not match the private key: the server
+# derives other handshake keys, every encrypted record fails its tag, and
+# the handshake stalls at tls_state=3 / tls_read_seq=0.
+# ----------------------------------------------------------------------------
+
+# Captured on the U64E (issue #242, PRG 2596bd34...): the client private
+# key, and the X25519 public key the C64 derived from it and sent.
+ISSUE_242_PRIV = bytes.fromhex(
+    "6070a17ca41b28c9a767bbcb5c09984db799efe30fcdd27b772c4c5273d854ca")
+ISSUE_242_BAD_PUB = bytes.fromhex(
+    "eca6f47c0dac9595f0d33a5cac283324122155b610cbf8bde7af3852d0603a12")
+# RFC 7748 X25519(priv, 9), confirmed with the `cryptography` package.
+ISSUE_242_GOOD_PUB = bytes.fromhex(
+    "c689799caae3aaaf8e2bc4a2906c7394508ad112306a1f7bb01d277e58aaca03")
+# The one fe_mul in that scalar mult (ladder bit 110, CB = C * B) that came
+# out 2^24 short.
+ISSUE_242_MUL_A = int(
+    "7d3a8b9166a36a3b11107c68fcd8e736b366b042200b454f875aff297199f38a", 16)
+ISSUE_242_MUL_B = int(
+    "7062a30ead657b4aee32c934a97d7530a3d5a63b4072c6be1e4a33d1f070b597", 16)
+
+
+def _wide_vector(low_bytes, high):
+    """64-byte fe_wide image: low 32 bytes given, high half = {index: byte}."""
+    w = bytearray(64)
+    w[:32] = low_bytes
+    for i, v in high.items():
+        w[32 + i] = v
+    return bytes(w)
+
+
+# (name, fe_wide image). Each is built so the first pass leaves a carry whose
+# x38 fold overflows byte 1 and then has to ripple through $FF bytes.
+REDUCE_WIDE_VECTORS = [
+    # Pass 1 leaves carry 2 (w[63]=7 at byte 31) -> fold 76 overflows byte 1,
+    # ripples through bytes 2..30 ($FF) and stops in byte 31.
+    ("ripple bytes 2-30", _wide_vector(b"\xff" * 32, {31: 0x07})),
+    # w[63]=$80: 128*38 = $1300 leaves byte 31 at $FF and carry $13; the
+    # fold ripples through bytes 2..31 and wraps past 2^256 (@prop3).
+    ("ripple past byte 31 (@prop3)", _wide_vector(b"\xff" * 32, {31: 0x80})),
+]
+
+
+def test_fe_reduce_wide_carry(transport, labels):
+    """fe_reduce_wide must propagate its final-fold carry through $FF bytes."""
+    passed = failed = 0
+    for name, wide in REDUCE_WIDE_VECTORS:
+        write_bytes(transport, labels["fe_wide"], wide)
+        jsr(transport, labels["fe_reduce_wide"], timeout=60.0)
+        got = le32_to_int(bytes(read_bytes(transport, labels["fe_wide"], 32)))
+        want = int.from_bytes(wide, "little") % P
+        if got % P == want:
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS fe_reduce_wide {name}")
+        else:
+            failed += 1
+            print(f"  FAIL fe_reduce_wide {name}")
+            print(f"    expected (mod p): {want:064x}")
+            print(f"    got:              {got:064x}")
+
+    result = c64_fe_mul(transport, labels, ISSUE_242_MUL_A, ISSUE_242_MUL_B)
+    want = fe_mul_ref(ISSUE_242_MUL_A, ISSUE_242_MUL_B)
+    if result == want:
+        passed += 1
+        if VERBOSE:
+            print("  PASS fe_mul #242 captured operands")
+    else:
+        failed += 1
+        print("  FAIL fe_mul #242 captured operands")
+        print(f"    expected: {want:064x}")
+        print(f"    got:      {result:064x}")
+    return passed, failed
+
+
+# ----------------------------------------------------------------------------
+# fe_mul_a24 had the sibling defect (found in review of #244): its three
+# folds of bytes 32..34 (x38) rippled with INC but simply stopped when the
+# ripple ran off byte 31, losing 2^256 = 38 (mod p). Random inputs almost
+# never reach it (bytes 3..31 must all be $FF), but a PEER can: at ladder
+# bit 254 (always set after clamping) E = AA - BB = 4u exactly, so a
+# server key_share u = a/4 with a*121665 = (H+1)*2^256 - r faults every
+# handshake that uses it.
+# ----------------------------------------------------------------------------
+
+def a24_trap(h):
+    """a < p with a*121665 = (h+1)*2^256 - r, r < 121665: bytes 3..31 of
+    the product are $FF and bytes 32..34 hold h."""
+    r = ((h + 1) << 256) % 121665
+    return (((h + 1) << 256) - r) // 121665
+
+
+# Which fold wraps depends on H: bytes 32..34 of the product are H, and the
+# fold stages add them x38 at offsets 0, 1, 2. The large H values wrap at
+# the byte-33 stage; H = 70 and 103 (byte 33 = 0) wrap at the byte-32
+# stage. Both entries into @a24_wrap38 are peer-forceable with canonical
+# input. The byte-34 entry is not (a*121665 < 2^272 for a < 2^255) and is
+# kept only as a defensive fold, so it has no vector here.
+A24_TRAP_HS = (50000, 40000, 30000, 60000, 70, 103)
+# u = a24_trap(50000) / 4 mod p, and X25519(ISSUE_242_PRIV, u) from the
+# `cryptography` package (RFC 7748). Unfixed code returns 67c65d3c...
+A24_TRAP_U = bytes.fromhex(
+    "566921b9502455f0956529a6c75c428d42b3b613a7d438bfc111c979a9604d5a")
+A24_TRAP_EXPECTED = bytes.fromhex(
+    "81de4f2b4753ba75f04b1f1740966d3c53506a4d696ecca7be36fb9e0c44ba56")
+# Same for H = 70, which wraps at the byte-32 fold stage instead.
+A24_TRAP_U_B32 = bytes.fromhex(
+    "77df4be5d2bb505fcdbcbf0c15ec79a87baff978ea36cd47b411a220ab8f0960")
+A24_TRAP_EXPECTED_B32 = bytes.fromhex(
+    "bcd4697ebed243e33f5517d73fe54c6b31b645c04bdadbe309fdf25987802e08")
+
+
+def test_fe_mul_a24_fold_carry(transport, labels):
+    """fe_mul_a24 must fold a ripple that runs off byte 31 back in as +38."""
+    passed = failed = 0
+    for h in A24_TRAP_HS:
+        a = a24_trap(h)
+        got = c64_fe_mul_a24(transport, labels, a)
+        want = fe_mul_a24_ref(a)
+        if got % P == want:
+            passed += 1
+            if VERBOSE:
+                print(f"  PASS fe_mul_a24 trap H={h}")
+        else:
+            failed += 1
+            print(f"  FAIL fe_mul_a24 trap H={h}: short by "
+                  f"{(want - got) % P} (mod p)")
+            print(f"    expected: {want:064x}")
+            print(f"    got:      {got:064x}")
+    return passed, failed
+
+
+def test_x25519_a24_trap_u(transport, labels):
+    """X25519 with a peer-chosen u that hits the fe_mul_a24 fold at bit 254."""
+    passed = failed = 0
+    for name, u, want in (("H=50000 (b33 fold)", A24_TRAP_U, A24_TRAP_EXPECTED),
+                          ("H=70 (b32 fold)", A24_TRAP_U_B32,
+                           A24_TRAP_EXPECTED_B32)):
+        print(f"    a24 trap u {name}...", end="", flush=True)
+        result = c64_x25519_scalarmult(transport, labels, ISSUE_242_PRIV, u)
+        if result == want:
+            passed += 1
+            print(" PASS")
+        else:
+            failed += 1
+            print(" FAIL")
+            print(f"    expected: {want.hex()}")
+            print(f"    got:      {result.hex()}")
+    return passed, failed
+
+
+def test_x25519_issue_242_keygen(transport, labels):
+    """X25519(captured #242 private key, 9) must be the RFC 7748 value."""
+    passed = failed = 0
+    print("    #242 captured keygen...", end="", flush=True)
+    result = c64_x25519_scalarmult(transport, labels, ISSUE_242_PRIV,
+                                   (9).to_bytes(32, "little"))
+    if result == ISSUE_242_GOOD_PUB:
+        passed += 1
+        print(" PASS")
+    else:
+        failed += 1
+        print(" FAIL")
+        print(f"    expected: {ISSUE_242_GOOD_PUB.hex()}")
+        print(f"    got:      {result.hex()}"
+              + ("  (= the key the U64E sent in #242)"
+                 if result == ISSUE_242_BAD_PUB else ""))
+    return passed, failed
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -658,6 +837,10 @@ def run_tests(transport, labels, seed):
          lambda: test_fe_cswap(transport, labels, rng)),
         ("fe_inv",
          lambda: test_fe_inv(transport, labels, rng)),
+        ("fe_reduce_wide carry (#242)",
+         lambda: test_fe_reduce_wide_carry(transport, labels)),
+        ("fe_mul_a24 fold carry (#244 review)",
+         lambda: test_fe_mul_a24_fold_carry(transport, labels)),
     ]
 
     skipped_groups = []
@@ -676,6 +859,10 @@ def run_tests(transport, labels, seed):
          lambda: test_x25519_rfc7748_vector1(transport, labels)),
         ("x25519 RFC 7748 vector 2",
          lambda: test_x25519_rfc7748_vector2(transport, labels)),
+        ("x25519 #242 captured keygen",
+         lambda: test_x25519_issue_242_keygen(transport, labels)),
+        ("x25519 fe_mul_a24 trap u",
+         lambda: test_x25519_a24_trap_u(transport, labels)),
     ]
     if FAST:
         # A skipped group must not silently leave the denominator: record
@@ -785,11 +972,11 @@ def main():
     required_intree_fe_routines = [
         "fe_copy", "fe_zero", "fe_one",
         "fe_add", "fe_sub", "fe_mul", "fe_sqr", "fe_inv",
-        "fe_cswap", "fe_mul_a24",
+        "fe_cswap", "fe_mul_a24", "fe_reduce_wide",
     ]
     required_intree_fe_data = [
         "fe_src1", "fe_src2", "fe_dst",
-        "fe_tmp1", "fe_tmp2", "fe_tmp3",
+        "fe_tmp1", "fe_tmp2", "fe_tmp3", "fe_wide",
     ]
     required_intree_fe = required_intree_fe_routines + required_intree_fe_data
 
