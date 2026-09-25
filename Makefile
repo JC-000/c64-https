@@ -139,13 +139,12 @@ endif
 # prints "PIN WARN ..." and continues instead. The 32 bytes travel in
 # build/https_host.inc, so re-pinning after a key rotation needs no
 # `make clean`. P-256 leaves only (the only ones this client can verify).
+# Both backends; on ip65 it is the only certificate authentication there is
+# (no name check), and it costs 14 B of the tight LOADER.
 HTTPS_PIN_SPKI_SHA256 ?=
 HTTPS_PIN_WARN ?=
 HTTPS_PIN_BYTES :=
 ifneq ($(strip $(HTTPS_PIN_SPKI_SHA256)),)
-ifneq ($(BACKEND),uci)
-$(error HTTPS_PIN_SPKI_SHA256 is UCI-only: the pin plus its diagnostic is ~280 B and ip65 has under 200 B free, split four ways (#155))
-endif
 ifeq ($(shell printf '%s' '$(strip $(HTTPS_PIN_SPKI_SHA256))' | grep -Eqx '[0-9A-Fa-f]{64}' && echo ok),)
 $(error HTTPS_PIN_SPKI_SHA256 must be exactly 64 hex digits (python3 tools/spki_pin.py <host> prints it))
 endif

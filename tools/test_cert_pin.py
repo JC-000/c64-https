@@ -34,7 +34,7 @@ What each group proves
 
 Usage:
     python3 tools/test_cert_pin.py            # builds BACKEND=uci onchip twice
-    C64_PIN_PROFILE=uci python3 tools/test_cert_pin.py   # the REU profile
+    C64_PIN_PROFILE=uci|ip65-onchip|ip65 python3 tools/test_cert_pin.py
 
 Leaves build/ holding the WARN image. Exit 0 pass, 1 fail, 2 could not run.
 """
@@ -69,6 +69,8 @@ MAP_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.map")
 PROFILES = {
     "onchip": ["BACKEND=uci", "USE_NISTCURVES_ONCHIP=1"],
     "uci": ["BACKEND=uci"],
+    "ip65-onchip": ["BACKEND=ip65", "USE_NISTCURVES_ONCHIP=1"],
+    "ip65": ["BACKEND=ip65"],
 }
 
 CARRY_TRAMPOLINE = 0x033C
@@ -217,7 +219,7 @@ def h4(b: bytes) -> str:
     return b[:4].hex().upper()
 
 
-def run_image(r: Run, warn: bool, A, B):
+def run_image(r: Run, warn: bool, A, B, name_check: bool):
     pin_a = hashlib.sha256(spki(A)).digest()
     pin_b = hashlib.sha256(spki(B)).digest()
     word = "WARN" if warn else "FAIL"
@@ -252,10 +254,15 @@ def run_image(r: Run, warn: bool, A, B):
     r.check("reverse displacement: verified key is A, so the pin accepts",
             c == 0 and st == ST_MATCH and pk == point(A), f"C={c} status=${st:02X}")
 
-    # Pin passes, name fails: the chain still rejects.
+    # Pin passes, name fails: the chain still rejects — where there IS a name
+    # check (#135, UCI only). On ip65 the pin is the whole certificate check.
     c, st, _, _ = r.extract(make_cert(spki(A), ["other.example"]))
-    r.check("pinned key, wrong SAN: pin passes, name check still rejects",
-            c == 1 and st == ST_MATCH, f"C={c} status=${st:02X}")
+    if name_check:
+        r.check("pinned key, wrong SAN: pin passes, name check still rejects",
+                c == 1 and st == ST_MATCH, f"C={c} status=${st:02X}")
+    else:
+        r.check("pinned key, wrong SAN: accepted (ip65 has no name check)",
+                c == 0 and st == ST_MATCH, f"C={c} status=${st:02X}")
 
     # Curve gate, driven directly: a window that hashes to the pin, with
     # ecdsa_curve_id = 1 as a P-384 extraction leaves it.
@@ -375,7 +382,7 @@ def main() -> int:
             passed += ok
             failed += not ok
             r = Run(t, labels)
-            run_image(r, warn, A, B)
+            run_image(r, warn, A, B, name_check="BACKEND=uci" in profile)
             passed += r.passed
             failed += r.failed
 

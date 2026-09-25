@@ -155,8 +155,8 @@ Variables:
     be silently dropped by the two REU-profile builds.
   - `HTTPS_PIN_SPKI_SHA256=<64 hex>` (+ `HTTPS_PIN_WARN=1` = report, don't
     abort) — leaf SPKI pin, #155. `tools/spki_pin.py <host>` computes it;
-    the bytes ride `build/https_host.inc`. UCI only (`$(error)` on ip65);
-    unset = byte-identical PRG. Test: `tools/test_cert_pin.py` (builds its
+    the bytes ride `build/https_host.inc`. Both backends (ip65: in
+    CRYPTO_RESIDENT, +14 B LOADER); unset = byte-identical PRG. Test: `tools/test_cert_pin.py` (builds its
     own images). The pin hashes the window the key SCANNER read, not the
     DER-parsed SPKI — see the header of `src/cert_pin.s` before changing it.
   - `HTTPS_HOST` / `HTTPS_PATH` / `HTTPS_SNI` / `HTTPS_PORT` /
