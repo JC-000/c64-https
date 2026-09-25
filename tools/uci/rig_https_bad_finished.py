@@ -499,16 +499,12 @@ def main() -> int:
         print(f"ERROR: {sni_problem}", file=sys.stderr)
         return 2
 
-    srv = _try_bind(test_host_ip, HTTPS_PORT)
-    if srv is None:
-        print(f"ERROR: could not bind {test_host_ip}:{HTTPS_PORT}",
-              file=sys.stderr)
-        return 2
-    print(f"Listener     : {test_host_ip}:{HTTPS_PORT} (cert {cert_path})")
-    # Bound now, so a port problem costs no device time; NOT started until
-    # the DeviceLock is held (#246) — see start_listener below.
+    # The listener is bound AND started only once the DeviceLock is held
+    # (#246): its ACCEPT_TIMEOUT must not run while this rig queues, and a
+    # port held through a queue would refuse every other lane's local rig.
     server_result: dict = {}
     server_thread = None
+    srv = None
 
     routine_raw, host_len_patch = _build_http_routine(labels, HTTPS_PORT)
     routine = bytearray(routine_raw)
@@ -579,8 +575,14 @@ def main() -> int:
         client.reset()
         time.sleep(2.5)
 
-        # #246: the listener's ACCEPT_TIMEOUT clock starts here, with the
-        # C64, not before the DeviceLock queue.
+        # #246: bind and start the listener here, with the C64, not before
+        # the DeviceLock queue.
+        srv = _try_bind(test_host_ip, HTTPS_PORT)
+        if srv is None:
+            print(f"ERROR: could not bind {test_host_ip}:{HTTPS_PORT}",
+                  file=sys.stderr)
+            return 2
+        print(f"Listener     : {test_host_ip}:{HTTPS_PORT} (cert {cert_path})")
         server_thread = start_listener(
             serve_one_connection, args=(srv, cert_path, key_path),
             kwargs=dict(mode=SERVER_MODE, body=DEFAULT_BODY,
@@ -703,7 +705,8 @@ def main() -> int:
         except Exception:
             pass
         try:
-            srv.close()
+            if srv is not None:
+                srv.close()
         except Exception:
             pass
 

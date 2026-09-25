@@ -311,6 +311,20 @@ def _try_bind(bind_ip: str, port: int) -> socket.socket | None:
     return srv
 
 
+def _bind_https_listener(bind_ip: str):
+    """-> (socket, port): DEFAULT_HTTPS_PORT, else FALLBACK_HTTPS_PORT; or
+    (None, None). Called only with the DeviceLock held (#246)."""
+    srv = _try_bind(bind_ip, DEFAULT_HTTPS_PORT)
+    if srv is not None:
+        return srv, DEFAULT_HTTPS_PORT
+    if DEFAULT_HTTPS_PORT == FALLBACK_HTTPS_PORT:
+        return None, None
+    print(f"NOTE: bind {bind_ip}:{DEFAULT_HTTPS_PORT} failed"
+          f" (need root?), falling back to {FALLBACK_HTTPS_PORT}")
+    srv = _try_bind(bind_ip, FALLBACK_HTTPS_PORT)
+    return (srv, FALLBACK_HTTPS_PORT) if srv is not None else (None, None)
+
+
 def _run_https_server(srv: socket.socket, ctx: ssl.SSLContext,
                       result: dict) -> None:
     srv.settimeout(ACCEPT_TIMEOUT)
@@ -1441,34 +1455,13 @@ def main() -> int:
         test_host_ip = _detect_local_ip(HOST)
         print(f"\nDev host LAN IP : {test_host_ip}")
         print(f"Cert / key      : {CERT_PATH} / {KEY_PATH}")
-
-        # --- Bind HTTPS listener (try default port, fall back to 4433) ---
-        ctx = _make_ssl_context()
-        srv = _try_bind(test_host_ip, DEFAULT_HTTPS_PORT)
-        chosen_port = DEFAULT_HTTPS_PORT
-        if srv is None:
-            if DEFAULT_HTTPS_PORT != FALLBACK_HTTPS_PORT:
-                print(f"NOTE: bind {test_host_ip}:{DEFAULT_HTTPS_PORT} failed"
-                      f" (need root?), falling back to {FALLBACK_HTTPS_PORT}")
-                srv = _try_bind(test_host_ip, FALLBACK_HTTPS_PORT)
-                chosen_port = FALLBACK_HTTPS_PORT
-            if srv is None:
-                print(f"ERROR: could not bind HTTPS listener", file=sys.stderr)
-                return 1
-        print(f"HTTPS port      : {chosen_port}")
         print(f"Expected body   : {EXPECTED_BODY!r}")
-        # Bound now, so a port problem costs no device time; NOT started
-        # until the DeviceLock is held (#246) — see start_listener below.
+        # The listener is bound AND started only once the DeviceLock is
+        # held (#246): its ACCEPT_TIMEOUT must not run while this rig
+        # queues, and a port held through a queue would also refuse every
+        # other lane's local rig on this host.
 
-    # --- Build routine (port patched in at build time) ---
-    routine_bytes_raw, host_len_patch = _build_http_routine(labels, chosen_port)
-    routine_bytes = bytearray(routine_bytes_raw)
     host_ip_bytes = test_host_ip.encode("ascii")
-    routine_bytes[host_len_patch] = len(host_ip_bytes)
-    routine_bytes = bytes(routine_bytes)
-
-    print(f"Routine size    : {len(routine_bytes)} bytes @ ${ROUTINE_ADDR:04X}")
-
     host_str = host_ip_bytes + b"\x00"
     path_str = b"/\x00"
 
@@ -1632,9 +1625,15 @@ def main() -> int:
         client.reset()
         time.sleep(2.5)
 
-        # #246: the listener's ACCEPT_TIMEOUT clock starts here, with the
-        # C64, not before the DeviceLock queue.
+        # #246: bind and start the listener here, with the C64, not before
+        # the DeviceLock queue.
         if not EXTERNAL_LISTENER:
+            ctx = _make_ssl_context()
+            srv, chosen_port = _bind_https_listener(test_host_ip)
+            if srv is None:
+                print("ERROR: could not bind HTTPS listener", file=sys.stderr)
+                return 1
+            print(f"HTTPS port      : {chosen_port}")
             server_thread = start_listener(
                 _run_https_server, args=(srv, ctx, server_result),
                 result=server_result, wait_s=3.0)
@@ -1642,6 +1641,15 @@ def main() -> int:
                 print("ERROR: HTTPS server failed to start", file=sys.stderr)
                 return 1
             print(f"HTTPS server listening on {test_host_ip}:{chosen_port}")
+
+        # --- Build routine (port patched in at build time) ---
+        routine_bytes_raw, host_len_patch = _build_http_routine(labels,
+                                                                chosen_port)
+        routine_bytes = bytearray(routine_bytes_raw)
+        routine_bytes[host_len_patch] = len(host_ip_bytes)
+        routine_bytes = bytes(routine_bytes)
+        print(f"Routine size    : {len(routine_bytes)} bytes @ "
+              f"${ROUTINE_ADDR:04X}")
 
         print("run_prg(PRG)...")
         client.run_prg(prg)
