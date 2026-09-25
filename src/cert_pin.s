@@ -143,10 +143,9 @@ cert_pin_check:
 .endif
 
 ; Everything below — the interlock, the status byte, the diagnostic and the
-; pin itself — is a separate segment so the comb cfg can split the ~280 B
-; across two regions: neither of its tails holds all of it, and the overlay
-; tail is also HTTPS_TARGET_RODATA's budget, so the half that goes there is
-; kept as small as possible. The uci cfg puts both halves in CRYPTO_OVERLAY.
+; pin itself — is a separate segment so the comb cfg can split the ~270 B
+; across two regions (neither of its tails holds all of it with a long
+; target string); the uci cfg puts both halves in CRYPTO_OVERLAY.
 ; Holds cert_pin_status: RAM only.
 .segment "CERT_PIN_UI"
 
