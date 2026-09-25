@@ -188,6 +188,16 @@ otherwise, and nothing here said it before:
   `ip65-onchip` does **not** — the routine is 491 B (`X509_NAME_CODE` in the
   map) and no free block in that layout comes close — `tools/measure_margins.py`
   measures them. See issue #135.
+- **Key pinning exists, but is opt-in, build-time and UCI-only.** Build with
+  `HTTPS_PIN_SPKI_SHA256=<64 hex>` (the value `python3 tools/spki_pin.py
+  <host>` prints) and the client aborts unless the server presents exactly
+  that leaf key, printing `PIN FAIL EXP xxxxxxxx GOT yyyyyyyy` so you can read
+  the new fingerprint off the screen; `HTTPS_PIN_WARN=1` prints `PIN WARN ...`
+  and carries on. That **is** authentication of the one host you built for —
+  it trusts no CA at all — but no packaged image carries a pin, and a pinned
+  image stops connecting the day the server rotates its key (some do on every
+  renewal: `tools/spki_pin.py --check-baseline`). ip65 has no room for it.
+  Issue #155.
 
 What the client *does* prove is that the peer holds the private key for the
 leaf certificate it presented (the CertificateVerify signature is genuinely
@@ -423,6 +433,8 @@ The knobs, all read straight from the Makefile:
 | `USE_NISTCURVES_ONCHIP_COMB=1` | implies onchip, adds the Lim-Lee comb + a boot precompute into REU bank 2. **Needs an REU.** Switches to `cfg/c64-https-$(BACKEND)-onchip.cfg`. |
 | `HTTPS_HOST=` / `HTTPS_PATH=` | the single target baked into the image. Hosts over 63 chars are a build error. |
 | `HTTPS_SNI=` | SNI override, when it must differ from `HTTPS_HOST` (e.g. dialling an IP). |
+| `HTTPS_PIN_SPKI_SHA256=` | pin the server's leaf key (SHA-256 of its SPKI; `tools/spki_pin.py <host>`). Aborts on any other key. UCI only; unset = no pin. |
+| `HTTPS_PIN_WARN=1` | with a pin: report a mismatch on screen and continue instead of aborting. |
 | `HTTPS_PORT=` | default 443. |
 | `HTTPS_BODY_TO_REU=1` | stream the response body into the REU instead of `http_resp_buf`. UCI only. |
 | `VIC_BLANK=0` | degrade `vic_blank`/`vic_unblank` to `RTS`. A/B measurement control. |

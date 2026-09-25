@@ -40,6 +40,9 @@
         .export cert_data_ptr
 .endif
 
+.ifdef HTTPS_PIN_SPKI
+.import cert_pin_check
+.endif
         .ifdef X509_VERIFY_NAME
 .import x509_verify_hostname
 .endif
@@ -600,7 +603,11 @@ x509_extract_pubkey:
         ; handshake exactly like a bad key would — the carry we return is the
         ; caller's success/failure, so falling through to its `clc` would
         ; silently accept a certificate for the wrong host.
-.ifdef X509_VERIFY_NAME
+.ifdef HTTPS_PIN_SPKI
+        ; Issue #155: the SPKI pin runs first, so a pin failure reports as
+        ; one; it tail-calls the name check itself on success.
+        jmp cert_pin_check              ; tail call: its carry IS our result
+.elseif .defined(X509_VERIFY_NAME)
         jmp x509_verify_hostname        ; tail call: its carry IS our result
 .else
         clc

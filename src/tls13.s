@@ -78,6 +78,10 @@
 ; --- Key schedule (tls_keyschedule.s) ---
 .import tls_derive_handshake_keys
 .import tls_derive_traffic_keys
+.ifdef HTTPS_PIN_SPKI
+.import cert_pin_status         ; #155: the pin's positive flag
+.import cert_pin_require
+.endif
 .import tls_compute_finished
 .import tls_verify_finished
 .import tls_verify_data
@@ -140,6 +144,9 @@ tls_connect:
         lda #TLS_STATE_IDLE
         sta tls_state
         sta tls_reached_connected ; #204: this attempt has not connected yet
+.ifdef HTTPS_PIN_SPKI
+        sta cert_pin_status     ; #155: no Certificate has been pinned yet
+.endif
 
         ; generate client random (32 bytes)
         lda #<tls_client_random
@@ -272,6 +279,16 @@ tls_connect:
         ; the right value.  Both derivations sign the same transcript
         ; (Transcript-Hash(ClientHello..ServerFinished)), so the single
         ; snapshot above is shared cleanly.
+.ifdef HTTPS_PIN_SPKI
+        ; #155 interlock: no client Finished and no traffic keys unless the
+        ; SPKI pin check RAN and allowed this connection. A flight that omits
+        ; the Certificate never reaches the check, so it is refused here
+        ; rather than trusted.
+        jsr cert_pin_require
+        bcc :+
+        jmp @error
+:
+.endif
         jsr tls_send_finished
         bcc @ok8
         jmp @error
