@@ -812,8 +812,8 @@ def main() -> int:
             certifies=CERTIFIES)
 
     for line in hw.format_provenance(hw.provenance(
-            [Path(__file__), PROJECT_ROOT / "tools" / "ip65_hw_checks.py",
-             PRG_PATH], repo=PROJECT_ROOT)):
+            [Path(__file__), PROJECT_ROOT / "tools" / "ip65_hw_checks.py"],
+            repo=PROJECT_ROOT)):
         print(line)
 
     if not selftest_library():
@@ -827,6 +827,11 @@ def main() -> int:
         return cannot_run("the PRG could not be built -- `make` failed",
                           executed=0, total=1, certifies=CERTIFIES,
                           opt_out_env=None)
+    # The PRG's provenance AFTER the build: hashed before it, it named
+    # whatever the previous build left in build/, not the image that runs.
+    for line in hw.format_provenance(hw.provenance([PRG_PATH],
+                                                   repo=PROJECT_ROOT)):
+        print(line)
 
     problems = rig_problems()
     if problems:
