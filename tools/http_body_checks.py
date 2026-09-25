@@ -131,6 +131,8 @@ __all__ = [
     "decode_body_state",
     "expected_body_size",
     "should_stop_early",
+    "handshake_failed",
+    "TLS_STATE_ERROR",
     "StallTracker",
     "close_confirmed",
     "early_stop_step",
@@ -434,6 +436,37 @@ def should_stop_early(state: BodyState, tcp_state, frozen_for: float,
                   "no further byte can arrive")
 
 
+#: `tls_state` value `src/tls13.s` stores on any handshake abort.
+TLS_STATE_ERROR = 0xFF
+
+
+def handshake_failed(state: BodyState, tls_state, shadow_ok: bool):
+    """Has the fetch died in the TLS handshake? -> a description, or None.
+
+    #247: `should_stop_early` needs parse_state >= 2, so a handshake failure
+    used to burn the whole FETCH_TIMEOUT. On that path `do_https_get` prints
+    "TLS HANDSHAKE FAILED", calls `net_tcp_close` and returns to the menu —
+    nothing further can arrive, and no "CONNECTION CLOSED" follows.
+
+    Only when all hold: the shadow read is RAM (`tls_state` lives at $A000+),
+    `tls_state` is ERROR, and the parser never reached the body. A $FF
+    AFTER the body began is an application-data failure, which the
+    budget/early-stop logic already owns (and in the viewer build its socket
+    stays open until 'Q'), so it is deliberately not this function's case.
+    Stopping here changes no verdict: `check_http_status` fails any state
+    below parse_state 2.
+    """
+    if not shadow_ok:
+        return None
+    if tls_state != TLS_STATE_ERROR:
+        return None
+    if state.parse_state >= PARSE_STATE_BODY:
+        return None
+    return ("STOPPED EARLY: tls_state=ERROR ($FF) before the response "
+            f"reached its body (parse_state={state.parse_state}) — the TLS "
+            "handshake failed, so no body byte can arrive")
+
+
 class StallTracker:
     """When `http_body_total` last moved. The poll loop's only clock state.
 
@@ -456,14 +489,31 @@ class StallTracker:
 
 
 def early_stop_step(tracker: StallTracker, state: BodyState, now: float,
-                    read_tcp_state, *, stall_abort: float, shadow_ok: bool):
+                    read_tcp_state, *, stall_abort: float, shadow_ok: bool,
+                    read_tls_state=None):
     """One poll of the rig's loop: record progress, then `should_stop_early`.
 
     `read_tcp_state` is a zero-argument callable (one REST read), called
     only once the counter has been frozen for `stall_abort`, so a moving
     fetch costs no extra traffic.
+
+    #247: before the body, `read_tls_state` (also a zero-argument reader,
+    optional) is polled for a handshake failure — see `handshake_failed`.
+    That stop additionally requires `net_tcp_state` CLOSED: `do_https_get`
+    calls `net_tcp_close` straight after printing the failure, so the stop
+    is also the proof that the socket is gone, which the 'Q' that follows
+    (at the menu, banking BASIC in) can no longer provide.
     """
     tracker.observe(state.body_total, now)
+    if read_tls_state is not None and state.parse_state < PARSE_STATE_BODY:
+        dead = handshake_failed(state, read_tls_state(), shadow_ok)
+        if dead:
+            tcp = read_tcp_state()
+            if tcp == NET_TCP_CLOSED:
+                return True, (f"{dead}; net_tcp_state=CLOSED "
+                              "(net_tcp_close has run)")
+            return False, (f"{dead}; waiting for net_tcp_close "
+                           f"(net_tcp_state={tcp!r})")
     frozen = tracker.frozen_for(now)
     if frozen < stall_abort:
         return False, (f"frozen for {frozen:.0f}s, below the "
@@ -472,8 +522,14 @@ def early_stop_step(tracker: StallTracker, state: BodyState, now: float,
                              stall_abort=stall_abort, shadow_ok=shadow_ok)
 
 
-def close_confirmed(stopped_early: bool, read_shadow_ok, read_tcp_state):
+def close_confirmed(stopped_early: bool, read_shadow_ok, read_tcp_state,
+                    closed_before=None):
     """After 'Q': has `net_tcp_close` run? -> a description, or None.
+
+    `closed_before` is the evidence an earlier read already produced — the
+    #247 handshake stop proves CLOSED before the 'Q', and after that 'Q'
+    (at the menu) BASIC is banked in and `net_tcp_state` is unreadable. It
+    counts only as a NON-EMPTY string, like every other answer here.
 
     Only after an early stop; otherwise the screen marker alone decides, as
     before. `read_shadow_ok()` is re-read on every call because 'Q' at the
@@ -488,6 +544,8 @@ def close_confirmed(stopped_early: bool, read_shadow_ok, read_tcp_state):
     replaces is printed after `net_tcp_close` either way, so it is the same
     evidence, not weaker.
     """
+    if isinstance(closed_before, str) and closed_before:
+        return closed_before
     if not stopped_early:
         return None
     if not read_shadow_ok():

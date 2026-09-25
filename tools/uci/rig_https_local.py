@@ -116,6 +116,7 @@ from _memory_policy import (
 )
 from _device_prep import DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
+from _rig_lifecycle import guard_socket_teardown, start_listener
 from _sni_precondition import enforce_sni_precondition
 
 
@@ -1456,21 +1457,8 @@ def main() -> int:
                 return 1
         print(f"HTTPS port      : {chosen_port}")
         print(f"Expected body   : {EXPECTED_BODY!r}")
-
-        server_thread = threading.Thread(
-            target=_run_https_server,
-            args=(srv, ctx, server_result),
-            daemon=True,
-        )
-        server_thread.start()
-        for _ in range(60):
-            if server_result.get("listening"):
-                break
-            time.sleep(0.05)
-        else:
-            print("ERROR: HTTPS server failed to start", file=sys.stderr)
-            return 1
-        print(f"HTTPS server listening on {test_host_ip}:{chosen_port}")
+        # Bound now, so a port problem costs no device time; NOT started
+        # until the DeviceLock is held (#246) — see start_listener below.
 
     # --- Build routine (port patched in at build time) ---
     routine_bytes_raw, host_len_patch = _build_http_routine(labels, chosen_port)
@@ -1529,6 +1517,8 @@ def main() -> int:
     debug_started_on_u64 = False
     outcome: str = "UNKNOWN"
     exit_code: int = 1
+    fetch_in_flight = False
+    transport = None
     run_start = time.time()
     try:
         client = Ultimate64Client(host=HOST, timeout=15.0)
@@ -1642,6 +1632,17 @@ def main() -> int:
         client.reset()
         time.sleep(2.5)
 
+        # #246: the listener's ACCEPT_TIMEOUT clock starts here, with the
+        # C64, not before the DeviceLock queue.
+        if not EXTERNAL_LISTENER:
+            server_thread = start_listener(
+                _run_https_server, args=(srv, ctx, server_result),
+                result=server_result, wait_s=3.0)
+            if server_thread is None:
+                print("ERROR: HTTPS server failed to start", file=sys.stderr)
+                return 1
+            print(f"HTTPS server listening on {test_host_ip}:{chosen_port}")
+
         print("run_prg(PRG)...")
         client.run_prg(prg)
         # Wait for auto-init (entropy, REU stash, DHCP). Scales with TURBO_MHZ
@@ -1702,6 +1703,7 @@ def main() -> int:
         # Trigger via SYS
         sys_line = f"sys{ROUTINE_ADDR}\r"
         print(f"Triggering: {sys_line.strip()}")
+        fetch_in_flight = True      # #234: from here a socket may be live
         send_text(transport, sys_line)
 
         # Poll sentinel
@@ -1735,6 +1737,7 @@ def main() -> int:
             if sentinel == SENTINEL_VALUE:
                 print("  sentinel set — routine complete")
                 sentinel_seen = True
+                fetch_in_flight = False     # http_get has returned
                 break
         # NOTE: this used to be the `else:` of the while-loop (while/else —
         # runs only when the loop exhausts without break). The W0 phase-timing
@@ -1900,6 +1903,12 @@ def main() -> int:
                           f"retain)")
                 except Exception as exc:
                     print(f"WARNING: failed to remove PASS run dir: {exc}")
+
+        # #234: before disable_uci — the C64 needs the command interface
+        # to issue the SOCKET_CLOSE this waits for.
+        if fetch_in_flight and transport is not None:
+            guard_socket_teardown(transport.read_memory,
+                                  labels.get("net_tcp_state"))
 
         if uci_enabled and client is not None:
             print("\nDisabling UCI...")

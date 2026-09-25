@@ -120,6 +120,7 @@ from _device_lock_helper import (
 from _memory_policy import (build_policy,
                             build_policy_and_arbiter_with_overlay_carveout)
 from _device_prep import REQUIRED_REU_SIZE, DevicePrepError, prepare_device
+from _rig_lifecycle import guard_socket_teardown, teardown_warning
 from _reu_preflight import ReuPreflightError, preflight_reu
 from _temp_gc import gc_temp
 
@@ -604,6 +605,8 @@ def main() -> int:
     outcome = "UNKNOWN"
     exit_code = 1
     viewer_live = False
+    fetch_in_flight = False
+    transport = None
     run_start = time.time()
     try:
         client = Ultimate64Client(host=HOST, timeout=15.0)
@@ -685,6 +688,7 @@ def main() -> int:
             # Not needing the scratch is a better answer than hunting for a
             # region big enough to hold it.
             print("Menu mode: pressing 'G' (no DMA trampoline, no scratch)")
+            fetch_in_flight = True  # #234: open until the viewer sees 'Q'
             send_text(transport, "g")
         else:
             print("Sending 'Q' to exit PRG main_loop...")
@@ -718,6 +722,7 @@ def main() -> int:
 
             sys_line = f"sys{routine_addr}\r"
             print(f"Triggering: {sys_line.strip()}")
+            fetch_in_flight = True  # #234: from here a socket may be live
             send_text(transport, sys_line)
 
         # --- Poll sentinel + body progress ------------------------------- #
@@ -784,6 +789,7 @@ def main() -> int:
                 print(f"  sentinel set after {now - start:.1f}s — "
                       "routine complete")
                 sentinel_seen = True
+                fetch_in_flight = False     # http_get has returned
                 break
 
         if phase_timing and phase_log:
@@ -824,7 +830,15 @@ def main() -> int:
             print(f"\nFAIL: sentinel not set within {WIKI_TIMEOUT:.0f}s "
                   f"(progress=0x{last_progress:02X}, "
                   f"http_body_total={body_total:,})", file=sys.stderr)
-            _close_orphan_socket(transport, client, labels)
+            # #234: give the C64 a bounded chance to close on its own before
+            # the reset-based orphan close below, which is the last resort.
+            td = guard_socket_teardown(
+                transport.read_memory, labels.get("net_tcp_state"),
+                nudge=(lambda: send_text(transport, "q")) if MENU_MODE
+                else None)
+            fetch_in_flight = False
+            if not td.closed:
+                _close_orphan_socket(transport, client, labels)
             outcome = "TIMEOUT"
             return 1
         if carry != 0:
@@ -868,6 +882,13 @@ def main() -> int:
         outcome = verdict            # PASS or WARN
         exit_code = 0
         viewer_live = True
+        # Deliberate: the viewer stays live for a human, and with it the
+        # firmware socket (it closes when the viewer sees 'Q'). #234's wait
+        # would only time out, so say it plainly instead.
+        fetch_in_flight = False
+        print(teardown_warning("viewer left live on purpose; its socket "
+                               "closes when the viewer sees 'Q'", 0.0),
+              file=sys.stderr)
         print(f"\n{verdict}: {body_total:,} article bytes sunk to REU "
               f"$10:0000, http_status={http_status}, prefix verified "
               f"against the live article.")
@@ -897,6 +918,14 @@ def main() -> int:
             print(f"WARNING: run_info write failed: {exc}")
         print(f"\nDebug artifacts: {run_dir}")
 
+        # #234: before disable_uci — the C64 needs the command interface
+        # to issue the SOCKET_CLOSE this waits for. In menu mode the C64 is
+        # in the viewer, the one place 'Q' closes the socket.
+        if fetch_in_flight and transport is not None:
+            guard_socket_teardown(
+                transport.read_memory, labels.get("net_tcp_state"),
+                nudge=(lambda: send_text(transport, "q")) if MENU_MODE
+                else None)
         if viewer_live:
             # Leave the machine exactly as-is for the human.
             pass
