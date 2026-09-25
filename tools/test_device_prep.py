@@ -602,7 +602,8 @@ def test_the_discovery_rule_finds_the_known_rigs() -> None:
     names = {p.name for p in _crypto_path_rigs()}
     expected = {"bench_ecdsa_u64e.py", "rig_https_bad_finished.py",
                 "rig_https_live.py", "rig_https_local.py",
-                "rig_https_wiki.py", "rig_https_banner.py"}
+                "rig_https_wiki.py", "rig_https_banner.py",
+                "rig_close_retry.py"}
     assert names == expected, (
         f"the discovery rule now selects {sorted(names)}, not "
         f"{sorted(expected)}. If a rig was added or renamed that is fine — "

@@ -762,7 +762,10 @@ def test_poll_reset_is_not_idle():
     socket for the rest of http_recv_body's tick budget; the line must
     also be kept for the post-mortem (the routine-line filter drops every
     "02," line)."""
-    for status in (b"02,NO DATA: 104", b"02,NO DATA: 9", b"02,NO DATA: 128"):
+    # 111 (ECONNREFUSED) ends in "11" like the idle line, so only the
+    # length tells it apart.
+    for status in (b"02,NO DATA: 104", b"02,NO DATA: 9", b"02,NO DATA: 128",
+                   b"02,NO DATA: 111"):
         uci, mem, labels = _poll_once((b"\xff\xff", status))
         base._check(_state(mem, labels) == NET_TCP_ERROR, (
             "SOCKET_READ $FFFF with %r left net_tcp_state=$%02X, expected "
