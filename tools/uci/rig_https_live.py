@@ -42,7 +42,8 @@ Environment variables:
                           ec_precompute_256 boot pass is ~45 s at 48 MHz —
                           the local rig's 22 s default would poll a machine
                           still precomputing), 22 otherwise.
-  SENTINEL_POLL_TIMEOUT — C64-side completion budget (default 300 * scale)
+  SENTINEL_POLL_TIMEOUT — C64-side completion budget (default 900 * scale;
+                          github.com's / is ~576 KB chunked at ~2 KB/s)
   PHASE_TIMING          — default **1** here (opt-in in the local rig): a
                           live run is a milestone and the W0 phase table is
                           half its value. Set 0 to disable.
@@ -126,7 +127,7 @@ EXPECT_STATUS = int(os.environ.get("EXPECT_STATUS", "200"))
 TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
 _TIMEOUT_SCALE = max(1.0, 48.0 / float(TURBO_MHZ))
 SENTINEL_POLL_TIMEOUT = float(
-    os.environ.get("SENTINEL_POLL_TIMEOUT", str(300.0 * _TIMEOUT_SCALE))
+    os.environ.get("SENTINEL_POLL_TIMEOUT", str(900.0 * _TIMEOUT_SCALE))
 )
 
 SENTINEL_VALUE = 0xC4
