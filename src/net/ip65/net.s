@@ -317,10 +317,9 @@ cb_load_len_hi:
         lda $ffff               ; SMC: patched to addr of tcp_inbound_data_length+1
         sta cb_remaining+1
         ; Length $FFFF is not data: ip65 tcp.s signals the peer's FIN and RST
-        ; that way, with tcp_inbound_data_ptr left stale. Copying it filled
-        ; the ring with ~4 KB of old buffer and latched tcp_recv_overflow on
-        ; every close. No real segment reaches $FF00 (MSS <= 1460), so the
-        ; high byte alone identifies it.
+        ; that way, with tcp_inbound_data_ptr left stale, so nothing may be
+        ; copied. No real segment reaches $FF00 (MSS <= 1460), so the high
+        ; byte alone identifies it.
         cmp #$ff
         bne cb_not_closed
         lda #NET_TCP_CLOSED     ; FIN or RST: ip65 has closed its end
@@ -373,10 +372,7 @@ cb_loop:
         ; it delivers only the next in-sequence segment (tcp.s rejects
         ; any other sequence number), so the dropped tail is ACKed bytes
         ; lost to the stream for good — the TLS layer then fails on a
-        ; broken record. The flag used to latch on every connection
-        ; close, when ip65's FIN/RST length ($FFFF) was copied as data;
-        ; the $FFFF check at the top of the callback drops that now, so a
-        ; set flag is real loss.
+        ; broken record. A set flag is real loss.
         lda #1
         sta tcp_recv_overflow
         jmp cb_done
