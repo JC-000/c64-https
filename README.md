@@ -513,7 +513,7 @@ Progress:
 - [x] ip65 submodule integration — 6.8 KB binary blob at $2000 (TCP/UDP/DNS/DHCP/ARP + RR-Net CS8900a)
 - [x] Network wrapper with ZP time-sharing — save/restore $02-$1B around ip65 calls
 - [x] Crypto primitives — ChaCha20, Poly1305, AEAD (from c64-wireguard), SHA-256, HMAC-DRBG (from c64-aes256-ecdsa)
-- [x] X25519 — the vendored `libs/x25519` sibling (constant-time per its `docs/CT_ANALYSIS.md`), built on-chip (no REU) on every profile. `tools/bench_x25519.py` measures one basepoint scalar multiply at **366 s** of C64 time (NTSC, VIC-II blanked, CIA1 TOD; 391 s unblanked). The retired in-tree copy took 175 s on the REU profile and 242 s on-chip, measured the same way.
+- [x] X25519 — the vendored `libs/x25519` sibling (constant-time per its `docs/CT_ANALYSIS.md`), built on-chip (no REU) on every profile. `tools/bench_x25519.py` measures one basepoint scalar multiply at **366 s** of C64 time (NTSC, VIC-II blanked, CIA1 TOD; 391 s unblanked). The retired in-tree on-chip copy took 242 s, measured the same way.
 - [x] VIC-II blanking during the CPU-bound crypto — `src/vic.s`, scoped to the two X25519 scalar multiplies and the ECDSA verify so the on-screen handshake progress markers stay visible between phases. Worth **6.3-6.8%**, measured both in VICE at 1 MHz and on a U64E at 8/16/48 MHz; see the VIC-II blanking section of `CLAUDE.md`
 - [x] HKDF-SHA256 — Extract, Expand, Expand-Label, Derive-Secret (RFC 5869 + TLS 1.3)
 - [x] TLS 1.3 record layer — encrypt/decrypt with ChaCha20-Poly1305, nonce construction, sequence numbers
@@ -875,7 +875,7 @@ Environment variables honored by `rig_https_local.py`:
 Vendored as submodules and linked into the PRG:
 
 - [c64-nist-curves](https://github.com/JC-000/c64-nist-curves) — `libs/nistcurves`, the ECDSA P-256 verify used for CertificateVerify
-- [c64-x25519](https://github.com/JC-000/c64-x25519) — `libs/x25519`, an alternative X25519 behind `USE_X25519_SIBLING=1`. **Contributes zero bytes to all three shipped products**: the flag is off by default and the in-tree `src/crypto/{x25519,fe25519}.s` is what links. See Known Issues for its current link status.
+- [c64-x25519](https://github.com/JC-000/c64-x25519) — `libs/x25519`, the X25519 in every build since #245 (on-chip profile, via `tools/integration/build_x25519.sh`; lookup tables generated at runtime by `src/crypto/x25519_tables.s`).
 - [ip65](https://github.com/cc65/ip65) — the TCP/IP stack behind the ip65 backend
 
 Not vendored — origin of code that now lives in-tree, or tooling:
