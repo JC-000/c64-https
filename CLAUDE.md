@@ -991,9 +991,8 @@ both flags load-bearing). Stock 1 MHz, ~40-80 min.
     passing run touched neither the cartridge nor the 6510. **A stock
     re-run reports 27, not 24**: the clock assertion arrived with
     `TURBO_MHZ` and fires at 1 MHz too, landing in that host-side group.
-    #202 added the 26th (ip65 config fields, 6510-side) and #235 the 27th
-    (adapter send count + ring overflow, 6510-side); both counted from the
-    code, not yet observed on a run. The first run's
+    #202 added the 26th (ip65 config fields) and #235 the 27th (adapter
+    send count + ring overflow), both 6510-side. The first run's
     decomposition is history and stays as written.
   - Two stations on the cable and the Mac is one of them, so every wire
     assertion discriminates by **Ethernet source address**; a third MAC
