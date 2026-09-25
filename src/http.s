@@ -321,7 +321,7 @@ http_recv_loop:
 ;   HTTP_AUX_CODE2 is the segment this routine belongs in anyway: it is
 ;   documented as the home for http.s's jsr-only helpers, and
 ;   http_body_done_check — the routine tail-called below — is already
-;   here.  It lands in CRYPTO_OVERLAY on ip65 (152 B free) and under UCI.
+;   here.  It lands in CRYPTO_OVERLAY on ip65 and under UCI.
 ;   Before moving anything else into NET_CODE on ip65, re-check the
 ;   wikipedia target; PRG size and "bytes free" in one region will not
 ;   tell you.
@@ -770,10 +770,10 @@ http_recv_response:
 ; W4: body state + chunked-transfer support.
 ;
 ; Everything below lives in HTTP_AUX_CODE, NOT in CODE: the ip65
-; LOADER region is packed (8 B free pre-W4), so the body-state handler
-; was moved out of CODE and the chunked machinery added alongside it.
-; The segment maps to LOADER under UCI (588 B free) and to the
-; resident CRYPTO_OVERLAY slot under ip65 (see the cfgs).
+; LOADER region is packed, so the body-state handler was moved out of
+; CODE and the chunked machinery added alongside it. The segment maps to
+; LOADER under UCI and to the resident CRYPTO_OVERLAY slot under ip65
+; (see the cfgs; tools/measure_margins.py for what is free).
 ; =============================================================================
         .segment "HTTP_AUX_CODE"
 

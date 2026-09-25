@@ -62,8 +62,8 @@
 ; flags (EMBED_P256_OVERLAY / USE_OVERLAY_P384_EMBED) that stage
 ; runtime-swapped images there are mutually exclusive with a resident
 ; deframer, exactly as they already are with LIB_NISTCURVES_MUL_CODE.
-; State + carry buffer live in the NET_BSS_TAIL region (~378 B free
-; under UCI comb).
+; State + carry buffer live in the NET_BSS_TAIL region, whose tail is
+; small (tools/measure_margins.py).
 ; The whole module is gated on TLS_STREAM_DEFRAME (UCI-only for now:
 ; ip65 has neither the code nor the BSS headroom — see the Makefile).
 
@@ -935,7 +935,7 @@ df_cs_advance_n:
         rts
 
 ; =============================================================================
-; Deframer state — NET_BSS_TAIL region (UCI: ~378 B free under comb)
+; Deframer state — NET_BSS_TAIL region (UCI)
 ; =============================================================================
 .segment "NET_BSS_TAIL"
 

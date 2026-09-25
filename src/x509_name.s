@@ -42,8 +42,8 @@
 .import tls_hostname_len
 .endif
 
-; Gated: the routine is 491 B and ip65's largest free block is 170 B
-; (NET_CODE) — see the placement note in CLAUDE.md. Under BACKEND=ip65 this
+; Gated: the routine is 491 B and no ip65 region has a free block anywhere
+; near that (tools/measure_margins.py). Under BACKEND=ip65 this
 ; TU contributes nothing and the segment is `optional = yes`, so the link is
 ; unaffected; the call site in tls_cert.s is gated on the same symbol.
 .ifdef X509_VERIFY_NAME
