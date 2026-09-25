@@ -58,8 +58,8 @@ sqtab_hi:       .res 512
 ; c64-lib-contract SPEC §6.5 — canonical names for the shared multiply
 ; buffers c64-https provides.
 ;
-; c64-https owns these four buffers (src/data.s under the default build;
-; the sibling's data module under USE_X25519_SIBLING=1) and the
+; c64-https owns these four buffers (src/data.s, every build; the X25519
+; sibling uses them too, issue #245) and the
 ; integration wrapper therefore DROPS libs/nistcurves' `data_shared.o`
 ; from the archive — two providers of the same RAM would be a duplicate
 ; symbol at best and two disjoint copies at worst.
@@ -74,12 +74,7 @@ sqtab_hi:       .res 512
 ;   Unresolved external 'nistcurves_mul_cached_a' referenced in:
 ;     src/fp256.s(188) ...            (likewise _dma_hi, _dma_lo, _src2_buf)
 ;
-; The aliases below close that. They are deliberately *here* rather than
-; beside either definition site: `src/data.s` declares the buffers only
-; under `.ifndef USE_X25519_SIBLING`, and the sibling's generated data
-; module declares them otherwise, so a definition-site alias would have to
-; be written twice and kept in step. Importing the bare name binds to
-; whichever provider the link selected, with no duplication and no gating.
+; The aliases below close that.
 ;
 ; When upstream drops the bare `mul_*` aliases at its next MAJOR, the
 ; migration is to rename the definitions and delete this block — not to

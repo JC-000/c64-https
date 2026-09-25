@@ -937,6 +937,56 @@ def test_x25519_random_keygen(transport, labels, rng):
     return passed, failed
 
 
+# ----------------------------------------------------------------------------
+# The two unions (issue #245). On every profile the field buffers overlay
+# tls_rec_buf; on ip65 the lookup tables overlay cert_buf as well, which a
+# first handshake's Certificate overwrites before the NEXT handshake's
+# keygen. So src/tls_ecdh.s's entries (x25519_base_fresh /
+# x25519_scalarmult_fresh) must produce the right answer from a state where
+# both regions hold garbage. Fill them with junk, write only the inputs the
+# caller writes (x25_scalar, x25_u), run the fresh entry, check the result.
+# ----------------------------------------------------------------------------
+
+def _clobber_x25519_state(transport, labels, byte):
+    tables = labels["mul38_lo_tab"]
+    write_bytes(transport, tables, bytes([byte]) * 2048)
+    bss = labels["fe25519_tmp1"]
+    write_bytes(transport, bss, bytes([byte]) * (17 * 32))
+
+
+def test_x25519_fresh_after_clobber(transport, labels):
+    """Fresh entries are correct with tables + field buffers overwritten."""
+    passed = failed = 0
+    cases = [
+        ("scalarmult_fresh, RFC vector 1, junk $A5", "x25519_scalarmult_fresh",
+         SCALAR_1, U_1, EXPECTED_1, 0xA5),
+        ("scalarmult_fresh, RFC vector 2, junk $FF", "x25519_scalarmult_fresh",
+         SCALAR_2, U_2, EXPECTED_2, 0xFF),
+        ("base_fresh, #242 key, junk $5A", "x25519_base_fresh",
+         ISSUE_242_PRIV, None, ISSUE_242_GOOD_PUB, 0x5A),
+    ]
+    for name, entry, k, u, want, junk in cases:
+        print(f"    {name}...", end="", flush=True)
+        _clobber_x25519_state(transport, labels, junk)
+        write_bytes(transport, labels["x25_scalar"], k)
+        if u is not None:
+            write_bytes(transport, labels["x25_u"], u)
+            jsr(transport, labels["x25519_clamp"])
+        jsr(transport, labels[entry], timeout=7200.0)
+        got = bytes(read_bytes(transport, labels["x25_result"], 32))
+        if got == want:
+            passed += 1
+            print(" PASS")
+        else:
+            failed += 1
+            print(" FAIL")
+            print(f"    expected: {want.hex()}")
+            print(f"    got:      {got.hex()}")
+    # Leave the tables valid for any group that runs after this one.
+    jsr(transport, labels["x25519_tables_init"], timeout=60.0)
+    return passed, failed
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -989,6 +1039,8 @@ def run_tests(transport, labels, seed):
          lambda: test_x25519_issue_242_keygen(transport, labels)),
         ("x25519 fe25519_mul_a24 trap u (#244)",
          lambda: test_x25519_a24_trap_u(transport, labels)),
+        ("x25519 fresh entries after clobbered unions",
+         lambda: test_x25519_fresh_after_clobber(transport, labels)),
         (f"x25519 random scalars x{KEYGEN_N}",
          lambda: test_x25519_random_keygen(transport, labels, rng)),
     ]
@@ -1082,6 +1134,7 @@ def main():
     ZP = load_sibling_zp()
     required = [
         "x25519_clamp", "x25519_scalarmult", "x25519_tables_init",
+        "x25519_scalarmult_fresh", "x25519_base_fresh",
         "x25_scalar", "x25_u", "x25_result",
         "fe25519_copy", "fe25519_zero", "fe25519_one",
         "fe25519_add", "fe25519_sub", "fe25519_mul", "fe25519_sqr",
