@@ -33,18 +33,9 @@
 .endif
 
         ; ---- exports: REU multiply table routines ----
-        ; Phase C.5: under USE_X25519_SIBLING=1 the sibling's
-        ; libs/x25519/src/x25519_init.s owns reu_mul_init +
-        ; reu_fetch_mul_row + reu_fetch_doubled_row + reu_clear_wide.
-        ; The in-tree definitions below are guarded out to avoid
-        ; duplicate-symbol errors at link time; the boot caller below
-        ; imports `reu_mul_init` from the sibling archive instead.
-        .ifdef USE_X25519_SIBLING
-        .import reu_mul_init
-        ; Needed for its autoload-latch restore tail, not for the ZP
-        ; clear — see the X25519 slot stash near the end of this file.
-        .import reu_clear_wide
-        .else
+        ; c64-https owns the §8.2 reu_mul for libs/nistcurves' REU profile.
+        ; The X25519 sibling is built onchip (no REU surface), so it
+        ; neither provides nor needs one.
         .export reu_mul_init
         ; Under USE_NISTCURVES_ONCHIP the sibling's rebuilt
         ; mul_8x8_onchip.o exports reu_fetch_mul_row unconditionally
@@ -52,7 +43,6 @@
         ; ld65 duplicate. The in-tree routine body stays for local use.
         .ifndef USE_NISTCURVES_ONCHIP
         .export reu_fetch_mul_row
-        .endif
         .endif
 
         ; ---- exports: Phase 3 P-384 overlay REU stash ----
@@ -222,20 +212,6 @@ BORDER_DEFAULT   = $0E
         .include "reu_layout.inc"
         .endif
 
-        ; ---- imports: W3 X25519 sibling slot stash ----
-        ; Under USE_X25519_SIBLING=1, the sibling's X25519_RODATA +
-        ; X25519_BSS segments load into CRYPTO_OVERLAY at PRG-load time.
-        ; Boot stashes those slot bytes (i.e. the sibling's running
-        ; code+rodata image) to REU bank 3 so a later
-        ; `crypto_swap_to_x25519` can refresh the slot from there after
-        ; a P-256 / P-384 swap has overwritten it.  No new .incbin
-        ; needed -- the linker already pinned the bytes at $4200.
-        .ifdef USE_X25519_SIBLING
-        .import __CRYPTO_OVERLAY_START__
-        ; Same REU layout include rationale as above.
-        .include "reu_layout.inc"
-        .endif
-
 ; =============================================================================
 ; BASIC stub: 10 SYS 2061
 ; Loaded at $0801 via EXEHDR segment (first bytes of LOADER region).
@@ -399,7 +375,7 @@ start:
 
         ; Phase 3: stash both P-384 split overlay images in REU banks 6
         ; and 7 from the .incbin'd staging blocks at $4200 and $E000.
-        ; Inert under USE_X25519_SIBLING=1 / BACKEND=ip65 (see
+        ; Inert under BACKEND=ip65 and every shipped UCI build (see
         ; reu_p384_overlay_init's body for the conditional).
         jsr reu_p384_overlay_init
 
@@ -834,13 +810,6 @@ ascii_chrout:
 ; REU multiply table initialization (from c64-x25519 optimizations)
 ; =============================================================================
 
-; Phase C.5: in-tree reu_mul_init / reu_fetch_mul_row are guarded out
-; under USE_X25519_SIBLING=1. The sibling's libs/x25519/src/x25519_init.s
-; supplies a richer initializer that also populates REU banks 2-5 with
-; the zero block + doubled tables required by the sibling's
-; fe25519_sqr. Calling the in-tree version would leave those banks
-; unset and corrupt every fe25519_sqr.
-.ifndef USE_X25519_SIBLING
 
 ; =============================================================================
 ; reu_mul_init - Generate 256 full multiplication rows and stash in REU
@@ -958,7 +927,6 @@ reu_fetch_mul_row:
         sta reu_command
         rts
 
-.endif ; .ifndef USE_X25519_SIBLING (in-tree reu_mul_init / reu_fetch_mul_row)
 
 ; =============================================================================
 ; reu_p384_overlay_init - Stash both P-384 split-overlay images in REU.
@@ -978,8 +946,8 @@ reu_fetch_mul_row:
 ; freed unconditionally; KERNAL ROM is banked in by default so future
 ; reads from $E000 hit ROM, not the no-longer-needed blob bytes.
 ;
-; Inert when USE_OVERLAY_P384_EMBED is undefined (BACKEND=ip65, or
-; USE_X25519_SIBLING=1 under UCI) -- the routine compiles to a single
+; Inert when USE_OVERLAY_P384_EMBED is undefined (BACKEND=ip65, and
+; every shipped UCI build) -- the routine compiles to a single
 ; RTS so the call site in `start` is harmless.
 ;
 ; SEI around each DMA window; restores caller's I flag.  ~16 ms total
@@ -1119,80 +1087,6 @@ reu_p384_overlay_init:
         plp
 .endif ; .ifdef USE_OVERLAY_P256_EMBED
 
-; -----------------------------------------------------------------------------
-; W3: X25519 sibling slot stash (USE_X25519_SIBLING=1).
-;
-; The sibling's X25519_RODATA + X25519_BSS segments load into
-; CRYPTO_OVERLAY at PRG-load time (see cfg/c64-https-uci.cfg).  Boot
-; STASHes the slot bytes to REU_OVERLAY_X25519 (bank 6, $60000 under
-; this flag) so a later `crypto_swap_to_x25519` can refresh the slot
-; after a P-256 / P-384 swap has overwritten it.  Same SEI window +
-; ~8 ms cost as the P-256 stash above.  No .incbin -- the linker
-; already pinned the sibling image into CRYPTO_OVERLAY.
-;
-; THIS WRITE IS THE ONE THAT MATTERS FOR THE REU BANK MAP.  It runs
-; unconditionally at boot whether or not any swap ever happens, so it
-; is not covered by the "no TLS caller invokes crypto_swap_to_x25519"
-; argument that reu_layout.inc used to declare the bank-3 overlap
-; theoretical.  At $30000 it destroyed the sibling's 17th-bit-carry
-; table right after reu_mul_init built it, breaking fe25519_sqr (and
-; only fe25519_sqr) -- see the relocation note in reu_layout.inc.
-;
-; NB: this stashes the *initialized* portion of CRYPTO_OVERLAY (the
-; sibling's rodata tables) plus any zero-init BSS bytes that fall in
-; the same span.  The BSS is fine to stash-and-restore because the
-; sibling's `reu_mul_init` rebuilds the volatile mul tables anyway;
-; the rodata round-trip is the load-bearing part.
-; -----------------------------------------------------------------------------
-.ifdef USE_X25519_SIBLING
-        php
-        sei
-        lda #<__CRYPTO_OVERLAY_START__
-        sta reu_c64_lo
-        lda #>__CRYPTO_OVERLAY_START__
-        sta reu_c64_hi
-        lda #<REU_OVERLAY_X25519
-        sta reu_reu_lo
-        lda #>REU_OVERLAY_X25519
-        sta reu_reu_hi
-        lda #^REU_OVERLAY_X25519
-        sta reu_reu_bank
-        lda #<OVERLAY_SIZE
-        sta reu_len_lo
-        lda #>OVERLAY_SIZE
-        sta reu_len_hi
-        lda #0
-        sta reu_addr_ctrl
-        lda #$90                ; execute + STASH (C64->REU)
-        sta reu_command
-        plp
-
-        ; RESTORE THE MUL-ROW AUTOLOAD LATCH. The stash above is a full
-        ; six-register REU setup (c64 addr, reu addr, bank, len=$2000,
-        ; addr_ctrl) and it runs AFTER `jsr reu_mul_init` in the boot
-        ; sequence. `reu_fetch_mul_row` is a three-register primitive —
-        ; it writes only reu_reu_hi / reu_reu_bank / reu_command and
-        ; trusts the latch for everything else — so leaving it stomped
-        ; makes the next fetch pull $2000 bytes into $4200 instead of
-        ; $0200 bytes into mul_dma_lo.
-        ;
-        ; The blast radius is asymmetric and that is what made this hard
-        ; to see: fe25519 re-establishes the latch itself on every op
-        ; (reu_clear_wide's tail), so X25519 is unaffected and both
-        ; RFC 7748 vectors pass. libs/nistcurves' fp_mul does NOT — it
-        ; relies on the boot-time latch — so ECDSA P-256 verify is the
-        ; only visible casualty: tools/test_ecdsa_kat_oracle.py went
-        ; 3/6, all three VALID vectors rejected, which reads exactly
-        ; like the "missing -reu" garbage-fp_mul failure documented in
-        ; CLAUDE.md and would have been misdiagnosed as one.
-        ;
-        ; reu_clear_wide is the library's own canonical restorer (its
-        ; tail is documented as one of the two establishers of this
-        ; latch), so we call it rather than open-coding the register
-        ; writes and drifting from it later. Its ZP clear of fe_wide is
-        ; incidental and harmless at boot.
-        jsr reu_clear_wide
-.endif ; .ifdef USE_X25519_SIBLING
         rts
 
 ; =============================================================================
@@ -1476,9 +1370,6 @@ https_sni_override:
         .segment "BSS"
 
 net_initialized:        .res 1
-; Phase C.5: reu_init_a/b are state for the in-tree reu_mul_init loop.
-; Sibling's reu_mul_init keeps its own state.
-.ifndef USE_X25519_SIBLING
+; reu_init_a/b are state for the reu_mul_init loop.
 reu_init_a:             .res 1
 reu_init_b:             .res 1
-.endif

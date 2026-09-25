@@ -11,8 +11,12 @@
 ;   ec_point_* symbols             → c64-nist-curves (P-256; P-384 deferred)
 ;   sha256 symbols                 → in-tree only, no sibling equivalent
 
-.import x25519_scalarmult
-.import fe25519_mul, fe25519_sqr, fe25519_inv
+; X25519: libs/x25519 (issue #245). Call the *_fresh entries: they rebuild
+; the sibling's runtime-generated lookup tables first (src/crypto/
+; x25519_tables.s). The sibling's own x25519_scalarmult / fe25519_* read
+; those tables and are only safe after x25519_tables_init.
+.import x25519_base_fresh, x25519_scalarmult_fresh
+.import x25519_tables_init
 
 .import chacha20_encrypt
 .import poly1305_init, poly1305_update, poly1305_final

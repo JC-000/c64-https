@@ -2,7 +2,7 @@
 """test_reu_row_abi.py - pin the `reu_fetch_mul_row` entry convention.
 
 `reu_fetch_mul_row` is a **rendezvous**: c64-https is the APP_OWNED
-provider (`src/boot.s`, the `.ifndef USE_X25519_SIBLING` block) and the
+provider (`src/boot.s`) and the
 libs/nistcurves sibling is a consumer of it. c64-lib-contract SPEC §8.2
 says the row index arrives in register **A**.
 
@@ -13,11 +13,11 @@ The in-tree provider does not read A. It does::
             asl
             ...
 
-The only caller in any build we ship or test happens to leave A holding
-the same value it just stored into `mul_cached_a` (`src/crypto/fe25519.s`
-does ``sta mul_cached_a`` immediately before the ``jsr``), so provider
-and contract agree *by coincidence of that one call site*, not by
-construction. If either side changes — upstream nistcurves v0.14.0 makes
+There is no caller left in any build: the in-tree X25519 whose ``fe_mul``
+was the last one (it did ``sta mul_cached_a`` immediately before the
+``jsr``, so provider and contract agreed *by coincidence of that one call
+site*) was retired in #245, and the sibling that replaced it is built
+without an REU surface. If either side changes — upstream nistcurves v0.14.0 makes
 its own copy ``sta nistcurves_mul_cached_a`` and treats A as
 authoritative — nothing in this tree would go red. Every multiply row
 would silently be the wrong row, which is the class of defect that
@@ -52,9 +52,10 @@ executable assertion.
 Scope limitation (read before quoting a green run)
 --------------------------------------------------
 `reu_fetch_mul_row` is exported only ``.ifndef USE_NISTCURVES_ONCHIP``
-(``src/boot.s`` exports block) and its only in-tree caller,
-``src/crypto/fe25519.s``'s ``fe_mul``, calls it only in the same
-non-onchip case. So this suite can run against the **REU profile only**
+(``src/boot.s`` exports block), and since #245 nothing imports it on any
+profile (the ld65 map's Imports list; its last caller was the retired
+in-tree ``fe_mul``). So this suite pins the published provider's
+convention, and can run against the **REU profile only**
 — a plain ``make`` (BACKEND=ip65, no USE_NISTCURVES_ONCHIP*), which is
 the same build ``tools/test_ecdsa_kat_oracle.py`` defaults to. Under
 ``USE_NISTCURVES_ONCHIP=1`` / ``..._COMB=1`` the suite reports CANNOT
@@ -143,6 +144,9 @@ def profile_problem():
                     object, build/crypto/fe25519.o (our own fe_mul)
       onchip/comb   exported by nobody, imported by nobody
 
+    Since #245 retired build/crypto/fe25519.o, the REU row reads "imported
+    by nobody" too.
+
     No sibling member exports or imports it on either profile. The
     wrapper passes ``-D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH -D
     SHARED_CT_MUL_8X8`` in ``CONTRACT_DEFINES``, which defers the whole
@@ -176,9 +180,6 @@ def profile_problem():
                 "still callable here, but it is dead code: nothing in "
                 "the image or the sibling archive calls it, so pinning "
                 "its convention on this build certifies nothing")
-    if "USE_X25519_SIBLING" in ca65[0]:
-        return ("USE_X25519_SIBLING evicts the in-tree provider entirely "
-                "(src/boot.s .ifndef USE_X25519_SIBLING)")
     return None
 
 

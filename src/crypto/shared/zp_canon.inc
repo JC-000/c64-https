@@ -95,7 +95,7 @@ tls_direction   = $21           ; 1 byte
 .endif
 
 ; --- ECDSA P-256/P-384 bignum arithmetic ---
-; Overlaps with x25519 at $39-$3A but the two never run simultaneously.
+; Overlaps the X25519 sibling at $22-$2F; the two never run simultaneously.
 .ifndef fp_src1
 fp_src1         = $22           ; 2 bytes ($22-$23)
 .endif
@@ -115,46 +115,14 @@ fp_carry        = $2a           ; 1 byte
 fp_loop         = $2b           ; 1 byte
 .endif
 .ifndef fp_mul_i
-fp_mul_i        = $39           ; 1 byte (shares with x25_byte_idx)
+fp_mul_i        = $39           ; 1 byte
 .endif
 .ifndef fp_mul_j
-fp_mul_j        = $3a           ; 1 byte (shares with x25_bit_mask)
+fp_mul_j        = $3a           ; 1 byte
 .endif
 .ifndef ec_scalar_ptr
 ec_scalar_ptr   = $3b           ; 2 bytes ($3B-$3C)
 .endif
 
-; --- fe25519 field arithmetic ---
-.ifndef fe_src1
-fe_src1         = $2c           ; 2 bytes ($2C-$2D)
-.endif
-.ifndef fe_src2
-fe_src2         = $2e           ; 2 bytes ($2E-$2F)
-.endif
-.ifndef fe_dst
-fe_dst          = $30           ; 2 bytes ($30-$31)
-.endif
-.ifndef fe_carry
-fe_carry        = $32           ; 1 byte
-.endif
-.ifndef fe_loop
-fe_loop         = $33           ; 1 byte
-.endif
-.ifndef fe_mul_i
-fe_mul_i        = $34           ; 1 byte
-.endif
-.ifndef fe_mul_j
-fe_mul_j        = $35           ; 1 byte
-.endif
-; $36-$37 reserved (fe25519 uses fe_tmp1..4 as 32-byte data labels)
-
-; --- x25519 state ---
-.ifndef x25_prev_bit
-x25_prev_bit    = $38           ; 1 byte — previous k_t for swap
-.endif
-.ifndef x25_byte_idx
-x25_byte_idx    = $39           ; 1 byte — byte index in scalar
-.endif
-.ifndef x25_bit_mask
-x25_bit_mask    = $3a           ; 1 byte — current bit mask
-.endif
+; --- X25519: libs/x25519's own zp_config.s defaults, not declared here ---
+; ($14-$16, $1C, $1E-$2F, ZP_WIDE $40-$7F; see build_x25519.sh.)

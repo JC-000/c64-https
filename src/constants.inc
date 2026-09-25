@@ -81,31 +81,20 @@ tls_rec_idx     = $20           ; 1 byte — index during record read/write
 tls_direction   = $21           ; 1 byte — 0=write, 1=read (key/IV/seq select)
 
 ; --- ECDSA P-256/P-384 bignum arithmetic (from c64-aes256-ecdsa) ---
-; These overlap with x25519 at $39-$3A but never run simultaneously.
+; These overlap the X25519 sibling at $22-$2F but never run simultaneously.
 fp_src1         = $22           ; 2 bytes ($22-$23) — operand 1 pointer
 fp_src2         = $24           ; 2 bytes ($24-$25) — operand 2 pointer
 fp_dst          = $26           ; 2 bytes ($26-$27) — destination pointer
 fp_misc         = $28           ; 2 bytes ($28-$29) — modulus pointer
 fp_carry        = $2a           ; 1 byte
 fp_loop         = $2b           ; 1 byte
-fp_mul_i        = $39           ; 1 byte (shares with x25_byte_idx — OK, never simultaneous)
-fp_mul_j        = $3a           ; 1 byte (shares with x25_bit_mask — OK)
+fp_mul_i        = $39           ; 1 byte
+fp_mul_j        = $3a           ; 1 byte
 ec_scalar_ptr   = $3b           ; 2 bytes ($3B-$3C) — scalar for point multiply
 
-; --- fe25519 field arithmetic (relocated from wireguard $1E-$29) ---
-fe_src1         = $2c           ; 2 bytes ($2C-$2D) — operand 1 pointer
-fe_src2         = $2e           ; 2 bytes ($2E-$2F) — operand 2 pointer
-fe_dst          = $30           ; 2 bytes ($30-$31) — destination pointer
-fe_carry        = $32           ; 1 byte
-fe_loop         = $33           ; 1 byte
-fe_mul_i        = $34           ; 1 byte
-fe_mul_j        = $35           ; 1 byte
-; $36-$37 reserved (fe25519 uses fe_tmp1..4 as 32-byte data labels)
-
-; --- x25519 state (relocated from wireguard $2A-$2D) ---
-x25_prev_bit    = $38           ; 1 byte — previous k_t for swap
-x25_byte_idx    = $39           ; 1 byte — byte index in scalar
-x25_bit_mask    = $3a           ; 1 byte — current bit mask
+; --- X25519 (libs/x25519 sibling, its own zp_config.s defaults) ---
+; $14-$16, $1C, $1E-$2F and ZP_WIDE $40-$7F, time-shared with the per-call
+; slots above; see the ZP table in tools/integration/build_x25519.sh.
 
 ; --- TLS handshake-message base pointer (W1 streaming deframer) ---
 ; Points at the current handshake message; the message handlers in

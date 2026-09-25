@@ -117,8 +117,7 @@ Variables:
   - `USE_NISTCURVES_ONCHIP=1` — libs/nistcurves FP_ONCHIP_MUL profile: no
     REU row-fetch DMA, wins above ~18-22 MHz. Keeps the **base**
     `cfg/c64-https-$(BACKEND).cfg` — it only adds a `-D` and swaps the
-    archive. `$(error)`-guarded against `USE_X25519_SIBLING` and the
-    overlay-embed flags.
+    archive. `$(error)`-guarded against the overlay-embed flags.
   - `USE_NISTCURVES_ONCHIP_COMB=1` — implies ONCHIP; Lim-Lee comb + boot
     precompute into REU bank 2 (**needs an REU**; ~45 s boot at 48 MHz,
     ~36 min at 1 MHz — rigs need `C64_INIT_WAIT`). Fastest above ~5-7 MHz.
@@ -126,8 +125,8 @@ Variables:
     `cfg/c64-https-$(BACKEND)-onchip.cfg` — which exists for uci only, so
     there is no ip65 comb build. Confirm from the `ld65 -C` line, not from
     the profile name.
-  - `USE_X25519_SIBLING=1` — links under **neither** backend today (see
-    Known issues). Off by default, ships in nothing.
+  - `USE_X25519_SIBLING` — **retired, `$(error)`-guarded (#245)**: every
+    build links the `libs/x25519` sibling; any value is refused.
   - `EMBED_P256_OVERLAY=1` — **retired, `$(error)`-guarded (#118)**: the
     P-256 verify image is 644 B larger than the 7,680 B slot at every pin
     since v0.7.0, and `CRYPTO_OVERLAY` now holds ~5 KB of resident
@@ -183,12 +182,16 @@ only through it, so swapping an implementation is a link-line change.
 Conventions: AX = pointer lo/hi, caller-provided buffers, keys/IVs via
 fixed buffers in crypto BSS.
 
-  X25519 / fe25519      in-tree `src/crypto/{x25519,fe25519}.s` (default);
-                        sibling `libs/x25519@v0.16.0` opt-in, same ABI:
-                        `x25519_scalarmult`, `fe25519_mul/sqr/inv`.
-                        Opt-in only in name: it links under NEITHER
-                        backend (see Known issues), so no build reaches
-                        this row today.
+  X25519 / fe25519      sibling `libs/x25519@v0.16.0`, every build (#245):
+                        `x25519_base/scalarmult/clamp`, `fe25519_*`.
+                        Built `X25519_ONCHIP_MUL=1` on all five profiles
+                        (no REU surface) by
+                        `tools/integration/build_x25519.sh`. Its lookup
+                        tables are runtime-generated BSS
+                        (`src/crypto/x25519_tables.s`); `tls_ecdh.s` only
+                        calls the `x25519_*_fresh` entries, which run
+                        `x25519_tables_init` first. A harness calling the
+                        sibling directly must call it too.
   ChaCha20-Poly1305     in-tree, permanent: `chacha20_encrypt`,
                         `poly1305_init/update/final`, `aead_encrypt/decrypt`
   SHA-256               in-tree: `sha256_init/update/final`
@@ -219,11 +222,14 @@ fixed buffers in crypto BSS.
     **corrupt** one. Anyone who can write REU bank 2 plants a valid
     point, reaches a forged R with Z != 0 throughout, and no
     post-condition on the result sees it.
-  - Zero page: fe25519 `$2C-$37`, x25519 `$38-$3A`, ECDSA bignum `$22-$3C`,
-    time-shared; sibling slots `fp_mul_i=$39`, `fp_mul_j=$3A`,
-    `nistcurves_zp_ptr2=$3D` (verify in `build/labels.txt`). All defined
-    locally (`src/constants.inc`, `src/crypto/shared/zp_canon.inc`); no
-    `.importzp` anywhere.
+  - Zero page: ECDSA bignum `$22-$3C`; nistcurves slots `fp_mul_i=$39`,
+    `fp_mul_j=$3A`, `nistcurves_zp_ptr2=$3D` (verify in
+    `build/labels.txt`), defined locally (`src/constants.inc`,
+    `src/crypto/shared/zp_canon.inc`); no `.importzp` anywhere. The X25519
+    sibling uses its own `zp_config.s` defaults — `$14-$16`, `$1C`,
+    `$1E-$2F`, `fe_wide` at ZP_WIDE `$40-$7F` — all time-shared with
+    per-call slots (table in `build_x25519.sh`); they are not in
+    `labels.txt`.
   - c64-lib-contract is a **prose dependency, not a submodule** — nothing
     in `make` reads it, so a contract release can never break a build.
     Always cite a **tag** (newest: v1.1.0). v1.0.0 cut the SPEC by 7/8 and
@@ -575,22 +581,6 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
 
 ## Known issues
 
-  - **`USE_X25519_SIBLING=1` links under neither backend**, and each
-    backend dies on a **different segment**: ip65 `X25519_RODATA`
-    overflows `CRYPTO_OVERLAY`; UCI `X25519_BSS` overflows it, since
-    `CERT_BUF_BSS` moved into `CRYPTO_OVERLAY` for wikipedia (accepted
-    casualty). Re-link for the figures. **Neither warning is the total
-    deficit**: ld65 warns once per memory area, on the first segment to
-    push it past its size, so everything placed there afterwards is
-    uncounted. Never sum od65 object rows to get a footprint; the
-    `Makefile` block beside `X25519_SEG_LADDER` derives why. The earlier
-    `Duplicate external identifier: 'reu_mul_tables_init'` collision is
-    handled by **deferral through `CONTRACT_DEFINES`** (`-D
-    SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH`), not by dropping
-    `reu_mul_init.o` — the wrapper does no member surgery at all any
-    more (§6.1), it `cp`s the upstream archive. `reu_mul` is APP_OWNED
-    here. Flag off; in-tree X25519 ships. RFC vectors passed, but ~1.3%
-    of X25519 scalar mults failed (#242); a24 bug: peer-forced (#244).
   - **P-384 build is broken**, one link deeper than before: the `ar65`
     member-name bug was ours (fixed), and the chain now stops at
     `LIB_NISTCURVES_SHA384_TABLES` overflowing `OVERLAY_REGION` by 1,536 B
@@ -727,7 +717,9 @@ only re-measured points are 48 MHz UCI REU (80.8 → 82.1 → 82.4 s, n=1; the
   C64U comb (v0.6.0)                —        38.4     31.0
 
   ip65 + onchip, no REU, VICE honest 1 MHz: **2,159.7 s (36.0 min)**,
-  verify stretch 1,416.7 s (+1.4% vs the model), X25519 ~326 s each.
+  verify stretch 1,416.7 s (+1.4% vs the model), X25519 ~326 s each —
+  measured on the retired in-tree X25519. The sibling that replaced it
+  (#245) is slower: `bench_x25519.py` 366 s vs 242 s in-tree onchip.
 
 Best verify today: **16.4 s @ 48 MHz on the U64E (comb)**, 1.73x faster
 than *blanked* onchip at that clock (28.4 s, n=3 — README's figure; the
@@ -808,8 +800,12 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
                                    flags.
   $6000-$9FFF  CRYPTO_HOT          resident code + rodata + small BSS
   $A000-$BFFF  CRYPTO_COLD_SHADOW  large BSS (RAM under BASIC ROM, $01=$36);
-                                   BSS_TAIL packs first, so `tls_rec_buf`
-                                   (548 B) sits at $A000; TABLES_BSS pinned
+                                   BSS_TAIL pinned at $A000 (`tls_rec_buf`,
+                                   548 B), overlaid by the X25519 field
+                                   buffers (`X25519_SCRATCH`, #245 — dead
+                                   across both scalar mults, asserted in
+                                   `x25519_tables.s`); X25519_TABLES (2 KB)
+                                   packs below TABLES_BSS; TABLES_BSS pinned
                                    at $BA00 so sqtab lands at $BC00
                                    (LIB_SHARED_SQTAB_BASE, asserted
                                    post-link)
@@ -828,7 +824,11 @@ ip65 (`cfg/c64-https-ip65.cfg`):
   $A000-$BFFF  CRYPTO_COLD_SHADOW  BSS; `cert_buf` (1,536 B) pinned at $A000
                                    and unioned with LIB_NISTCURVES_P256_BSS
                                    (`SCRATCH_UNION`, #68 — disjoint lifetimes,
-                                   capped so growth is a link error)
+                                   capped so growth is a link error) and
+                                   with the 2 KB X25519 tables
+                                   (`X25519_TABLES_UNION`, #245, rebuilt per
+                                   scalar mult); `tls_rec_buf` pinned at
+                                   $A800 under `X25519_SCRATCH` as on UCI
   $C000-$CFFF  TCP_BUF             4 KB ring for the ip65 callback
 
 ip65 is essentially full, and the onchip profile (the shipped product) is

@@ -31,15 +31,12 @@ VICE      ?= x64sc
 BACKEND   ?= ip65
 CFG       := cfg/c64-https-$(BACKEND).cfg
 
-# --- Sibling X25519 integration (Phase C.5, c64-x25519 v0.4.0) ---
-# `USE_X25519_SIBLING=1` swaps in `build/lib/x25519.a` for the in-tree
-# `src/crypto/fe25519.s` + `src/crypto/x25519.s` + in-tree X25519 data
-# buffers from `src/data.s`. Default OFF — the in-tree implementation
-# stays the shipped default until the supervisor + validator sign off
-# on the sibling drop-in. The flag is read at link time; both code
-# paths coexist on the branch so an A/B comparison is `make` vs
-# `make USE_X25519_SIBLING=1`.
-USE_X25519_SIBLING ?= 0
+# X25519 is always the libs/x25519 sibling (issue #245 retired the in-tree
+# src/crypto/{x25519,fe25519}.s). The old opt-in knob is refused rather than
+# ignored, so a stale command line cannot believe it selected something.
+ifneq ($(origin USE_X25519_SIBLING),undefined)
+$(error USE_X25519_SIBLING is retired (issue #245): every build links the libs/x25519 sibling; drop the variable)
+endif
 
 IP65_DIR     := ip65
 IP65_BUILD   := ip65-build
@@ -221,9 +218,6 @@ ifeq ($(USE_NISTCURVES_ONCHIP_COMB),1)
 USE_NISTCURVES_ONCHIP := 1
 endif
 ifeq ($(USE_NISTCURVES_ONCHIP),1)
-ifeq ($(USE_X25519_SIBLING),1)
-$(error USE_NISTCURVES_ONCHIP and USE_X25519_SIBLING are mutually exclusive for now: both archives export reu_fetch_mul_row)
-endif
 ifeq ($(USE_OVERLAY_P384_EMBED),1)
 $(error USE_NISTCURVES_ONCHIP places LIB_NISTCURVES_MUL_CODE in CRYPTO_OVERLAY - mutually exclusive with USE_OVERLAY_P384_EMBED)
 endif
@@ -243,90 +237,18 @@ else
 SIBLING_LIB_ARCHIVES := build/lib/nistcurves-p256.a
 endif
 
-# Phase C.5 (USE_X25519_SIBLING=1): c64-x25519 v0.4.0 sibling, always-resident,
-# replaces in-tree fe25519.s + x25519.s + X25519 buffers in src/data.s.
-# Off by default.
-ifeq ($(USE_X25519_SIBLING),1)
+# X25519: the libs/x25519 sibling (issue #245), onchip profile on every
+# build — see tools/integration/build_x25519.sh for why one profile. The
+# wrapper routes the sibling's code per source. fe25519.s goes to
+# CRYPTO_CODE; the ladder keeps its SPEC §4 name LIB_X25519_CODE, which
+# each cfg places (CRYPTO_OVERLAY on comb, where CRYPTO_HOT is full), so
+# the archive is identical on every profile.
+export X25519_SEG_FE25519 ?= CRYPTO_CODE
+export X25519_SEG_LADDER  ?= LIB_X25519_CODE
+export X25519_SEG_REU     ?= LIB_X25519_CODE
 SIBLING_LIB_ARCHIVES += build/lib/x25519.a
-# Propagate the flag to ca65 so src/data.s suppresses the in-tree X25519
-# buffer declarations (the sibling's data_x25519_raw.s provides them).
-CA65FLAGS += -D USE_X25519_SIBLING=1
 
-# Split the sibling's code across CRYPTO_HOT and CRYPTO_OVERLAY. This is
-# what makes USE_X25519_SIBLING=1 link at all under UCI, so it is a
-# default rather than something the operator has to know.
-#
-# The sibling's 4,470 B of code (v0.16.0: 2,750 + 717 + 216 + 787) does
-# not fit either region whole: CRYPTO_HOT has ~3.3 KB of room for it
-# (measured), and CRYPTO_OVERLAY has ~3.7 KB once the sibling's own
-# 3,840 B of tables and BSS are in there -- that is 2,304 B of RODATA
-# plus 1,536 B of BSS, and it is NOT the 3840 in the overflow warning
-# below, which is X25519_RODATA's linked size. The collision is a
-# coincidence; do not read one for the other. Leaving the ladder (717 B)
-# and the boot-only table init (787 B) in CRYPTO_OVERLAY satisfies
-# both. Under USE_X25519_SIBLING=1 that
-# region is not a paged overlay -- both embed flags that page it are
-# mutually exclusive with this one -- so it is plain resident RAM.
-#
-# X25519_RODATA is the wrong NAME for executable code; it is used only
-# because it is the one segment both backend cfgs already route into
-# CRYPTO_OVERLAY. The clean form is a cfg declaring the SPEC §4 names
-# (LIB_X25519_CODE / LIB_X25519_INIT_CODE / LIB_X25519_DATA); at that
-# point these two lines and the wrapper's sed both go away.
-#
-# NEITHER BACKEND LINKS under USE_X25519_SIBLING=1, and each dies on a
-# different segment. Figures below are the literal ld65 warning, measured
-# at submodule pin v0.16.0 and identical at v0.13.0:
-#
-#   ip65  Segment 'X25519_RODATA' overflows memory area 'CRYPTO_OVERLAY'
-#         by 3840 bytes   (cfg/c64-https-ip65.cfg:103)
-#   uci   Segment 'X25519_BSS'    overflows memory area 'CRYPTO_OVERLAY'
-#         by 1536 bytes   (cfg/c64-https-uci.cfg:120)
-#
-# ip65's CRYPTO_OVERLAY is 4,212 B and already holds TLS_CODE +
-# CRYPTO_AUX_CODE + HTTP_AUX_CODE; uci's is 7.5 KB but already holds
-# TLS_DEFRAME_CODE + CERT_BUF_BSS + HTTPS_TARGET_RODATA + x509_name.
-#
-# NEITHER NUMBER IS A TOTAL DEFICIT. ld65 does not stop at the first area
-# it cannot fill -- it walks every memory area and warns ONCE PER AREA,
-# on the first segment whose placement pushes that area past its size,
-# reporting the overflow at that instant. Every segment routed into the
-# same area afterwards is uncounted: ip65's 3840 omits X25519_BSS
-# entirely. Relink against an enlarged CRYPTO_OVERLAY and X25519_BSS ends
-# at $74FF against an area ending at $5FFF -- a real shortfall of $1500,
-# 5,376 B.
-#
-# The 3840 IS X25519_RODATA's linked size, exactly. Two reasons it is not
-# the figure you get by summing per-source od65 rows (build_x25519.sh),
-# and both need stating because they cancel:
-#
-#   1. INSIDE the segment: our own generated RODATA module is align=$100,
-#      so ld65 inserts 32 B of fill ahead of it. The objects therefore
-#      link as a larger segment than their sizes sum to (map: Offs=0002CD
-#      + 000313 then Offs=000600 with Fill=0020).
-#   2. BEFORE the segment: CRYPTO_OVERLAY ends on a page boundary ($5FFF)
-#      and X25519_RODATA is page-aligned, so the alignment pad always
-#      consumes exactly whatever headroom the prior tenants left --
-#      HTTP_AUX_CODE ends at $5FE9, so 22 B here -- and the area is at
-#      exactly 100% before the first X25519 byte is placed.
-#
-# So the prior tenants contribute ZERO to the reported overflow, and
-# 3840 is not a "shrink X25519_RODATA by 3,840 B and it links" number.
-# See build_x25519.sh, and docs/engineering-notes.md for the two relink
-# experiments that established all of this.
-export X25519_INIT_SEGMENT ?= X25519_RODATA
-export X25519_SEG_LADDER   ?= X25519_RODATA
-endif
-
-# Phase C.5: under USE_X25519_SIBLING=1, evict the in-tree X25519
-# implementation from the link line — the sibling archive
-# (build/lib/x25519.a) provides byte-compatible exports for x25519_*
-# and a richer fe25519_* surface than the in-tree fe_* symbols.
-ifeq ($(USE_X25519_SIBLING),1)
-CRYPTO_SRCS_EFFECTIVE := $(filter-out src/crypto/fe25519.s src/crypto/x25519.s,$(CRYPTO_SRCS_ALL))
-else
 CRYPTO_SRCS_EFFECTIVE := $(CRYPTO_SRCS_ALL)
-endif
 
 # ENABLE_P384_VERIFY=1 — re-arms the P-384 verify arm in
 # src/crypto/ecdsa_verify.s. OFF BY DEFAULT AND UNSAFE ON ITS OWN.
@@ -436,11 +358,9 @@ endif
 
 # Phase 3: embed the two P-384 split overlay blobs in the PRG so boot
 # can populate REU banks 6/7 at startup.  Gated to UCI (ip65 has no
-# room for the SHA blob in main RAM) and to !USE_X25519_SIBLING (the
-# sibling rodata occupies CRYPTO_OVERLAY at PRG load time, displacing
-# the SHA blob).  Adds a build-order dep on the .bin files; a missing
-# .bin causes the .incbin to fail, so we extend PRG_DEPS below.
-ifneq ($(USE_X25519_SIBLING),1)
+# room for the SHA blob in main RAM).  Adds a build-order dep on the .bin
+# files; a missing .bin causes the .incbin to fail, so we extend PRG_DEPS
+# below.
 # Phase 5 Fix D: respect a command-line USE_OVERLAY_P384_EMBED=0 so the
 # bootstrap rule below can do a no-overlay-embed prelim link to break
 # the overlay-bin <-> labels.txt cycle on a clean tree.  Default is
@@ -464,7 +384,6 @@ USE_OVERLAY_P384_EMBED ?= 0
 endif
 ifeq ($(USE_OVERLAY_P384_EMBED),1)
 CA65FLAGS += -D USE_OVERLAY_P384_EMBED=1
-endif
 endif
 
 # W3: propagate USE_OVERLAY_P256_EMBED to ca65 (the .incbin in
@@ -570,27 +489,15 @@ $(PRG): $(PRG_DEPS)
 	# Rewrite ca65 label format `al XXXXXX .name` -> VICE format `al C:XXXX .name`
 	# so the c64-test-harness Labels.from_file() reader can parse it.
 	sed -i '' 's/^al 00\([0-9a-fA-F]\{4\}\) /al C:\1 /' $(LABELS)
-ifeq ($(USE_NISTCURVES_ONCHIP),1)
-	# Onchip-profile invariant: the sibling's sqtab_lo/hi equates are
-	# BAKED to $$BC00/$$BE00 (LIB_SHARED_SQTAB_BASE in the wrapper).
-	# src/data.s owns sqtab_lo/hi, but the sibling reads the table through
-	# its OWN equates derived from that base, so the two must agree on the
-	# address. Drift is neither a link nor a boot failure — just every
+	# Every-profile invariant: both siblings read sqtab_lo/hi through
+	# their OWN equates BAKED to $$BC00/$$BE00 (LIB_SHARED_SQTAB_BASE in
+	# build_x25519.sh, and in build_nistcurves_p256.sh on the onchip
+	# profiles), while src/data.s's labels land wherever ld65 puts
+	# TABLES_BSS. Drift is neither a link nor a boot failure, just every
 	# multiply reading the wrong memory.
 	@grep -q '^al C:BC00 \.sqtab_lo' $(LABELS) || \
-		{ echo 'ERROR: sqtab_lo is not at $$BC00 — TABLES_BSS layout drifted; realign LIB_SHARED_SQTAB_BASE in tools/integration/build_nistcurves_p256.sh'; \
+		{ echo 'ERROR: sqtab_lo is not at $$BC00 — TABLES_BSS layout drifted; realign LIB_SHARED_SQTAB_BASE in tools/integration/build_x25519.sh and build_nistcurves_p256.sh'; \
 		  grep ' \.sqtab_lo$$' $(LABELS); exit 1; }
-endif
-ifeq ($(USE_X25519_SIBLING),1)
-	# Same invariant, other sibling: build_x25519.sh bakes sqtab_lo/hi
-	# into the sibling at X25519_SQTAB_BASE while in-tree sqtab_init
-	# fills the real table wherever ld65 put it. Disagreement is neither
-	# a link nor a boot failure, just a wrong shared secret. Rationale
-	# and the $$B800-vs-$$BC00 history: tools/integration/build_x25519.sh.
-	@grep -q '^al C:B800 \.sqtab_lo' $(LABELS) || \
-		{ echo 'ERROR: sqtab_lo is not at $$B800 — TABLES_BSS layout drifted; realign X25519_SQTAB_BASE in tools/integration/build_x25519.sh'; \
-		  grep ' \.sqtab_lo$$' $(LABELS); exit 1; }
-endif
 
 # Phase 5 Fix D: $(LABELS) is normally a side-effect of the $(PRG)
 # link recipe; we don't add an explicit rule.  The overlay-bin rule
@@ -668,7 +575,7 @@ build/net/ip65/ip65_blob.o: $(IP65_BIN)
 # hand-kept list of knob names: every flag that reaches the toolchain does so
 # through CA65FLAGS or LD65FLAGS (which carries $(CFG), hence BACKEND and the
 # onchip/comb cfg variants), so a new knob added at the top of this file is
-# covered on the day it is written. The archive list and the two exported
+# covered on the day it is written. The archive list and the three exported
 # X25519 segment names are added because they steer build inputs without
 # appearing on either command line.
 #
@@ -781,8 +688,9 @@ FLAGS_STAMP_BODY := printf '%s\n' \
     'CA65FLAGS=$(CA65FLAGS)' \
     'LD65FLAGS=$(LD65FLAGS)' \
     'SIBLING_LIB_ARCHIVES=$(SIBLING_LIB_ARCHIVES)' \
-    'X25519_INIT_SEGMENT=$(X25519_INIT_SEGMENT)' \
-    'X25519_SEG_LADDER=$(X25519_SEG_LADDER)'
+    'X25519_SEG_FE25519=$(X25519_SEG_FE25519)' \
+    'X25519_SEG_LADDER=$(X25519_SEG_LADDER)' \
+    'X25519_SEG_REU=$(X25519_SEG_REU)'
 
 ifeq ($(STAMP_SKIP),)
 ifeq ($(MAKE_DRY_RUN),)
@@ -922,14 +830,10 @@ build/lib/nistcurves-p256-onchip-comb.a:
 	@mkdir -p build/lib
 	bash tools/integration/build_nistcurves_p256.sh onchip-comb
 
-# Phase C.5: c64-x25519 v0.4.0 X25519 archive — replaces the in-tree
-# fe25519.s + x25519.s + X25519 buffer declarations in src/data.s when
-# USE_X25519_SIBLING=1. Linked into the PRG under BOTH backends. The
-# sibling's reu_mul_init is called from src/boot.s in place of the
-# in-tree REU mul table generator; sqtab_init is still served by the
-# in-tree src/crypto/poly1305.s (sibling's mul_8x8.s is excluded from
-# the archive to avoid duplicate-symbol with poly1305's mul_8x8).
-build/lib/x25519.a:
+# libs/x25519 X25519 archive (issue #245), linked into every build. Rebuilt
+# when the wrapper or the flags stamp changes: the stamp carries the
+# X25519_SEG_* routing knobs, which change the archive's segment names.
+build/lib/x25519.a: tools/integration/build_x25519.sh $(FLAGS_STAMP)
 	@mkdir -p build/lib
 	bash tools/integration/build_x25519.sh
 
