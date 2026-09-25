@@ -37,7 +37,9 @@ PASS needs, per arm:
            C=0 / $86 / CLOSED / handle-gone results.
 
 The forced arm FAILS on the pre-#243 adapter: the close returns C=1 with
-$89 and the follow-up read finds the socket still open.
+$89. The handle-gone check reads net_poll's errno verdict (#253), so on an
+adapter older than that the control arm fails too — there, read the close's
+carry and error, not the verdict line.
 
 Environment: U64_HOST, TURBO_MHZ (default 48), RETRY_TARGET_HOST (default
 lwn.net; any host accepting TCP on 443), C64_INIT_WAIT, UCI_DEBUG_DIR.
