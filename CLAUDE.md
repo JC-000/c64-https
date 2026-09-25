@@ -406,8 +406,11 @@ Second device: C64 Ultimate "Starlight", `U64_HOST=10.53.21.158`, fw 1.1.0,
 `tools/uci/` (README there). Need a device (`U64_HOST`, default
 192.168.1.81), `c64-test-harness`, and go through `DeviceLock` +
 `enable_uci`. Named `rig_*.py`, not `test_*.py`, on purpose (#109/#111).
-Scratch DMA addresses come from `build_policy_and_arbiter()`
-(`_memory_policy.py`, parses `build/labels.txt`) — never hardcode them.
+Scratch DMA addresses come from `_memory_policy.py` (parses
+`build/labels.txt`) — never hardcode them. `rig_https_local`/`_live`/
+`_bad_finished` allocate from page 3 (`build_policy_and_low_ram_arbiter`,
+$0334-$03FF, 204 B), which no link moves; the other rigs still carve a
+linked-region tail.
 
 **The acquire budget is `C64_DEVICE_LOCK_TIMEOUT`, default 1800 s**, and
 it is one number: every rig here and `tests/rig_ip65_rrnet_hw.py` takes

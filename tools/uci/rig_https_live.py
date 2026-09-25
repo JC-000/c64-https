@@ -42,7 +42,8 @@ Environment variables:
                           ec_precompute_256 boot pass is ~45 s at 48 MHz —
                           the local rig's 22 s default would poll a machine
                           still precomputing), 22 otherwise.
-  SENTINEL_POLL_TIMEOUT — C64-side completion budget (default 300 * scale)
+  SENTINEL_POLL_TIMEOUT — C64-side completion budget (default 900 * scale;
+                          github.com's / is ~576 KB chunked at ~2 KB/s)
   PHASE_TIMING          — default **1** here (opt-in in the local rig): a
                           live run is a milestone and the W0 phase table is
                           half its value. Set 0 to disable.
@@ -95,7 +96,7 @@ from c64_test_harness.labels import Labels
 from _device_lock_helper import (
     LockTimeoutConfigError, acquire_device_lock,
 )
-from _memory_policy import build_policy_and_arbiter_with_overlay_carveout
+from _memory_policy import build_policy_and_low_ram_arbiter
 from _device_prep import DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
 from _temp_gc import gc_temp
@@ -126,7 +127,7 @@ EXPECT_STATUS = int(os.environ.get("EXPECT_STATUS", "200"))
 TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
 _TIMEOUT_SCALE = max(1.0, 48.0 / float(TURBO_MHZ))
 SENTINEL_POLL_TIMEOUT = float(
-    os.environ.get("SENTINEL_POLL_TIMEOUT", str(300.0 * _TIMEOUT_SCALE))
+    os.environ.get("SENTINEL_POLL_TIMEOUT", str(900.0 * _TIMEOUT_SCALE))
 )
 
 SENTINEL_VALUE = 0xC4
@@ -151,6 +152,10 @@ _KNOWN_TARGETS: dict[str, dict] = {
 # value in labels.txt: 2048 UCI / 1536 ip65 (Wikipedia growth) — always
 # prefer the label over this constant.
 CERT_BUF_FALLBACK_BYTES = 1536
+#: Page-3 scratch sizes (#209): a hostname of up to 63 chars + NUL (the
+#: build_live_routine limit), and "/" + NUL.
+HOST_STR_BYTES = 64
+PATH_STR_BYTES = 8
 
 # Comb marker: manifest equate bit for REU bank 2 (Lim-Lee anchor table).
 _BANKS_EQUATE = "LIB_NISTCURVES_REU_BANKS_USED"
@@ -353,18 +358,25 @@ def main() -> int:
     init_wait = float(os.environ.get("C64_INIT_WAIT",
                                      str(default_init_wait(labels))))
 
-    # DMA addresses from the arbiter — never hardcoded. Same carveout the
-    # local rig uses (the comb build's overlay landings fill CRYPTO_OVERLAY;
-    # the NET_CODE zero-fill tail is the safe scratch region).
-    memory_policy, arbiter = build_policy_and_arbiter_with_overlay_carveout(
+    # DMA addresses from the arbiter — never hardcoded — in page 3, which
+    # no link can take away (#209/#247: the uci-comb CRYPTO_OVERLAY tail
+    # could not hold the old 256 B slot). Sized to what is written; the
+    # routine's length does not depend on its addresses, so it is measured
+    # with placeholders first.
+    memory_policy, arbiter = build_policy_and_low_ram_arbiter(
         LABELS_PATH, PRG_PATH,
     )
-    routine_addr    = arbiter.alloc(256, name="trampoline")
-    host_str_addr   = arbiter.alloc(64,  name="host_str")
-    path_str_addr   = arbiter.alloc(64,  name="path_str")
-    sentinel_addr   = arbiter.alloc(1,   name="sentinel")
-    progress_addr   = arbiter.alloc(1,   name="progress")
-    carry_flag_addr = arbiter.alloc(1,   name="carry_flag")
+    host_bytes = HTTPS_TARGET.encode("ascii")
+    markers         = arbiter.alloc(3, name="sentinel+progress+carry")
+    sentinel_addr, progress_addr, carry_flag_addr = (
+        markers, markers + 1, markers + 2)
+    host_str_addr   = arbiter.alloc(HOST_STR_BYTES, name="host_str")
+    path_str_addr   = arbiter.alloc(PATH_STR_BYTES, name="path_str")
+    routine_len = len(build_live_routine(
+        labels, routine_addr=0, host_str_addr=0, path_str_addr=0,
+        sentinel_addr=0, progress_addr=0, carry_flag_addr=0,
+        host_len=len(host_bytes), port=HTTPS_TARGET_PORT))
+    routine_addr    = arbiter.alloc(routine_len, name="trampoline")
     print(f"\nMemoryPolicy reserved {len(memory_policy.reserved_regions)}"
           f" region(s); arbiter allocations:")
     for base, last, note in arbiter.allocations:
@@ -374,7 +386,6 @@ def main() -> int:
                           labels.get("cert_buf_size",
                                      CERT_BUF_FALLBACK_BYTES))
 
-    host_bytes = HTTPS_TARGET.encode("ascii")
     routine_bytes = build_live_routine(
         labels,
         routine_addr=routine_addr,
@@ -492,9 +503,11 @@ def main() -> int:
         for i in range(0, len(routine_bytes), CHUNK):
             transport.write_memory(routine_addr + i,
                                    routine_bytes[i:i + CHUNK])
-        transport.write_memory(host_str_addr, host_str.ljust(64, b"\x00"))
-        transport.write_memory(path_str_addr, path_str.ljust(8, b"\x00"))
-        transport.write_memory(sentinel_addr, bytes(16))
+        transport.write_memory(host_str_addr,
+                               host_str.ljust(HOST_STR_BYTES, b"\x00"))
+        transport.write_memory(path_str_addr,
+                               path_str.ljust(PATH_STR_BYTES, b"\x00"))
+        transport.write_memory(sentinel_addr, bytes(3))
 
         # Trigger via SYS
         sys_line = f"sys{routine_addr}\r"
@@ -704,7 +717,9 @@ def _selfcheck() -> int:
     park = addrs["routine_addr"] + len(code) - 3
     check("parks with JMP self",
           code[-3:] == bytes([0x4C, park & 0xFF, (park >> 8) & 0xFF]))
-    check("routine fits its 256 B slot", len(code) <= 256,
+    # 204 B of page 3 hold routine + host (64) + path (8) + 3 markers.
+    check("routine fits the page-3 scratch beside its data",
+          len(code) + HOST_STR_BYTES + PATH_STR_BYTES + 3 <= 204,
           f"{len(code)} bytes")
 
     # 4) host-length guard

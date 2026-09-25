@@ -1,10 +1,9 @@
 """Shared MemoryPolicy / MemoryArbiter factory for the c64-https tools/uci/* scripts.
 
-The c64-https build can lay out its memory map in several different ways
-depending on the BACKEND (ip65 vs uci) and the USE_X25519_SIBLING flag.
-Hand-coding scratch DMA addresses in each test script invites silent
-collisions when the layout changes (see issue surfaced by PR #41:
-ROUTINE_ADDR=$4200 clobbered X25519_RODATA under USE_X25519_SIBLING=1).
+The c64-https build lays out its memory map differently per BACKEND and
+profile. Hand-coding scratch DMA addresses in each test script invites
+silent collisions when the layout changes (PR #41: a hardcoded
+ROUTINE_ADDR=$4200 clobbered linked crypto tables).
 
 This module is the single source of truth for "where is c64-https
 holding RAM under the current build?". It reads ``build/labels.txt``
@@ -45,6 +44,7 @@ from c64_test_harness import (
     MemoryRegion,
     UnknownPolicy,
 )
+from c64_test_harness.memory_policy import HARNESS_SCRATCH
 from c64_test_harness.verify import PrgFile
 
 
@@ -60,12 +60,9 @@ from c64_test_harness.verify import PrgFile
 # arbiter to look for unused space *between* declared regions (e.g.
 # $A000-$BFFF on UCI, $D000+ KERNAL ROM shadow, etc.).
 #
-# The CRYPTO_OVERLAY case is the deliberate exception: under
-# USE_X25519_SIBLING=1 the X25519_RODATA + _BSS segments only fill the
-# first $F00 bytes; the tail $5100-$5FFF is genuinely intended as
-# harness scratch (the cfg comment says so explicitly). We re-add that
-# tail as a safe_region in :func:`build_policy` so the arbiter can
-# allocate there.
+# The CRYPTO_OVERLAY case is the deliberate exception: only its used
+# portion is reserved, so the older rigs can still carve its tail (see
+# :func:`build_policy`). The HTTPS trampoline rigs no longer do (#209).
 _SEGMENT_RX = re.compile(
     r"^al\s+(?:C:)?([0-9A-Fa-f]+)\s+\.__([A-Za-z0-9_]+)_(START|LAST|SIZE)__\s*$"
 )
@@ -254,11 +251,10 @@ def build_arbiter(
 
     The default window targets the $4000-$5FFF span — under ip65 most
     of this is filled by NET_BSS ($4000-$4F8B) + NET_BSS_TAIL
-    ($4F8C-$5FFF), but under UCI the CRYPTO_OVERLAY's tail ($5100-$5FFF
-    when USE_X25519_SIBLING=1, or all of $4200-$5FFF when not) is the
-    natural home for harness scratch: it's RAM-backed, inside the
-    LOADER/NET_CODE write-banked region, and not used by any code
-    that the PRG ships with under normal operation.
+    ($4F8C-$5FFF), and under UCI whatever tail CRYPTO_OVERLAY's resident
+    tenants leave is all that is free — it moves with every link, which is
+    why the HTTPS trampoline rigs use :func:`build_policy_and_low_ram_arbiter`
+    instead (#209).
 
     Pass ``window=(0xC000, 0xCFFF)`` to allocate inside the TCP_BUF
     range instead, but be aware that ``tcp_recv_buf`` lives there and
@@ -336,7 +332,7 @@ def build_policy_and_arbiter_with_overlay_carveout(
       3. ``CRYPTO_OVERLAY`` — the 7,680 B swap slot at $4200-$5FFF.
          Conditional fallback: usable ONLY when the build has no
          overlay blob linked into the slot. The default UCI build
-         (no ``USE_X25519_SIBLING=1`` / no ``EMBED_P256_OVERLAY=1`` /
+         (no ``EMBED_P256_OVERLAY=1`` /
          no ``USE_OVERLAY_P384_EMBED=1``) leaves CRYPTO_OVERLAY
          zero-filled in the PRG with nothing reading from it at
          runtime, which is a natural scratch home.
@@ -354,13 +350,12 @@ def build_policy_and_arbiter_with_overlay_carveout(
          it returns the same RuntimeError it raised before this
          candidate was added.
 
-         Unlike candidates (1) and (2), CRYPTO_OVERLAY is fully unused
-         (no ``__CRYPTO_OVERLAY_*_LAST__`` records any byte being
-         written — the region's "used end" tracks the MEMORY entry's
-         ``define = yes`` markers, not actual segment placement). When
-         this candidate is selected we therefore carve from the
-         region's *start* address rather than from a page-aligned
-         used-end.
+         NOTE: on every current UCI build CRYPTO_OVERLAY is NOT unused —
+         it holds resident tenants (deframer, cert_buf, name check, ...).
+         The window below starts at the region's start, but
+         :func:`build_policy` still reserves CRYPTO_OVERLAY up to its
+         ``__LAST__``, so the arbiter only ever hands out the tail. That
+         tail moves with the link; see :func:`build_policy_and_low_ram_arbiter`.
 
     For the chosen region we:
       - round the region's used-end up to the next $100 boundary (cheap
@@ -531,10 +526,86 @@ def build_policy_and_arbiter_with_overlay_carveout(
     return policy, arbiter
 
 
+#: $0334-$03FF: the KERNAL datasette buffer ($033C-$03FB) and the unused
+#: bytes either side of it, 204 B. Harness scratch for the SYS trampolines
+#: (#209), because every region the build lays out has been spent at one
+#: time or another — the comb CRYPTO_OVERLAY tail went 714 -> 223 -> 153 ->
+#: 126 B while the rigs needed 387 — and a scratch home that moves with the
+#: link breaks on hardware, not at build time. This one is outside the link
+#: entirely:
+#:
+#:   * nothing c64-https links is placed there (LOADER starts at $0801) and
+#:     no c64-https source addresses it; the one `cassette_buf = $0334`
+#:     in labels.txt is an unreferenced libs/nistcurves equate;
+#:   * the KERNAL touches it only for tape I/O, and BASIC never;
+#:   * RAMTAS clears page 3 at reset, which is why every rig writes its
+#:     scratch AFTER run_prg + the BASIC return, never before;
+#:   * it sits directly above the $0314-$0333 vectors, so the window must
+#:     not start below $0334.
+#:
+#: rig_https_wiki.py already puts its orphan-close trampoline at $0334.
+#: `build_policy` still reserves every region labels.txt declares, so a
+#: future cfg that did place something here fails the allocation loudly.
+LOW_RAM_SCRATCH = (0x0334, 0x03FF)
+
+#: c64-test-harness declares its own page-3 writers in HARNESS_SCRATCH, and
+#: MemoryArbiter withholds them by default. These are the ones overlapping
+#: LOW_RAM_SCRATCH, each a harness entry point no tools/uci rig calls (the
+#: rigs start code by typing SYS, never through execute.jsr/run_subroutine,
+#: play no SID, and run no liveness probe while they hold the lock). So the
+#: window is allocated raw, and any page-3 writer NOT in this set — a new
+#: one merged into the editable harness install — refuses the allocation
+#: instead of being silently overridden. tools/test_rig_scratch.py pins
+#: that no rig calls any of these.
+LOW_RAM_HARNESS_WRITERS_UNUSED = frozenset({
+    "execute.jsr",
+    "execute.run_subroutine (U64 path)",
+    "sid_player.play_sid_vice",
+    "backends.ultimate64_probe.probe_u64",
+    "backends.ultimate64_probe.liveness_probe",
+})
+
+
+def build_policy_and_low_ram_arbiter(
+    labels_path: str | Path,
+    prg_path: str | Path,
+    *,
+    unknown: UnknownPolicy = UnknownPolicy.WARN,
+    extra_reserved: tuple[MemoryRegion, ...] = (),
+) -> tuple[MemoryPolicy, MemoryArbiter]:
+    """Policy + an arbiter scoped to :data:`LOW_RAM_SCRATCH` (#209).
+
+    Independent of every segment the build lays out, so a cfg change that
+    reshapes CRYPTO_OVERLAY cannot take the rigs' scratch with it. 204 B:
+    size allocations to what is written (a 117 B trampoline, a 64 B host,
+    an 8 B path and 3 marker bytes is 192 B), not to round numbers.
+    """
+    lo, hi = LOW_RAM_SCRATCH
+    unknown_writers = sorted(
+        f"{r.span} {r.owner}" for r in HARNESS_SCRATCH
+        if r.start <= hi and r.end > lo
+        and r.owner not in LOW_RAM_HARNESS_WRITERS_UNUSED)
+    if unknown_writers:
+        raise RuntimeError(
+            "c64-test-harness declares page-3 writers this repo has not "
+            "audited against the rigs' low-RAM scratch window "
+            f"${lo:04X}-${hi:04X}: {unknown_writers}. Check whether any "
+            "tools/uci rig calls them; if none does, add the owner to "
+            "LOW_RAM_HARNESS_WRITERS_UNUSED in tools/uci/_memory_policy.py.")
+    policy = build_policy(labels_path, prg_path, unknown=unknown,
+                          extra_reserved=extra_reserved)
+    arbiter = MemoryArbiter(policy=policy, window=LOW_RAM_SCRATCH,
+                            exclude_harness_scratch=False)
+    return policy, arbiter
+
+
 __all__ = [
+    "LOW_RAM_HARNESS_WRITERS_UNUSED",
+    "LOW_RAM_SCRATCH",
     "build_policy",
     "build_arbiter",
     "build_policy_and_arbiter",
     "build_policy_and_arbiter_with_overlay_carveout",
+    "build_policy_and_low_ram_arbiter",
     "attach_arbiter_safe_regions",
 ]
