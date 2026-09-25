@@ -354,7 +354,7 @@ drops a symbol fails the link by name on both backends. Surface:
     Memory layout section carries and the one to use.
     `print_local_ip` rides LOADER_OVERFLOW, so the NET_CODE tail that is
     `HTTPS_HOST`/`HTTPS_PATH`'s ip65 budget shrank from 170 to ~60 B beyond
-    the default strings (56 B measured; wikipedia's +46 B still builds on
+    the default strings (56 B measured; wikipedia's +42 B still builds on
     both ip65 profiles, with 14 B to spare — verified at this pin; the
     theoretical 165 B host+path maximum no longer does).
 
@@ -644,8 +644,8 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     `MemoryPolicyError` before the wire.
   - `CRYPTO_HOT` margin under UCI is **per profile, and the one number this
     file used to carry (81 B) was wrong by more than half.** Measured at the
-    v0.14.0 pin **with the P-384 objects gated out**: **203 B** uci-onchip,
-    **93 B** uci-comb, 166 B on the unshipped REU default. At v0.11.2 it was
+    v0.14.0 pin **with the P-384 objects gated out**: **178 B** uci-onchip,
+    **68 B** uci-comb, 141 B on the unshipped REU default. At v0.11.2 it was
     36 / 193 / 23 — measured on master at `48657f5`, which is where to check
     it: the v0.11.2 pin is no longer reachable from this branch (it fails the
     branch's own ABI assert). So the 81 B was already stale before this bump
@@ -654,7 +654,7 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     `LIB_NISTCURVES_P256_RODATA` moved to `CRYPTO_OVERLAY` in
     `cfg/c64-https-uci.cfg` to absorb v0.12.0's +58 B of settle call sites,
     and gating returned 33 B of `CRYPTO_RODATA`. Comb is the exception at
-    93 B because its cfg already routes `CRYPTO_RODATA` to `CRYPTO_OVERLAY`,
+    68 B because its cfg already routes `CRYPTO_RODATA` to `CRYPTO_OVERLAY`,
     so its 33 B came back there instead — see the memory map below.
     Watch it on every pin bump, and measure all three.
   - `http_recv_response`: `Content-Length` (single-SP matcher, **24-bit,
