@@ -49,6 +49,7 @@
 .export uci_status_buf
 .export uci_status_len
 .export uci_status_seen
+.export uci_status_tail
 .export uci_status_force
 .export uci_wait_idle
 .export uci_wait_not_busy
@@ -688,6 +689,11 @@ uci_drain_status:
 @dst_have:
         lda UCI_STATUS_DATA
         jsr uci_settle
+        ; Last two bytes seen, non-sticky: net_poll reads the errno of a
+        ; "02,NO DATA: n" line off them (#253).
+        ldx uci_status_tail+1
+        stx uci_status_tail+0
+        sta uci_status_tail+1
         ; Hold the committed line intact. uci_status_len is sticky, but the
         ; BUFFER is shared, so without this a later drain scribbles over the
         ; bytes the length still describes: a held "02,NO DATA: 11" with a
@@ -777,6 +783,7 @@ uci_drain_status:
 uci_status_buf:  .res UCI_STATUS_MAX
 uci_status_len:  .res 1
 uci_status_seen: .res 1
+uci_status_tail: .res 2         ; last two bytes the latest drain saw
 uci_status_force: .res 1
 
 uci_resp_dst:    .res 2         ; destination pointer (lo, hi)

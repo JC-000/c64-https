@@ -55,6 +55,8 @@
 .import uci_tod_start
 .import uci_status_len
 .import uci_status_force
+.import uci_status_seen
+.import uci_status_tail
 .import uci_wait_idle
 .import uci_wait_not_busy
 .import uci_begin_cmd
@@ -315,8 +317,8 @@ net_poll:
         ; a peer FIN (idle polls answer $FFFF), and read_socket then
         ; lwip_close()s the socket itself and says "01,CONNECTION CLOSED
         ; BY HOST" (network_target.cc). Staying CONNECTED here kept the
-        ; caller polling a socket that no longer exists, for the whole
-        ; ~87 min tick budget in http_recv_body. CLOSED is true: the
+        ; caller polling a socket that no longer exists, for the rest of
+        ; http_recv_body's tick budget. CLOSED is true: the
         ; firmware socket is gone, so a C64 reset over it poisons nothing.
         jsr uci_drain_resp
         bcs @hd0_drain_to           ; drain wedged — surface as ERROR
@@ -455,10 +457,37 @@ net_poll:
         jsr uci_drain_status
         bcs @dd_drain_to
         jsr uci_ack
-        rts
+        ; actual_len $FFFF is lwip_recv's -1, and read_socket says why in
+        ; "02,NO DATA: <errno>". errno 11 (EWOULDBLOCK) is every idle
+        ; poll; any other (104 ECONNRESET for a peer RST, 9 EBADF, 128
+        ; ENOTCONN, ...) is a socket that will never deliver again, and
+        ; staying CONNECTED polled it for the rest of http_recv_body's
+        ; tick budget. Idle is exactly 14 bytes ending "11".
+        lda uci_read_hdr+0
+        and uci_read_hdr+1
+        cmp #$FF
+        bne @dd_live                ; a real length
+        lda uci_status_seen
+        cmp #14
+        bne @dd_dead
+        lda uci_status_tail+0
+        cmp #'1'
+        bne @dd_dead
+        lda uci_status_tail+1
+        cmp #'1'
+        beq @dd_live
+@dd_dead:
+        ; Keep the line: the post-mortem filter drops every "02," line,
+        ; and this is the one that says what killed the socket. The bytes
+        ; are in uci_status_buf whenever no earlier line is held.
+        lda uci_status_len
+        bne @dd_drain_to
+        lda uci_status_seen
+        sta uci_status_len
 @dd_drain_to:
         lda #NET_TCP_ERROR
         sta net_tcp_state
+@dd_live:
         rts
 
 ; =============================================================================
@@ -727,7 +756,8 @@ net_tcp_connect:
 ; advance the patched base address by 256 every time Y rolls over.
 ; Response: 2 bytes = written_lo/hi (LE). If written != requested we set
 ; UCI_ERR_SHORT_WRITE but still return C=0 so the caller can continue
-; (mirrors ip65 behaviour that treats short writes as best-effort).
+; (mirrors ip65 behaviour that treats short writes as best-effort). A
+; written count of $FFFF (lwip_send's -1) is a failed send: C=1, $87.
 ; =============================================================================
 net_tcp_send:
         sta uci_send_ptr_lo

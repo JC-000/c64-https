@@ -102,6 +102,7 @@ UCI_STAT_ABORT_PENDING = 0x04
 
 NET_TCP_CLOSED = 0x00
 NET_TCP_CONNECTED = 0x01
+NET_TCP_ERROR = 0x02
 NET_TCP_CONNECT_FAIL = 0x03
 
 UCI_ERR_NOT_PRESENT = 0x81
@@ -126,7 +127,7 @@ ABORT_LATENCY = 4
 
 LABELS_NEEDED = ("net_init", "net_tcp_connect", "net_tcp_close", "net_poll",
                  "net_tcp_send", "net_send_len", "net_recv_byte",
-                 "tcp_recv_buf",
+                 "tcp_recv_buf", "uci_status_buf",
                  "tcp_recv_head", "tcp_recv_tail",
                  "uci_host_buf", "uci_socket_id", "net_last_error",
                  "net_tcp_state", "uci_status_len", "uci_status_force")
@@ -728,8 +729,8 @@ def test_poll_eof_closes_the_socket_state():
     """SOCKET_READ answering actual_len 0 is the peer's FIN: read_socket
     has already lwip_close()d the socket and said "01,CONNECTION CLOSED BY
     HOST". net_poll must stop reporting CONNECTED, or http_recv_body polls
-    a dead socket for its whole tick budget (~87 min; live: github.com and
-    browserleaks.com runs sat out the rig's 900 s sentinel this way)."""
+    a dead socket for the rest of its tick budget (live: github.com runs
+    sat out the rig's 900 s sentinel this way)."""
     uci, mem, labels = _poll_once((b"\x00\x00", b"01,CONNECTION CLOSED BY HOST"))
     base._check(uci.parsed and uci.parsed[0][0][:2] == bytes([TARGET_NETWORK,
                                                               0x10]), (
@@ -751,6 +752,37 @@ def test_poll_no_data_keeps_the_socket():
     uci, mem, labels = _poll_once((b"\xff\xff", b"02,NO DATA: 11"))
     base._check(_state(mem, labels) == NET_TCP_CONNECTED, (
         "an idle poll changed net_tcp_state to $%02X"
+        % _state(mem, labels)))
+
+
+def test_poll_reset_is_not_idle():
+    """A peer RST: lwip_recv returns -1 with ECONNRESET, so SOCKET_READ
+    answers $FFFF (the same header as an idle poll) and "02,NO DATA: 104".
+    Only the errno tells them apart. Staying CONNECTED polled the dead
+    socket for the rest of http_recv_body's tick budget; the line must
+    also be kept for the post-mortem (the routine-line filter drops every
+    "02," line)."""
+    for status in (b"02,NO DATA: 104", b"02,NO DATA: 9", b"02,NO DATA: 128"):
+        uci, mem, labels = _poll_once((b"\xff\xff", status))
+        base._check(_state(mem, labels) == NET_TCP_ERROR, (
+            "SOCKET_READ $FFFF with %r left net_tcp_state=$%02X, expected "
+            "$02 ERROR" % (status, _state(mem, labels))))
+        n = mem.read(labels["uci_status_len"])
+        held = bytes(mem.read(labels["uci_status_buf"] + i)
+                     for i in range(n))
+        base._check(held == status, (
+            "the dead socket's status line was not kept: uci_status_len=%d, "
+            "buffer %r, expected %r" % (n, held, status)))
+        base._check(uci.idle and uci.abort_writes == 0,
+                    "the %r poll left the interface in %s" % (status,
+                                                             uci.describe()))
+
+
+def test_poll_data_keeps_the_socket():
+    """Control: a real read ("00,OK") stays CONNECTED."""
+    uci, mem, labels = _poll_once((b"\x03\x00abc", b"00,OK"))
+    base._check(_state(mem, labels) == NET_TCP_CONNECTED, (
+        "a 3-byte read changed net_tcp_state to $%02X"
         % _state(mem, labels)))
 
 
@@ -850,6 +882,8 @@ TESTS = (
     test_clean_connect_close_connect_never_aborts,
     test_poll_eof_closes_the_socket_state,
     test_poll_no_data_keeps_the_socket,
+    test_poll_reset_is_not_idle,
+    test_poll_data_keeps_the_socket,
     test_eof_keeps_the_bytes_already_in_the_ring,
     test_send_error_is_not_a_length,
 )
