@@ -728,7 +728,7 @@ def _dump_diag(transport: Ultimate64Transport,
     print()
     print("--- adapter / TLS state ---")
     for name in ("net_last_error", "net_tcp_state", "uci_socket_id",
-                 "net_initialized"):
+                 "net_initialized", "reu_dma_timeout"):
         if name in labels:
             print(f"  {name:22s} : 0x{r8(name):02X}")
     for name in ("tls_state", "tls_last_state",
