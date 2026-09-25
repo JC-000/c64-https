@@ -224,8 +224,8 @@ def test_testpaths_lists_nothing_pytest_cannot_run() -> None:
 #   PREREQ   Is this success exit reached from a prerequisite branch -- a
 #            condition that inspects the environment (os.environ, which(),
 #            a path's existence, the platform, a helper whose NAME says
-#            prereq/available/missing/supported/installed, an ImportError
-#            handler) rather than a result? Then the exit code must BE a
+#            prereq/available/missing/supported/installed, an `except`
+#            for ImportError / a skip / Unavailable) rather than a result? Then the exit code must BE a
 #            _skip_policy call (`return cannot_run(...)`, `require(...)`),
 #            never a literal. A bare `return 0`, `sys.exit(0)` or
 #            pytest-test `return` there is the #158/#165/#177 shape -- and
@@ -333,6 +333,12 @@ _PREREQ_WORDS = {"prereq", "prereqs", "prerequisite", "prerequisites",
                  "available", "missing", "supported", "installed"}
 _PREREQ_PREFIXES = ("have_", "has_", "skip_if")
 _PATH_PROBES = {"exists", "is_file", "is_dir", "isfile", "isdir", "access"}
+# An `except` for one of these IS a prerequisite branch: a missing module,
+# a skip raised further down, or the suites' own "no usable build" error.
+# `except VoluntarySkip: return 0` is a hand-rolled opt-out (found in two
+# UCI suites on merging #238/#241).
+_PREREQ_HANDLERS = {"ImportError", "ModuleNotFoundError", "VoluntarySkip",
+                    "SkipTest", "Skipped", "Unavailable"}
 # What makes an identifier a count of checks that RAN (see _countish).
 # Deliberately narrow: a false "evidence" match silences VACUOUS, so every
 # word here has to name executed checks on its own or as a compound.
@@ -744,9 +750,8 @@ def _collect_sites(tree):
                           else h.type.elts):
                     if isinstance(t, (ast.Name, ast.Attribute)):
                         names.append(t.id if isinstance(t, ast.Name) else t.attr)
-                is_import = any(n in ("ImportError", "ModuleNotFoundError")
-                                for n in names)
-                visit_block(h.body, func, conds, handler or is_import)
+                is_prereq = any(n in _PREREQ_HANDLERS for n in names)
+                visit_block(h.body, func, conds, handler or is_prereq)
             visit_block(st.orelse, func, conds, handler)
             visit_block(st.finalbody, func, conds, handler)
         elif isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1106,6 +1111,12 @@ _GUARD_CASES_BAD = {
         "import shutil\ndef main(run=True):\n"
         "    if run and not shutil.which('x'):\n        return 0\n"
         "    return 1\n", "PREREQ"),
+    # tools/test_uci_reply_valid_wait.py / test_uci_abort_recovery.py as
+    # merged from #238 / #241: the first opt-out skip returned 0 outright.
+    "voluntary_skip_handler_return_0": (
+        "def main():\n    for t in TESTS:\n        try:\n            t()\n"
+        "        except VoluntarySkip:\n            return 0\n    return 1\n",
+        "PREREQ"),
     "import_error_exit_0": (
         "import sys\ntry:\n    import foo\nexcept ImportError:\n"
         "    sys.exit(0)\n", "PREREQ"),

@@ -63,6 +63,8 @@ from test_uci_timeout_recovery import (                   # noqa: E402
 )
 
 OPT_OUT_ENV = "C64_UCI_TESTS_OPTIONAL"
+from _skip_policy import require, verdict  # noqa: E402
+CERTIFIES = "the #230(b) reply wait"
 
 # $DF1C reads between ACCEPT (CMD_BUSY clears) and VALIDATE (state "10").
 # Anything >= 3 puts the old code's first DATA_AV test inside the window.
@@ -153,12 +155,10 @@ def _require(*args):
     except Unavailable as exc:
         if os.environ.get(OPT_OUT_ENV) != "1":
             raise
-        reason = ("EXPLICIT SKIP (%s=1): %s — this exit-0 certifies NOTHING "
-                  "about the #230(b) reply wait." % (OPT_OUT_ENV, exc))
-        pytest = sys.modules.get("pytest")
-        if pytest is None:
-            raise VoluntarySkip(reason)
-        pytest.skip(reason)
+        # _skip_policy.require() folds the warning into the reason
+        # and hands pytest a skip only when pytest is driving (#178).
+        require(False, str(exc), executed=0, total=len(TESTS),
+                certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV)
 
 
 def _ring(mem, labels, n):
@@ -318,13 +318,15 @@ TESTS = (
 
 
 def main():
-    failed = 0
+    passed = failed = 0
     for test in TESTS:
         try:
             test()
         except VoluntarySkip as exc:
             print("SKIP: %s" % exc)
-            return 0
+            return verdict(passed, failed,
+                           skipped=len(TESTS) - passed - failed,
+                           opt_out_env=OPT_OUT_ENV, certifies=CERTIFIES)
         except Unavailable as exc:
             print("CANNOT RUN: %s" % exc)
             return 2
@@ -332,10 +334,11 @@ def main():
             failed += 1
             print("FAIL %s: %s" % (test.__name__, exc))
         else:
+            passed += 1
             print("ok   %s" % test.__name__)
     print("%d/%d passed, %d assertions" % (len(TESTS) - failed, len(TESTS),
                                            base.ASSERTIONS_RUN))
-    return 1 if failed else 0
+    return verdict(passed, failed, certifies=CERTIFIES)
 
 
 if __name__ == "__main__":

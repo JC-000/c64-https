@@ -67,6 +67,7 @@ from c64_test_harness import (
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _vice_helpers import default_vice_config  # noqa: E402
+from _skip_policy import verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -430,7 +431,8 @@ def main() -> int:
         print(f"\n  [-] CONNECTED latch: {failed} TEST(S) FAILED")
     print("=" * 60)
 
-    return 0 if failed == 0 else 1
+    return verdict(passed, failed,
+                   certifies="the tls_connected latch (#204)")
 
 
 if __name__ == "__main__":
