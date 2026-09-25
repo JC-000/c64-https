@@ -111,8 +111,7 @@ from _device_lock_helper import (
     LockTimeoutConfigError, acquire_device_lock,
 )
 from _memory_policy import (
-    build_policy_and_arbiter,
-    build_policy_and_arbiter_with_overlay_carveout,
+    build_policy_and_low_ram_arbiter,
 )
 from _device_prep import DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
@@ -222,12 +221,16 @@ def _ensure_certs_or_fail() -> int:
 # Sizes are conservative — the trampoline is ~110 B today; we allow
 # 256 B for headroom.  HOST/PATH strings are ASCII-NUL-terminated and
 # fit easily inside their 64-byte slots.
-ROUTINE_ADDR: int = -1     # arbiter.alloc(256, name="trampoline")
-HOST_STR_ADDR: int = -1    # arbiter.alloc(64,  name="host_str")
-PATH_STR_ADDR: int = -1    # arbiter.alloc(64,  name="path_str")
-SENTINEL_ADDR: int = -1    # arbiter.alloc(1,   name="sentinel")
-PROGRESS_ADDR: int = -1    # arbiter.alloc(1,   name="progress")
-CARRY_FLAG_ADDR: int = -1  # arbiter.alloc(1,   name="carry_flag")
+ROUTINE_ADDR: int = -1     # arbiter.alloc(<routine length>, "trampoline")
+HOST_STR_ADDR: int = -1    # arbiter.alloc(HOST_STR_BYTES, "host_str")
+PATH_STR_ADDR: int = -1    # arbiter.alloc(PATH_STR_BYTES, "path_str")
+SENTINEL_ADDR: int = -1    # markers + 0  } one 3-byte allocation: the poll
+PROGRESS_ADDR: int = -1    # markers + 1  } reads sentinel+progress as one
+CARRY_FLAG_ADDR: int = -1  # markers + 2  } 2-byte blob
+#: The host string is the listener's dotted quad (<= 15 chars + NUL); the
+#: path is "/". Sized to what is written, not to round numbers (#209).
+HOST_STR_BYTES = 32
+PATH_STR_BYTES = 8
 
 SENTINEL_VALUE   = 0xAA
 
@@ -1390,32 +1393,29 @@ def main() -> int:
         print(f"ERROR: {sni_problem}", file=sys.stderr)
         return 2
 
-    # --- Memory policy + arbiter: derive scratch addresses from the
-    # current build's segment layout instead of hardcoding them.  The
-    # policy reserves every PRG segment found in labels.txt; the
-    # arbiter then allocates inside the NET_CODE zero-fill tail
-    # ($3xxx-$3FFF), carved out via
-    # ``build_policy_and_arbiter_with_overlay_carveout``. Previously this
-    # used ``build_policy_and_arbiter`` (CRYPTO_OVERLAY window), but
-    # Phase 5's overlay-blob landings fill CRYPTO_OVERLAY end-to-end
-    # ($4200-$5FFF) and the arbiter could no longer find a slot. The
-    # overlay-carveout helper steals the NET_CODE tail (declared
-    # ``fill = yes`` in the cfg, used only up to $3xxx by the adapter
-    # and relocated TLS/crypto-aux code) instead, which has ~1.6 KB of
-    # safe RAM under both the P-256 and P-384 builds.
-    # Transport hookup happens after the transport is constructed
-    # inside the try-block below.
+    # --- Scratch: page 3, sized to what is written (#209) ---
+    # _memory_policy.build_policy_and_low_ram_arbiter says why $0334-$03FF
+    # and not a tail of some linked region: every such tail has been spent
+    # at one time or another (the uci-comb CRYPTO_OVERLAY tail is ~126 B,
+    # against the 387 B the old round-number allocation asked for), and a
+    # home that moves with the link fails on hardware, not at build time.
+    # The policy still reserves every segment in labels.txt; transport
+    # hookup happens after the transport is constructed below.
     global ROUTINE_ADDR, HOST_STR_ADDR, PATH_STR_ADDR
     global SENTINEL_ADDR, PROGRESS_ADDR, CARRY_FLAG_ADDR
-    memory_policy, arbiter = build_policy_and_arbiter_with_overlay_carveout(
+    memory_policy, arbiter = build_policy_and_low_ram_arbiter(
         LABELS_PATH, PRG_PATH,
     )
-    ROUTINE_ADDR    = arbiter.alloc(256, name="trampoline")
-    HOST_STR_ADDR   = arbiter.alloc(64,  name="host_str")
-    PATH_STR_ADDR   = arbiter.alloc(64,  name="path_str")
-    SENTINEL_ADDR   = arbiter.alloc(1,   name="sentinel")
-    PROGRESS_ADDR   = arbiter.alloc(1,   name="progress")
-    CARRY_FLAG_ADDR = arbiter.alloc(1,   name="carry_flag")
+    markers         = arbiter.alloc(3, name="sentinel+progress+carry")
+    SENTINEL_ADDR, PROGRESS_ADDR, CARRY_FLAG_ADDR = (
+        markers, markers + 1, markers + 2)
+    HOST_STR_ADDR   = arbiter.alloc(HOST_STR_BYTES, name="host_str")
+    PATH_STR_ADDR   = arbiter.alloc(PATH_STR_BYTES, name="path_str")
+    # Every operand in the routine is absolute, so its length does not
+    # depend on where it lands: measure it at 0, then allocate exactly that.
+    ROUTINE_ADDR    = 0
+    ROUTINE_ADDR    = arbiter.alloc(len(_build_http_routine(labels, 0)[0]),
+                                    name="trampoline")
     print(
         f"\nMemoryPolicy reserved {len(memory_policy.reserved_regions)}"
         f" region(s); arbiter allocations:"
@@ -1483,6 +1483,11 @@ def main() -> int:
 
     host_str = host_ip_bytes + b"\x00"
     path_str = b"/\x00"
+    if len(host_str) > HOST_STR_BYTES:
+        print(f"ERROR: host {test_host_ip!r} exceeds the {HOST_STR_BYTES} B "
+              "host_str scratch", file=sys.stderr)
+        return 2
+    assert len(routine_bytes) == len(_build_http_routine(labels, 0)[0])
 
     prg = PRG_PATH.read_bytes()
 
@@ -1693,11 +1698,13 @@ def main() -> int:
                 ROUTINE_ADDR + i,
                 routine_bytes[i:i + CHUNK],
             )
-        transport.write_memory(HOST_STR_ADDR, host_str.ljust(32, b"\x00"))
-        transport.write_memory(PATH_STR_ADDR, path_str.ljust(8, b"\x00"))
+        transport.write_memory(HOST_STR_ADDR,
+                               host_str.ljust(HOST_STR_BYTES, b"\x00"))
+        transport.write_memory(PATH_STR_ADDR,
+                               path_str.ljust(PATH_STR_BYTES, b"\x00"))
 
-        # Clear sentinel area
-        transport.write_memory(SENTINEL_ADDR, bytes(16))
+        # Clear sentinel, progress and carry (exactly the 3 allocated)
+        transport.write_memory(SENTINEL_ADDR, bytes(3))
 
         # Trigger via SYS
         sys_line = f"sys{ROUTINE_ADDR}\r"

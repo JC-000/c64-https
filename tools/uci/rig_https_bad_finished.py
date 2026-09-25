@@ -114,9 +114,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _device_lock_helper import (  # noqa: E402
     LockTimeoutConfigError, acquire_device_lock,
 )
-from _memory_policy import (  # noqa: E402
-    build_policy_and_arbiter_with_overlay_carveout,
-)
+from _memory_policy import build_policy_and_low_ram_arbiter  # noqa: E402
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
 from _sni_precondition import enforce_sni_precondition  # noqa: E402
@@ -175,6 +173,9 @@ def _state_name(v: int) -> str:
 # must never be hardcoded.
 ROUTINE_ADDR = HOST_STR_ADDR = PATH_STR_ADDR = -1
 SENTINEL_ADDR = PROGRESS_ADDR = CARRY_FLAG_ADDR = -1
+#: Sized to what is written (#209): a dotted quad + NUL, and "/" + NUL.
+HOST_STR_BYTES = 32
+PATH_STR_BYTES = 8
 
 
 def _detect_local_ip(target: str) -> str:
@@ -458,15 +459,20 @@ def main() -> int:
 
     global ROUTINE_ADDR, HOST_STR_ADDR, PATH_STR_ADDR
     global SENTINEL_ADDR, PROGRESS_ADDR, CARRY_FLAG_ADDR
-    memory_policy, arbiter = build_policy_and_arbiter_with_overlay_carveout(
+    # Page-3 scratch, independent of the link (#209): see
+    # _memory_policy.build_policy_and_low_ram_arbiter. The routine's length
+    # does not depend on its addresses, so it is measured at 0 first.
+    memory_policy, arbiter = build_policy_and_low_ram_arbiter(
         LABELS_PATH, PRG_PATH,
     )
-    ROUTINE_ADDR = arbiter.alloc(256, name="trampoline")
-    HOST_STR_ADDR = arbiter.alloc(64, name="host_str")
-    PATH_STR_ADDR = arbiter.alloc(64, name="path_str")
-    SENTINEL_ADDR = arbiter.alloc(1, name="sentinel")
-    PROGRESS_ADDR = arbiter.alloc(1, name="progress")
-    CARRY_FLAG_ADDR = arbiter.alloc(1, name="carry_flag")
+    markers = arbiter.alloc(3, name="sentinel+progress+carry")
+    SENTINEL_ADDR, PROGRESS_ADDR, CARRY_FLAG_ADDR = (
+        markers, markers + 1, markers + 2)
+    HOST_STR_ADDR = arbiter.alloc(HOST_STR_BYTES, name="host_str")
+    PATH_STR_ADDR = arbiter.alloc(PATH_STR_BYTES, name="path_str")
+    ROUTINE_ADDR = 0
+    ROUTINE_ADDR = arbiter.alloc(len(_build_http_routine(labels, 0)[0]),
+                                 name="trampoline")
     for base, last, note in arbiter.allocations:
         print(f"  ${base:04X}-${last:04X}  {note}")
 
@@ -601,9 +607,11 @@ def main() -> int:
 
         for i in range(0, len(routine), 64):
             transport.write_memory(ROUTINE_ADDR + i, routine[i:i + 64])
-        transport.write_memory(HOST_STR_ADDR, (host_bytes + b"\x00").ljust(32, b"\x00"))
-        transport.write_memory(PATH_STR_ADDR, b"/\x00".ljust(8, b"\x00"))
-        transport.write_memory(SENTINEL_ADDR, bytes(16))
+        transport.write_memory(
+            HOST_STR_ADDR, (host_bytes + b"\x00").ljust(HOST_STR_BYTES, b"\x00"))
+        transport.write_memory(
+            PATH_STR_ADDR, b"/\x00".ljust(PATH_STR_BYTES, b"\x00"))
+        transport.write_memory(SENTINEL_ADDR, bytes(3))
 
         print(f"Triggering: sys{ROUTINE_ADDR}")
         send_text(transport, f"sys{ROUTINE_ADDR}\r")

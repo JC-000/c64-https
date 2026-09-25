@@ -45,6 +45,7 @@ from c64_test_harness import (
     MemoryRegion,
     UnknownPolicy,
 )
+from c64_test_harness.memory_policy import HARNESS_SCRATCH
 from c64_test_harness.verify import PrgFile
 
 
@@ -531,10 +532,86 @@ def build_policy_and_arbiter_with_overlay_carveout(
     return policy, arbiter
 
 
+#: $0334-$03FF: the KERNAL datasette buffer ($033C-$03FB) and the unused
+#: bytes either side of it, 204 B. Harness scratch for the SYS trampolines
+#: (#209), because every region the build lays out has been spent at one
+#: time or another — the comb CRYPTO_OVERLAY tail went 714 -> 223 -> 153 ->
+#: 126 B while the rigs needed 387 — and a scratch home that moves with the
+#: link breaks on hardware, not at build time. This one is outside the link
+#: entirely:
+#:
+#:   * nothing c64-https links is placed there (LOADER starts at $0801) and
+#:     no c64-https source addresses it; the one `cassette_buf = $0334`
+#:     in labels.txt is an unreferenced libs/nistcurves equate;
+#:   * the KERNAL touches it only for tape I/O, and BASIC never;
+#:   * RAMTAS clears page 3 at reset, which is why every rig writes its
+#:     scratch AFTER run_prg + the BASIC return, never before;
+#:   * it sits directly above the $0314-$0333 vectors, so the window must
+#:     not start below $0334.
+#:
+#: rig_https_wiki.py already puts its orphan-close trampoline at $0334.
+#: `build_policy` still reserves every region labels.txt declares, so a
+#: future cfg that did place something here fails the allocation loudly.
+LOW_RAM_SCRATCH = (0x0334, 0x03FF)
+
+#: c64-test-harness declares its own page-3 writers in HARNESS_SCRATCH, and
+#: MemoryArbiter withholds them by default. These are the ones overlapping
+#: LOW_RAM_SCRATCH, each a harness entry point no tools/uci rig calls (the
+#: rigs start code by typing SYS, never through execute.jsr/run_subroutine,
+#: play no SID, and run no liveness probe while they hold the lock). So the
+#: window is allocated raw, and any page-3 writer NOT in this set — a new
+#: one merged into the editable harness install — refuses the allocation
+#: instead of being silently overridden. tools/test_rig_scratch.py pins
+#: that no rig calls any of these.
+LOW_RAM_HARNESS_WRITERS_UNUSED = frozenset({
+    "execute.jsr",
+    "execute.run_subroutine (U64 path)",
+    "sid_player.play_sid_vice",
+    "backends.ultimate64_probe.probe_u64",
+    "backends.ultimate64_probe.liveness_probe",
+})
+
+
+def build_policy_and_low_ram_arbiter(
+    labels_path: str | Path,
+    prg_path: str | Path,
+    *,
+    unknown: UnknownPolicy = UnknownPolicy.WARN,
+    extra_reserved: tuple[MemoryRegion, ...] = (),
+) -> tuple[MemoryPolicy, MemoryArbiter]:
+    """Policy + an arbiter scoped to :data:`LOW_RAM_SCRATCH` (#209).
+
+    Independent of every segment the build lays out, so a cfg change that
+    reshapes CRYPTO_OVERLAY cannot take the rigs' scratch with it. 204 B:
+    size allocations to what is written (a 117 B trampoline, a 64 B host,
+    an 8 B path and 3 marker bytes is 192 B), not to round numbers.
+    """
+    lo, hi = LOW_RAM_SCRATCH
+    unknown_writers = sorted(
+        f"{r.span} {r.owner}" for r in HARNESS_SCRATCH
+        if r.start <= hi and r.end > lo
+        and r.owner not in LOW_RAM_HARNESS_WRITERS_UNUSED)
+    if unknown_writers:
+        raise RuntimeError(
+            "c64-test-harness declares page-3 writers this repo has not "
+            "audited against the rigs' low-RAM scratch window "
+            f"${lo:04X}-${hi:04X}: {unknown_writers}. Check whether any "
+            "tools/uci rig calls them; if none does, add the owner to "
+            "LOW_RAM_HARNESS_WRITERS_UNUSED in tools/uci/_memory_policy.py.")
+    policy = build_policy(labels_path, prg_path, unknown=unknown,
+                          extra_reserved=extra_reserved)
+    arbiter = MemoryArbiter(policy=policy, window=LOW_RAM_SCRATCH,
+                            exclude_harness_scratch=False)
+    return policy, arbiter
+
+
 __all__ = [
+    "LOW_RAM_HARNESS_WRITERS_UNUSED",
+    "LOW_RAM_SCRATCH",
     "build_policy",
     "build_arbiter",
     "build_policy_and_arbiter",
     "build_policy_and_arbiter_with_overlay_carveout",
+    "build_policy_and_low_ram_arbiter",
     "attach_arbiter_safe_regions",
 ]
