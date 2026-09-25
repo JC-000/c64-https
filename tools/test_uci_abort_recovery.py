@@ -96,7 +96,7 @@ from test_uci_timeout_recovery import (                   # noqa: E402
 
 OPT_OUT_ENV = "C64_UCI_TESTS_OPTIONAL"
 from _skip_policy import require, verdict  # noqa: E402
-CERTIFIES = "#230(a) / #221"
+CERTIFIES = "#230(a) / #221 / #243"
 
 UCI_STAT_ABORT_PENDING = 0x04
 
@@ -522,15 +522,88 @@ def _close(cpu, labels):
     return cpu.call(labels["net_tcp_close"])
 
 
-def test_close_entry_wait_bail():
-    uci = AbortModel([CONNECT_OK])
+CMD_SOCKET_CLOSE = 0x09
+CLOSE_BYTES = bytes([TARGET_NETWORK, CMD_SOCKET_CLOSE, 1])
+UCI_ERR_READ_FAIL = 0x86
+
+
+def _closes(uci):
+    return [p for p in uci.parsed if p[0] == CLOSE_BYTES]
+
+
+def test_close_entry_wait_bail_retries_the_close():
+    """#243: the entry wait finds a transaction somebody left open (a
+    net_poll bail). The abort clears it, so the close must still reach the
+    firmware: without the retry the socket stays live while net_tcp_state
+    says CLOSED, and the next C64 reset over it poisons the lease. A
+    retry that succeeds reports success and leaves the error the caller
+    came in with (here net_poll's $86), not the entry wait's $89."""
+    uci = AbortModel([(b"", OK), CONNECT_OK])
+    _dirty_interface(uci)
+    cpu, mem, labels = _require(uci)
+    mem.write(labels["uci_socket_id"], 1)
+    mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
+    mem.write(labels["net_last_error"], UCI_ERR_READ_FAIL)
+    carry = _close(cpu, labels)
+    base._check(_closes(uci) == [(CLOSE_BYTES, "ok")], (
+        "after the entry-wait abort the firmware parsed %r: no SOCKET_CLOSE "
+        "%r reached it, so the socket is still live" % (uci.parsed,
+                                                        CLOSE_BYTES)))
+    base._check(uci.abort_writes == 1 and uci.aborts_completed == 1, (
+        "abort writes=%d completed=%d; expected exactly one, landed"
+        % (uci.abort_writes, uci.aborts_completed)))
+    base._check(carry is False and _err(mem, labels) == UCI_ERR_READ_FAIL, (
+        "the retried close succeeded but returned C=%d, net_last_error=$%02X;"
+        " expected C=0 and the entry value $86"
+        % (carry, _err(mem, labels))))
+    base._check(_state(mem, labels) == NET_TCP_CLOSED,
+                "net_tcp_state=$%02X after the close" % _state(mem, labels))
+    _assert_connected(cpu, mem, uci, labels, "connect after the retried close")
+
+
+def test_close_no_retry_when_the_abort_never_lands():
+    """The entry wait expired because the task is stuck, so the abort
+    queued behind it never lands either. Retrying would only stack a third
+    5 s wait: report $89 after the entry wait + ONE abort wait, as before."""
+    uci = AbortModel([(b"", OK)], abort_latency=None)
     _dirty_interface(uci)
     cpu, mem, labels = _require(uci)
     mem.write(labels["uci_socket_id"], 1)
     mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
     carry = _close(cpu, labels)
+    base._check(carry is True and _err(mem, labels) == UCI_ERR_WAIT_TIMEOUT
+                and _state(mem, labels) == NET_TCP_CLOSED, (
+        "stuck task: close returned C=%d, net_last_error=$%02X, "
+        "net_tcp_state=$%02X; expected C=1, $89, CLOSED"
+        % (carry, _err(mem, labels), _state(mem, labels))))
+    base._check(uci.abort_writes == 1 and not uci.parsed
+                and uci.pushes_accepted + uci.pushes_rejected == 0, (
+        "stuck task: %d abort write(s), %d push(es), parsed %r; expected one "
+        "abort and no command" % (uci.abort_writes, uci.pushes_accepted
+                                   + uci.pushes_rejected, uci.parsed)))
+    reads = mem._tod_reads
+    budget = base.BUDGET_TENTHS
+    base._check(2 * budget <= reads < 3 * budget, (
+        "the stuck-task close read the TOD %d times: expected the entry wait "
+        "+ one abort wait (%d-%d)" % (reads, 2 * budget, 3 * budget - 1)))
+
+
+def test_close_retry_that_also_fails_reports_89():
+    """The abort lands, but the retried SOCKET_CLOSE stalls too: $89, C=1,
+    CLOSED, exactly one retry, and the interface still left clean."""
+    uci = AbortModel([(b"", OK), CONNECT_OK])
+    uci.cmd_latencies = [STALL_RECOVERS]
+    _dirty_interface(uci)
+    cpu, mem, labels = _require(uci)
+    mem.write(labels["uci_socket_id"], 1)
+    mem.write(labels["net_tcp_state"], NET_TCP_CONNECTED)
+    carry = _close(cpu, labels)
+    base._check(_closes(uci) == [(CLOSE_BYTES, "ok")], (
+        "expected exactly one (retried) SOCKET_CLOSE, the firmware parsed %r"
+        % uci.parsed))
     _after_bail(cpu, mem, uci, labels, carry,
-                "net_tcp_close's entry uci_wait_idle bail", NET_TCP_CLOSED)
+                "net_tcp_close's retried close, push wait bail",
+                NET_TCP_CLOSED)
 
 
 def test_close_push_wait_bail():
@@ -624,10 +697,10 @@ def test_clean_connect_close_connect_never_aborts():
     uci = AbortModel([CONNECT_OK, (b"", OK), CONNECT_OK])
     cpu, mem, labels = _require(uci)
     _assert_connected(cpu, mem, uci, labels, "first clean connect")
-    _close(cpu, labels)                 # no return code: carry not checked
-    base._check(_state(mem, labels) == NET_TCP_CLOSED,
-                "a clean close left net_tcp_state=$%02X"
-                % _state(mem, labels))
+    carry = _close(cpu, labels)
+    base._check(carry is False and _state(mem, labels) == NET_TCP_CLOSED, (
+        "a clean close returned C=%d, net_tcp_state=$%02X; expected C=0, "
+        "CLOSED" % (carry, _state(mem, labels))))
     _assert_connected(cpu, mem, uci, labels, "second clean connect")
     base._check(uci.abort_writes == 0, (
         "the clean paths wrote ABORT %d time(s); the bail has leaked onto "
@@ -647,7 +720,9 @@ TESTS = (
     test_connect_push_wait_bail,
     test_connect_error_path_drain_bail,
     test_connect_ok_path_drain_bail,
-    test_close_entry_wait_bail,
+    test_close_entry_wait_bail_retries_the_close,
+    test_close_no_retry_when_the_abort_never_lands,
+    test_close_retry_that_also_fails_reports_89,
     test_close_push_wait_bail,
     test_close_drain_bail,
     test_bail_whose_abort_never_lands,

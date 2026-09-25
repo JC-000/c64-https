@@ -960,7 +960,8 @@ net_tcp_send:
 ;
 ; SCOPE (#221). Routed here: net_tcp_send's push-wait and drain exits;
 ; net_tcp_connect's entry wait, push wait and both drain pairs; and
-; net_tcp_close's entry wait, push wait and drains. NOT routed: net_poll's
+; net_tcp_close's push wait and drains (its entry wait aborts and retries
+; the close once instead, #243). NOT routed: net_poll's
 ; exits (they force NET_TCP_ERROR, and the close that follows meets the
 ; open transaction at its entry wait, which now aborts it),
 ; net_dhcp_acquire's, and net_tcp_send's entry wait (C=1 to a caller that
@@ -976,14 +977,32 @@ uci_txn_bail:
 ; =============================================================================
 ; net_tcp_close — CMD_SOCKET_CLOSE on the open socket. Best-effort; the
 ; UCI error bit is drained but not surfaced, and net_tcp_state is always
-; forced back to NET_TCP_CLOSED.
+; forced back to NET_TCP_CLOSED. C=0 closed; C=1 a bounded wait expired
+; (net_last_error = $89) and the firmware socket may still be live.
+;
+; The entry wait retries once (#243). Not idle within 5 s is typically a
+; net_poll bail that left a reply open; returning there, as #221 did, left
+; the firmware socket live under a CLOSED net_tcp_state, which a later
+; C64 reset turns into lease poisoning. ABORT closes no socket, so once
+; its reset lands the SOCKET_CLOSE is still owed and the interface is
+; clean enough to send it. uci_abort's wait IS the idle wait (the $35
+; mask), so the retry goes straight to the command. If the reset never
+; lands the task is stuck and a retry would only add a third 5 s: that is
+; C=1/$89 as before. A retry that succeeds restores the net_last_error
+; the caller came in with (e.g. net_poll's $86), so $89 means the close
+; failed, not that it needed a second attempt. Any later failure takes
+; @cl_bail, so there is exactly one retry.
 ; =============================================================================
 net_tcp_close:
+        lda net_last_error
+        sta @cl_err_in
         jsr uci_wait_idle
-        ; Not idle within 5 s (typically a net_poll bail left a reply
-        ; open) — abort it and return C=1, as before (#221).
-        bcs @cl_bail
-
+        bcc @cl_send
+        jsr uci_abort               ; waits for reset AND idle ($35)
+        bcs @cl_closed              ; stuck task: C=1, $89
+        lda @cl_err_in
+        sta net_last_error
+@cl_send:
         lda #UCI_TARGET_NETWORK
         jsr uci_begin_cmd
 
@@ -1002,7 +1021,8 @@ net_tcp_close:
         jsr uci_drain_status
         bcs @cl_bail
         jsr uci_ack
-        jmp @cl_closed
+        clc
+        bcc @cl_closed
 
 @cl_bail:
         jsr uci_txn_bail            ; C=1, as every bail here returned
@@ -1013,6 +1033,7 @@ net_tcp_close:
         lda #NET_TCP_CLOSED
         sta net_tcp_state
         rts
+@cl_err_in: .byte 0
 
 ; =============================================================================
 ; net_dns_resolve — stage a hostname for the next net_tcp_connect.
