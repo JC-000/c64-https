@@ -17,9 +17,11 @@
 ; access fixed-cycle (upstream docs/CT_ANALYSIS.md).
 ;
 ; x25519_tables_init must run before the first x25519_scalarmult /
-; x25519_base. src/tls_ecdh.s calls it ahead of both scalar mults, so the
-; tables never depend on anything surviving from boot or from an earlier
-; handshake. It computes by running sums only (no multiply, no sqtab), so
+; x25519_base. src/tls_ecdh.s reaches both scalar mults only through the
+; x25519_base_fresh / x25519_scalarmult_fresh entries below, which build
+; the tables first, so they never depend on anything surviving from boot
+; or from an earlier handshake. (Wrappers here rather than two extra jsr
+; in tls_ecdh.s, which sits in LOADER — ip65's tightest region.) It computes by running sums only (no multiply, no sqtab), so
 ; it has no ordering dependency on sqtab_init either. Public data only:
 ; nothing here is secret-dependent.
 ;
@@ -29,6 +31,8 @@
 .setcpu "6502"
 
 .export x25519_tables_init
+.export x25519_base_fresh, x25519_scalarmult_fresh
+.import x25519_base, x25519_scalarmult
 .export mul38_lo_tab, mul38_hi_tab
 .export sqr_lo, sqr_hi
 .export a24_b0, a24_b1, a24_b2, a24_b3
@@ -51,7 +55,19 @@ a24_b3:         .res 256
 .assert (sqr_lo & $FF) = 0, lderror, "sqr_lo must be page-aligned"
 .assert (a24_b0 & $FF) = 0, lderror, "a24_b0 must be page-aligned"
 
-.segment "CRYPTO_CODE"
+; Placed with the sibling's ladder (each cfg routes X25519_GLUE_CODE next
+; to LIB_X25519_CODE: CRYPTO_OVERLAY on comb, resident code elsewhere).
+.segment "X25519_GLUE_CODE"
+
+; x25519_base / x25519_scalarmult with the tables rebuilt first. Same
+; inputs, outputs and clobbers as the sibling entries (x25519_tables_init
+; clobbers only A and X, which both entries clobber anyway).
+x25519_base_fresh:
+        jsr x25519_tables_init
+        jmp x25519_base
+x25519_scalarmult_fresh:
+        jsr x25519_tables_init
+        jmp x25519_scalarmult
 
 ; -----------------------------------------------------------------------------
 ; x25519_tables_init — fill all eight tables for i = 0..255.

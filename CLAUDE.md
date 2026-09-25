@@ -188,9 +188,10 @@ fixed buffers in crypto BSS.
                         (no REU surface) by
                         `tools/integration/build_x25519.sh`. Its lookup
                         tables are runtime-generated BSS
-                        (`src/crypto/x25519_tables.s`); `tls_ecdh.s` calls
-                        `x25519_tables_init` before every scalar mult, and
-                        so must any harness calling fe25519 directly.
+                        (`src/crypto/x25519_tables.s`); `tls_ecdh.s` only
+                        calls the `x25519_*_fresh` entries, which run
+                        `x25519_tables_init` first. A harness calling the
+                        sibling directly must call it too.
   ChaCha20-Poly1305     in-tree, permanent: `chacha20_encrypt`,
                         `poly1305_init/update/final`, `aead_encrypt/decrypt`
   SHA-256               in-tree: `sha256_init/update/final`

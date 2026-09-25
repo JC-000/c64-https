@@ -19,17 +19,17 @@
 ;   x25_result (32 bytes) = output
 ;   x25519_base           = scalar * basepoint(9) (clamps + scalarmult)
 ;   x25519_scalarmult     = scalar * u (raw, caller must clamp)
-;   x25519_tables_init    = fill the sibling's lookup tables; called ahead
-;                           of every scalar mult (src/crypto/x25519_tables.s)
+;   *_fresh               = the two above with the sibling's lookup tables
+;                           rebuilt first (src/crypto/x25519_tables.s); the
+;                           only entries used here
 
 .include "constants.inc"
 
 .export tls_ecdh_generate_keypair
 .export tls_ecdh_compute_shared
 
-.import x25519_base
-.import x25519_scalarmult
-.import x25519_tables_init
+.import x25519_base_fresh
+.import x25519_scalarmult_fresh
 .import vic_blank
 .import vic_unblank
 .import x25519_clamp
@@ -60,14 +60,12 @@ tls_ecdh_generate_keypair:
         dex
         bpl @copy_priv
 
-        jsr x25519_tables_init
-
         ; Compute public key = scalar * basepoint(9)
         ; x25519_base handles clamping and copies basepoint to x25_u.
         ; Blanked: no screen output happens inside, and badline DMA costs
         ; ~6.3% of the 6510 (measured, see src/vic.s).
         jsr vic_blank
-        jsr x25519_base
+        jsr x25519_base_fresh
         jsr vic_unblank
 
         ; Copy x25_result -> tls_ecdhe_pubkey
@@ -109,9 +107,8 @@ tls_ecdh_compute_shared:
         bpl @copy_srv
 
         ; Compute shared secret = scalar * server_pubkey
-        jsr x25519_tables_init
         jsr vic_blank
-        jsr x25519_scalarmult
+        jsr x25519_scalarmult_fresh
         jsr vic_unblank
 
         ; Copy x25_result -> tls_shared_secret
