@@ -11,12 +11,17 @@ reu_command, and this suite holds that in place.
 
 What it checks
 --------------
-  static    no `sta reu_command` anywhere in src/ outside src/reu_exec.s,
-            and reu_exec.s still reads reu_status and branches on bit 6.
-            (A text guard: it is what fails on a new bare execute site.)
+  static    no `sta reu_command` anywhere in src/ outside src/reu_exec.s;
+            reu_exec.s still reads reu_status and branches on bit 6; the
+            settle loop is present and REU_SETTLE_ITER keeps it at or above
+            nistcurves' 106-cycle floor (24 + 9*ITER); and the long confirm
+            bound is selected for exactly the REU-requiring profiles.
+            (Text guards: the settle has no behavioural oracle in VICE --
+            deleting it changes no value this suite can read.)
 
-  VICE, REU attached (the default build: REU row-fetch profile, so
-  reu_mul_init's 512 boot stashes and reu_fetch_mul_row are all live):
+  VICE, REU attached, on BOTH bounds -- the default build (REU row-fetch
+  profile: long bound, reu_mul_init's 512 boot stashes and
+  reu_fetch_mul_row all live) and USE_NISTCURVES_ONCHIP=1 (short bound):
     boot    reu_dma_timeout == 0: every boot stash saw bit 6 inside the
             bound. $DF00 bit 6 reads CLEAR after boot -- the last boot
             stash's END OF BLOCK was consumed by a status read. On a tree
@@ -28,19 +33,20 @@ What it checks
             still 0, and X, Y and C come back as they went in (the helper
             replaced bare stores whose callers did not expect X/Y/C to move).
 
-  VICE, NO REU ($DF00 is open bus):
-    boot    the menu still appears (the bounded spin cannot hang a stock
-            C64's boot -- ip65-onchip ships there and still runs
-            reu_mul_init), and reu_dma_timeout reads 1: the bound, not
-            bit 6, ended at least one spin.
+  VICE, NO REU, onchip build only (the no-REU product; a REU-profile build
+  with no REU spins the long bound on every one of 512 boot stashes):
+    boot    the menu still appears (the short bound cannot hang a
+            REU-less boot -- ip65-onchip ships there and still runs
+            reu_mul_init), and reu_dma_timeout reads 1: in VICE the open
+            bus never shows bit 6, so the bound ended the spins.
     call    reu_execute returns, with X, Y and C preserved.
 
 Usage:
     python3 tools/test_reu_execute.py [--verbose]
 
 Env:
-    C64_SKIP_BUILD=1   reuse the already-built PRG (must be the default
-                       REU-profile build, or the boot checks prove less)
+    C64_SKIP_BUILD=1   test only the PRG already in build/ (whichever
+                       profile it is), instead of building both
 
 Requires: Python 3.10+, c64_test_harness, VICE x64sc
 """
@@ -86,6 +92,8 @@ CMD_STASH = 0x90               # execute, no autoload, C64 -> REU
 CMD_FETCH = 0x91               # execute, no autoload, REU -> C64
 FLAG_C = 0x01
 
+SETTLE_FLOOR_CY = 106          # libs/nistcurves nistcurves_reu_dma_wait
+
 BARE_STORE = re.compile(r"^\s*sta\s+reu_command\b", re.I | re.M)
 
 
@@ -118,6 +126,21 @@ def static_checks() -> list[tuple[str, bool, str]]:
     out.append(("src/reu_exec.s executes once, then reads reu_status and "
                 "branches on bit 6", bool(shape),
                 "present" if helper else "src/reu_exec.s missing"))
+    settle = re.search(r"@settle:\s*lda\s+#REU_SETTLE_ITER\s+sta\s+reu_wait_cnt\s+"
+                       r"@settle_loop:\s*dec\s+reu_wait_cnt\s+bne\s+@settle_loop\s+"
+                       r"rts\b", helper, re.I)
+    m = re.search(r"^\s*REU_SETTLE_ITER\s*=\s*(\d+)", helper, re.M)
+    it = int(m.group(1)) if m else 0
+    out.append(("the settle loop is intact and 24 + 9*REU_SETTLE_ITER >= 106 "
+                "cycles", bool(settle) and 24 + 9 * it >= SETTLE_FLOOR_CY,
+                f"loop {'present' if settle else 'MISSING'}, ITER={it} -> "
+                f"{24 + 9 * it} cy"))
+    cond = re.search(r"^\.if\s+\.defined\(USE_NISTCURVES_COMB\)\s+\.or\s+"
+                     r"\(\.not\s+\.defined\(USE_NISTCURVES_ONCHIP\)\)\s*\n"
+                     r"\s*REU_CONFIRM_LONG\s*=\s*1", helper, re.M)
+    out.append(("the long confirm bound is selected for comb and the REU "
+                "default, not for the onchip products", bool(cond),
+                "present" if cond else "condition changed or missing"))
     return out
 
 
@@ -193,88 +216,109 @@ def main() -> int:
     for label, ok, detail in static_checks():
         report(label, ok, detail)
 
-    if os.environ.get("C64_SKIP_BUILD"):
-        print("\n=== Building (skipped: C64_SKIP_BUILD set) ===")
-    else:
-        print("\n=== Building (default: REU row-fetch profile) ===")
-        subprocess.run(["make", "clean"], capture_output=True)
-        result = subprocess.run(["make"], capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"Build failed:\n{result.stderr}")
-            return 1
-        print("  Build OK")
-
-    if not os.path.exists(PRG_PATH):
-        print(f"FATAL: {PRG_PATH} not found")
-        return 1
-    labels = Labels.from_file(LABELS_PATH)
-    missing = [n for n in REQUIRED_LABELS if labels.address(n) is None]
-    if missing:
-        print(f"FATAL: required label(s) not found: {', '.join(missing)}")
-        return 1
-
     pattern = bytes((i * 37 + 11) & 0xFF for i in range(256))
 
-    print("\n=== VICE with REU ===")
-    config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True,
-                                 sound=False)
-    with ViceInstanceManager(config=config) as mgr:
-        inst = boot(mgr)
-        if inst is None:
-            print("FATAL: main menu did not appear (REU attached)")
-            return 1
-        t = inst.transport
-        try:
-            timeout = read_bytes(t, labels["reu_dma_timeout"], 1)[0]
-            status = read_bytes(t, REU_STATUS, 1)[0]
-            report("boot: reu_dma_timeout == 0 (all 512 stashes confirmed "
-                   "inside the bound)", timeout == 0, f"${timeout:02X}")
-            report("boot: $DF00 END OF BLOCK consumed after the last boot "
-                   "stash", not status & EOB, f"$DF00=${status:02X}")
-
-            write_bytes(t, SRC_BUF, pattern)
-            write_bytes(t, DST_BUF, bytes(256))
-            regs = call_execute(t, labels, SRC_BUF, CMD_STASH)
-            status = read_bytes(t, REU_STATUS, 1)[0]
-            for label, ok in regs_preserved(regs):
-                report(f"call STASH: {label}", ok, str(regs))
-            report("call STASH: $DF00 END OF BLOCK consumed", not status & EOB,
-                   f"$DF00=${status:02X}")
-            regs = call_execute(t, labels, DST_BUF, CMD_FETCH)
-            got = read_bytes(t, DST_BUF, 256)
-            report("call FETCH: 256 B pattern round-trips through REU bank 7",
-                   got == pattern,
-                   f"{sum(a == b for a, b in zip(got, pattern))}/256 match")
-            for label, ok in regs_preserved(regs):
-                report(f"call FETCH: {label}", ok, str(regs))
-            timeout = read_bytes(t, labels["reu_dma_timeout"], 1)[0]
-            report("call: reu_dma_timeout still 0", timeout == 0,
-                   f"${timeout:02X}")
-        finally:
-            mgr.release(inst)
-
-    print("\n=== VICE without REU ($DF00 open bus) ===")
-    # Deliberately NOT default_vice_config(): this instance must have no
-    # REU. Only boot and the helper run here -- no crypto, so the
-    # REU-profile build's wrong-answers-without-REU trap is not reached.
-    config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
-    with ViceInstanceManager(config=config) as mgr:
-        inst = boot(mgr)
-        report("boot without REU reaches the menu (bounded spin, no hang)",
-               inst is not None)
-        if inst is not None:
+    def reu_phase(label):
+        labels = Labels.from_file(LABELS_PATH)
+        missing = [n for n in REQUIRED_LABELS if labels.address(n) is None]
+        if missing:
+            report(f"[{label}] required labels present", False,
+                   ", ".join(missing))
+            return None
+        print(f"\n=== VICE with REU [{label}] ===")
+        config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True,
+                                     sound=False)
+        with ViceInstanceManager(config=config) as mgr:
+            inst = boot(mgr)
+            if inst is None:
+                report(f"[{label}] main menu appeared (REU attached)", False)
+                return labels
             t = inst.transport
             try:
                 timeout = read_bytes(t, labels["reu_dma_timeout"], 1)[0]
-                report("boot without REU: reu_dma_timeout == 1 (the bound "
-                       "ended a spin)", timeout == 1, f"${timeout:02X}")
+                status = read_bytes(t, REU_STATUS, 1)[0]
+                report(f"[{label}] boot: reu_dma_timeout == 0 (all 512 stashes "
+                       "confirmed inside the bound)", timeout == 0,
+                       f"${timeout:02X}")
+                report(f"[{label}] boot: $DF00 END OF BLOCK consumed after the "
+                       "last boot stash", not status & EOB,
+                       f"$DF00=${status:02X}")
+                write_bytes(t, SRC_BUF, pattern)
+                write_bytes(t, DST_BUF, bytes(256))
                 regs = call_execute(t, labels, SRC_BUF, CMD_STASH)
-                report("call without REU returns", True,
-                       f"{regs['_seconds']:.2f}s")
-                for label, ok in regs_preserved(regs):
-                    report(f"call without REU: {label}", ok, str(regs))
+                status = read_bytes(t, REU_STATUS, 1)[0]
+                for lab, ok in regs_preserved(regs):
+                    report(f"[{label}] call STASH: {lab}", ok, str(regs))
+                report(f"[{label}] call STASH: $DF00 END OF BLOCK consumed",
+                       not status & EOB, f"$DF00=${status:02X}")
+                regs = call_execute(t, labels, DST_BUF, CMD_FETCH)
+                got = read_bytes(t, DST_BUF, 256)
+                report(f"[{label}] call FETCH: 256 B pattern round-trips "
+                       "through REU bank 7", got == pattern,
+                       f"{sum(a == b for a, b in zip(got, pattern))}/256 match")
+                for lab, ok in regs_preserved(regs):
+                    report(f"[{label}] call FETCH: {lab}", ok, str(regs))
+                timeout = read_bytes(t, labels["reu_dma_timeout"], 1)[0]
+                report(f"[{label}] call: reu_dma_timeout still 0", timeout == 0,
+                       f"${timeout:02X}")
             finally:
                 mgr.release(inst)
+        return labels
+
+    def no_reu_phase(labels):
+        print("\n=== VICE without REU [onchip] ===")
+        # Deliberately NOT default_vice_config(): this instance must have no
+        # REU. Only boot and the helper run here -- no crypto.
+        config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True,
+                            sound=False)
+        with ViceInstanceManager(config=config) as mgr:
+            inst = boot(mgr)
+            report("[onchip] boot without REU reaches the menu (short bound, "
+                   "no hang)", inst is not None)
+            if inst is None:
+                return
+            t = inst.transport
+            try:
+                timeout = read_bytes(t, labels["reu_dma_timeout"], 1)[0]
+                report("[onchip] boot without REU: reu_dma_timeout == 1 (the "
+                       "bound ended a spin)", timeout == 1, f"${timeout:02X}")
+                regs = call_execute(t, labels, SRC_BUF, CMD_STASH)
+                report("[onchip] call without REU returns", True,
+                       f"{regs['_seconds']:.2f}s")
+                for lab, ok in regs_preserved(regs):
+                    report(f"[onchip] call without REU: {lab}", ok, str(regs))
+            finally:
+                mgr.release(inst)
+
+    def build(flags):
+        subprocess.run(["make", "clean"], capture_output=True)
+        r = subprocess.run(["make", *flags], capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(PRG_PATH):
+            print(f"Build failed ({' '.join(flags) or 'default'}):\n{r.stderr}")
+            return False
+        return True
+
+    if os.environ.get("C64_SKIP_BUILD"):
+        print("\n=== Building (skipped: C64_SKIP_BUILD set) ===")
+        if not os.path.exists(PRG_PATH):
+            print(f"FATAL: {PRG_PATH} not found")
+            return 1
+        with open(os.path.join(PROJECT_ROOT, "build", "flags.stamp")) as f:
+            onchip = ("USE_NISTCURVES_ONCHIP" in f.read())
+        labels = reu_phase("onchip" if onchip else "REU default")
+        if onchip and labels is not None:
+            no_reu_phase(labels)
+    else:
+        print("\n=== Building default (REU row-fetch profile, long bound) ===")
+        if not build([]):
+            return 1
+        reu_phase("REU default")
+        print("\n=== Building USE_NISTCURVES_ONCHIP=1 (short bound) ===")
+        if not build(["USE_NISTCURVES_ONCHIP=1"]):
+            return 1
+        labels = reu_phase("onchip")
+        if labels is not None:
+            no_reu_phase(labels)
 
     total = passed + failed
     print("\n" + "=" * 60)
