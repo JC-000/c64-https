@@ -68,6 +68,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _device_lock_helper import (  # noqa: E402
     LockTimeoutConfigError, acquire_device_lock,
 )
+from _prg_load import PrgLoadError, load_verified_and_run  # noqa: E402
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
 from boot_check import decode_screen, screen_text  # noqa: E402
@@ -262,7 +263,11 @@ def main() -> int:
 
         client.reset()
         time.sleep(2.5)
-        client.run_prg(prg)
+        try:
+            load_verified_and_run(client, prg)   # #199
+        except PrgLoadError as exc:
+            print(f"[fatal] {exc}", file=sys.stderr)
+            return 4
 
         print(f"Waiting up to {INIT_WAIT:.0f}s for the menu (comb boot precompute)...")
         ok, lines = wait_for(client, "Q=QUIT", INIT_WAIT + 30, "boot")

@@ -46,6 +46,7 @@ from c64_test_harness.keyboard import send_text
 from _device_lock_helper import (
     LockTimeoutConfigError, acquire_device_lock,
 )
+from _prg_load import PrgLoadError, load_verified_and_run
 
 from _memory_policy import build_policy_and_arbiter
 
@@ -417,8 +418,12 @@ def main() -> int:
         client.reset()
         time.sleep(2.5)
 
-        print("run_prg(PRG)...")
-        client.run_prg(prg)
+        print("load_prg(PRG), verify, SYS (#199)...")
+        try:
+            load_verified_and_run(client, prg)
+        except PrgLoadError as exc:
+            print(f"[fatal] {exc}", file=sys.stderr)
+            return 4
         # Let the PRG complete its auto-init: entropy, REU stash, DHCP.
         # Empirically this has been ~18-22 s on the U64E.
         time.sleep(22.0)
