@@ -140,7 +140,8 @@ endif
 # build/https_host.inc, so re-pinning after a key rotation needs no
 # `make clean`. P-256 leaves only (the only ones this client can verify).
 # Both backends; on ip65 it is the only certificate authentication there is
-# (no name check), and it costs 14 B of the tight LOADER.
+# (no name check). It adds no LOADER bytes: the interlock replaces existing
+# jsr targets in tls13.s/boot.s.
 HTTPS_PIN_SPKI_SHA256 ?=
 HTTPS_PIN_WARN ?=
 HTTPS_PIN_BYTES :=
