@@ -45,6 +45,9 @@
         .export reu_fetch_mul_row
         .endif
 
+        ; Every REU execute goes through src/reu_exec.s (#191, SPEC §8.2).
+        .import reu_execute
+
         ; ---- exports: Phase 3 P-384 overlay REU stash ----
         .export reu_p384_overlay_init
 
@@ -865,7 +868,7 @@ reu_mul_init:
         lda #0
         sta reu_addr_ctrl      ; both addresses increment
         lda #%10110000         ; execute + autoload + STASH (C64->REU)
-        sta reu_command
+        jsr reu_execute
 
         ; Stash hi table (256 bytes) to REU at offset a*512+256
         lda #<mul_dma_hi
@@ -890,7 +893,7 @@ reu_mul_init:
         lda #0
         sta reu_addr_ctrl
         lda #%10110000         ; execute + autoload + STASH
-        sta reu_command
+        jsr reu_execute
 
         inc reu_init_a
         beq @init_done         ; if wrapped to 0, done
@@ -914,7 +917,7 @@ reu_mul_init:
 ;
 ; Input: mul_cached_a = multiplier value (0-255)
 ; Fetches 512 bytes: 256 lo bytes to mul_dma_lo, 256 hi bytes to mul_dma_hi
-; Clobbers: A
+; Clobbers: A, N/V/Z (X, Y, C preserved -- see src/reu_exec.s)
 ; =============================================================================
 reu_fetch_mul_row:
         lda mul_cached_a
@@ -924,8 +927,7 @@ reu_fetch_mul_row:
         adc #0                 ; bank = carry from shift
         sta reu_reu_bank
         lda #%10110001         ; execute + autoload + FETCH (REU->C64)
-        sta reu_command
-        rts
+        jmp reu_execute         ; tail call: A clobbered, as documented
 
 
 ; =============================================================================
@@ -980,7 +982,7 @@ reu_p384_overlay_init:
         lda #0
         sta reu_addr_ctrl       ; both addresses autoincrement
         lda #$90                ; execute + STASH (C64->REU)
-        sta reu_command
+        jsr reu_execute
         plp
 
         ; --- Intermediate: copy CURVE blob from $E000 -> CRYPTO_OVERLAY ---
@@ -1047,7 +1049,7 @@ reu_p384_overlay_init:
         lda #0
         sta reu_addr_ctrl
         lda #$90
-        sta reu_command
+        jsr reu_execute
         plp
 .endif ; .ifdef USE_OVERLAY_P384_EMBED
 
@@ -1083,7 +1085,7 @@ reu_p384_overlay_init:
         lda #0
         sta reu_addr_ctrl
         lda #$90                ; execute + STASH (C64->REU)
-        sta reu_command
+        jsr reu_execute
         plp
 .endif ; .ifdef USE_OVERLAY_P256_EMBED
 

@@ -272,6 +272,12 @@ $A000-$BFFF); big BSS in `CRYPTO_COLD_SHADOW`; segments named per contract
 §4 (`LIB_NISTCURVES_P256_CODE` etc.). REU Profile B baseline; comb claims
 bank 2; banks 6-7 reserved for the P-384 overlay experiment.
 
+Our own REU executes: never `sta reu_command` — `jsr reu_execute`
+(`src/reu_exec.s`, SPEC §8.2 bit-6 confirm + settle; X/Y/C preserved;
+confirm bound 8 reads on the no-REU onchip products, 65,536 on comb and
+the REU default; `reu_dma_timeout` is its sticky expiry flag).
+`tools/test_reu_execute.py` fails on a bare store.
+
 ## Networking backend ABI
 
 Switching backend = a different cfg + different `src/net/<backend>/*.o`.

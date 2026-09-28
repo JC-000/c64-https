@@ -142,6 +142,8 @@
 
         ; Live overlay slot start address (from the cfg's MEMORY{} define).
         .import __CRYPTO_OVERLAY_START__
+        ; Every REU execute goes through src/reu_exec.s (#191, SPEC §8.2).
+        .import reu_execute
 
 ; -----------------------------------------------------------------------------
 ; Overlay IDs -- canonical values live in `overlay_ids.inc` (W3).  This
@@ -411,7 +413,7 @@ do_swap:
 
         ; Issue REU -> C64 DMA (command $91: bit7=start, 01=REU->C64).
         lda #REU_CMD_REU_TO_C64
-        sta reu_command
+        jsr reu_execute
 
         ; Restore original I flag.
         plp
