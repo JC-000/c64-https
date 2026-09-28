@@ -381,6 +381,34 @@ def test_tcp_recv_callback(transport, labels):
         print(f"  FAIL: second batch mismatch")
         failed += 1
 
+    # Test 3: ip65's FIN/RST signal. tcp.s calls the callback with
+    # tcp_inbound_data_length = $FFFF and a stale data pointer when the peer
+    # closes or resets. It is not data: nothing may enter the ring, the
+    # overflow flag must stay clear, and the adapter must stop reporting
+    # CONNECTED.
+    overflow = labels.address("tcp_recv_overflow")
+    tcp_state = labels.address("net_tcp_state")
+    if None in (overflow, tcp_state):
+        print("  FAIL: tcp_recv_overflow / net_tcp_state labels not found")
+        return passed, failed + 1
+    write_bytes(transport, overflow, [0])
+    write_bytes(transport, tcp_state, [0x01])       # NET_TCP_CONNECTED
+    write_bytes(transport, 0xC102, [0xFF, 0xFF])    # len = $FFFF
+    jsr(transport, recv_cb, timeout=30.0)
+    tail_lo, tail_hi = read_bytes(transport, recv_tail, 2)
+    ovf = read_bytes(transport, overflow, 1)[0]
+    state = read_bytes(transport, tcp_state, 1)[0]
+    for ok, what in (
+            (tail_lo | (tail_hi << 8) == 24,
+             f"FIN/RST ($FFFF) copies nothing (recv_tail = "
+             f"{tail_lo | (tail_hi << 8)}, expected 24)"),
+            (ovf == 0, f"FIN/RST leaves tcp_recv_overflow clear (= {ovf})"),
+            (state == 0x00, f"FIN/RST marks net_tcp_state CLOSED "
+                            f"(= ${state:02X}, expected $00)")):
+        print(f"  {'PASS' if ok else 'FAIL'}: {what}")
+        passed += ok
+        failed += not ok
+
     return passed, failed
 
 

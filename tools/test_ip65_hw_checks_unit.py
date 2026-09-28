@@ -97,6 +97,7 @@ RED_CASES = {
     "check_tls_connected": "test_tls_connected_red_green",
     "check_http_response": "test_http_response_red_green",
     "check_net_last_error": "test_net_last_error_red_green",
+    "check_net_counters": "test_net_counters_red_green",
     "check_image_readback": "test_image_readback_red_green",
     "check_ip65_config_written": "test_ip65_config_written_red_green",
 }
@@ -873,19 +874,51 @@ def test_shadow_ram_red_green() -> None:
 
 
 def test_tls_connected_red_green() -> None:
-    """FINISHED is not CONNECTED, and an unread state is not a pass.
+    """The latch decides; the sample corroborates (#204).
 
-    State 6 is the interesting red case: the server's Finished verified but
-    the client never reached CONNECTED. The server would report a completed
-    handshake in exactly that situation.
+    NAIVE ARM: "the highest tls_state SAMPLED is CONNECTED". That is what
+    the check used to be, and at 48 MHz it is red on a run that connected:
+    the first turbo run sampled CERT_VERIFY (5) while the latch -- had it
+    existed -- would have read CONNECTED. The real checker passes that run
+    on the latch.
     """
-    assert not hw.check_tls_connected(None).ok
-    v = hw.check_tls_connected(hw.TLS_STATE_FINISHED)
-    assert not v.ok and v.evidence["state_name"] == "FINISHED"
-    assert not hw.check_tls_connected(hw.TLS_STATE_IDLE).ok
-    assert not hw.check_tls_connected(hw.TLS_STATE_ERROR,
-                                      hw.TLS_STATE_FINISHED).ok
-    assert hw.check_tls_connected(hw.TLS_STATE_CONNECTED).ok
+    C = hw.TLS_STATE_CONNECTED
+
+    def naive_ok(sampled) -> bool:
+        return sampled == C
+
+    turbo_sample = 5                                        # CERT_VERIFY
+    assert not naive_ok(turbo_sample), "naive arm no longer fires"
+    v = hw.check_tls_connected(turbo_sample, 0, C)
+    assert v.ok and v.evidence["tls_reached_connected"] == C
+
+    # Unread latch: a failure, even with a CONNECTED sample beside it.
+    assert hw.check_tls_connected(C, 0, None).status == "fail"
+    assert hw.check_tls_connected(None).status == "fail"     # old call shape
+    # The latch holds only 0 or 7; anything else is the wrong address. The
+    # sample beside it is a non-CONNECTED one, so the contradiction branch
+    # cannot supply the same status on this branch's behalf.
+    assert hw.check_tls_connected(turbo_sample, 0, 0xA5).status == \
+        "inconclusive"
+    assert hw.check_tls_connected(turbo_sample, 0,
+                                  hw.TLS_STATE_ERROR).status == "inconclusive"
+    assert hw.check_tls_connected(turbo_sample, 0,
+                                  hw.TLS_STATE_FINISHED).status == \
+        "inconclusive"
+    # Latch 0 but a CONNECTED sample in the same attempt: the instrument,
+    # not the client, is broken -- never a pass, never a plain fail.
+    assert hw.check_tls_connected(C, 0, 0).status == "inconclusive"
+    # FINISHED is not CONNECTED: the server's Finished verified, the client
+    # never got there. The server would report a completed handshake.
+    v = hw.check_tls_connected(hw.TLS_STATE_FINISHED, 0, 0)
+    assert v.status == "fail" and v.evidence["state_name"] == "FINISHED"
+    assert hw.check_tls_connected(hw.TLS_STATE_IDLE, 0, 0).status == "fail"
+    assert hw.check_tls_connected(hw.TLS_STATE_ERROR, hw.TLS_STATE_FINISHED,
+                                  0).status == "fail"
+    assert hw.check_tls_connected(None, 0, 0).status == "fail"
+    # Green: the latch set, with or without a CONNECTED sample.
+    assert hw.check_tls_connected(C, 0, C).ok
+    assert hw.check_tls_connected(None, 0, C).ok
 
 
 def test_http_response_red_green() -> None:
@@ -934,6 +967,40 @@ def test_net_last_error_red_green() -> None:
     assert not hw.check_net_last_error(None, table).ok
     assert hw.check_net_last_error(0x00, table).ok
     assert hw.net_error_table(None) == {}
+
+
+def test_net_counters_red_green() -> None:
+    """"Never tried" and "tried, ring overflowed" both fail (#235).
+
+    NAIVE ARM: "the overflow flag is not set" -- which reads an unread
+    counter (None) as clean and says nothing about whether anything was
+    sent. A send count judged only as "> 0" would still pass a fetch that
+    sent one record and stopped; the exact compare is what catches that.
+    """
+    N = hw.HTTPS_FETCH_SEND_CALLS
+    assert N == 6
+
+    def naive_ok(send_calls, overflow) -> bool:
+        return not overflow
+
+    assert naive_ok(None, None), "naive arm no longer fires"
+    assert hw.check_net_counters(None, None).status == "fail"
+    assert hw.check_net_counters(N, None).status == "fail"
+    assert hw.check_net_counters(None, 0).status == "fail"
+    # Never tried: fails with or without an expectation.
+    assert not hw.check_net_counters(0, 0).ok
+    assert not hw.check_net_counters(0, 0, expect_sends=N).ok
+    # Tried, but not the whole fetch -- and not MORE than the whole fetch.
+    assert not hw.check_net_counters(2, 0, expect_sends=N).ok
+    assert not hw.check_net_counters(N + 1, 0, expect_sends=N).ok
+    # The ring overflowed: ACKed bytes lost, even with the exact send count
+    # -- and even on a run whose body came out right.
+    v = hw.check_net_counters(N, 1, expect_sends=N)
+    assert not v.ok and v.evidence["tcp_recv_overflow"] == 1
+    assert not hw.check_net_counters(2, 1).ok
+    # Green.
+    assert hw.check_net_counters(N, 0, expect_sends=N).ok
+    assert hw.check_net_counters(2, 0).ok          # incomplete run: "it tried"
 
 
 def test_image_readback_red_green() -> None:

@@ -113,9 +113,10 @@ MUTANTS = [
     ("parse_pcap accepts a snaplen-clipped capture",
      "        if incl < orig and strict:",
      "        if False and incl < orig and strict:"),
-    ("check_tls_connected accepts FINISHED as CONNECTED",
-     "    if tls_state_max != TLS_STATE_CONNECTED:",
-     "    if tls_state_max not in (TLS_STATE_CONNECTED, TLS_STATE_FINISHED):"),
+    ("check_tls_connected accepts a latch value it cannot hold, as CONNECTED",
+     "    if reached_connected not in (0, TLS_STATE_CONNECTED):",
+     "    if reached_connected not in (0, TLS_STATE_CONNECTED, "
+     "TLS_STATE_FINISHED):\n        pass\n    elif False:"),
     ("tcp_streams fuses every connection into one sequence space",
      '        key = (bytes(f.ip_src or b""), f.sport, bytes(f.ip_dst or b""), f.dport)',
      '        key = "one-stream-for-everything"'),
@@ -303,10 +304,37 @@ MUTANTS = [
     ("check_shadow_ram_readable loses the CBMBASIC-signature arm",
      "            BASIC_ROM_SIGNATURE in bytes_at_a000[:16]:",
      "            False:"),
-    ("check_tls_connected skips the unread test (KNOWN EQUIVALENT)",
-     *_off("    if tls_state_max is None:")),
+    # #204: the latch is the authority, the sample corroboration
+    ("check_tls_connected accepts an unread latch",
+     *_off("    if reached_connected is None:")),
+    ("check_tls_connected accepts a latch value it cannot hold",
+     *_off("    if reached_connected not in (0, TLS_STATE_CONNECTED):")),
+    ("check_tls_connected judges on the sample again (the pre-#204 oracle)",
+     "    if reached_connected == TLS_STATE_CONNECTED:",
+     "    if reached_connected == TLS_STATE_CONNECTED and "
+     "tls_state_max == TLS_STATE_CONNECTED:"),
+    ("check_tls_connected lets a CONNECTED sample overrule a 0 latch",
+     'or its address is wrong", ev, status="inconclusive")',
+     'or its address is wrong", ev, status="pass") if False else '
+     'Verdict(True, "sampled CONNECTED", ev)'),
+    ("check_tls_connected skips the latch-vs-sample contradiction",
+     *_off("    if tls_state_max == TLS_STATE_CONNECTED:")),
     ("check_tls_connected skips the ERROR test (KNOWN EQUIVALENT)",
      *_off("    if tls_state_max == TLS_STATE_ERROR:")),
+    # #235: adapter counters
+    ("check_net_counters accepts unread counters",
+     *_off("    if send_calls is None or recv_overflow is None:")),
+    ("check_net_counters accepts a run that never sent",
+     *_off("    if send_calls == 0:")),
+    ("check_net_counters treats the expected count as a floor",
+     "    if expect_sends is not None and send_calls != expect_sends:",
+     "    if expect_sends is not None and send_calls < expect_sends:"),
+    ("check_net_counters ignores the expected count",
+     *_off("    if expect_sends is not None and send_calls != expect_sends:")),
+    ("check_net_counters ignores a receive-ring overflow",
+     *_off("    if recv_overflow:")),
+    ("HTTPS_FETCH_SEND_CALLS counts records, not calls",
+     "HTTPS_FETCH_SEND_CALLS = 6", "HTTPS_FETCH_SEND_CALLS = 3"),
     ("check_http_response accepts an empty expected body",
      *_off("    if not expected_body:")),
     ("check_http_response accepts an unread response",
@@ -408,12 +436,9 @@ KNOWN_EQUIVALENT = {
     "check_body_not_on_wire skips the empty-capture test (KNOWN EQUIVALENT)":
         "no frames means no corpora, so no control hit and no secret hit: "
         "the no-control branch returns the same INCONCLUSIVE",
-    "check_tls_connected skips the unread test (KNOWN EQUIVALENT)":
-        "None != TLS_STATE_CONNECTED, so the not-CONNECTED branch fails it "
-        "with the same status",
     "check_tls_connected skips the ERROR test (KNOWN EQUIVALENT)":
-        "$FF != TLS_STATE_CONNECTED, so the not-CONNECTED branch fails it "
-        "with the same status",
+        "with the latch at 0 a $FF sample falls through to the final "
+        "not-CONNECTED branch, which fails it with the same status",
 }
 
 
