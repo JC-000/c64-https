@@ -316,7 +316,7 @@ def _patch_rig(mod, *, events, mem, run_prg, send_text, tmp):
         "http_path_len", "http_port", "net_init", "net_initialized",
         "uci_socket_id", "tcp_recv_head", "tcp_recv_tail", "http_resp_buf",
         "http_resp_len", "http_status", "tls_state", "tls_last_state",
-        "net_last_error"])}
+        "tls_reached_connected", "net_last_error"])}
     labels["net_tcp_state"] = TCP
 
     prg = tmp / "c64-https.prg"
@@ -537,16 +537,16 @@ def test_bad_finished_reports_and_judges_the_carry() -> None:
               "finished_corrupted": True, "client_accepted_finished": False,
               "client_finished_valid": True, "response_sent": True,
               "request": b"GET / HTTP/1.1"}
-    bad = {"tls_state": 0xFF, "tls_last_state": 6, "http_status": 0,
-           "http_resp_buf": b"", "http_get_carry": 1}
+    bad = {"tls_state": 0xFF, "tls_last_state": 6, "tls_reached_connected": 0,
+           "http_status": 0, "http_resp_buf": b"", "http_get_carry": 1}
     ok, _ = bf._evaluate("bad", server, bad, "")
     assert ok
     ok, why = bf._evaluate("bad", server, dict(bad, http_get_carry=0), "")
     assert not ok and any("carry" in r and r.startswith("FAIL") for r in why)
     good_srv = dict(server, finished_corrupted=False,
                     client_accepted_finished=True)
-    good = {"tls_state": 0, "tls_last_state": 0, "http_status": 200,
-            "http_resp_buf": body, "http_get_carry": 0}
+    good = {"tls_state": 0, "tls_last_state": 0, "tls_reached_connected": 7,
+            "http_status": 200, "http_resp_buf": body, "http_get_carry": 0}
     ok, _ = bf._evaluate("good", good_srv, good, "")
     assert ok
     for c in (1, None):
@@ -591,7 +591,7 @@ def test_discovery_finds_the_known_fetch_rigs() -> None:
     expected = {"rig_https_local.py", "rig_https_live.py",
                 "rig_https_bad_finished.py", "rig_https_banner.py",
                 "rig_https_wiki.py", "rig_http_local.py", "rig_http_live.py",
-                "phase3_tcp_echo.py"}
+                "phase3_tcp_echo.py", "rig_close_retry.py"}
     missing = expected - found
     assert not missing, f"the fetch-rig rule no longer selects {missing}"
 
