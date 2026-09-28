@@ -239,6 +239,18 @@ def run_image(r: Run, warn: bool, A, B, name_check: bool):
     needle = f"PIN {word} EXP {h4(pin_a)} GOT {h4(pin_b)}"
     r.check(f"diagnostic '{needle}' on screen", needle in scr)
 
+    # Every hash above differs from pin A at byte 0, so a compare that stops
+    # early would pass them all. Flip one byte of the pin in RAM, at each end.
+    exp = r.L["cert_pin_expected"]
+    for i in (31, 0):
+        write_bytes(r.t, exp + i, bytes([pin_a[i] ^ 0x01]))
+        try:
+            c, st, _, _ = r.extract(good)
+        finally:
+            write_bytes(r.t, exp + i, pin_a[i:i + 1])
+        r.check(f"hash differs from the pin only in byte {i}: status $80",
+                c == want_c and st == ST_BAD, f"C={c} status=${st:02X}")
+
     # Displaced key, the attack: structural SPKI = A (pinned), planted SPKI = B
     # earlier in the TBS. The extractor copies B; the pin must see B.
     der = make_cert(spki(A), [HOST], planted=spki(B))
@@ -380,7 +392,7 @@ def main() -> int:
                 "cert_pin_hs_keys", "cert_pin_send_finished", "tls_send_finished",
                 "cert_pin_status", "cert_buf", "cert_data_ptr", "cert_data_len_lo",
                 "cert_data_len_hi", "tls_hostname", "tls_hostname_len",
-                "ecdsa_pubkey_x", "ecdsa_pubkey_y", "ecdsa_curve_id"]
+                "ecdsa_pubkey_x", "ecdsa_pubkey_y", "ecdsa_curve_id", "cert_pin_expected"]
         missing = [n for n in need if labels.address(n) is None]
         if missing:
             print(f"CANNOT RUN: labels missing from the {mode} image: {missing}", file=sys.stderr)
