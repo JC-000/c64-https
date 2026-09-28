@@ -95,10 +95,10 @@ Policy and tests: `tools/uci/_device_prep.py`, `tools/test_device_prep.py`
 
 `_rig_lifecycle.py`, pinned by `tools/test_rig_lifecycle.py` (no hardware):
 
-- A local-listener rig binds its port before the DeviceLock (a port problem
-  costs no device time) but starts the listener with `start_listener` only
-  once the lock is held, right before `run_prg`. `ACCEPT_TIMEOUT` therefore
-  measures the C64, not the queue.
+- A local-listener rig binds its port and starts the listener
+  (`start_listener`) only once the DeviceLock is held, right before
+  `run_prg`: `ACCEPT_TIMEOUT` measures the C64, not the queue, and a queued
+  rig holds no port another lane's rig needs.
 - A rig that triggers a fetch sets `fetch_in_flight` at the SYS / 'G' and
   clears it when the fetch has returned. If it is still set in `finally`,
   `guard_socket_teardown` runs **before** `disable_uci` and
