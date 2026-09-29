@@ -98,7 +98,6 @@ import json
 import os
 import socket
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -123,6 +122,9 @@ from _memory_policy import (  # noqa: E402
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
 from _sni_precondition import enforce_sni_precondition  # noqa: E402
+from _rig_lifecycle import (  # noqa: E402
+    guard_socket_teardown, start_listener, tls_evidence_addrs,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "https_e2e"))
@@ -404,6 +406,8 @@ def _evaluate(mode: str, server_result: dict, c64: dict,
         check(c64["tls_reached_connected"] == 0,
               "the handshake never completed (tls_reached_connected = "
               f"${c64['tls_reached_connected']:02X})")
+        check(c64.get("http_get_carry") == 1,
+              f"http_get returned C=1 (carry={c64.get('http_get_carry')!r})")
         check(c64["http_status"] != 200,
               f"no HTTP 200 was parsed (http_status={c64['http_status']})")
         check(DEFAULT_BODY not in body,
@@ -432,6 +436,8 @@ def _evaluate(mode: str, server_result: dict, c64: dict,
         check(c64["tls_reached_connected"] == TLS_STATE_CONNECTED,
               "the handshake completed (tls_reached_connected = "
               f"${c64['tls_reached_connected']:02X})")
+        check(c64.get("http_get_carry") == 0,
+              f"http_get returned C=0 (carry={c64.get('http_get_carry')!r})")
         check(c64["http_status"] == 200,
               f"http_status is 200 (got {c64['http_status']})")
         check(DEFAULT_BODY in body,
@@ -505,29 +511,12 @@ def main() -> int:
         print(f"ERROR: {sni_problem}", file=sys.stderr)
         return 2
 
-    srv = _try_bind(test_host_ip, HTTPS_PORT)
-    if srv is None:
-        print(f"ERROR: could not bind {test_host_ip}:{HTTPS_PORT}",
-              file=sys.stderr)
-        return 2
-    print(f"Listener     : {test_host_ip}:{HTTPS_PORT} (cert {cert_path})")
-
+    # The listener is bound AND started only once the DeviceLock is held
+    # (#246): its ACCEPT_TIMEOUT must not run while this rig queues, and a
+    # port held through a queue would refuse every other lane's local rig.
     server_result: dict = {}
-    server_thread = threading.Thread(
-        target=serve_one_connection,
-        args=(srv, cert_path, key_path),
-        kwargs=dict(mode=SERVER_MODE, body=DEFAULT_BODY,
-                    timeout=ACCEPT_TIMEOUT, result=server_result),
-        daemon=True,
-    )
-    server_thread.start()
-    for _ in range(100):
-        if server_result.get("listening"):
-            break
-        time.sleep(0.05)
-    else:
-        print("ERROR: listener failed to come up", file=sys.stderr)
-        return 2
+    server_thread = None
+    srv = None
 
     routine_raw, host_len_patch = _build_http_routine(labels, HTTPS_PORT)
     routine = bytearray(routine_raw)
@@ -553,6 +542,8 @@ def main() -> int:
 
     client: Ultimate64Client | None = None
     uci_enabled = False
+    fetch_in_flight = False
+    transport = None
     try:
         client = Ultimate64Client(host=HOST, timeout=15.0)
         transport = Ultimate64Transport(host=HOST, timeout=15.0, client=client)
@@ -596,6 +587,23 @@ def main() -> int:
         client.reset()
         time.sleep(2.5)
 
+        # #246: bind and start the listener here, with the C64, not before
+        # the DeviceLock queue.
+        srv = _try_bind(test_host_ip, HTTPS_PORT)
+        if srv is None:
+            print(f"ERROR: could not bind {test_host_ip}:{HTTPS_PORT}",
+                  file=sys.stderr)
+            return 2
+        print(f"Listener     : {test_host_ip}:{HTTPS_PORT} (cert {cert_path})")
+        server_thread = start_listener(
+            serve_one_connection, args=(srv, cert_path, key_path),
+            kwargs=dict(mode=SERVER_MODE, body=DEFAULT_BODY,
+                        timeout=ACCEPT_TIMEOUT, result=server_result),
+            result=server_result, wait_s=5.0)
+        if server_thread is None:
+            print("ERROR: listener failed to come up", file=sys.stderr)
+            return 2
+
         print("run_prg(PRG)...")
         client.run_prg(prg)
         time.sleep(float(os.environ.get("C64_INIT_WAIT", "22")) * _TIMEOUT_SCALE)
@@ -616,6 +624,7 @@ def main() -> int:
         transport.write_memory(SENTINEL_ADDR, bytes(16))
 
         print(f"Triggering: sys{ROUTINE_ADDR}")
+        fetch_in_flight = True      # #234: from here a socket may be live
         send_text(transport, f"sys{ROUTINE_ADDR}\r")
 
         deadline = time.time() + SENTINEL_POLL_TIMEOUT
@@ -630,12 +639,20 @@ def main() -> int:
                 last_progress = blob[1]
             if blob[0] == SENTINEL_VALUE:
                 completed = True
+                fetch_in_flight = False     # http_get has returned
                 print(f"  sentinel set after {time.time() - start:.1f}s")
                 break
 
-        server_thread.join(timeout=10.0)
+        if server_thread is not None:
+            server_thread.join(timeout=10.0)
 
         c64 = _read_c64_state(transport, labels)
+        # #247: the trampoline latches http_get's P register (PHP/PLA) into
+        # CARRY_FLAG_ADDR. Only meaningful once the sentinel says http_get
+        # returned — before that the byte is the trampoline's own zero.
+        p_reg = transport.read_memory(CARRY_FLAG_ADDR, 1)[0]
+        c64["http_get_p"] = p_reg if completed else None
+        c64["http_get_carry"] = (p_reg & 0x01) if completed else None
         screen_text = _decode_screen_ram(
             bytes(transport.read_memory(0x0400, 1000))
         )
@@ -645,6 +662,10 @@ def main() -> int:
         print(f"  tls_last_state  = {_state_name(c64['tls_last_state'])}")
         print(f"  tls_reached_connected = "
               f"{_state_name(c64['tls_reached_connected'])}")
+        print(f"  http_get carry  = "
+              + (f"{c64['http_get_carry']} (P=${c64['http_get_p']:02X}; "
+                 "0=success, 1=failure)" if completed else
+                 "not latched (the routine did not complete)"))
         print(f"  http_status     = {c64['http_status']}")
         print(f"  http_resp_len   = {c64['http_resp_len']}")
         print(f"  http_resp_buf   = "
@@ -683,6 +704,12 @@ def main() -> int:
         return 0 if passed else 1
 
     finally:
+        # #234: before disable_uci — the C64 needs the command interface
+        # to issue the SOCKET_CLOSE this waits for.
+        if fetch_in_flight and transport is not None:
+            guard_socket_teardown(transport.read_memory,
+                                  labels.get("net_tcp_state"),
+                                  tls_addrs=tls_evidence_addrs(labels))
         if uci_enabled and client is not None:
             try:
                 disable_uci(client)
@@ -693,7 +720,8 @@ def main() -> int:
         except Exception:
             pass
         try:
-            srv.close()
+            if srv is not None:
+                srv.close()
         except Exception:
             pass
 

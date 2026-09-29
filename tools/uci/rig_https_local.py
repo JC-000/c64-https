@@ -116,6 +116,9 @@ from _memory_policy import (
 )
 from _device_prep import DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
+from _rig_lifecycle import (
+    guard_socket_teardown, start_listener, tls_evidence_addrs,
+)
 from _sni_precondition import enforce_sni_precondition
 
 
@@ -308,6 +311,20 @@ def _try_bind(bind_ip: str, port: int) -> socket.socket | None:
         srv.close()
         return None
     return srv
+
+
+def _bind_https_listener(bind_ip: str):
+    """-> (socket, port): DEFAULT_HTTPS_PORT, else FALLBACK_HTTPS_PORT; or
+    (None, None). Called only with the DeviceLock held (#246)."""
+    srv = _try_bind(bind_ip, DEFAULT_HTTPS_PORT)
+    if srv is not None:
+        return srv, DEFAULT_HTTPS_PORT
+    if DEFAULT_HTTPS_PORT == FALLBACK_HTTPS_PORT:
+        return None, None
+    print(f"NOTE: bind {bind_ip}:{DEFAULT_HTTPS_PORT} failed"
+          f" (need root?), falling back to {FALLBACK_HTTPS_PORT}")
+    srv = _try_bind(bind_ip, FALLBACK_HTTPS_PORT)
+    return (srv, FALLBACK_HTTPS_PORT) if srv is not None else (None, None)
 
 
 def _run_https_server(srv: socket.socket, ctx: ssl.SSLContext,
@@ -1441,47 +1458,13 @@ def main() -> int:
         test_host_ip = _detect_local_ip(HOST)
         print(f"\nDev host LAN IP : {test_host_ip}")
         print(f"Cert / key      : {CERT_PATH} / {KEY_PATH}")
-
-        # --- Bind HTTPS listener (try default port, fall back to 4433) ---
-        ctx = _make_ssl_context()
-        srv = _try_bind(test_host_ip, DEFAULT_HTTPS_PORT)
-        chosen_port = DEFAULT_HTTPS_PORT
-        if srv is None:
-            if DEFAULT_HTTPS_PORT != FALLBACK_HTTPS_PORT:
-                print(f"NOTE: bind {test_host_ip}:{DEFAULT_HTTPS_PORT} failed"
-                      f" (need root?), falling back to {FALLBACK_HTTPS_PORT}")
-                srv = _try_bind(test_host_ip, FALLBACK_HTTPS_PORT)
-                chosen_port = FALLBACK_HTTPS_PORT
-            if srv is None:
-                print(f"ERROR: could not bind HTTPS listener", file=sys.stderr)
-                return 1
-        print(f"HTTPS port      : {chosen_port}")
         print(f"Expected body   : {EXPECTED_BODY!r}")
+        # The listener is bound AND started only once the DeviceLock is
+        # held (#246): its ACCEPT_TIMEOUT must not run while this rig
+        # queues, and a port held through a queue would also refuse every
+        # other lane's local rig on this host.
 
-        server_thread = threading.Thread(
-            target=_run_https_server,
-            args=(srv, ctx, server_result),
-            daemon=True,
-        )
-        server_thread.start()
-        for _ in range(60):
-            if server_result.get("listening"):
-                break
-            time.sleep(0.05)
-        else:
-            print("ERROR: HTTPS server failed to start", file=sys.stderr)
-            return 1
-        print(f"HTTPS server listening on {test_host_ip}:{chosen_port}")
-
-    # --- Build routine (port patched in at build time) ---
-    routine_bytes_raw, host_len_patch = _build_http_routine(labels, chosen_port)
-    routine_bytes = bytearray(routine_bytes_raw)
     host_ip_bytes = test_host_ip.encode("ascii")
-    routine_bytes[host_len_patch] = len(host_ip_bytes)
-    routine_bytes = bytes(routine_bytes)
-
-    print(f"Routine size    : {len(routine_bytes)} bytes @ ${ROUTINE_ADDR:04X}")
-
     host_str = host_ip_bytes + b"\x00"
     path_str = b"/\x00"
 
@@ -1530,6 +1513,8 @@ def main() -> int:
     debug_started_on_u64 = False
     outcome: str = "UNKNOWN"
     exit_code: int = 1
+    fetch_in_flight = False
+    transport = None
     run_start = time.time()
     try:
         client = Ultimate64Client(host=HOST, timeout=15.0)
@@ -1643,6 +1628,32 @@ def main() -> int:
         client.reset()
         time.sleep(2.5)
 
+        # #246: bind and start the listener here, with the C64, not before
+        # the DeviceLock queue.
+        if not EXTERNAL_LISTENER:
+            ctx = _make_ssl_context()
+            srv, chosen_port = _bind_https_listener(test_host_ip)
+            if srv is None:
+                print("ERROR: could not bind HTTPS listener", file=sys.stderr)
+                return 1
+            print(f"HTTPS port      : {chosen_port}")
+            server_thread = start_listener(
+                _run_https_server, args=(srv, ctx, server_result),
+                result=server_result, wait_s=3.0)
+            if server_thread is None:
+                print("ERROR: HTTPS server failed to start", file=sys.stderr)
+                return 1
+            print(f"HTTPS server listening on {test_host_ip}:{chosen_port}")
+
+        # --- Build routine (port patched in at build time) ---
+        routine_bytes_raw, host_len_patch = _build_http_routine(labels,
+                                                                chosen_port)
+        routine_bytes = bytearray(routine_bytes_raw)
+        routine_bytes[host_len_patch] = len(host_ip_bytes)
+        routine_bytes = bytes(routine_bytes)
+        print(f"Routine size    : {len(routine_bytes)} bytes @ "
+              f"${ROUTINE_ADDR:04X}")
+
         print("run_prg(PRG)...")
         client.run_prg(prg)
         # Wait for auto-init (entropy, REU stash, DHCP). Scales with TURBO_MHZ
@@ -1703,6 +1714,7 @@ def main() -> int:
         # Trigger via SYS
         sys_line = f"sys{ROUTINE_ADDR}\r"
         print(f"Triggering: {sys_line.strip()}")
+        fetch_in_flight = True      # #234: from here a socket may be live
         send_text(transport, sys_line)
 
         # Poll sentinel
@@ -1736,6 +1748,7 @@ def main() -> int:
             if sentinel == SENTINEL_VALUE:
                 print("  sentinel set — routine complete")
                 sentinel_seen = True
+                fetch_in_flight = False     # http_get has returned
                 break
         # NOTE: this used to be the `else:` of the while-loop (while/else —
         # runs only when the loop exhausts without break). The W0 phase-timing
@@ -1901,6 +1914,13 @@ def main() -> int:
                           f"retain)")
                 except Exception as exc:
                     print(f"WARNING: failed to remove PASS run dir: {exc}")
+
+        # #234: before disable_uci — the C64 needs the command interface
+        # to issue the SOCKET_CLOSE this waits for.
+        if fetch_in_flight and transport is not None:
+            guard_socket_teardown(transport.read_memory,
+                                  labels.get("net_tcp_state"),
+                                  tls_addrs=tls_evidence_addrs(labels))
 
         if uci_enabled and client is not None:
             print("\nDisabling UCI...")

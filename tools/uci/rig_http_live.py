@@ -31,6 +31,7 @@ from _device_lock_helper import (
 )
 
 from _memory_policy import build_policy_and_arbiter
+from _rig_lifecycle import guard_socket_teardown
 
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
@@ -273,6 +274,8 @@ def main() -> int:
 
     client: Ultimate64Client | None = None
     uci_enabled = False
+    fetch_in_flight = False
+    transport = None
     try:
         client = Ultimate64Client(host=HOST, timeout=15.0)
         transport = Ultimate64Transport(host=HOST, timeout=15.0, client=client)
@@ -312,6 +315,7 @@ def main() -> int:
         # Trigger
         sys_line = f"sys{ROUTINE_ADDR}\r"
         print(f"Triggering: {sys_line.strip()}")
+        fetch_in_flight = True      # #234: from here a socket may be live
         send_text(transport, sys_line)
 
         # Poll sentinel
@@ -327,6 +331,7 @@ def main() -> int:
                 last_progress = progress
             if sentinel == SENTINEL_VALUE:
                 print("  sentinel set — routine complete")
+                fetch_in_flight = False     # http_get has returned
                 break
         else:
             print(f"TIMEOUT: sentinel not set (progress=0x{last_progress:02X})",
@@ -388,6 +393,11 @@ def main() -> int:
         return 1
 
     finally:
+        # #234: before disable_uci — the C64 needs the command interface
+        # to issue the SOCKET_CLOSE this waits for.
+        if fetch_in_flight and transport is not None:
+            guard_socket_teardown(transport.read_memory,
+                                  labels.get("net_tcp_state"))
         if uci_enabled and client is not None:
             print("\nDisabling UCI...")
             try:

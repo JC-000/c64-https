@@ -359,6 +359,73 @@ def test_stall_tracker_and_early_stop_step() -> None:
         assert not stop, (sock, shadow_ok)
 
 
+def test_handshake_failed_red_green() -> None:
+    """#247: a stop only for tls_state=ERROR before the body, from RAM."""
+    pre = state(parse_state=1, status=0, cl_valid=0, content_length=0,
+                body_total=0)
+    # GREEN
+    assert hbc.handshake_failed(pre, hbc.TLS_STATE_ERROR, True)
+    assert hbc.handshake_failed(state(parse_state=0), hbc.TLS_STATE_ERROR,
+                                True)
+    # RED: not ERROR (mid-handshake states, IDLE, CONNECTED, unread)
+    for v in (0, 1, 4, 6, 7, None):
+        assert hbc.handshake_failed(pre, v, True) is None, v
+    # RED: $FF after the body began is not the handshake case
+    assert hbc.handshake_failed(state(parse_state=2), hbc.TLS_STATE_ERROR,
+                                True) is None
+    # RED: the read was ROM, not RAM
+    assert hbc.handshake_failed(pre, hbc.TLS_STATE_ERROR, False) is None
+
+
+def test_early_stop_step_handshake_red_green() -> None:
+    """#247 in the loop step: stops on a dead handshake only once the socket
+    reads CLOSED, never on a live one, and never after the body began."""
+    pre = state(parse_state=1, status=0, cl_valid=0, content_length=0,
+                body_total=0)
+    ab = hbc.STALL_ABORT
+    dead_tls = lambda: hbc.TLS_STATE_ERROR           # noqa: E731
+    # GREEN: ERROR + CLOSED, on the first poll — no freeze margin needed.
+    stop, why = hbc.early_stop_step(
+        hbc.StallTracker(0.0), pre, 0.0, lambda: hbc.NET_TCP_CLOSED,
+        stall_abort=ab, shadow_ok=True, read_tls_state=dead_tls)
+    assert stop and "CLOSED" in why, why
+    # RED: ERROR but net_tcp_close has not run yet -> keep polling.
+    for sock in (hbc.NET_TCP_CONNECTED, hbc.NET_TCP_ERROR, None):
+        stop, why = hbc.early_stop_step(
+            hbc.StallTracker(0.0), pre, 0.0, lambda: sock,
+            stall_abort=ab, shadow_ok=True, read_tls_state=dead_tls)
+        assert not stop, (sock, why)
+    # RED: a handshake still in progress.
+    stop, _ = hbc.early_stop_step(
+        hbc.StallTracker(0.0), pre, 0.0, lambda: hbc.NET_TCP_CLOSED,
+        stall_abort=ab, shadow_ok=True, read_tls_state=lambda: 5)
+    assert not stop
+    # RED: shadow not proven.
+    stop, _ = hbc.early_stop_step(
+        hbc.StallTracker(0.0), pre, 0.0, lambda: hbc.NET_TCP_CLOSED,
+        stall_abort=ab, shadow_ok=False, read_tls_state=dead_tls)
+    assert not stop
+    # RED: no reader given -> the pre-#247 behaviour.
+    stop, _ = hbc.early_stop_step(
+        hbc.StallTracker(0.0), pre, 0.0, lambda: hbc.NET_TCP_CLOSED,
+        stall_abort=ab, shadow_ok=True)
+    assert not stop
+    # Past the body the reader is not consulted at all.
+    reads = []
+    body = state(content_length=754_413, body_total=299_123)
+    hbc.early_stop_step(hbc.StallTracker(0.0), body, 0.0,
+                        lambda: hbc.NET_TCP_CLOSED, stall_abort=ab,
+                        shadow_ok=True,
+                        read_tls_state=lambda: reads.append(1) or 0xFF)
+    assert not reads
+    # And the verdict an early handshake stop leads to is FAIL, not 78.
+    code, _ = hbc.decide_exit(
+        banner_ok=True, shadow=hbc.Verdict(True, "ram", {}),
+        settled=hbc.check_fetch_settled(False, 10.0, 900.0),
+        status=hbc.check_http_status(pre), body=hbc.check_body_complete(pre))
+    assert code == hbc.EXIT_FAIL, code
+
+
 def test_close_confirmed_red_green() -> None:
     """The close wait ends early only on positive, RAM-proven evidence."""
     calls = []
@@ -386,6 +453,12 @@ def test_close_confirmed_red_green() -> None:
     assert hbc.close_confirmed(True, lambda: False,
                                sock(hbc.NET_TCP_CLOSED)) is None
     assert not calls, "the socket byte is read only once RAM is proven"
+    # #247: evidence read before the 'Q' counts — only as a non-empty string.
+    assert hbc.close_confirmed(False, lambda: False, sock(None),
+                               "net_tcp_state=CLOSED") == "net_tcp_state=CLOSED"
+    for junk in (None, "", True, 1):
+        assert hbc.close_confirmed(False, lambda: False, sock(None),
+                                   junk) is None, junk
 
 
 def test_stall_config_error_red_green() -> None:
@@ -499,7 +572,8 @@ def test_the_banner_rig_uses_the_early_stop_decision() -> None:
         + str([_src(a) for a in step.args]))
     kws = {k.arg: _src(k.value) for k in step.keywords}
     assert kws == {"stall_abort": "STALL_ABORT_S",
-                   "shadow_ok": "shadow.ok"}, kws
+                   "shadow_ok": "shadow.ok",
+                   "read_tls_state": "read_tls_state"}, kws
 
     # read_tcp_state really reads net_tcp_state's label.
     rts = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
@@ -513,10 +587,11 @@ def test_the_banner_rig_uses_the_early_stop_decision() -> None:
             for a in c.args] == ["started"]
     assert "tracker.frozen_for(now) < STALL_GRACE_S" in src
 
-    # The close predicate: exactly these three, in this order.
+    # The close predicate: exactly these four, in this order.
     cc = _call_named(tree, "close_confirmed")
     assert len(cc) == 1 and [_src(a) for a in cc[0].args] == [
-        "stopped_early", "read_shadow_ok", "read_tcp_state"], (
+        "stopped_early", "read_shadow_ok", "read_tcp_state",
+        "closed_before"], (
         [_src(a) for a in cc[0].args] if cc else "no close_confirmed call")
     rso = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
                and n.name == "read_shadow_ok")
@@ -563,6 +638,26 @@ def test_the_banner_rig_uses_the_early_stop_decision() -> None:
         "        return None\n"
         "    return bytes(client.read_mem(tcp_addr, 1))[0]"), _src(
         fdef("read_tcp_state"))
+    # #247: tls_state likewise, one byte at its own label.
+    assert sorted(_src(a.value) for a in assigns("tls_addr")) == [
+        "None", "label_addr('tls_state')"], [
+        _src(a) for a in assigns("tls_addr")]
+    assert _src(fdef("read_tls_state")) == (
+        "def read_tls_state():\n"
+        "    if tls_addr is None:\n"
+        "        return None\n"
+        "    return bytes(client.read_mem(tls_addr, 1))[0]"), _src(
+        fdef("read_tls_state"))
+    # closed_before is set ONLY by a stop that happened before the body
+    # (the handshake stop, which read CLOSED); any other binding would let
+    # the close wait end over a live socket.
+    assert sorted(_src(a) for a in assigns("closed_before")) == [
+        "closed_before = None", "closed_before = why"], [
+        _src(a) for a in assigns("closed_before")]
+    cb_if = [n for n in ast.walk(fn) if isinstance(n, ast.If)
+             and any(_src(x) == "closed_before = why" for x in n.body)]
+    assert [_src(n.test) for n in cb_if] == [
+        "state.parse_state < PARSE_STATE_BODY"], [_src(n.test) for n in cb_if]
     assert _src(fdef("read_shadow_ok")) == (
         "def read_shadow_ok():\n"
         "    return check_shadow_ram_readable(bytes(client.read_mem(40960, "
@@ -575,7 +670,7 @@ def test_the_banner_rig_uses_the_early_stop_decision() -> None:
             for k in c.keywords if k.arg == "also"]
     assert [_src(a) for a in also] == [
         "lambda: close_confirmed(stopped_early, read_shadow_ok, "
-        "read_tcp_state)"], [_src(a) for a in also]
+        "read_tcp_state, closed_before)"], [_src(a) for a in also]
 
     # `stop` and `stopped_early` have exactly the bindings the feature needs:
     # stop only from early_stop_step; stopped_early False before the loop
@@ -631,7 +726,7 @@ def test_the_banner_rig_uses_the_early_stop_decision() -> None:
     assert [_src(c) for c in closes] == [
         "wait_for(client, 'CONNECTION CLOSED', 120 * _SCALE, 'close', "
         "also=lambda: close_confirmed(stopped_early, read_shadow_ok, "
-        "read_tcp_state))"], [_src(c) for c in closes]
+        "read_tcp_state, closed_before))"], [_src(c) for c in closes]
 
     # wait_for (module level, outside main) is a thin shell over the
     # executed poll_until; pinned whole.

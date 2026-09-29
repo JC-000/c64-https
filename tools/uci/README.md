@@ -91,6 +91,23 @@ ON.
 Policy and tests: `tools/uci/_device_prep.py`, `tools/test_device_prep.py`
 (faked client, no hardware).
 
+## Listener and socket lifecycle (#246, #234)
+
+`_rig_lifecycle.py`, pinned by `tools/test_rig_lifecycle.py` (no hardware):
+
+- A local-listener rig binds its port and starts the listener
+  (`start_listener`) only once the DeviceLock is held, right before
+  `run_prg`: `ACCEPT_TIMEOUT` measures the C64, not the queue, and a queued
+  rig holds no port another lane's rig needs.
+- A rig that triggers a fetch sets `fetch_in_flight` at the SYS / 'G' and
+  clears it when the fetch has returned. If it is still set in `finally`,
+  `guard_socket_teardown` runs **before** `disable_uci` and
+  `lock.release()`: a bounded wait (`C64_TEARDOWN_WAIT`, default 120 s) for
+  `net_tcp_state` CLOSED (read only once `$A000` reads RAM) or the
+  `CONNECTION CLOSED` marker, then a loud power-cycle warning if neither
+  came. It never raises, and a Ctrl-C during it ends the wait, not the
+  release.
+
 ## Running them
 
 ```sh

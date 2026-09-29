@@ -71,6 +71,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _device_lock_helper import (  # noqa: E402
     LockTimeoutConfigError, acquire_device_lock,
 )
+from _rig_lifecycle import guard_socket_teardown  # noqa: E402
 from _memory_policy import (  # noqa: E402
     build_policy_and_arbiter_with_overlay_carveout,
 )
@@ -385,7 +386,9 @@ def main() -> int:
         print(f"Pruning old debug artifacts: {d}")
     run_dir = _create_run_dir(DEBUG_BASE_DIR)
     client = None
+    tr = None
     uci_enabled = False
+    fetch_in_flight = False
     outcome, exit_code = "UNKNOWN", 1
     start = time.time()
     try:
@@ -425,6 +428,7 @@ def main() -> int:
             return exit_code
         problems = []
         verdicts = {}
+        fetch_in_flight = True      # #234: from here a socket may be live
         for arm in (ARM_FORCED, ARM_CONTROL):
             p, v = _run_arm(tr, arm, a, code, host, results, sentinel,
                             progress, arm_addr, labels)
@@ -433,6 +437,8 @@ def main() -> int:
             if v == "HUNG":
                 break
             time.sleep(1.0)
+        else:
+            fetch_in_flight = False     # both routines returned
         print(f"\nverdicts: {verdicts}")
         if problems:
             for x in problems:
@@ -453,6 +459,11 @@ def main() -> int:
                                    "turbo_mhz": TURBO_MHZ, "host": HOST})
         except Exception as exc:
             print(f"WARNING: run_info write failed: {exc}")
+        # #234: before disable_uci — the C64 needs the command interface
+        # to issue the SOCKET_CLOSE this waits for.
+        if fetch_in_flight and tr is not None:
+            guard_socket_teardown(tr.read_memory,
+                                  labels.get("net_tcp_state"))
         if uci_enabled and client is not None:
             try:
                 disable_uci(client)
