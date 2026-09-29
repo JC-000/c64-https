@@ -256,6 +256,44 @@ def test_unaudited_harness_page3_writer_refuses_the_window() -> None:
         mp.HARNESS_SCRATCH = saved
 
 
+def test_the_window_is_page_three() -> None:
+    """$0334 is the first byte above the KERNAL vectors; $0400 is screen
+    RAM. Widening either end is a decision, not a tweak."""
+    assert mp.LOW_RAM_SCRATCH == (0x0334, 0x03FF), mp.LOW_RAM_SCRATCH
+
+
+def _fixture_labels() -> dict[str, int]:
+    out = {}
+    for line in COMB_SEGMENTS.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2].startswith("."):
+            out[parts[2][1:]] = int(parts[1].split(":")[1], 16)
+    return out
+
+
+def test_each_rig_fits_routine_and_data_in_the_window() -> None:
+    """Routine + host + path + the 3 marker bytes, per rig, <= the window.
+    Every operand is absolute, so the routine's length is address-free."""
+    lo, hi = mp.LOW_RAM_SCRATCH
+    window = hi - lo + 1
+    labels = _fixture_labels()
+    sizes = {}
+    for name in ("rig_https_local", "rig_https_bad_finished"):
+        mod = importlib.import_module(name)
+        code = mod._build_http_routine(labels, 443)[0]
+        sizes[name] = (len(code) + mod.HOST_STR_BYTES + mod.PATH_STR_BYTES
+                       + 3)
+    live = importlib.import_module("rig_https_live")
+    code = live.build_live_routine(
+        labels, routine_addr=0, host_str_addr=0, path_str_addr=0,
+        sentinel_addr=0, progress_addr=1, carry_flag_addr=2, host_len=10,
+        port=443)
+    sizes["rig_https_live"] = (len(code) + live.HOST_STR_BYTES
+                               + live.PATH_STR_BYTES + 3)
+    over = {n: v for n, v in sizes.items() if v > window}
+    assert not over, f"over the {window} B window: {over}"
+
+
 def test_no_rig_calls_the_page3_harness_writers() -> None:
     """The audit behind LOW_RAM_HARNESS_WRITERS_UNUSED, kept true."""
     names = {"jsr", "run_subroutine", "play_sid_vice", "liveness_probe",
