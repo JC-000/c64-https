@@ -137,6 +137,14 @@ STALL_ABORT_S = float(os.environ.get("STALL_ABORT", str(STALL_ABORT * _SCALE)))
 STALL_GRACE_S = float(os.environ.get("STALL_GRACE", str(STALL_GRACE)))
 
 
+def _tls_addrs():
+    """tls_state / tls_reached_connected for the #234 guard, or None."""
+    try:
+        return label_addr("tls_state"), label_addr("tls_reached_connected")
+    except KeyError:
+        return None
+
+
 def label_addr(name: str) -> int:
     """Read a symbol address out of build/labels.txt (VICE `al C:XXXX .name`)."""
     labels = PRG_PATH.parent / "labels.txt"
@@ -497,6 +505,7 @@ def main() -> int:
                 tcp_label = None
             guard_socket_teardown(
                 client.read_mem, tcp_label,
+                tls_addrs=_tls_addrs(),
                 nudge=lambda: client.send_text("Q", finish_with_return=False))
         if uci_on and client is not None:
             try:

@@ -122,7 +122,9 @@ from _memory_policy import (  # noqa: E402
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
 from _sni_precondition import enforce_sni_precondition  # noqa: E402
-from _rig_lifecycle import guard_socket_teardown, start_listener  # noqa: E402
+from _rig_lifecycle import (  # noqa: E402
+    guard_socket_teardown, start_listener, tls_evidence_addrs,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "https_e2e"))
@@ -706,7 +708,8 @@ def main() -> int:
         # to issue the SOCKET_CLOSE this waits for.
         if fetch_in_flight and transport is not None:
             guard_socket_teardown(transport.read_memory,
-                                  labels.get("net_tcp_state"))
+                                  labels.get("net_tcp_state"),
+                                  tls_addrs=tls_evidence_addrs(labels))
         if uci_enabled and client is not None:
             try:
                 disable_uci(client)

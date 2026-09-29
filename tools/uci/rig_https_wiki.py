@@ -120,7 +120,9 @@ from _device_lock_helper import (
 from _memory_policy import (build_policy,
                             build_policy_and_arbiter_with_overlay_carveout)
 from _device_prep import REQUIRED_REU_SIZE, DevicePrepError, prepare_device
-from _rig_lifecycle import guard_socket_teardown, teardown_warning
+from _rig_lifecycle import (
+    guard_socket_teardown, teardown_warning, tls_evidence_addrs,
+)
 from _reu_preflight import ReuPreflightError, preflight_reu
 from _temp_gc import gc_temp
 
@@ -834,6 +836,7 @@ def main() -> int:
             # the reset-based orphan close below, which is the last resort.
             td = guard_socket_teardown(
                 transport.read_memory, labels.get("net_tcp_state"),
+                tls_addrs=tls_evidence_addrs(labels),
                 nudge=(lambda: send_text(transport, "q")) if MENU_MODE
                 else None)
             fetch_in_flight = False
@@ -924,6 +927,7 @@ def main() -> int:
         if fetch_in_flight and transport is not None:
             guard_socket_teardown(
                 transport.read_memory, labels.get("net_tcp_state"),
+                tls_addrs=tls_evidence_addrs(labels),
                 nudge=(lambda: send_text(transport, "q")) if MENU_MODE
                 else None)
         if viewer_live:

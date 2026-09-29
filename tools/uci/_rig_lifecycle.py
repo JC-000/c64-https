@@ -104,13 +104,14 @@ class Teardown:
     reason: str
 
 
-def probe_socket(read_mem, tcp_state_addr):
+def probe_socket(read_mem, tcp_state_addr, *, connect_passed=False):
     """One look at the C64 -> (closed: True/False/None, description).
 
-    True: `net_tcp_close` has run (the screen marker, or `net_tcp_state`
-    CLOSED / CONNECT_FAIL - every CLOSED store after `net_init` is inside
-    `net_tcp_close`). False: CONNECTED, or ERROR (the stream is dead but the
-    close has not run yet). None: could not tell.
+    True: the screen marker, `net_tcp_state` CONNECT_FAIL, or CLOSED once
+    ``connect_passed``. CLOSED is also what `net_init` leaves until
+    TCP_CONNECT returns, so on its own it proves nothing. False: CONNECTED,
+    ERROR (the stream is dead but the close has not run yet), or CLOSED with
+    no evidence the connect has run. None: could not tell.
 
     `net_tcp_state` lives in CRYPTO_COLD_SHADOW on UCI ($B3C0 at the time of
     writing); a host read of $A000+ with BASIC banked in returns the ROM, so
@@ -134,9 +135,13 @@ def probe_socket(read_mem, tcp_state_addr):
         v = bytes(read_mem(tcp_state_addr, 1))[0]
     except Exception as exc:        # noqa: BLE001
         return None, f"net_tcp_state unreadable ({type(exc).__name__}: {exc})"
-    if v in (NET_TCP_CLOSED, NET_TCP_CONNECT_FAIL):
-        name = "CLOSED" if v == NET_TCP_CLOSED else "CONNECT_FAIL"
-        return True, f"net_tcp_state={name}"
+    if v == NET_TCP_CONNECT_FAIL:
+        return True, "net_tcp_state=CONNECT_FAIL"
+    if v == NET_TCP_CLOSED:
+        if connect_passed:
+            return True, "net_tcp_state=CLOSED"
+        return False, ("net_tcp_state=CLOSED, but nothing shows the connect "
+                       "has run yet (net_init leaves CLOSED too)")
     if v == NET_TCP_CONNECTED:
         return False, "net_tcp_state=CONNECTED"
     if v == NET_TCP_ERROR:
@@ -144,15 +149,48 @@ def probe_socket(read_mem, tcp_state_addr):
     return None, f"net_tcp_state=${v:02X} (unrecognised)"
 
 
+def tls_evidence_addrs(labels):
+    """(tls_state, tls_reached_connected) addresses, or None if either is
+    missing. Either byte off its reset value means `tls_connect` ran, which
+    only follows a successful TCP_CONNECT."""
+    try:
+        return labels["tls_state"], labels["tls_reached_connected"]
+    except (KeyError, TypeError):
+        return None
+
+
+def _tls_ran(read_mem, tls_addrs) -> bool:
+    if tls_addrs is None:
+        return False
+    try:
+        if min(tls_addrs) >= SHADOW_BASE and not check_shadow_ram_readable(
+                bytes(read_mem(SHADOW_BASE, 16))).ok:
+            return False
+        return any(bytes(read_mem(a, 1))[0] != 0 for a in tls_addrs)
+    except Exception:               # noqa: BLE001 - unknown is "no evidence"
+        return False
+
+
 def await_socket_teardown(read_mem, tcp_state_addr, *, budget: float,
                           clock=time.monotonic, sleep=time.sleep,
-                          interval: float = 1.0) -> Teardown:
-    """Poll :func:`probe_socket` until it says closed or ``budget`` runs out."""
+                          interval: float = 1.0, tls_addrs=None,
+                          seen_open=False) -> Teardown:
+    """Poll :func:`probe_socket` until it says closed or ``budget`` runs out.
+
+    CLOSED counts once this wait (or ``seen_open``) has seen CONNECTED or
+    ERROR, or once ``tls_addrs`` (:func:`tls_evidence_addrs`) show that
+    `tls_connect` ran. The TLS bytes are assumed fresh: one fetch per boot.
+    """
     deadline = clock() + budget
     while True:
-        closed, why = probe_socket(read_mem, tcp_state_addr)
+        passed = seen_open or _tls_ran(read_mem, tls_addrs)
+        closed, why = probe_socket(read_mem, tcp_state_addr,
+                                   connect_passed=passed)
         if closed:
             return Teardown(True, why)
+        if why.startswith(("net_tcp_state=CONNECTED",
+                           "net_tcp_state=ERROR")):
+            seen_open = True
         if clock() >= deadline:
             return Teardown(False, why)
         sleep(interval)
@@ -175,7 +213,7 @@ def teardown_warning(reason: str, waited: float) -> str:
 
 def guard_socket_teardown(read_mem, tcp_state_addr, *, budget=None,
                           nudge=None, clock=time.monotonic, sleep=time.sleep,
-                          out=None) -> Teardown:
+                          out=None, tls_addrs=None) -> Teardown:
     """Rig ``finally`` hook: bounded wait for the close, else a loud warning.
 
     ``nudge`` (optional, zero-argument) runs once before the wait - a rig
@@ -192,15 +230,22 @@ def guard_socket_teardown(read_mem, tcp_state_addr, *, budget=None,
     print(f"Fetch did not finish: waiting up to {budget:.0f}s for the C64 to "
           "close its socket before the DeviceLock is released "
           "(C64_TEARDOWN_WAIT)...", file=out)
+    seen_open = False
     try:
         if nudge is not None:
+            # Look once first: the nudge may close a socket this wait would
+            # otherwise never see open.
+            _, why = probe_socket(read_mem, tcp_state_addr)
+            seen_open = why.startswith(("net_tcp_state=CONNECTED",
+                                        "net_tcp_state=ERROR"))
             try:
                 nudge()
             except Exception as exc:    # noqa: BLE001
                 print(f"  (nudge failed: {type(exc).__name__}: {exc})",
                       file=out)
         td = await_socket_teardown(read_mem, tcp_state_addr, budget=budget,
-                                   clock=clock, sleep=sleep)
+                                   clock=clock, sleep=sleep,
+                                   tls_addrs=tls_addrs, seen_open=seen_open)
     except KeyboardInterrupt:
         td = Teardown(False, "wait interrupted (Ctrl-C)")
     except Exception as exc:        # noqa: BLE001
@@ -217,4 +262,5 @@ __all__ = [
     "NET_TCP_CONNECT_FAIL", "CLOSED_MARKER", "TEARDOWN_WAIT_DEFAULT",
     "Teardown", "await_socket_teardown", "guard_socket_teardown",
     "probe_socket", "start_listener", "teardown_budget", "teardown_warning",
+    "tls_evidence_addrs",
 ]

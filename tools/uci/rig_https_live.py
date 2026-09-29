@@ -96,7 +96,7 @@ from _device_lock_helper import (
     LockTimeoutConfigError, acquire_device_lock,
 )
 from _memory_policy import build_policy_and_arbiter_with_overlay_carveout
-from _rig_lifecycle import guard_socket_teardown
+from _rig_lifecycle import guard_socket_teardown, tls_evidence_addrs
 from _device_prep import DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
 from _temp_gc import gc_temp
@@ -640,7 +640,8 @@ def main() -> int:
         # to issue the SOCKET_CLOSE this waits for.
         if fetch_in_flight and transport is not None:
             guard_socket_teardown(transport.read_memory,
-                                  labels.get("net_tcp_state"))
+                                  labels.get("net_tcp_state"),
+                                  tls_addrs=tls_evidence_addrs(labels))
         if uci_enabled and client is not None:
             print("\nDisabling UCI...")
             try:

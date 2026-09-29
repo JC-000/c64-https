@@ -60,6 +60,7 @@ _real_sleep = time.sleep
 from ip65_hw_checks import BASIC_ROM_A000_PREFIX  # noqa: E402
 
 TCP = 0xB3C0      # where net_tcp_state sits on UCI builds (shadow RAM)
+TLS_STATE, TLS_LATCH = 0xA24D, 0xA24F   # tls_state, tls_reached_connected
 
 
 class Clock:
@@ -112,8 +113,45 @@ def screen_codes(text: str) -> bytes:
 def test_probe_closed_states_count_as_closed() -> None:
     for v, name in ((lc.NET_TCP_CLOSED, "CLOSED"),
                     (lc.NET_TCP_CONNECT_FAIL, "CONNECT_FAIL")):
-        closed, why = lc.probe_socket(mem_reader(fresh_mem(v)), TCP)
+        closed, why = lc.probe_socket(mem_reader(fresh_mem(v)), TCP,
+                                      connect_passed=True)
         assert closed is True and name in why, (v, closed, why)
+
+
+def test_closed_before_the_connect_is_not_closed() -> None:
+    """net_init leaves CLOSED until TCP_CONNECT returns: a guard entered
+    mid-connect must keep waiting, not release over the socket to come."""
+    mem = fresh_mem(lc.NET_TCP_CLOSED)
+    closed, _ = lc.probe_socket(mem_reader(mem), TCP)
+    assert closed is False
+    clk = Clock()
+    td = lc.guard_socket_teardown(mem_reader(mem), TCP, budget=5,
+                                  clock=clk, sleep=clk.sleep,
+                                  out=io.StringIO(),
+                                  tls_addrs=(TLS_STATE, TLS_LATCH))
+    assert not td.closed, td
+
+
+def test_closed_counts_after_evidence_the_connect_ran() -> None:
+    clk = Clock()
+    for addr, v in ((TLS_STATE, 0xFF), (TLS_LATCH, 7)):
+        mem = fresh_mem(lc.NET_TCP_CLOSED)
+        mem[addr] = v
+        td = lc.await_socket_teardown(mem_reader(mem), TCP, budget=5,
+                                      clock=clk, sleep=clk.sleep,
+                                      tls_addrs=(TLS_STATE, TLS_LATCH))
+        assert td.closed, (hex(addr), td)
+    # ...or once this wait has seen the socket open: CLOSED, then
+    # CONNECTED, then CLOSED again.
+    mem = fresh_mem(lc.NET_TCP_CLOSED)
+    seq = iter([lc.NET_TCP_CONNECTED, lc.NET_TCP_CLOSED])
+
+    def sleep(s):
+        clk.sleep(s)
+        mem[TCP] = next(seq, lc.NET_TCP_CLOSED)
+    td = lc.await_socket_teardown(mem_reader(mem), TCP, budget=30,
+                                  clock=clk, sleep=sleep)
+    assert td.closed, td
 
 
 def test_probe_connected_and_error_are_not_closed() -> None:
@@ -133,7 +171,7 @@ def test_probe_rom_byte_is_never_read_as_closed() -> None:
 def test_probe_below_shadow_needs_no_rom_gate() -> None:
     mem = fresh_mem(rom_in=True)
     mem[0x610C] = lc.NET_TCP_CLOSED
-    closed, _ = lc.probe_socket(mem_reader(mem), 0x610C)
+    closed, _ = lc.probe_socket(mem_reader(mem), 0x610C, connect_passed=True)
     assert closed is True
 
 
@@ -645,6 +683,158 @@ def test_every_fetch_rig_guards_the_socket_before_release() -> None:
     assert not bad, (f"#234: these fetch rigs release the DeviceLock without "
                      f"guard_socket_teardown ahead of disable_uci/release: "
                      f"{bad}")
+
+
+def _is_trigger(call) -> bool:
+    """send_text of 'G', of `sys_line`, or of an f"sys{...}" line: the key
+    press that starts a fetch. A constant "sys820" (the wiki rig's
+    orphan-close stub) is not one."""
+    f = call.func
+    if (f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")) \
+            != "send_text":
+        return False
+    for a in call.args:
+        if isinstance(a, ast.Constant) and a.value in ("G", "g"):
+            return True
+        if isinstance(a, ast.Name) and a.id == "sys_line":
+            return True
+        if (isinstance(a, ast.JoinedStr) and a.values
+                and isinstance(a.values[0], ast.Constant)
+                and str(a.values[0].value).lower().startswith("sys")):
+            return True
+    return False
+
+
+def _flight_assign(stmt):
+    """The value assigned to fetch_in_flight by `stmt`, or None."""
+    if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == "fetch_in_flight"):
+        return stmt.value
+    return None
+
+
+def _blocks(node):
+    for field in ("body", "orelse", "finalbody", "handlers"):
+        blk = getattr(node, field, None)
+        if isinstance(blk, list) and blk and isinstance(blk[0], ast.AST):
+            yield blk
+
+
+def _arming_problems(src: str) -> list[str]:
+    """#234's arming, structurally: the statement that presses 'G' / types
+    the SYS (or calls a helper of this module that does) is directly
+    preceded by `fetch_in_flight = True` - climbing out of a block when it
+    is the block's first statement. And a constant `False` after the
+    arming is either conditional (an `if`/`for`/`while` block) or sits next
+    to a guard_socket_teardown / teardown_warning call."""
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    helpers = {name for name, fn in funcs.items() if name != "main"
+               and any(isinstance(c, ast.Call) and _is_trigger(c)
+                       for c in ast.walk(fn))}
+
+    def fires(stmt) -> bool:
+        for c in ast.walk(stmt):
+            if not isinstance(c, ast.Call):
+                continue
+            if _is_trigger(c):
+                return True
+            if isinstance(c.func, ast.Name) and c.func.id in helpers:
+                return True
+        return False
+
+    main = funcs.get("main")
+    if main is None:
+        return ["no main()"]
+    problems, triggers, armed_at = [], 0, []
+
+    def walk(block, parents):
+        for i, st in enumerate(block):
+            v = _flight_assign(st)
+            if isinstance(v, ast.Constant) and v.value is True:
+                armed_at.append(st.lineno)
+            inner = list(_blocks(st))
+            if inner and fires(st) and not isinstance(st, ast.Expr):
+                for blk in inner:
+                    walk(blk, parents + [(block, i, st)])
+                continue
+            if not fires(st):
+                for blk in inner:
+                    walk(blk, parents + [(block, i, st)])
+                continue
+            nonlocal triggers
+            triggers += 1
+            blk, j, chain = block, i, list(parents)
+            while j == 0 and chain:
+                blk, j, _ = chain.pop()
+            prev = blk[j - 1] if j > 0 else None
+            pv = _flight_assign(prev) if prev is not None else None
+            if not (isinstance(pv, ast.Constant) and pv.value is True):
+                problems.append(f"line {st.lineno}: fetch trigger not "
+                                "preceded by `fetch_in_flight = True`")
+
+    walk(main.body, [])
+    if not triggers:
+        problems.append("no fetch trigger found in main()")
+
+    def disarms(block, conditional):
+        for i, st in enumerate(block):
+            v = _flight_assign(st)
+            if (isinstance(v, ast.Constant) and v.value is False and armed_at
+                    and st.lineno > min(armed_at) and not conditional):
+                near = [x for x in block[max(0, i - 1):i + 2] if x is not st]
+                if not any(_calls(x, "guard_socket_teardown")
+                           or _calls(x, "teardown_warning") for x in near):
+                    problems.append(f"line {st.lineno}: unconditional "
+                                    "`fetch_in_flight = False`")
+            for field in ("body", "orelse", "finalbody", "handlers"):
+                blk = getattr(st, field, None)
+                if isinstance(blk, list) and blk and isinstance(blk[0],
+                                                                ast.AST):
+                    cond = conditional or (
+                        isinstance(st, (ast.If, ast.For, ast.While))
+                        or field == "handlers")
+                    disarms(blk, cond)
+    disarms(main.body, False)
+    return problems
+
+
+def test_every_fetch_rig_arms_the_guard_at_the_trigger() -> None:
+    """#234: the guard only runs if `fetch_in_flight` is set, so the arming
+    is what makes it real. Every rig the guard claims to cover arms it at
+    each trigger and never disarms it unconditionally."""
+    bad = []
+    for p in _rig_files():
+        src = p.read_text()
+        if not _drives_a_fetch(src):
+            continue
+        bad += [f"{p.name}: {x}" for x in _arming_problems(src)]
+    assert not bad, "\n".join(bad)
+
+
+def test_the_arming_check_goes_red() -> None:
+    """The check above, against the four ways it was found to be blind."""
+    cases = [
+        ("rig_https_live.py", "        fetch_in_flight = True      # #234: "
+         "from here a socket may be live\n", ""),
+        ("rig_http_live.py", "        fetch_in_flight = True      # #234: "
+         "from here a socket may be live\n", ""),
+        ("rig_https_wiki.py", "            fetch_in_flight = True  # #234: "
+         "open until the viewer sees 'Q'\n", ""),
+        ("rig_https_wiki.py", "            fetch_in_flight = True  # #234: "
+         "from here a socket may be live\n", ""),
+        ("rig_https_banner.py", "        fetch_in_flight = True      # #234: "
+         "from here a socket may be live\n", ""),
+        ("rig_https_banner.py", "fetch_in_flight = not ok",
+         "fetch_in_flight = False"),
+        ("rig_close_retry.py", "        fetch_in_flight = True      # #234: "
+         "from here a socket may be live\n", ""),
+    ]
+    for name, old, new in cases:
+        src = (UCI / name).read_text()
+        assert src.count(old) == 1, (name, old)
+        assert _arming_problems(src.replace(old, new)), (name, old)
 
 
 def main() -> int:
