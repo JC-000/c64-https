@@ -97,6 +97,9 @@ FARM_LINKS = ("src", "cfg", "tools", "libs", "ip65", "ip65-build", "Makefile")
 # The reference profile for every case: UCI, onchip. Fastest to build, and
 # the profile the 2026-08-30 incident was measured on.
 UCI = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP=1")
+# The objects build/https_host.inc invalidates: the two that know the target
+# strings (#128/#141) and cert_pin.o, which reads the pin bytes (#155).
+TARGET_INC_GRAIN = {"build/boot.o", "build/http.o", "build/cert_pin.o"}
 
 PRG = "build/c64-https.prg"
 STAMP = "build/flags.stamp"
@@ -372,8 +375,9 @@ def test_flags_invalidation_removes_every_link_output():
 def test_https_host_invalidation_removes_every_link_output():
     """Issue #220, the second block: build/https_host.inc had the same gap.
 
-    Its grain must stay #128's (boot.o + http.o only) — only the link
-    outputs join it, and the rest of the objects must survive.
+    Its grain must stay #128's (boot.o + http.o, plus #155's cert_pin.o,
+    which reads the pin bytes from the same header) — only the link outputs
+    join it, and the rest of the objects must survive.
     """
     _require_toolchain()
     with Farm() as farm:
@@ -391,9 +395,9 @@ def test_https_host_invalidation_removes_every_link_output():
             "describing the previous target's image."
         )
         lost = set(before) - set(farm.mtimes())
-        assert lost == {"build/boot.o", "build/http.o"}, (
-            "the https_host.inc invalidation grain changed; #128 wants "
-            f"exactly boot.o + http.o, got {sorted(lost)}"
+        assert lost == TARGET_INC_GRAIN, (
+            "the https_host.inc invalidation grain changed; #128/#155 want "
+            f"exactly {sorted(TARGET_INC_GRAIN)}, got {sorted(lost)}"
         )
 
 
@@ -654,12 +658,45 @@ def test_https_host_change_is_still_incremental():
         after = farm.mtimes()
         rebuilt = {k for k in after if after[k] != before.get(k)}
         assert rebuilt, "nothing rebuilt at all for a new HTTPS_HOST"
-        unexpected = rebuilt - {"build/boot.o", "build/http.o"}
+        unexpected = rebuilt - TARGET_INC_GRAIN
         assert not unexpected, (
-            f"HTTPS_HOST= now forces a wider rebuild than boot.o/http.o: "
+            f"HTTPS_HOST= now forces a wider rebuild than {sorted(TARGET_INC_GRAIN)}: "
             f"{sorted(unexpected)}. The target strings must stay out of "
             "build/flags.stamp, or #128's no-clean ergonomic costs a full "
             "rebuild every time (and #155's pin values will too)."
+        )
+
+
+def test_pin_change_is_incremental():
+    """#155: re-pinning after a key rotation must not need `make clean`.
+
+    The pin's presence moves CA65FLAGS (-D HTTPS_PIN_SPKI=1, stamped), but a
+    NEW VALUE travels only in build/https_host.inc. So pin A -> pin B must
+    rebuild within the target-include grain and land on exactly the PRG a
+    clean pin-B build produces — the check that the new bytes, not the old
+    ones, are in the image.
+    """
+    _require_toolchain()
+    pin_a = "HTTPS_PIN_SPKI_SHA256=" + "a5" * 32
+    pin_b = "HTTPS_PIN_SPKI_SHA256=" + "5a" * 32
+    oracle = _clean_build_sha(*UCI, pin_b)
+    with Farm() as farm:
+        farm.make(*UCI, pin_a)
+        sha_a = farm.sha()
+        before = farm.mtimes()
+        farm.make(*UCI, pin_b)
+        assert farm.sha() == oracle, (
+            "a pin change without `make clean` does not match a clean build — "
+            "the old pin is still in the image"
+        )
+        assert sha_a != oracle, "pin A and pin B built the same PRG — vacuous"
+        after = farm.mtimes()
+        rebuilt = {k for k in after if after[k] != before.get(k)}
+        assert "build/cert_pin.o" in rebuilt, "cert_pin.o was not rebuilt"
+        unexpected = rebuilt - TARGET_INC_GRAIN
+        assert not unexpected, (
+            f"a pin change rebuilt more than {sorted(TARGET_INC_GRAIN)}: "
+            f"{sorted(unexpected)}"
         )
 
 
