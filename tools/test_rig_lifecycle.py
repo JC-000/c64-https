@@ -726,8 +726,10 @@ def _arming_problems(src: str) -> list[str]:
     the SYS (or calls a helper of this module that does) is directly
     preceded by `fetch_in_flight = True` - climbing out of a block when it
     is the block's first statement. And a constant `False` after the
-    arming is either conditional (an `if`/`for`/`while` block) or sits next
-    to a guard_socket_teardown / teardown_warning call."""
+    arming sits directly in an `if` branch (or a loop's `else:`, which runs
+    only when the loop finished without `break`), or next to a
+    guard_socket_teardown / teardown_warning call. A loop body alone is not
+    a condition: a disarm there clears the flag on the first pass."""
     tree = ast.parse(src)
     funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
     helpers = {name for name, fn in funcs.items() if name != "main"
@@ -792,9 +794,9 @@ def _arming_problems(src: str) -> list[str]:
                 blk = getattr(st, field, None)
                 if isinstance(blk, list) and blk and isinstance(blk[0],
                                                                 ast.AST):
-                    cond = conditional or (
-                        isinstance(st, (ast.If, ast.For, ast.While))
-                        or field == "handlers")
+                    cond = isinstance(st, ast.If) or (
+                        isinstance(st, (ast.For, ast.While))
+                        and field == "orelse")
                     disarms(blk, cond)
     disarms(main.body, False)
     return problems
@@ -830,6 +832,18 @@ def test_the_arming_check_goes_red() -> None:
          "fetch_in_flight = False"),
         ("rig_close_retry.py", "        fetch_in_flight = True      # #234: "
          "from here a socket may be live\n", ""),
+        # the sentinel disarm lifted out of its `if` into the poll loop
+        ("rig_https_bad_finished.py",
+         "            if blob[0] == SENTINEL_VALUE:\n"
+         "                completed = True\n"
+         "                fetch_in_flight = False     # http_get has returned\n",
+         "            fetch_in_flight = False     # http_get has returned\n"
+         "            if blob[0] == SENTINEL_VALUE:\n"
+         "                completed = True\n"),
+        ("rig_https_live.py",
+         "        while time.time() < deadline:\n",
+         "        while time.time() < deadline:\n"
+         "            fetch_in_flight = False\n"),
     ]
     for name, old, new in cases:
         src = (UCI / name).read_text()
