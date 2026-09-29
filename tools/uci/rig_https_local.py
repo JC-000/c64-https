@@ -110,6 +110,7 @@ from c64_test_harness.labels import Labels
 from _device_lock_helper import (
     LockTimeoutConfigError, acquire_device_lock,
 )
+from _prg_load import PrgLoadError, load_verified_and_run
 from _memory_policy import (
     build_policy_and_low_ram_arbiter,
 )
@@ -1638,8 +1639,12 @@ def main() -> int:
         print(f"Routine size    : {len(routine_bytes)} bytes @ "
               f"${ROUTINE_ADDR:04X}")
 
-        print("run_prg(PRG)...")
-        client.run_prg(prg)
+        print("load_prg(PRG), verify, SYS (#199)...")
+        try:
+            load_verified_and_run(client, prg)
+        except PrgLoadError as exc:
+            print(f"[fatal] {exc}", file=sys.stderr)
+            return 4
         # Wait for auto-init (entropy, REU stash, DHCP). Scales with TURBO_MHZ
         # so stock 1 MHz runs allow enough time for entropy + REU sqtab init.
         # C64_INIT_WAIT overrides the base (comb-profile boots run

@@ -562,8 +562,9 @@ KNOWN_UNPREPPED: dict[str, str] = {}
 def _crypto_path_rigs():
     """Discover the rigs this contract covers, rather than listing them.
 
-    The rule: a module that boots the PRG on the device (``client.run_prg``)
-    AND knows about the comb profile. Those two together are exactly the
+    The rule: a module that boots the PRG on the device (``client.run_prg``,
+    or since #199 ``load_verified_and_run(client``) AND knows about the comb
+    profile. Those two together are exactly the
     exposure — comb needs REU bank 2, and its boot precompute is ~45 s at
     48 MHz against ~36 min at 1 MHz, so such a rig depends on both the REU
     state and the clock whether or not it manages them.
@@ -592,7 +593,9 @@ def _crypto_path_rigs():
     found = []
     for path in sorted(UCI.glob("*.py")):
         text = path.read_text()
-        if "client.run_prg(" in text and "comb" in text.lower():
+        boots = ("client.run_prg(" in text
+                 or "load_verified_and_run(client" in text)
+        if boots and "comb" in text.lower():
             found.append(path)
     return found
 

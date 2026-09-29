@@ -376,6 +376,11 @@ def _patch_rig(mod, *, events, mem, run_prg, send_text, tmp):
     setattr_("prepare_device", lambda *a, **k: None)
     setattr_("preflight_reu", lambda *a, **k: None)
     setattr_("send_text", send_text)
+    if hasattr(mod, "load_verified_and_run"):
+        # #199's verified load is tools/test_prg_load.py's subject; here it
+        # is the point where the C64 starts, as run_prg was.
+        setattr_("load_verified_and_run",
+                 lambda client, prg, **k: client.run_prg(prg))
     setattr_("enforce_sni_precondition", lambda *a, **k: None)
     setattr_("_detect_local_ip", lambda h: "127.0.0.1")
     setattr_("time", _TimeShim())
