@@ -93,11 +93,7 @@ UNDISPATCHED_SUITES = {
 def build():
     print("=== Building ===")
     subprocess.run(["make", "clean"], capture_output=True)
-    # KEEP_X509_PARSE_CERT=1: the "x509" suite drives x509_parse_cert, which
-    # shipped builds reclaim (#155 phase 2). With it the image is the
-    # pre-reclaim one plus nothing else; every other suite is unaffected.
-    result = subprocess.run(["make", "KEEP_X509_PARSE_CERT=1"],
-                            capture_output=True, text=True)
+    result = subprocess.run(["make"], capture_output=True, text=True)
     if result.returncode != 0:
         print(f"  Build FAILED:\n{result.stderr}")
         sys.exit(1)
@@ -310,6 +306,17 @@ def main():
             "hs_sequence",
             "tls_deframe_pump absent -- not a TLS_STREAM_DEFRAME build "
             "(rerun with BACKEND=uci)"))
+
+    # x509's DER groups drive x509_parse_cert, which the default image
+    # reclaims (#155 phase 2; KEEP_X509_PARSE_CERT re-arms it). Every suite
+    # here tests the one default image, so x509 is accounted for, not run
+    # against a different build: tools/test_x509.py builds its own.
+    if "x509" in suites and labels.address("x509_parse_cert") is None:
+        suites.remove("x509")
+        skipped_suites.append((
+            "x509",
+            "x509_parse_cert absent -- the default image reclaims it; run "
+            "python3 tools/test_x509.py (builds KEEP_X509_PARSE_CERT=1)"))
 
     require_menu_wait_env()
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
