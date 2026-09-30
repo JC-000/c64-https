@@ -297,7 +297,7 @@ def test_each_rig_fits_routine_and_data_in_the_window() -> None:
 def test_no_rig_calls_the_page3_harness_writers() -> None:
     """The audit behind LOW_RAM_HARNESS_WRITERS_UNUSED, kept true."""
     names = {"jsr", "run_subroutine", "play_sid_vice", "liveness_probe",
-             "probe_u64", "extract_reu_contents"}
+             "probe_u64", "extract_reu_contents", "extract_snapshot"}
     bad = []
     for p in sorted(UCI.glob("*.py")):
         tree = ast.parse(p.read_text())
