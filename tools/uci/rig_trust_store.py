@@ -315,6 +315,8 @@ def rec(host, spki=SPKI_1):
 
 def run_phases(r: Rig):
     ftp = r.ftp
+    if os.environ.get("RIG_ONLY") == "13":
+        return phase_midsave(r)
     print("\n[1] load, empty directory")
     c, a, st = r.load("github.com")
     r.require(c == 0 and a == ts.ST_EMPTY and st["slot_st"] == (1, 1), "EMPTY, C=0")
@@ -433,12 +435,26 @@ def run_phases(r: Rig):
     ftp.delete("TRUST.B")
 
     if TURBO_MHZ == 1:
+        phase_midsave(r)
+
+    print("\n[14] no directory")
+    ftp.rmdir()
+    c, a, st = r.load("example.com")
+    r.check(c == 1 and st["reason"] == ts.R_NOPATH, "FAIL NOPATH")
+
+
+def phase_midsave(r: Rig):
+    ftp = r.ftp
+    if TURBO_MHZ == 1:
         print("\n[13] reset DURING trust_store_save's write (1 MHz)")
         base = ts.encode(5, [rec("a.example"), rec("b.example"), rec("c.example")])
         ftp.put(A_PATH, base)
         c, a, st = r.load("d.example")
         r.check(c == 0 and st["slot"] == 0, "loaded generation 5 from A")
-        r.tr.write_memory(r.L["ts_target"], b"\xff")
+        # ts_target is store state in CRYPTO_OVERLAY: a deliberate, one-byte
+        # poke so the poll below can see the save pick its target.
+        r.tr.write_memory(r.L["ts_target"], b"\xff",
+                          override="rig_trust_store: arm the mid-save poll")
         r.tr.write_memory(r.rec, rec("d.example").pack())
         r.sys(OP_SAVE, wait=False)
         hit = None
@@ -458,8 +474,8 @@ def run_phases(r: Rig):
         r.notes["midsave_reset_at_s"] = hit
         r.notes["midsave_B_size"] = None if fb is None else len(fb)
         if hit is None:
-            print("  INCONCLUSIVE: the poll missed the write window")
             r.notes["midsave"] = "missed"
+            r.check(False, "the reset landed inside the save's write window")
         else:
             print(f"  reset {hit:.2f} s after SYS; TRUST.B now "
                   f"{r.notes['midsave_B_size']} B")
@@ -470,11 +486,6 @@ def run_phases(r: Rig):
                     "after the reset: VALID generation 5 from A, d.example absent")
         ftp.delete("TRUST.A")
         ftp.delete("TRUST.B")
-
-    print("\n[14] no directory")
-    ftp.rmdir()
-    c, a, st = r.load("example.com")
-    r.check(c == 1 and st["reason"] == ts.R_NOPATH, "FAIL NOPATH")
 
 
 def main() -> int:
@@ -545,8 +556,8 @@ def main() -> int:
             return 4
         try:
             run_phases(rig)
-        except RuntimeError as exc:
-            rig.failed.append(str(exc))
+        except Exception as exc:  # noqa: BLE001 - any escape is a failed run
+            rig.failed.append(f"{type(exc).__name__}: {exc}")
             print(f"\n{exc}")
     finally:
         if rig is not None:
