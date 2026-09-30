@@ -38,6 +38,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 
 from c64_test_harness import (
     Labels, ViceInstanceManager, read_bytes, write_bytes, jsr, wait_for_text,
@@ -45,7 +46,7 @@ from c64_test_harness import (
 from c64_test_harness import TimeoutError as HarnessTimeout
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _vice_helpers import default_vice_config  # noqa: E402
+from _vice_helpers import default_vice_config, menu_wait  # noqa: E402
 from _skip_policy import cannot_run, verdict  # noqa: E402
 from test_x509_name import make_cert  # noqa: E402
 from _petscii_keys import target_keys as keys  # noqa: E402
@@ -222,6 +223,22 @@ class Suite:
                    s["tls_hostname_len"] == 0, f"got {s['tls_hostname_len']}")
         self.check("screen says INVALID TARGET",
                    "INVALID TARGET" in screen_text(self.t), "message not on screen")
+        # A refusal must also swallow the rest of what the operator typed:
+        # whatever reaches main_loop runs as a menu command ('H' dials
+        # zimmers.net, 'I' re-inits, 'Q' quits). So let main_loop run for a
+        # while with any leftovers, then look for each command's trace.
+        self.check("KERNAL key buffer empty on return",
+                   read_bytes(self.t, 0x00C6, 1)[0] == 0, "keys left queued")
+        self.t.resume()
+        time.sleep(3.0)
+        scr = screen_text(self.t)
+        self.check("no menu command ran afterwards (no dial, no HTTP GET, "
+                   "no re-init, no quit)",
+                   read_bytes(self.t, MARK, 1)[0] != DIALLED
+                   and "HTTP GET" not in scr and "INITIALIZING" not in scr
+                   and "READY." not in scr,
+                   f"dialled={read_bytes(self.t, MARK, 1)[0] == DIALLED} "
+                   f"screen={' '.join(scr.split())[:160]!r}")
 
     def run(self) -> None:
         dh, dp = self.default_host, self.default_path
@@ -249,13 +266,13 @@ class Suite:
                       cap_host, cap_path)
 
         self.refused("64-char host refused at the 64th key, not truncated",
-                     keys("h" * 64))
+                     keys("h" * 64 + "\r/p\r"))
         self.refused("101-char path refused at the 101st key",
-                     keys("\r/" + "p" * 100))
-        self.refused("'_' is not a hostname character", keys("bad_host\r"))
-        self.refused("empty label: '..'", keys("a..b\r"))
+                     keys("\r/" + "p" * 100 + "\r"))
+        self.refused("'_' is not a hostname character", keys("bad_host\r/p\r"))
+        self.refused("empty label: '..'", keys("a..b\r/p\r"))
         self.refused("empty label: leading '.' (would match *.foo.org)",
-                     keys(".foo.org\r"))
+                     keys(".foo.org\r/p\r"))
         # Why that refusal is not cosmetic: fed straight to the name check,
         # an empty leftmost label satisfies a wildcard.
         write_bytes(self.t, self.L["tls_hostname"], b".foo.org\x00")
@@ -263,12 +280,24 @@ class Suite:
         self.check("(evidence) x509_verify_hostname alone accepts '.foo.org' "
                    "against '*.foo.org'", self.name_check(["*.foo.org"]) == 0,
                    "C=1: the refusal's stated reason no longer holds")
-        self.refused("empty label: trailing '.'", keys("foo.org.\r"))
-        self.refused("space in host", keys("a "))
-        self.refused("cursor key in host", keys("ab") + [KEY_CRSR_DOWN])
+        self.refused("empty label: trailing '.'", keys("foo.org.\r/p\r"))
+        self.refused("space in host", keys("a \r/p\r"))
+        self.refused("cursor key in host", keys("ab") + [KEY_CRSR_DOWN] + keys("\r/p\r"))
         self.refused("path without a leading '/'", keys("\rnopath\r"))
         self.refused("space in path (would split the request line)",
-                     keys("\r/a "))
+                     keys("\r/a \r"))
+
+        # The operator keeps typing after the refused key. On a prompt that
+        # returns at the refusal these reach main_loop as H / I / Q. Last,
+        # because on such a prompt 'Q' leaves the program.
+        self.refused("space in host, operator types on (h, i, q)",
+                     keys("my hiq.org\r/hiq\r"))
+        self.refused("64th host key, operator types on",
+                     keys("h" * 63 + "hiq\r/hiq\r"))
+        self.refused("empty label refused at RETURN; the path line follows",
+                     keys("a..b\r/hiq\r"))
+        self.refused("space in path, operator types on",
+                     keys("\r/a hiq\r"))
 
 
 def main() -> int:
@@ -296,9 +325,8 @@ def main() -> int:
         inst = mgr.acquire()
         t = inst.transport
         try:
-            if wait_for_text(t, "Q=QUIT", timeout=float(
-                    os.environ.get("C64_INIT_TIMEOUT", "120")),
-                    verbose=False) is None:
+            if wait_for_text(t, "Q=QUIT", timeout=menu_wait(120),
+                             verbose=False) is None:
                 return cannot_run("menu never appeared", executed=0, total=1,
                                   certifies="the typed HTTPS target prompt")
             write_bytes(t, labels["net_initialized"], b"\x01")

@@ -865,6 +865,11 @@ ascii_chrout:
 ;     or doubled '.'); x509_name.s's wildcard rule would let ".foo.org"
 ;     match "*.foo.org", so the empty leftmost label is not cosmetic;
 ;   * a path that does not start with '/'.
+; A refusal still reads both lines to their RETURN (a refused key's line is
+; swallowed unechoed; a refused host still gets the PATH prompt), flushes
+; the KERNAL key buffer, and only then prints INVALID TARGET. Returning
+; early would hand the rest of what the operator typed to main_loop, where
+; 'H' dials zimmers.net, 'I' re-inits the network and 'Q' quits.
 ;
 ; Keys: unshifted letters are lowercase, shifted ones uppercase (the path is
 ; case-sensitive, the host is folded either way), and '_' is the left-arrow
@@ -885,6 +890,7 @@ ascii_chrout:
 https_target_prompt:
         lda #0                  ; #204: a new attempt starts here, before
         sta tls_reached_connected ;  any refusal, DNS or TCP failure
+        sta tgt_fail
 
         ; --- host ---
         lda #<tgt_host_msg
@@ -897,7 +903,7 @@ https_target_prompt:
         ldy #>tls_hostname
         ldx #HTTPS_HOST_MAX
         jsr tgt_read_line
-        bcs @refused
+        bcs @host_bad
         ldy tgt_len
         bne @host_check
 @host_default:                  ; RETURN alone: the build-time host
@@ -918,20 +924,20 @@ https_target_prompt:
         cmp #'.'
         bne @hc_not_dot
         cmp tgt_prev
-        beq @refused            ; empty label
+        beq @host_bad           ; empty label
         bne @hc_ok              ; always
 @hc_not_dot:
         cmp #'-'
         beq @hc_ok
         cmp #'0'
-        bcc @refused
+        bcc @host_bad
         cmp #'9'+1
         bcc @hc_ok
         ora #$20                ; A-Z -> a-z; nothing else lands in a-z
         cmp #'a'
-        bcc @refused
+        bcc @host_bad
         cmp #'z'+1
-        bcs @refused
+        bcs @host_bad
         sta tls_hostname,y
 @hc_ok:
         sta tgt_prev
@@ -940,7 +946,7 @@ https_target_prompt:
 @hc_end:
         lda tgt_prev
         cmp #'.'
-        beq @refused            ; trailing '.'
+        beq @host_bad           ; trailing '.'
 @host_set:
         sty tls_hostname_len
         sty http_host_len
@@ -949,16 +955,11 @@ https_target_prompt:
         lda #>tls_hostname      ; never 0: the flags make the bne a jump
         sta http_host_ptr+1
         bne @path
-
-        ; mid-routine so every branch to it reaches
-@refused:
-        lda #0
-        sta tls_hostname_len
-        lda #<tgt_bad_msg
-        ldy #>tgt_bad_msg
-        jsr print_string
-        sec
-        rts
+@host_bad:
+        ; Still ask for the path: the operator is about to type it, and a
+        ; line nobody reads would reach main_loop as menu commands.
+        lda #$80
+        sta tgt_fail
 
         ; --- path ---
 @path:
@@ -989,6 +990,8 @@ https_target_prompt:
         sta http_path_ptr
         stx http_path_ptr+1
         sty http_path_len
+        bit tgt_fail
+        bmi @refused            ; the host was refused
 
         ; --- banner: the name actually dialled (#128) ---
         lda #<https_get_msg
@@ -1003,13 +1006,25 @@ https_target_prompt:
         clc
         rts
 
+@refused:
+        lda #0
+        sta $c6                 ; KERNAL NDX: drop any type-ahead
+        sta tls_hostname_len
+        lda #<tgt_bad_msg
+        ldy #>tgt_bad_msg
+        jsr print_string
+        sec
+        rts
+
 ; -----------------------------------------------------------------------------
 ; tgt_read_line - minimal line editor for https_target_prompt.
 ;   In : A/Y = buffer, X = cap (chars, excluding the NUL)
-;   Out: C=0 tgt_len = length, buffer NUL-terminated, RETURN echoed;
-;        C=1 a refused key (see the header above); the buffer is partial.
-;   Stored bytes are ASCII; the echo is the key as typed. GETIN clobbers
-;   X and Y, so the index lives in tgt_len.
+;   Out: RETURN echoed, buffer NUL-terminated, tgt_len = length, and
+;        C=0 every key was taken; C=1 a key was refused (see the header).
+;   A refused key does not end the line: it and every later key up to
+;   RETURN are swallowed unechoed, so the rest of what the operator typed
+;   never reaches main_loop. Stored bytes are ASCII; the echo is the key as
+;   typed. GETIN clobbers X and Y, so the index lives in tgt_len.
 ; -----------------------------------------------------------------------------
 tgt_read_line:
         sta zp_ptr
@@ -1023,6 +1038,8 @@ tgt_read_line:
         ldy tgt_len
         cmp #$0d
         beq @done
+        bit tgt_bad
+        bmi @wait               ; swallowing the rest of a refused line
         cmp #$14                ; DEL: erase the last character
         bne @key
         tya
@@ -1062,15 +1079,16 @@ tgt_read_line:
         txa
         jsr chrout
         jmp @wait
+@refuse:
+        lda #$80
+        sta tgt_bad
+        bne @wait               ; always
 @done:
         lda #0
         sta (zp_ptr),y
         lda #$0d
         jsr chrout
-        clc
-        rts
-@refuse:
-        sec
+        asl tgt_bad             ; C = refused; clears it for the next line
         rts
 
 ; tgt_print_field - print a field's default then "]: ".
@@ -1104,6 +1122,8 @@ tgt_bad_msg:        .byte $0d, "INVALID TARGET", $0d, 0
 tgt_cap:            .byte 0
 tgt_len:            .byte 0
 tgt_prev:           .byte 0
+tgt_bad:            .byte 0     ; bit 7: this line had a refused key
+tgt_fail:           .byte 0     ; bit 7: the host field was refused
 
         .segment "CODE"
 .endif ; BACKEND_UCI
