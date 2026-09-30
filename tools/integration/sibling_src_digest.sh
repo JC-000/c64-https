@@ -29,12 +29,10 @@ sub="$1"; shift
 echo "submodule=$sub"
 echo "gitlink=$(git ls-files -s -- "$sub" 2>/dev/null | cut -d' ' -f2 || true)"
 echo "head=$(git -C "$sub" rev-parse HEAD 2>/dev/null || echo unknown)"
-# The toolchain the wrappers will run: the value as given (the Makefile
-# passes CA65/AR65 through) and what its first word resolves to on PATH.
-for var in CA65 AR65; do
-    val="${!var:-$(echo "$var" | tr 'A-Z' 'a-z')}"
-    echo "$var=$val -> $(command -v "${val%% *}" 2>/dev/null || echo unresolved)"
-done
+# The toolchain the wrappers will run, by content (toolchain_id.sh). The
+# Makefile computes it once per parse and passes it in TOOLCHAIN_ID.
+echo "toolchain=${TOOLCHAIN_ID:-$(bash tools/integration/toolchain_id.sh \
+    "CA65=${CA65:-ca65}" "AR65=${AR65:-ar65}" "LD65=${LD65:-ld65}")}"
 for w in "$@"; do
     echo "wrapper=$w $($SHA256 < "$w" 2>/dev/null | cut -d' ' -f1 || echo unknown)"
 done
