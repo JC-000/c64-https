@@ -805,7 +805,10 @@ $(FLAGS_STAMP):
 # then drives upstream's own make, which is mtime-based and keeps its
 # objects in libs/nistcurves/build (outside `make clean`), so it passes
 # `-B` there -- see build_nistcurves_p256.sh.
-SIBLING_DIGEST = bash tools/integration/sibling_src_digest.sh
+# CA65/AR65 ride in the environment so the digest records the toolchain the
+# wrappers will use: flags.stamp holds CA65 too, but it deletes only objects,
+# and a different assembler must rebuild these archives as well.
+SIBLING_DIGEST = CA65='$(CA65)' AR65='$(AR65)' bash tools/integration/sibling_src_digest.sh
 
 # $(1) stamp, $(2) submodule, $(3) wrapper scripts, $(4) files to delete
 define SIBLING_SRC_CHECK
