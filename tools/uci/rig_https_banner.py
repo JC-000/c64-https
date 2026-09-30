@@ -97,11 +97,20 @@ from http_body_checks import (  # noqa: E402
 )
 from ip65_hw_checks import check_shadow_ram_readable  # noqa: E402
 from _rig_lifecycle import guard_socket_teardown  # noqa: E402
+from _petscii_keys import push_keys, target_keys  # noqa: E402
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 PRG_PATH = Path(__file__).resolve().parents[2] / "build" / "c64-https.prg"
 LABELS_PATH = PRG_PATH.parent / "labels.txt"
-EXPECT_HOST = os.environ.get("HTTPS_HOST", "en.wikipedia.org").upper()
+#: #155 phase 2: on a build with the typed-target prompt, 'G' asks for a
+#: host and a path. TYPED_HOST / TYPED_PATH are typed there (unset = RETURN,
+#: which keeps the build-time target). A typed host is what the banner must
+#: then name, and what SNI, the Host header, the firmware DNS and the SAN
+#: check all use -- an HTTP 200 with a complete body is the proof of all four.
+TYPED_HOST = os.environ.get("TYPED_HOST", "")
+TYPED_PATH = os.environ.get("TYPED_PATH", "")
+EXPECT_HOST = (TYPED_HOST
+               or os.environ.get("HTTPS_HOST", "en.wikipedia.org")).upper()
 
 #: This rig runs no bus capture, so unlike `rig_https_local` it has no run
 #: directory of its own to put `device_state.json` in — it always creates
@@ -194,6 +203,21 @@ def main() -> int:
     bad_stall = stall_config_error(STALL_ABORT_S, STALL_GRACE_S)
     if bad_stall:
         print(f"[fatal] {bad_stall}", file=sys.stderr)
+        return 2
+    try:
+        label_addr("https_target_prompt")
+        prompt = True
+    except KeyError:
+        prompt = False
+    if (TYPED_HOST or TYPED_PATH) and not prompt:
+        print("[fatal] TYPED_HOST/TYPED_PATH set, but this PRG has no "
+              "https_target_prompt (not a UCI build with #155 phase 2)",
+              file=sys.stderr)
+        return 2
+    try:
+        typed = target_keys(f"{TYPED_HOST}\r{TYPED_PATH}\r") if prompt else []
+    except ValueError as exc:
+        print(f"[fatal] TYPED_HOST/TYPED_PATH: {exc}", file=sys.stderr)
         return 2
     prg = PRG_PATH.read_bytes()
     print(f"Loaded {len(prg)} B from {PRG_PATH}")
@@ -304,6 +328,10 @@ def main() -> int:
         print("Pressing 'G' (HTTPS GET) — reading the banner...")
         fetch_in_flight = True      # #234: from here a socket may be live
         client.send_text("G", finish_with_return=False)
+        if typed:
+            print(f"Typing host {TYPED_HOST or '(RETURN)'!r}, "
+                  f"path {TYPED_PATH or '(RETURN)'!r}")
+            push_keys(client, typed)
 
         # decode_screen() returns LOWERCASE letters — only screen_text()
         # uppercases, when it joins the rows. Comparing a raw row against

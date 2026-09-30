@@ -18,6 +18,10 @@
         ; never resolve, so a default build cannot dial anything real) and
         ; the default build byte-identical.
         .include "https_host.inc"
+        ; Longest host / path a build (the asserts on the strings below)
+        ; or an operator (https_target_prompt, UCI only) may give.
+        HTTPS_HOST_MAX = 63
+        HTTPS_PATH_MAX = 100
 .ifdef HTTPS_PIN_SPKI
         .import cert_pin_banner
 .endif
@@ -589,6 +593,19 @@ do_https_get:
         rts
 
 @net_ok:
+.ifdef BACKEND_UCI
+        ; #155 phase 2: the operator types the target (https_target_prompt,
+        ; below). It sets everything the ip65 arm sets inline, with the host
+        ; in tls_hostname, so SNI, the Host header, the firmware's DNS and
+        ; x509_verify_hostname all read the one typed, lowercased name.
+        jsr https_target_prompt
+        bcc @target_set
+        rts                     ; refused: reported, nothing dialled
+@target_set:
+        ; --- DNS resolve (UCI: stages the name for TCP_CONNECT) ---
+        lda #<tls_hostname
+        ldx #>tls_hostname
+.else
         ; Issue #128: print the ACTUAL target, not a hardcoded literal.
         ; This banner used to read "HTTPS GET WWW.FOO.BAR..." unconditionally,
         ; so a `make HTTPS_HOST=en.wikipedia.org` build announced the default
@@ -656,6 +673,7 @@ do_https_get:
         ; --- DNS resolve ---
         lda #<http_host_target
         ldx #>http_host_target
+.endif
         jsr net_dns_resolve
         bcc @dns_ok
 
@@ -819,6 +837,276 @@ ascii_chrout:
         jmp chrout
 @drop:
         rts
+
+.ifdef BACKEND_UCI
+; =============================================================================
+; https_target_prompt - ask for the host and path to fetch (#155 phase 2, UCI)
+;
+;   HOST [www.foo.invalid]: _
+;   PATH [/]: _
+;
+; RETURN on an empty field keeps the build-time HTTPS_HOST / HTTPS_PATH.
+;
+; Out: C=0  tls_hostname/_len = the host (typed ones lowercased),
+;           http_host_ptr/len -> tls_hostname, http_path_ptr/len,
+;           tls_reached_connected = 0, and the "HTTPS GET <host>..." banner
+;           printed. http_port is left alone: do_https_get dials HTTPS_PORT
+;           directly and only http_get reads http_port.
+;      C=1  the entry was refused and "INVALID TARGET" printed; nothing is
+;           dialled. tls_hostname_len is 0 on this exit, so a name check run
+;           against the leftovers could only fail.
+;
+; Refused — never truncated, never "fixed up":
+;   * a key that is not printable ASCII once translated (cursor keys,
+;     RUN/STOP, space, graphics), or one past the field's cap. The cap is
+;     the same 63 / 100 chars boot.s asserts for the build-time strings, so
+;     a typed target can never be longer than one that builds;
+;   * a host that is not [a-z0-9.-] with no empty label (leading, trailing
+;     or doubled '.'); x509_name.s's wildcard rule would let ".foo.org"
+;     match "*.foo.org", so the empty leftmost label is not cosmetic;
+;   * a path that does not start with '/'.
+;
+; Keys: unshifted letters are lowercase, shifted ones uppercase (the path is
+; case-sensitive, the host is folded either way), and '_' is the left-arrow
+; key or C=+@ (the glyph the default charset draws as an underscore).
+;
+; The typed path goes into http_resp_buf. Its only reader is http_build_get,
+; which runs before the first response byte is stored there
+; (http.s's body_append and http_body_finish's REU fetch-back are its only
+; writers, both in the receive path), and the next GET prompts again.
+;
+; Its own segment, TARGET_PROMPT_CODE, because the room is in a different
+; region per cfg: CRYPTO_OVERLAY under c64-https-uci.cfg, LOADER under the
+; comb cfg (see the cfg comments). The call site in do_https_get is smaller
+; than the inline block the ip65 arm keeps.
+; Clobbers: A, X, Y, zp_ptr.
+; =============================================================================
+        .segment "TARGET_PROMPT_CODE"
+https_target_prompt:
+        lda #0                  ; #204: a new attempt starts here, before
+        sta tls_reached_connected ;  any refusal, DNS or TCP failure
+
+        ; --- host ---
+        lda #<tgt_host_msg
+        ldy #>tgt_host_msg
+        jsr print_string
+        lda #<http_host_target
+        ldy #>http_host_target
+        jsr tgt_print_field
+        lda #<tls_hostname
+        ldy #>tls_hostname
+        ldx #HTTPS_HOST_MAX
+        jsr tgt_read_line
+        bcs @refused
+        ldy tgt_len
+        bne @host_check
+@host_default:                  ; RETURN alone: the build-time host
+        lda http_host_target,y
+        sta tls_hostname,y
+        beq @host_set
+        iny
+        bne @host_default       ; always (<= 63 chars, asserted)
+@host_check:
+        ; fold A-Z, require [a-z0-9.-], refuse an empty label. tgt_prev
+        ; starts as '.', so a leading '.' is the same test as "..".
+        ldy #0
+        lda #'.'
+        sta tgt_prev
+@hc_loop:
+        lda tls_hostname,y
+        beq @hc_end
+        cmp #'.'
+        bne @hc_not_dot
+        cmp tgt_prev
+        beq @refused            ; empty label
+        bne @hc_ok              ; always
+@hc_not_dot:
+        cmp #'-'
+        beq @hc_ok
+        cmp #'0'
+        bcc @refused
+        cmp #'9'+1
+        bcc @hc_ok
+        ora #$20                ; A-Z -> a-z; nothing else lands in a-z
+        cmp #'a'
+        bcc @refused
+        cmp #'z'+1
+        bcs @refused
+        sta tls_hostname,y
+@hc_ok:
+        sta tgt_prev
+        iny
+        bne @hc_loop            ; always
+@hc_end:
+        lda tgt_prev
+        cmp #'.'
+        beq @refused            ; trailing '.'
+@host_set:
+        sty tls_hostname_len
+        sty http_host_len
+        lda #<tls_hostname
+        sta http_host_ptr
+        lda #>tls_hostname      ; never 0: the flags make the bne a jump
+        sta http_host_ptr+1
+        bne @path
+
+        ; mid-routine so every branch to it reaches
+@refused:
+        lda #0
+        sta tls_hostname_len
+        lda #<tgt_bad_msg
+        ldy #>tgt_bad_msg
+        jsr print_string
+        sec
+        rts
+
+        ; --- path ---
+@path:
+        lda #<tgt_path_msg
+        ldy #>tgt_path_msg
+        jsr print_string
+        lda #<https_path_target
+        ldy #>https_path_target
+        jsr tgt_print_field
+        lda #<http_resp_buf
+        ldy #>http_resp_buf
+        ldx #HTTPS_PATH_MAX
+        jsr tgt_read_line
+        bcs @refused
+        ldy tgt_len
+        beq @path_default
+        lda http_resp_buf
+        cmp #'/'                ; origin-form request-target
+        bne @refused
+        lda #<http_resp_buf
+        ldx #>http_resp_buf     ; never 0: the flags make the bne a jump
+        bne @path_set
+@path_default:                  ; RETURN alone: the build-time path
+        lda #<https_path_target
+        ldx #>https_path_target
+        ldy #https_path_target_len
+@path_set:
+        sta http_path_ptr
+        stx http_path_ptr+1
+        sty http_path_len
+
+        ; --- banner: the name actually dialled (#128) ---
+        lda #<https_get_msg
+        ldy #>https_get_msg
+        jsr print_string
+        lda #<tls_hostname
+        ldy #>tls_hostname
+        jsr tgt_print_ascii
+        lda #<https_get_tail_msg
+        ldy #>https_get_tail_msg
+        jsr print_string
+        clc
+        rts
+
+; -----------------------------------------------------------------------------
+; tgt_read_line - minimal line editor for https_target_prompt.
+;   In : A/Y = buffer, X = cap (chars, excluding the NUL)
+;   Out: C=0 tgt_len = length, buffer NUL-terminated, RETURN echoed;
+;        C=1 a refused key (see the header above); the buffer is partial.
+;   Stored bytes are ASCII; the echo is the key as typed. GETIN clobbers
+;   X and Y, so the index lives in tgt_len.
+; -----------------------------------------------------------------------------
+tgt_read_line:
+        sta zp_ptr
+        sty zp_ptr+1
+        stx tgt_cap
+        lda #0
+        sta tgt_len
+@wait:
+        jsr getin
+        beq @wait
+        ldy tgt_len
+        cmp #$0d
+        beq @done
+        cmp #$14                ; DEL: erase the last character
+        bne @key
+        tya
+        beq @wait               ; nothing to erase
+        dec tgt_len
+        lda #$14
+        jsr chrout
+        jmp @wait
+@key:
+        cpy tgt_cap
+        bcs @refuse             ; one past the cap: refuse, never truncate
+        tax                     ; X = the key as typed, for the echo
+        cmp #$a4                ; C=+@, drawn as '_'
+        beq @underscore
+        cmp #$c1                ; shifted letters $C1-$DA -> A-Z
+        bcc @unshifted
+        cmp #$db
+        bcs @refuse
+        eor #$80
+        bne @store              ; always
+@unshifted:
+        cmp #$21                ; $21-$5F map to the same ASCII code
+        bcc @refuse             ;  ($5F, the left arrow, becomes '_')
+        cmp #$60
+        bcs @refuse
+        cmp #$41
+        bcc @store
+        cmp #$5b
+        bcs @store
+        ora #$20                ; unshifted letters $41-$5A -> a-z
+        bne @store              ; always
+@underscore:
+        lda #'_'
+@store:
+        sta (zp_ptr),y
+        inc tgt_len
+        txa
+        jsr chrout
+        jmp @wait
+@done:
+        lda #0
+        sta (zp_ptr),y
+        lda #$0d
+        jsr chrout
+        clc
+        rts
+@refuse:
+        sec
+        rts
+
+; tgt_print_field - print a field's default then "]: ".
+; tgt_print_ascii - print the NUL-terminated ASCII string at A/Y through
+; ascii_chrout (the build-time strings and tls_hostname are ASCII, #28).
+tgt_print_field:
+        jsr tgt_print_ascii
+        lda #<tgt_field_tail_msg
+        ldy #>tgt_field_tail_msg
+        jmp print_string
+tgt_print_ascii:
+        sta zp_ptr
+        sty zp_ptr+1
+        ldy #0
+@loop:
+        lda (zp_ptr),y
+        beq @end
+        jsr ascii_chrout        ; preserves Y
+        iny
+        bne @loop
+@end:
+        rts
+
+tgt_host_msg:       .byte "HOST [", 0
+tgt_path_msg:       .byte "PATH [", 0
+tgt_field_tail_msg: .byte "]: ", 0
+tgt_bad_msg:        .byte $0d, "INVALID TARGET", $0d, 0
+
+; Line-editor state. Stored in the segment, as x509_name.s does: the only
+; BSS home with room on uci-comb would be CRYPTO_OVERLAY anyway.
+tgt_cap:            .byte 0
+tgt_len:            .byte 0
+tgt_prev:           .byte 0
+
+        .segment "CODE"
+.endif ; BACKEND_UCI
 
 ; =============================================================================
 ; REU multiply table initialization (from c64-x25519 optimizations)
@@ -1351,7 +1639,7 @@ http_host_target:
 http_host_target_len = * - http_host_target - 1
         ; the SNI copy loop below guards at 63 chars; refuse at build
         ; time rather than truncating at runtime
-        .assert http_host_target_len <= 63, error, "HTTPS_HOST exceeds the 63-char SNI guard"
+        .assert http_host_target_len <= HTTPS_HOST_MAX, error, "HTTPS_HOST exceeds the 63-char SNI guard"
 
 http_path_root:
         .byte "/"
@@ -1363,7 +1651,7 @@ https_path_target:
         .byte HTTPS_PATH_STR
         .byte 0
 https_path_target_len = * - https_path_target - 1
-        .assert https_path_target_len <= 100, error, "HTTPS_PATH too long for the request builder"
+        .assert https_path_target_len <= HTTPS_PATH_MAX, error, "HTTPS_PATH too long for the request builder"
 
 .ifdef HTTPS_SNI_OVERRIDE
         ; `make HTTPS_SNI=<name>` — SNI presented instead of the connect

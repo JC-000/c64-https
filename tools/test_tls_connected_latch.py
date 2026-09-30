@@ -260,6 +260,11 @@ def run_https_get_dns_fail(transport, labels) -> dict:
                 "tls_connect tripwire")
         poke(transport, labels, "tls_state", 0x42)
         poke(transport, labels, "tls_reached_connected", TLS_STATE_CONNECTED)
+        if labels.address("https_target_prompt") is not None:
+            # UCI: 'G' asks for host and path first. Two RETURNs in the
+            # KERNAL buffer ($0277, count $C6) keep the build-time target.
+            write_bytes(transport, 0x0277, b"\x0d\x0d")
+            write_bytes(transport, 0x00C6, b"\x02")
         call(transport, p, labels["do_https_get"])
         return {
             "state": peek(transport, labels, "tls_state"),
