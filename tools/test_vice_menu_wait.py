@@ -61,6 +61,27 @@ def hardcoded_menu_waits():
     return bad
 
 
+def unvalidated_menu_waits():
+    """Files with a menu wait that never validate the override before VICE
+    starts (via default_vice_config or require_menu_wait_env): a bad value
+    there would surface as a traceback from inside a live session."""
+    bad = []
+    for path in _suites():
+        tree = ast.parse(path.read_text(), str(path))
+        calls = {getattr(n.func, "id", None) for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)}
+        if "menu_wait" in calls and path.name not in (
+                "_vice_helpers.py", Path(__file__).name) and not (
+                calls & {"default_vice_config", "require_menu_wait_env"}):
+            bad.append(path.name)
+    return bad
+
+
+def test_every_menu_wait_is_validated_before_launch():
+    bad = unvalidated_menu_waits()
+    assert not bad, f"menu_wait used without a pre-launch check: {bad}"
+
+
 def test_no_suite_hardcodes_its_menu_wait():
     bad = hardcoded_menu_waits()
     assert not bad, ("boot-menu waits not routed through "

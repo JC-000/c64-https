@@ -18,7 +18,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
-from _vice_helpers import menu_wait  # noqa: E402
+from _vice_helpers import menu_wait, require_menu_wait_env  # noqa: E402
 from _skip_policy import verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -756,6 +756,7 @@ def main():
     print(f"  Labels loaded: {len(required)} required labels verified")
 
     # Launch VICE
+    require_menu_wait_env()
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
     print("\n=== Starting VICE ===")
 

@@ -7,7 +7,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, goto, jsr, wait_for_text,
 )
-from _vice_helpers import menu_wait
+from _vice_helpers import menu_wait, require_menu_wait_env
 
 import subprocess
 subprocess.run(["make", "clean"], capture_output=True)
@@ -19,6 +19,7 @@ print("Build OK", flush=True)
 
 PRG = "build/c64-https.prg"
 LABELS = "build/labels.txt"
+require_menu_wait_env()
 config = ViceConfig(prg_path=PRG, warp=True, ntsc=True, sound=False)
 labels = Labels.from_file(LABELS)
 

@@ -27,7 +27,7 @@ from c64_test_harness import (
     wait_for_pc,
     wait_for_text,
 )
-from _vice_helpers import menu_wait  # noqa: E402
+from _vice_helpers import menu_wait, require_menu_wait_env  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -89,6 +89,7 @@ def main():
     results = []
 
     for n in range(1, 11):
+        require_menu_wait_env()
         config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
         with ViceInstanceManager(config=config) as mgr:
             inst = mgr.acquire()

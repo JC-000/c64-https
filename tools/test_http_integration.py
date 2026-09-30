@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 from _skip_policy import cannot_run, verdict  # noqa: E402
-from _vice_helpers import menu_wait  # noqa: E402
+from _vice_helpers import menu_wait, require_menu_wait_env  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -157,6 +157,7 @@ def main():
 
         # ---- 4. Launch VICE --------------------------------------------------
         print("\n=== Starting VICE ===")
+        require_menu_wait_env()
         config = ViceConfig(
             prg_path=PRG_PATH,
             warp=False,  # warp causes timing issues with ethernet

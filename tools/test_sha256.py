@@ -26,7 +26,7 @@ from c64_test_harness import (
     jsr,
     wait_for_text,
 )
-from _vice_helpers import menu_wait  # noqa: E402
+from _vice_helpers import menu_wait, require_menu_wait_env  # noqa: E402
 from _skip_policy import verdict  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -314,6 +314,7 @@ def main():
 
     # Start VICE
     print("\n=== Starting VICE ===")
+    require_menu_wait_env()
     config = ViceConfig(
         prg_path=PRG_PATH,
         warp=True,

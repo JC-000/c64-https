@@ -84,6 +84,7 @@ def default_vice_config(
     :param kwargs: forwarded to :class:`c64_test_harness.ViceConfig`.
     :returns: a configured ``ViceConfig`` instance.
     """
+    require_menu_wait_env()
     if no_reu_requested():
         print(
             f"[{NO_REU_ENV}] VICE launching WITHOUT -reu — valid only for "
@@ -133,11 +134,16 @@ def menu_wait(default: float, env: dict | None = None) -> float:
     return next(iter(vals.values()), float(default))
 
 
-# Validate once, at import: every suite imports this module before it launches
-# VICE, so a bad override stops the run with a FATAL line instead of a
-# traceback from inside a live VICE session.
-try:
-    menu_wait(1)
-except ValueError as _exc:
-    print(f"FATAL: {_exc}", file=sys.stderr)
-    raise SystemExit(2) from None
+
+def require_menu_wait_env() -> None:
+    """Refuse a bad menu-wait override before VICE starts: FATAL, exit 2.
+
+    Called by :func:`default_vice_config` and, in suites that build their own
+    ``ViceConfig``, just before it. Not at import, so pytest collection of the
+    pure-logic modules is unaffected by the environment.
+    """
+    try:
+        menu_wait(1)
+    except ValueError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(2) from None

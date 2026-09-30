@@ -18,7 +18,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
-from _vice_helpers import menu_wait  # noqa: E402
+from _vice_helpers import menu_wait, require_menu_wait_env  # noqa: E402
 
 PRG_PATH = os.path.join("build", "c64-https.prg")
 LABELS_PATH = os.path.join("build", "labels.txt")
@@ -307,6 +307,7 @@ def main():
             "tls_deframe_pump absent -- not a TLS_STREAM_DEFRAME build "
             "(rerun with BACKEND=uci)"))
 
+    require_menu_wait_env()
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
                         extra_args=["-reu", "-reusize", "512"])
     num_instances = min(workers, len(suites))
