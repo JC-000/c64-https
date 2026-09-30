@@ -61,6 +61,11 @@
 .export uci_drain_resp
 .export uci_drain_status
 .export uci_ack
+; For src/net/uci/uci_dos.s (TRUST_STORE=1): the multi-part DOS read waits
+; for the next part after its accept, and settles per byte like net_poll.
+; Exports emit no bytes; a build without the store is unchanged.
+.export uci_wait_reply
+.export uci_settle
 
 .export uci_resp_dst
 .export uci_resp_max

@@ -224,6 +224,30 @@ CRYPTO_SHARED_SRCS := $(wildcard src/crypto/shared/*.s)
 IP65_SRCS   := src/net/ip65/ip65_blob.s src/net/ip65/net.s src/net/ip65/net_banner.s src/net/ip65/exports.s src/net/ip65/net_manifest.s
 UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s src/net/uci/net_manifest.s
 
+# Issue #155 phase 2: the TOFU trust store's on-disk I/O (UCI DOS target,
+# src/net/uci/trust_store.s + uci_dos.s). TRUST_STORE=1 links it; unset, the
+# build is byte-identical to one that has never heard of it. UCI-only: ip65
+# has no DOS target. TRUST_STORE_DIR is where TRUST.A / TRUST.B live, on
+# persistent media (never /Temp, a RAM disk). The path reaches ca65 through
+# build/https_host.inc, like the other build-time strings.
+TRUST_STORE ?=
+TRUST_STORE_DIR ?= /USB1
+TRUST_STORE_SRCS := src/net/uci/uci_dos.s src/net/uci/trust_store.s
+TRUST_STORE_PATH :=
+ifeq ($(TRUST_STORE),1)
+ifneq ($(BACKEND),uci)
+$(error TRUST_STORE=1 is UCI-only: the store lives on the Ultimate's DOS target, which ip65 builds cannot reach)
+endif
+ifeq ($(shell printf '%s' '$(TRUST_STORE_DIR)' | grep -Eqx '(/[A-Za-z0-9_.-]+)+' && echo ok),)
+$(error TRUST_STORE_DIR must be an absolute path of [A-Za-z0-9_.-] components, e.g. /USB1 (got '$(TRUST_STORE_DIR)'))
+endif
+TRUST_STORE_PATH := $(TRUST_STORE_DIR)/TRUST.
+CA65FLAGS += -D TRUST_STORE=1
+UCI_SRCS += $(TRUST_STORE_SRCS)
+else ifneq ($(filter-out 0,$(TRUST_STORE)),)
+$(error TRUST_STORE must be 1 (link the trust store) or 0/unset)
+endif
+
 # Sibling-lib archive set. Phase C.3's nistcurves-p384 archive remains an
 # external overlay image (see below), not linked into the main PRG.
 # Phase C.4 adds nistcurves-p256.a which IS linked in, always-resident,
@@ -794,8 +818,9 @@ $(FLAGS_STAMP):
 # nothing here can be defeated by two files sharing a second.
 # The pin line is emitted only when a pin is set, so an unpinned build's
 # header is unchanged byte for byte.
-HTTPS_TARGET_INC_BODY := printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n.define HTTPS_SNI_STR "%s"\n$(if $(HTTPS_PIN_BYTES),.define HTTPS_PIN_SPKI_BYTES %s\n)' \
-                    '$(HTTPS_HOST)' '$(HTTPS_PATH)' '$(HTTPS_SNI)' $(if $(HTTPS_PIN_BYTES),'$(HTTPS_PIN_BYTES)')
+# Likewise the trust-store path line, emitted only under TRUST_STORE=1.
+HTTPS_TARGET_INC_BODY := printf '.define HTTPS_HOST_STR "%s"\n.define HTTPS_PATH_STR "%s"\n.define HTTPS_SNI_STR "%s"\n$(if $(HTTPS_PIN_BYTES),.define HTTPS_PIN_SPKI_BYTES %s\n)$(if $(TRUST_STORE_PATH),.define TRUST_STORE_PATH_STR "%s"\n)' \
+                    '$(HTTPS_HOST)' '$(HTTPS_PATH)' '$(HTTPS_SNI)' $(if $(HTTPS_PIN_BYTES),'$(HTTPS_PIN_BYTES)') $(if $(TRUST_STORE_PATH),'$(TRUST_STORE_PATH)')
 
 ifeq ($(STAMP_SKIP),)
 ifeq ($(MAKE_DRY_RUN),)
@@ -805,13 +830,13 @@ _ := $(shell mkdir -p build; \
                  rm -f build/https_host.inc.tmp; \
              else \
                  mv build/https_host.inc.tmp build/https_host.inc; \
-                 rm -f build/boot.o build/http.o build/cert_pin.o $(LINK_OUTPUTS); \
+                 rm -f build/boot.o build/http.o build/cert_pin.o build/net/uci/trust_store.o $(LINK_OUTPUTS); \
              fi)
 else
 # -n / -q / -t: compare and report, mutate nothing. See MAKE_DRY_RUN above.
 ifneq ($(shell $(HTTPS_TARGET_INC_BODY) 2>/dev/null | cmp -s - build/https_host.inc >/dev/null 2>&1 || echo differs),)
 $(warning DRY RUN (-$(MAKE_OPT_LETTERS)): target strings differ from build/https_host.inc.)
-$(warning   A real build would delete build/boot.o, build/http.o, build/cert_pin.o and $(LINK_OUTPUTS) at parse)
+$(warning   A real build would delete build/boot.o, build/http.o, build/cert_pin.o, build/net/uci/trust_store.o and $(LINK_OUTPUTS) at parse)
 $(warning   time. NOTHING was deleted; the tree is untouched.)
 endif
 endif
@@ -828,6 +853,7 @@ endif
 # that the two objects that KNOW about the target strings invalidate as a
 # pair, whichever of them grows a direct dependency next.
 build/boot.o build/http.o build/cert_pin.o: build/https_host.inc
+build/net/uci/trust_store.o: build/https_host.inc
 
 # Phase C.3: c64-nist-curves sibling archive (libs/nistcurves/ submodule).
 # Phase 1.5 split: produces TWO archives, one per overlay half. The
