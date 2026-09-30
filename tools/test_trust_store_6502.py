@@ -116,9 +116,9 @@ class Reset(Exception):
 class Dos:
     """The Ultimate's DOS target 1 over the command-interface registers."""
 
-    def __init__(self, files=None, dirs=(DIR,)):
+    def __init__(self, files=None, dirs=None):
         self.files = dict(files or {})      # path -> bytes (durable)
-        self.dirs = set(dirs)
+        self.dirs = set((DIR,) if dirs is None else dirs)
         self.state = ST_IDLE
         self.new_command = False
         self.error_busy = False
@@ -756,6 +756,12 @@ def main() -> int:
     if "trust_store_load" not in env.labels:
         return cannot_run("build/ is not a TRUST_STORE=1 image", executed=0,
                           total=len(CASES), certifies=CERTIFIES)
+    global DIR, A, B
+    lo, hi = env.labels["ts_name"], env.labels["ts_letter"]
+    prefix = env.image[lo - env.load_addr:hi - env.load_addr].decode("ascii")
+    DIR = prefix.rsplit("/", 1)[0]
+    A, B = prefix + "A", prefix + "B"
+    print(f"store path {prefix}A / B")
     print(f"PRG sha256 {hashlib.sha256(PRG.read_bytes()).hexdigest()}")
     for case in CASES:
         before = len(FAILED)

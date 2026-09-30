@@ -38,7 +38,10 @@
 ; which load fills before the ring is reused.
 ;
 ; Both also use the transcript hash state (tls_transcript_*) for SHA-256,
-; which is equally dead outside a handshake, and zp_ptr/zp_count.
+; which is equally dead outside a handshake, and zp_ptr/zp_count. That
+; state and net_tcp_state live under the BASIC ROM: call with $01 = $36,
+; as the program always runs (a rig calling in from BASIC must bank).
+; ts_reason is meaningful only after C=1; a success leaves it stale.
 
 .include "constants.inc"        ; zp_ptr, zp_count, tcp_recv_buf, TCP_RECV_MASK
 .include "net_states.inc"

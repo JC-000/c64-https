@@ -172,11 +172,14 @@ class Ftp:
             return fn(f)
 
     def listdir(self):
+        """None if TEST_DIR does not exist. NLST alone cannot say: on the
+        Ultimate's server it answers [] for a missing directory; CWD fails."""
         def go(f):
             try:
-                return sorted(n.rsplit("/", 1)[-1] for n in f.nlst(TEST_DIR))
+                f.cwd(TEST_DIR)
             except error_perm:
                 return None
+            return sorted(n.rsplit("/", 1)[-1] for n in f.nlst(TEST_DIR))
         return self._do(go)
 
     def get(self, path):
@@ -216,6 +219,12 @@ class Rig:
         self.failed = []
         self.notes = {}
         self.ftp = Ftp()
+
+    def require(self, cond, what):
+        """A check every later phase depends on: stop the run if it fails."""
+        self.check(cond, what)
+        if not cond:
+            raise RuntimeError(f"stopping: {what} failed")
 
     def check(self, cond, what):
         if cond:
@@ -308,15 +317,15 @@ def run_phases(r: Rig):
     ftp = r.ftp
     print("\n[1] load, empty directory")
     c, a, st = r.load("github.com")
-    r.check(c == 0 and a == ts.ST_EMPTY and st["slot_st"] == (1, 1), "EMPTY, C=0")
+    r.require(c == 0 and a == ts.ST_EMPTY and st["slot_st"] == (1, 1), "EMPTY, C=0")
 
     print("\n[2] save github.com")
     fa, fb = r.files()
     want = ts.save(fa, fb, "github.com", rec("github.com"))
     c, st = r.save("github.com", rec("github.com"))
     fa, fb = r.files()
-    r.check(c == 0 and (st["state"], st["slot"], st["gen"]) == (ts.ST_VALID, 0, 1),
-            "saved: VALID, slot A, generation 1")
+    r.require(c == 0 and (st["state"], st["slot"], st["gen"]) == (ts.ST_VALID, 0, 1),
+              "saved: VALID, slot A, generation 1")
     r.check(fa == want[1] and fb is None, "TRUST.A on the stick == the mirror; no TRUST.B")
 
     print("\n[3] load GitHub.COM")
@@ -534,7 +543,11 @@ def main() -> int:
         except PrgLoadError as exc:
             print(f"[fatal] {exc}", file=sys.stderr)
             return 4
-        run_phases(rig)
+        try:
+            run_phases(rig)
+        except RuntimeError as exc:
+            rig.failed.append(str(exc))
+            print(f"\n{exc}")
     finally:
         if rig is not None:
             summary = {"prg_sha256": sha, "turbo_mhz": TURBO_MHZ, "host": HOST,
