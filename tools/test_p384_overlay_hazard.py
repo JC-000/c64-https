@@ -30,7 +30,7 @@ from c64_test_harness import (
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _vice_helpers import default_vice_config  # noqa: E402
+from _vice_helpers import default_vice_config, menu_wait  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -107,7 +107,7 @@ def main() -> int:
         inst = mgr.acquire()
         t = inst.transport
         print(f"  VICE PID={inst.pid} port={inst.port}")
-        if wait_for_text(t, "Q=QUIT", timeout=float(os.environ.get("C64_INIT_TIMEOUT", "90")),
+        if wait_for_text(t, "Q=QUIT", timeout=menu_wait(90),
                          verbose=False) is None:
             print("FATAL: menu never appeared", file=sys.stderr)
             return 2

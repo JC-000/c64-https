@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 from _skip_policy import cannot_run, verdict  # noqa: E402
+from _vice_helpers import menu_wait  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -174,7 +175,7 @@ def main():
 
         # ---- 5. Wait for boot menu ------------------------------------------
         print("\n=== Waiting for boot menu ===")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait(60), verbose=False)
         if grid is None:
             print("  FATAL: Program menu did not appear")
             failed += 1

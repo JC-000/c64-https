@@ -67,7 +67,7 @@ from c64_test_harness import (
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _vice_helpers import default_vice_config  # noqa: E402
+from _vice_helpers import default_vice_config, menu_wait  # noqa: E402
 from _skip_policy import verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -201,7 +201,7 @@ def boot(mgr) -> object:
     inst = mgr.acquire()
     # Comb boots run ec_precompute_256 first: minutes of VICE time.
     grid = wait_for_text(inst.transport, "Q=QUIT",
-                         timeout=float(os.environ.get("C64_INIT_TIMEOUT", "180")),
+                         timeout=menu_wait(180),
                          verbose=False)
     if grid is None:
         mgr.release(inst)

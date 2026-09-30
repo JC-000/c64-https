@@ -97,3 +97,36 @@ def default_vice_config(
     if extra_args:
         base_args = base_args + list(extra_args)
     return ViceConfig(extra_args=base_args, **kwargs)
+
+
+#: Main-menu wait override, in seconds. The name the rigs and CLAUDE.md use.
+INIT_WAIT_ENV = "C64_INIT_WAIT"
+#: Older spelling several suites read; accepted as an alias.
+INIT_WAIT_ALIAS_ENV = "C64_INIT_TIMEOUT"
+
+
+def menu_wait(default: float, env: dict | None = None) -> float:
+    """Seconds to wait for the boot menu ("Q=QUIT") before calling it dead.
+
+    A comb image runs the Lim-Lee boot precompute before the menu, which
+    outlasts every suite's built-in default under VICE; one variable has to
+    raise all of them. ``C64_INIT_WAIT`` wins, ``C64_INIT_TIMEOUT`` is an
+    alias, ``default`` is the suite's own figure. A malformed value, or the
+    two set to different values, raises instead of being ignored — an
+    ignored override fails for the old reason and reads like a regression.
+    """
+    src = os.environ if env is None else env
+    raw = {k: src.get(k) for k in (INIT_WAIT_ENV, INIT_WAIT_ALIAS_ENV)
+           if src.get(k) not in (None, "")}
+    vals = {}
+    for k, v in raw.items():
+        try:
+            vals[k] = float(v)
+        except ValueError:
+            raise ValueError(f"{k}={v!r} is not a number of seconds") from None
+        if vals[k] <= 0:
+            raise ValueError(f"{k}={v!r} must be positive")
+    if len(set(vals.values())) > 1:
+        raise ValueError(f"{INIT_WAIT_ENV} and {INIT_WAIT_ALIAS_ENV} disagree "
+                         f"({raw}); set one")
+    return next(iter(vals.values()), float(default))

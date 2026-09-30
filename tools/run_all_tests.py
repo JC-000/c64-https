@@ -18,6 +18,7 @@ from c64_test_harness import (
     Labels, ViceConfig, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
+from _vice_helpers import menu_wait  # noqa: E402
 
 PRG_PATH = os.path.join("build", "c64-https.prg")
 LABELS_PATH = os.path.join("build", "labels.txt")
@@ -317,7 +318,7 @@ def main():
         """Acquire a fresh VICE instance, run one suite, release."""
         inst = mgr.acquire()
         try:
-            grid = wait_for_text(inst.transport, "Q=QUIT", timeout=120.0,
+            grid = wait_for_text(inst.transport, "Q=QUIT", timeout=menu_wait(120),
                                  verbose=False)
             if grid is None:
                 return suite_name, 0, 1, 0.0

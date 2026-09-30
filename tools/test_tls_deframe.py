@@ -63,7 +63,7 @@ from c64_test_harness import (
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _vice_helpers import default_vice_config  # noqa: E402
+from _vice_helpers import default_vice_config, menu_wait  # noqa: E402
 from _skip_policy import verdict  # noqa: E402
 
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -659,7 +659,7 @@ def main() -> int:
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=180.0, verbose=False)
+        grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait(180), verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             mgr.release(inst)

@@ -23,6 +23,7 @@ LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from net_test_env import NetworkTestEnv, skip_if_no_network
 from _skip_policy import cannot_run, verdict  # noqa: E402
+from _vice_helpers import menu_wait  # noqa: E402
 
 # ip65_dns_ip_addr: 4 bytes storing the resolved IP address
 IP65_DNS_IP_ADDR = 0x4073
@@ -184,7 +185,7 @@ def main():
 
             # ---- 3. Wait for boot menu ------------------------------------------
             print("\n=== Waiting for boot menu ===")
-            grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+            grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait(60), verbose=False)
             if grid is None:
                 print("  FATAL: Program menu did not appear")
                 failed += 1

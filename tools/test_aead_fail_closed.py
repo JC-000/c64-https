@@ -102,7 +102,7 @@ from c64_test_harness import (
     Labels, ViceInstanceManager,
     read_bytes, write_bytes, jsr, wait_for_text,
 )
-from _vice_helpers import default_vice_config
+from _vice_helpers import default_vice_config, menu_wait
 from _skip_policy import cannot_run, verdict
 
 try:
@@ -994,10 +994,9 @@ def main() -> int:
         print(f"  {name:<24} = ${labels[name]:04X}")
 
     try:
-        menu_wait = float(os.environ.get("C64_INIT_WAIT", "120"))
-    except ValueError:
-        print(f"FATAL: C64_INIT_WAIT={os.environ['C64_INIT_WAIT']!r} is not "
-              f"a number of seconds")
+        menu_wait_s = menu_wait(120)
+    except ValueError as exc:
+        print(f"FATAL: {exc}")
         return 1
 
     print("\n=== Starting VICE ===")
@@ -1007,10 +1006,10 @@ def main() -> int:
         inst = mgr.acquire()
         transport = inst.transport
         print(f"  VICE PID={inst.pid}, port={inst.port}")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait,
+        grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait_s,
                              verbose=False)
         if grid is None:
-            print(f"FATAL: Main menu did not appear within {menu_wait:.0f} s "
+            print(f"FATAL: Main menu did not appear within {menu_wait_s:.0f} s "
                   f"(a comb image's boot precompute needs ~135 s in VICE: "
                   f"set C64_INIT_WAIT)")
             mgr.release(inst)
