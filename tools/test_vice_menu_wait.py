@@ -22,7 +22,9 @@ from _vice_helpers import menu_wait  # noqa: E402
 
 
 def _suites():
-    return sorted(TOOLS.glob("test_*.py")) + [TOOLS / "run_all_tests.py"]
+    """Every tools/ script, not only the test_*.py suites: benches and
+    diagnostics launch VICE and wait for the menu too."""
+    return sorted(TOOLS.rglob("*.py"))
 
 
 def _is_menu_wait(node, assigned):
@@ -32,11 +34,15 @@ def _is_menu_wait(node, assigned):
 
 
 def hardcoded_menu_waits():
-    """(file:line) of every wait_for_text(..., "Q=QUIT", ...) whose
+    """(file:line) of every wait_for_text(..., "Q=QUIT", ...) in tools/ whose
     timeout is not menu_wait(...) or a name bound from it."""
     bad = []
     for path in _suites():
         tree = ast.parse(path.read_text(), str(path))
+        # module-level constants holding the menu needle count as the literal
+        needles = {t.id for n in tree.body if isinstance(n, ast.Assign)
+                   and isinstance(n.value, ast.Constant) and n.value.value == "Q=QUIT"
+                   for t in n.targets if isinstance(t, ast.Name)}
         assigned = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
                     and isinstance(n.value, ast.Call)
                     and getattr(n.value.func, "id", None) == "menu_wait"
@@ -44,7 +50,8 @@ def hardcoded_menu_waits():
         for n in ast.walk(tree):
             if not (isinstance(n, ast.Call)
                     and getattr(n.func, "id", None) == "wait_for_text"
-                    and any(isinstance(a, ast.Constant) and a.value == "Q=QUIT"
+                    and any((isinstance(a, ast.Constant) and a.value == "Q=QUIT")
+                            or (isinstance(a, ast.Name) and a.id in needles)
                             for a in n.args)):
                 continue
             timeout = next((k.value for k in n.keywords if k.arg == "timeout"),
@@ -84,6 +91,8 @@ def test_bad_values_are_refused_not_ignored():
     assert _raises({"C64_INIT_WAIT": "ten minutes"})
     assert _raises({"C64_INIT_TIMEOUT": "0"})
     assert _raises({"C64_INIT_WAIT": "-5"})
+    assert _raises({"C64_INIT_WAIT": "nan"})
+    assert _raises({"C64_INIT_TIMEOUT": "inf"})
     assert _raises({"C64_INIT_WAIT": "600", "C64_INIT_TIMEOUT": "900"})
 
 

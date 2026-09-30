@@ -22,6 +22,7 @@ script. It is deliberately opt-in and noisy: a no-REU run of a
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -124,9 +125,19 @@ def menu_wait(default: float, env: dict | None = None) -> float:
             vals[k] = float(v)
         except ValueError:
             raise ValueError(f"{k}={v!r} is not a number of seconds") from None
-        if vals[k] <= 0:
-            raise ValueError(f"{k}={v!r} must be positive")
+        if not math.isfinite(vals[k]) or vals[k] <= 0:
+            raise ValueError(f"{k}={v!r} must be a positive, finite number of seconds")
     if len(set(vals.values())) > 1:
         raise ValueError(f"{INIT_WAIT_ENV} and {INIT_WAIT_ALIAS_ENV} disagree "
                          f"({raw}); set one")
     return next(iter(vals.values()), float(default))
+
+
+# Validate once, at import: every suite imports this module before it launches
+# VICE, so a bad override stops the run with a FATAL line instead of a
+# traceback from inside a live VICE session.
+try:
+    menu_wait(1)
+except ValueError as _exc:
+    print(f"FATAL: {_exc}", file=sys.stderr)
+    raise SystemExit(2) from None
