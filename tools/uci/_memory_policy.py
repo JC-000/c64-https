@@ -563,6 +563,9 @@ LOW_RAM_HARNESS_WRITERS_UNUSED = frozenset({
     "sid_player.play_sid_vice",
     "backends.ultimate64_probe.probe_u64",
     "backends.ultimate64_probe.liveness_probe",
+    # c64-test-harness #516 ($03C0-$03C2, REU capture staging); no rig
+    # captures REU contents.
+    "snapshot.extract_reu_contents",
 })
 
 
