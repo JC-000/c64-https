@@ -12,26 +12,31 @@
 
 .include "constants.inc"
 
-.export add32
 .export add32_to_dst
-.export xor32
 .export xor32_in_place
 .export rotr32_16
-.export rotr32_8
-.export rotr32_12
-.export rotr32_4
-.export rotr32_7
-.export rotl32_1
 .export rotl32_8
 .export rotl32_4
 .export rotl32_12
 .export rotr32_1
 .export rotl32_7
+; #155 phase 2 reclaim: no build calls these (chacha20.s uses only the set
+; above), so they assemble only under KEEP_WORD32_ALL=1.
+.ifdef KEEP_WORD32_ALL
+.export add32
+.export xor32
+.export rotr32_8
+.export rotr32_12
+.export rotr32_4
+.export rotr32_7
+.export rotl32_1
 .export copy32
 .export zero32
+.endif
 
 .segment "CRYPTO_CODE"
 
+.ifdef KEEP_WORD32_ALL                  ; reclaimed: no caller in any build
 ; =============================================================================
 ; add32 - 32-bit addition: (w32_dst) = (w32_src1) + (w32_src2)
 ; Preserves: X
@@ -56,6 +61,7 @@ add32:
         adc (w32_src2),y
         sta (w32_dst),y
         rts
+.endif
 
 ; =============================================================================
 ; add32_to_dst - 32-bit add-in-place: (w32_dst) += (w32_src1)
@@ -82,6 +88,7 @@ add32_to_dst:
         sta (w32_dst),y
         rts
 
+.ifdef KEEP_WORD32_ALL                  ; reclaimed: no caller in any build
 ; =============================================================================
 ; xor32 - 32-bit XOR: (w32_dst) = (w32_src1) ^ (w32_src2)
 ; Preserves: X
@@ -105,6 +112,7 @@ xor32:
         eor (w32_src2),y
         sta (w32_dst),y
         rts
+.endif
 
 ; =============================================================================
 ; xor32_in_place - 32-bit XOR in place: (w32_dst) ^= (w32_src1)
@@ -160,6 +168,7 @@ rotr32_16:
         sta (w32_dst),y        ; pos3 = b1
         rts
 
+.ifdef KEEP_WORD32_ALL                  ; reclaimed: no caller in any build
 ; =============================================================================
 ; rotr32_8 - Rotate right 32 bits by 8 (byte rotate right)
 ; Little-endian: [b0 b1 b2 b3] >>> 8 = [b1 b2 b3 b0]
@@ -321,6 +330,7 @@ rotl32_1:
         sta (w32_dst),y
 :
         rts
+.endif
 
 ; =============================================================================
 ; rotl32_8 - Rotate left 32 bits by 8 (byte rotate left)
@@ -491,6 +501,7 @@ rotl32_7:
         jsr rotl32_8
         jmp rotr32_1           ; tail call
 
+.ifdef KEEP_WORD32_ALL                  ; reclaimed: no caller in any build
 ; =============================================================================
 ; copy32 - Copy 4 bytes: (w32_dst) = (w32_src1)
 ; Preserves: X
@@ -527,3 +538,4 @@ zero32:
         iny
         sta (w32_dst),y
         rts
+.endif

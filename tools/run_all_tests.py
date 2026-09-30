@@ -93,7 +93,11 @@ UNDISPATCHED_SUITES = {
 def build():
     print("=== Building ===")
     subprocess.run(["make", "clean"], capture_output=True)
-    result = subprocess.run(["make"], capture_output=True, text=True)
+    # KEEP_X509_PARSE_CERT=1: the "x509" suite drives x509_parse_cert, which
+    # shipped builds reclaim (#155 phase 2). With it the image is the
+    # pre-reclaim one plus nothing else; every other suite is unaffected.
+    result = subprocess.run(["make", "KEEP_X509_PARSE_CERT=1"],
+                            capture_output=True, text=True)
     if result.returncode != 0:
         print(f"  Build FAILED:\n{result.stderr}")
         sys.exit(1)

@@ -807,7 +807,10 @@ def main():
     else:
         print("\n=== Building ===")
         subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
-        result = subprocess.run(["make"], capture_output=True, text=True,
+        # x509_parse_cert is reclaimed out of shipped builds (#155 phase 2);
+        # this suite is its only caller, so it re-arms it.
+        result = subprocess.run(["make", "KEEP_X509_PARSE_CERT=1"],
+                                capture_output=True, text=True,
                                 cwd=PROJECT_ROOT)
         if result.returncode != 0:
             print(f"Build failed:\n{result.stderr}")
@@ -851,6 +854,8 @@ def main():
         print("      this suite depends on (e.g. a libs/nistcurves bump renamed")
         print("      an export). Skipping the group would report success while")
         print("      testing nothing, so this is a failure.")
+        print("      (Under C64_SKIP_BUILD, the DER group needs a build made")
+        print("      with KEEP_X509_PARSE_CERT=1; shipped builds omit it.)")
         print(f"{'='*60}")
         sys.exit(1)
 

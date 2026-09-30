@@ -120,6 +120,11 @@
 ;     freely while sha384_init/update/final is in flight.
 ; =============================================================================
 
+; #155 phase 2 reclaim: nothing in a shipped image imports this file, so it
+; assembles to an empty object unless a P-384/overlay lane that calls it is
+; on, or KEEP_CRYPTO_SWAP=1 re-arms it (tools/test_p384_symbols.py does).
+.if .defined(KEEP_CRYPTO_SWAP) .or .defined(ENABLE_P384_VERIFY) .or .defined(USE_OVERLAY_P384_EMBED) .or .defined(USE_OVERLAY_P256_EMBED)
+
         .include "constants.inc"        ; reu_* register equates
         .include "reu_layout.inc"
         .include "overlay_ids.inc"      ; OV_* constants (W3)
@@ -426,3 +431,5 @@ do_swap:
 ; -----------------------------------------------------------------------------
 .segment "BSS"
 current_overlay: .res 1
+
+.endif ; KEEP_CRYPTO_SWAP / P-384 / overlay embed

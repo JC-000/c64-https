@@ -19,6 +19,15 @@
 .export der_read_length
 .export der_skip
 .export der_skip_tlv
+.export der_len
+.export cert_buf
+.export cert_buf_len
+
+; #155 phase 2 reclaim: x509_parse_cert is off the live path (the TLS
+; Certificate consumer is x509_extract_pubkey in tls_cert.s), so it, its
+; OID table and its result BSS assemble only under KEEP_X509_PARSE_CERT=1
+; (tools/test_x509.py builds with it).
+.ifdef KEEP_X509_PARSE_CERT
 .export der_match_oid
 .export x509_parse_cert
 
@@ -30,7 +39,6 @@
 .export oid_sha384_ecdsa
 
 ; --- Public exports: BSS data ---
-.export der_len
 .export cert_tbs_ptr
 .export cert_tbs_len
 .export cert_pubkey
@@ -39,8 +47,7 @@
 .export cert_sig_s
 .export cert_sig_len
 .export cert_curve_id
-.export cert_buf
-.export cert_buf_len
+.endif ; KEEP_X509_PARSE_CERT
 
 ; =============================================================================
 .segment "CODE"
@@ -151,6 +158,7 @@ der_skip_tlv:
         jsr der_read_length
         jmp der_skip            ; tail call
 
+.ifdef KEEP_X509_PARSE_CERT
 ; =============================================================================
 ; der_match_oid - Compare bytes at (zp_ptr) against a known OID
 ; Input: A/X = pointer to expected OID bytes (lo/hi), Y = OID length
@@ -560,12 +568,17 @@ oid_sha256_ecdsa:                       ; 1.2.840.10045.4.3.2 (ecdsa-with-SHA256
         .byte $2a,$86,$48,$ce,$3d,$04,$03,$02
 oid_sha384_ecdsa:                       ; 1.2.840.10045.4.3.3 (ecdsa-with-SHA384)
         .byte $2a,$86,$48,$ce,$3d,$04,$03,$03
+.endif ; KEEP_X509_PARSE_CERT
 
 ; =============================================================================
 .segment "BSS"
 ; =============================================================================
 
 der_len:           .res 2               ; last parsed length (16-bit LE)
+; ip65 keeps these 199 B even when the parser is out: its TABLES_BSS is not
+; start-pinned, so shrinking BSS would move sqtab off $BC00 (post-link
+; assert). Unexported there, so nothing can come to depend on them.
+.if .defined(KEEP_X509_PARSE_CERT) .or .defined(BACKEND_IP65)
 cert_tbs_ptr:      .res 2               ; pointer to TBS bytes in cert_buf
 cert_tbs_len:      .res 2               ; length of TBS (tag + length + value)
 cert_pubkey:       .res 96              ; public key Qx||Qy (max 48+48 for P-384)
@@ -574,6 +587,7 @@ cert_sig_r:        .res 48              ; signature r component (max 48 for P-38
 cert_sig_s:        .res 48              ; signature s component (max 48 for P-384)
 cert_sig_len:      .res 1               ; 32 (P-256) or 48 (P-384)
 cert_curve_id:     .res 1               ; 0=P-256, 1=P-384
+.endif
 ; ip65 refit: cert_buf gets its own segment (was BSS_TAIL alongside
 ; src/data.s::tls_rec_buf) so the ip65 cfg can pin it at $A000 and
 ; time-share the RAM with LIB_NISTCURVES_P256_BSS (verify-time scratch).
