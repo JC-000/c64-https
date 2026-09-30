@@ -488,7 +488,10 @@ def case_save_roundtrip(env):
     want = ts.save(None, None, "github.com", rec("anything", SPKI_1))
     check((0, dos.files.get(A)) == want, "save into EMPTY: TRUST.A != mirror")
     check(B not in dos.files, "save into EMPTY touched TRUST.B")
-    check(m.state[:4] == (ts.ST_VALID, 0, 0, 1), f"after save: {m.state}")
+    check(m.state[0] == ts.ST_NONE and m.r8("ts_found") == 0 and m.lookup() is None,
+          f"after save the loaded state must be cleared: {m.state}")
+    m.load("github.com")
+    check(m.state[:4] == (ts.ST_VALID, 0, 0, 1), f"reload after save: {m.state}")
     check(dos.handle is None and not dos.leaked, "save left a handle open")
     # the read-back: after the last write+close the file was opened again for read
     ops = [x[0] for x in dos.log]

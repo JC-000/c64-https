@@ -305,6 +305,14 @@ class Rig:
               f"({took:.2f} s incl. SYS)")
         return c, st
 
+    def saved(self, host, rec, slot, gen):
+        """Save, then reload: a successful save leaves ts_state NONE."""
+        c, st = self.save(host, rec)
+        cleared = st["state"] == ts.ST_NONE and st["found"] == 0
+        _, _, st2 = self.load(host)
+        return (c == 0 and cleared and (st2["state"], st2["slot"], st2["gen"])
+                == (ts.ST_VALID, slot, gen) and st2["found"] == 1)
+
     def files(self):
         return self.ftp.get(A_PATH), self.ftp.get(B_PATH)
 
@@ -324,10 +332,9 @@ def run_phases(r: Rig):
     print("\n[2] save github.com")
     fa, fb = r.files()
     want = ts.save(fa, fb, "github.com", rec("github.com"))
-    c, st = r.save("github.com", rec("github.com"))
+    ok = r.saved("github.com", rec("github.com"), 0, 1)
     fa, fb = r.files()
-    r.require(c == 0 and (st["state"], st["slot"], st["gen"]) == (ts.ST_VALID, 0, 1),
-              "saved: VALID, slot A, generation 1")
+    r.require(ok, "saved; state cleared; reload: VALID, slot A, generation 1")
     r.check(fa == want[1] and fb is None, "TRUST.A on the stick == the mirror; no TRUST.B")
 
     print("\n[3] load GitHub.COM")
@@ -338,9 +345,9 @@ def run_phases(r: Rig):
     print("\n[4] save lwn.net")
     want = ts.save(fa, fb, "lwn.net", rec("lwn.net", SPKI_2))
     r.load("lwn.net")
-    c, st = r.save("lwn.net", rec("lwn.net", SPKI_2))
+    ok = r.saved("lwn.net", rec("lwn.net", SPKI_2), 1, 2)
     fa2, fb2 = r.files()
-    r.check(c == 0 and (st["slot"], st["gen"]) == (1, 2), "saved to slot B, generation 2")
+    r.check(ok, "saved; reload: slot B, generation 2")
     r.check(fb2 == want[1] and fa2 == fa, "TRUST.B == mirror; TRUST.A untouched")
 
     print("\n[5] torn write into TRUST.A (open for write, 100 B, no close, reset)")
@@ -379,9 +386,9 @@ def run_phases(r: Rig):
     fa, fb = r.files()
     want = ts.save(fa, fb, "example.com", rec("example.com"))
     r.load("example.com")
-    c, st = r.save("example.com", rec("example.com"))
+    ok = r.saved("example.com", rec("example.com"), 0, 3)
     fa, fb = r.files()
-    r.check(c == 0 and (st["slot"], st["gen"]) == (0, 3), "saved to slot A, generation 3")
+    r.check(ok, "saved; reload: slot A, generation 3")
     r.check(fa == want[1] and fb == pre_b, "TRUST.A == mirror; TRUST.B untouched")
 
     print("\n[8] corrupt TRUST.B")
@@ -424,9 +431,9 @@ def run_phases(r: Rig):
     r.check(c == 0 and st["found"] == 1 and st["rec"] == rec("h31.example").pack(),
             "record 32 of 32 found (five 512 B read parts)")
     want = ts.save(full, None, "h31.example", rec("h31.example", SPKI_2))
-    c, st = r.save("h31.example", rec("h31.example", SPKI_2))
+    ok = r.saved("h31.example", rec("h31.example", SPKI_2), 1, 41)
     fa, fb = r.files()
-    r.check(c == 0 and fb == want[1] and len(fb) == ts.FILE_MAX,
+    r.check(ok and fb == want[1] and len(fb) == ts.FILE_MAX,
             "2,064 B TRUST.B == mirror (nine write chunks)")
     r.load("new.example")
     c, st = r.save("new.example", rec("new.example"))

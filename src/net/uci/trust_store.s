@@ -22,6 +22,8 @@
 ;                       checks it. Refuses (C=1, ts_reason) unless a load
 ;                       returned VALID or EMPTY, a record is staged, and
 ;                       the store on disk is still the one loaded.
+;                       Success leaves ts_state = NONE: load again before
+;                       the next lookup or save.
 ;
 ; Fail-closed (S3 §4.3): the store is usable only if one slot validates or
 ; BOTH slots are FILE DOESN'T EXIST (EMPTY). Any other combination is FAIL:
@@ -82,7 +84,7 @@ trust_store_load:
         jsr ts_guard
         bcc :+
         jmp ts_fail
-:       jsr tls_transcript_init
+:       ldx #$00                ; length, high byte
         ldy #$00
 @char:
 @host:  lda $FFFF,y
@@ -92,23 +94,19 @@ trust_store_load:
         cmp #'Z'+1
         bcs @keep
         ora #$20                ; lowercase: the key must not depend on case
-@keep:  sta ts_char
-        tya
-        pha
-        lda #<ts_char
-        sta zp_ptr
-        lda #>ts_char
-        sta zp_ptr+1
-        lda #$01
-        sta zp_count
-        lda #$00
-        sta zp_count+1
-        jsr tls_transcript_update
-        pla
-        tay
+@keep:  sta TS_BUF,y            ; the ring is free: hash a lowercased copy
         iny
         bne @char
+        inx                     ; 256 characters: hash them all, as before
 @hashed:
+        sty zp_count
+        stx zp_count+1
+        jsr tls_transcript_init
+        lda #<TS_BUF
+        sta zp_ptr
+        lda #>TS_BUF
+        sta zp_ptr+1
+        jsr tls_transcript_update
         jsr tls_transcript_hash
         ldx #TS_KEY_SIZE-1
 :       lda tls_transcript,x
@@ -121,16 +119,21 @@ trust_store_load:
         bne @absent             ; EMPTY: nothing to look up
         jsr ts_find
         bcs @absent
-        ldy #TS_REC_SIZE-1
-:       lda (zp_ptr),y
-        sta ts_rec,y
-        dey
-        bpl :-
+        jsr ts_rec_in
         inc ts_found
 @absent:
         lda ts_state
         clc
 @out:   rts
+
+; ts_rec_in — copy the 64 B record at zp_ptr into ts_rec.
+ts_rec_in:
+        ldy #TS_REC_SIZE-1
+:       lda (zp_ptr),y
+        sta ts_rec,y
+        dey
+        bpl :-
+        rts
 
 trust_store_lookup:
         lda ts_found            ; 0 or 1
@@ -141,14 +144,9 @@ trust_store_lookup:
         rts
 
 trust_store_stage:
-        sta @src+1
-        stx @src+2
-        ldy #TS_REC_SIZE-1
-@copy:
-@src:   lda $FFFF,y
-        sta ts_rec,y
-        dey
-        bpl @copy
+        sta zp_ptr
+        stx zp_ptr+1
+        jsr ts_rec_in
         ldy #TS_KEY_SIZE-1
 :       lda ts_key,y
         sta ts_rec+TS_REC_KEY,y
@@ -264,18 +262,9 @@ ts_put:
         lda TS_BUF+TS_HDR_GEN+1
         cmp ts_snap+3
         bne @verify
-        lda ts_target
-        sta ts_slot
-        lda ts_snap+2
-        sta ts_gen
-        lda ts_snap+3
-        sta ts_gen+1
-        lda #TS_ST_VALID
-        sta ts_state
-        lda #$01
-        sta ts_found
-        lda #$00
-        sta ts_staged
+        lda #TS_ST_NONE         ; saved: the store moved on, so what was
+        sta ts_state            ; loaded is stale. Load again to look up
+        sta ts_found            ; (and before any further save).
         clc
         rts
 @write_err:
@@ -400,12 +389,9 @@ ts_read_slot:
         bcs @io
         bit ts_tmp
         bmi @io
-        lda dos_cnt+1           ; the count is the only evidence (header)
-        bne @hdr
-        lda dos_cnt
-        cmp #TS_HDR_SIZE + TS_SUM_SIZE
-        bcc @format
-@hdr:   ldx #3
+        ldx #3                  ; a read shorter than the header leaves
+                                ; stale bytes here; the size check below
+                                ; (dos_cnt == 16 + 64 * N) still rejects it
 :       lda TS_BUF,x
         cmp ts_hdr0,x
         bne @format
@@ -566,6 +552,5 @@ ts_cur2:    .res 1
 ts_target:  .res 1
 ts_found:   .res 1              ; 1: ts_rec is the loaded host's record
 ts_staged:  .res 1              ; 1: ts_rec is staged for save
-ts_char:    .res 1
 ts_key:     .res TS_KEY_SIZE
 ts_rec:     .res TS_REC_SIZE
