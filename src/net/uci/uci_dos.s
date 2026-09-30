@@ -116,6 +116,9 @@ dos_part:
         lda UCI_STATUS
         jsr uci_settle
         bpl dos_status             ; DATA_AV clear
+        lda dos_cap                ; not a read (dos_hdr zeroed the cap):
+        ora dos_cap+1              ; the reply must be empty, and dos_cnt
+        beq dos_reject             ; and dos_store are stale, so refuse
         lda dos_cnt
         cmp dos_cap
         bne @store

@@ -138,6 +138,10 @@ class Dos:
         self.read_error_on = None           # (path, bytes delivered)
         self.corrupt_next_read_of = None    # path: flip a byte on read
         self.extra_bytes = 0                # misbehave: send more than asked
+        self.open_error = {}                # path -> status text for a READ open
+        self.stale_next_read_of = None      # path: serve its pre-write content
+        self.junk_on_open = 0               # misbehave: data bytes on OPEN
+        self.prev = {}                      # path -> content before its last W|CA
         # observations
         self.log = []                       # (cmd, detail)
         self.write_sizes = []
@@ -153,6 +157,10 @@ class Dos:
         if op == 0x02:                                  # OPEN_FILE
             mode, name = c[2], c[3:].split(b"\x00")[0].decode("latin1")
             self.log.append(("open", (name, mode)))
+            if self.junk_on_open:
+                return bytes(self.junk_on_open), b"00,OK", False
+            if not mode & 0x02 and name in self.open_error:
+                return b"", self.open_error[name].encode(), False
             if self.handle is not None:
                 self.leaked.append(self.handle)         # fm->fopen overwrites
                 self.handle = None
@@ -160,10 +168,15 @@ class Dos:
             if d not in self.dirs:
                 return b"", b"PATH DOESN'T EXIST", False
             if mode & 0x08:                             # FA_CREATE_ALWAYS
+                self.prev[name] = self.files.get(name)
                 self.files[name] = b""                  # empties it NOW
                 self.handle = [name, mode, bytearray(), 0]
             elif name in self.files:
-                self.handle = [name, mode, bytearray(self.files[name]), 0]
+                data = self.files[name]
+                if self.stale_next_read_of == name and self.prev.get(name):
+                    data = self.prev[name]              # a stale cache hit
+                    self.stale_next_read_of = None
+                self.handle = [name, mode, bytearray(data), 0]
             else:
                 return b"", b"FILE DOESN'T EXIST", False
         elif op == 0x03:                                # CLOSE_FILE
@@ -579,6 +592,87 @@ def case_fail_closed(env):
     check(dos.handle is None, "short read left the file open")
 
 
+def case_other_slot_open_failure_fails_closed(env):
+    # adv-l2 #1: a valid slot beside one that fails to OPEN is not a torn
+    # write (a torn save always opens); it may be the NEWER slot. S3 §4.3:
+    # a DOS error other than 62 fails closed. Torn damage (FORMAT,
+    # CHECKSUM) and absence stay tolerated; an unknown version fails too.
+    older, newer = st(5, "old.example"), st(6, "old.example", "new.example")
+    for text, reason in (("DISK ERROR", ts.R_DOS), ("PATH DOESN'T EXIST", ts.R_NOPATH)):
+        for bad, good, good_slot in ((B, older, 0), (A, newer, 1)):
+            files = {A: older, B: newer}
+            files[good_slot and A or B] = good
+            dos = Dos(files)
+            dos.open_error[bad] = text
+            m = env.machine(dos)
+            c, a = m.load("new.example")
+            check(c and a == ts.ST_FAIL and m.state[1] == reason,
+                  f"valid slot beside a {text!r} open on {bad[-1]}: {m.state}")
+            m.stage(rec("new.example", SPKI_2).pack())
+            n = len(dos.write_sizes)
+            check(m.save() and len(dos.write_sizes) == n,
+                  f"{text!r}: a save went ahead over the failed slot")
+    v9 = bytearray(newer)
+    v9[4] = 9
+    m = env.machine(Dos({A: older, B: bytes(v9)}))
+    c, a = m.load("old.example")
+    check(c and m.state[1] == ts.R_VERSION, f"valid beside unknown version: {m.state}")
+    dos = Dos({A: older, B: newer})
+    dos.read_error_on = None
+    for torn in (b"", newer[:40]):
+        m = env.machine(Dos({A: older, B: torn}))
+        c, a = m.load("old.example")
+        check(not c and m.state[2] == 0, f"torn B must stay tolerated: {m.state}")
+    for code, text in ((ts.R_DOS, "DISK ERROR"),):
+        sel = ts.select(older, code)
+        check(sel.state == ts.ST_FAIL and sel.reason == code, "mirror: valid + DOS")
+
+
+def case_stage_and_failed_save(env):
+    # adv-l2 #2: a staged record must never be reported as stored.
+    dos = Dos({A: st(5, "h.example")})
+    m = env.machine(dos)
+    m.load("h.example")
+    m.stage(rec("h.example", SPKI_2).pack())
+    check(m.lookup() is None and m.state[0] == ts.ST_NONE,
+          f"after stage, lookup/state still claim the loaded store: {m.state}")
+    dos.write_error = "DISK IS FULL"
+    check(m.save(), "save with a write error succeeded")
+    check(m.lookup() is None and m.state[0] == ts.ST_NONE,
+          f"after a failed save the unsaved record is visible: {m.state}")
+    dos.write_error = None
+    check(m.save() and m.state[1] == ts.R_NOTREADY,
+          "a failed save left a record staged for a blind retry")
+    m.load("h.example")
+    check(m.lookup()[16:48] == SPKI_1, "reload after the failed save lost the old record")
+
+
+def case_stale_read_back(env):
+    # adv-l2 #3: a read-back that is valid but is NOT what was written (an
+    # older generation from a cache) must fail VERIFY.
+    dos = Dos({A: st(3, "a.example"), B: st(2, "a.example")})
+    m = env.machine(dos)
+    m.load("a.example")
+    m.stage(rec("a.example", SPKI_2).pack())
+    dos.stale_next_read_of = B
+    check(m.save() and m.state[1] == ts.R_VERIFY, f"stale read-back accepted: {m.state}")
+
+
+def case_junk_reply_on_open(env):
+    # adv-l2 #4: data on a command whose reply must be empty is refused, and
+    # never stored (dos_store still points past the previous read).
+    dos = Dos({A: st(2, "a.example")})
+    m = env.machine(dos)
+    m.load("a.example")                    # leaves dos_store past a read
+    end = 0xC000 + len(dos.files[A])
+    m.put(end, b"\xA5" * 16)
+    dos.junk_on_open = 8
+    c, a = m.load("a.example")
+    check(c and m.state[4] == (ts.R_DOS, ts.R_DOS), f"junk on OPEN not refused: {m.state}")
+    check(bytes(m.mem.ram[end:end + 16]) == b"\xA5" * 16,
+          "junk OPEN reply was stored at the stale read pointer")
+
+
 def case_torn_slot_falls_back(env):
     good = st(6, "a.example")
     for torn in (b"", st(7, "a.example", "b.example")[:40]):
@@ -707,8 +801,15 @@ def case_save_refusals(env):
     m.stage(rec("a.example", SPKI_2).pack())
     dos.corrupt_next_read_of = B
     check(m.save() and m.state[1] == ts.R_VERIFY, f"bad read-back: {m.state}")
-    check(m.state[:4] == (ts.ST_VALID, ts.R_VERIFY, 0, 1),
-          f"a failed save moved the loaded state: {m.state}")
+    check(m.state[:2] == (ts.ST_NONE, ts.R_VERIFY),
+          f"a failed save must consume the load: {m.state}")
+    # VERIFY means "not confirmed", not "not written": here only the read
+    # was corrupted, so the disk holds a good generation 2 in B. The reload
+    # must agree with the mirror's reading of what is actually on disk.
+    m.load("a.example")
+    sel = ts.select(dos.files.get(A), dos.files.get(B))
+    check((m.state[0], m.state[2], m.state[3]) == (sel.state, sel.slot, sel.gen),
+          f"reload after a failed save {m.state} != mirror {sel}")
 
 
 def case_socket_guard(env):
@@ -741,6 +842,8 @@ def case_read_cap(env):
 
 CASES = [case_empty, case_save_roundtrip, case_ping_pong_and_replace,
          case_newer_and_wrap, case_fail_closed, case_torn_slot_falls_back,
+         case_other_slot_open_failure_fails_closed, case_stage_and_failed_save,
+         case_stale_read_back, case_junk_reply_on_open,
          case_torn_save, case_full_store_and_big_image, case_save_refusals,
          case_socket_guard, case_read_cap]
 

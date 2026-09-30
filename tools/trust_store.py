@@ -218,6 +218,12 @@ def slot_result(slot) -> int:
     return SLOT_OK
 
 
+# What may sit beside a valid slot: a first save (absent) or a torn save
+# (a partial file). An open/read failure or an unknown version may be the
+# newer slot, so it fails closed (ts_tolerable in trust_store.s).
+TOLERABLE = (SLOT_ABSENT, R_FORMAT, R_CHECKSUM)
+
+
 def serial_newer(a: int, b: int):
     """True if b is newer than a, False if a is, None if neither (RFC 1982,
     16 bits: equal, or exactly 0x8000 apart)."""
@@ -247,10 +253,11 @@ def select(slot_a, slot_b) -> Selection:
         if newer is None:
             return Selection(ST_FAIL, R_TIE, slot_st=st)
         pick = 1 if newer else 0
-    elif st[0] == SLOT_OK:
-        pick = 0
-    elif st[1] == SLOT_OK:
-        pick = 1
+    elif st[0] == SLOT_OK or st[1] == SLOT_OK:
+        pick = 0 if st[0] == SLOT_OK else 1
+        other = st[pick ^ 1]
+        if other not in TOLERABLE:
+            return Selection(ST_FAIL, other, slot_st=st)
     elif st == (SLOT_ABSENT, SLOT_ABSENT):
         return Selection(ST_EMPTY, slot=1, gen=0, records=[], slot_st=st)
     else:

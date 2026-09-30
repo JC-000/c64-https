@@ -16,21 +16,24 @@
 ;                       store holds the host; C=1 otherwise. "First use"
 ;                       is exactly: ts_state = VALID or EMPTY, and C=1.
 ;   trust_store_stage   A/X = a 64 B record. Copied to ts_rec, with its
-;                       host key forced to ts_key. No disk access.
+;                       host key forced to ts_key. No disk access. It
+;                       consumes the load: lookup answers C=1 and
+;                       ts_state reads NONE until the next load.
 ;   trust_store_save    Writes the staged record into a new generation in
 ;                       the slot NOT loaded, closes it, reads it back and
 ;                       checks it. Refuses (C=1, ts_reason) unless a load
 ;                       returned VALID or EMPTY, a record is staged, and
 ;                       the store on disk is still the one loaded.
-;                       Success leaves ts_state = NONE: load again before
-;                       the next lookup or save.
+;                       Every attempt, saved or refused, leaves ts_state
+;                       NONE and nothing staged: load (and stage) again
+;                       before the next lookup or save.
 ;
 ; Fail-closed (S3 §4.3): the store is usable only if one slot validates or
-; BOTH slots are FILE DOESN'T EXIST (EMPTY). Any other combination is FAIL:
-; no medium, a DOS error, a bad checksum, an unknown version, a
-; generation tie. One valid slot beside a damaged one is VALID: that is
-; the torn-write case, and the damaged slot is the one the next save
-; overwrites.
+; BOTH slots are FILE DOESN'T EXIST (EMPTY). One valid slot is VALID only
+; beside a slot that is absent or damaged the way a torn save damages it
+; (FORMAT, CHECKSUM); the damaged slot is the one the next save
+; overwrites. Everything else is FAIL: no medium, a DOS or read error on
+; either slot, an unknown version, a generation tie, two bad slots.
 ;
 ; TIMING, and the one thing the caller must get right: the file image is
 ; built in the TCP receive ring at $C000, which holds nothing while no
@@ -152,32 +155,36 @@ trust_store_stage:
         sta ts_rec+TS_REC_KEY,y
         dey
         bpl :-
-        lda #$01
+        ; ts_rec is no longer the loaded record, so the load is consumed:
+        ; lookup answers C=1 and ts_state reads NONE from here on. The
+        ; load's state moves to ts_staged, which save requires.
+        lda ts_state
         sta ts_staged
+        lda #TS_ST_NONE
+        sta ts_state
+        sta ts_found
         rts
 
 trust_store_save:
         jsr ts_guard
         bcs ts_refuse
-        lda ts_staged
-        beq @notready
-        lda ts_state
+        lda ts_staged           ; the state of the load that was staged
         cmp #TS_ST_VALID
         beq @go
         cmp #TS_ST_EMPTY
         beq @go
-@notready:
         lda #TS_R_NOTREADY
         bne ts_refuse
 @go:
         ; Re-read the store and insist it is the one the load saw: the
         ; image is rebuilt from disk, and a store that moved in between
         ; (another save, a swapped stick) must not be overwritten blind.
-        ldx #3                  ; ts_state, ts_slot, ts_gen: contiguous
+        sta ts_snap             ; ts_state as loaded, then ts_slot, ts_gen
+        ldx #3
 :       lda ts_state,x
         sta ts_snap,x
         dex
-        bpl :-
+        bne :-
         jsr ts_scan
         ldx #3
 :       lda ts_state,x
@@ -208,6 +215,14 @@ trust_store_save:
 ts_refuse:
         sta ts_reason
         sec
+; ts_consume — a save attempt, whatever its outcome, uses up the load and
+; the staged record: load (and stage) again before the next lookup or
+; save. C is preserved.
+ts_consume:
+        lda #TS_ST_NONE
+        sta ts_state
+        sta ts_found
+        sta ts_staged
         rts
 
 ; ts_put — zp_ptr -> the record's place in TS_BUF: fill it, bump the
@@ -262,11 +277,8 @@ ts_put:
         lda TS_BUF+TS_HDR_GEN+1
         cmp ts_snap+3
         bne @verify
-        lda #TS_ST_NONE         ; saved: the store moved on, so what was
-        sta ts_state            ; loaded is stale. Load again to look up
-        sta ts_found            ; (and before any further save).
-        clc
-        rts
+        clc                     ; saved
+        jmp ts_consume
 @write_err:
         lda #TS_R_WRITE
         bne @refuse
@@ -312,8 +324,11 @@ ts_scan:
         lda ts_slot_st
         bne @a_bad
         lda ts_slot_st+1
-        bne @take_a
-        sec                     ; both valid: d = gen(B) - gen(A), serial
+        beq @both
+        jsr ts_tolerable        ; A valid, B not: only torn or absent
+        bcs ts_fail
+        bcc @take_a
+@both:  sec                     ; both valid: d = gen(B) - gen(A), serial
         lda ts_sgen+2
         sbc ts_sgen
         sta ts_tmp
@@ -331,7 +346,12 @@ ts_scan:
         ldx #1                  ; TS_BUF holds B already
         bne @valid
 @a_bad: lda ts_slot_st+1
-        beq @take_b
+        bne @neither
+        lda ts_slot_st          ; B valid, A not: only torn or absent
+        jsr ts_tolerable
+        bcs ts_fail
+        bcc @take_b
+@neither:
         lda ts_slot_st          ; neither valid: EMPTY only if both absent
         cmp #TS_SLOT_ABSENT
         bne ts_fail
@@ -352,7 +372,7 @@ ts_scan:
         jsr ts_read_slot
         beq :+
         lda #TS_R_CHANGED       ; valid a moment ago, not now
-        bne ts_fail
+        jmp ts_fail
 :       ldx #0
 @valid: stx ts_slot
         txa
@@ -365,6 +385,24 @@ ts_scan:
         lda #TS_ST_VALID
         sta ts_state
         clc
+        rts
+
+; ts_tolerable — A = the result of the slot beside a valid one. C=0 if a
+; torn save (FORMAT, CHECKSUM: a partial file) or a first save (ABSENT)
+; explains it; C=1 otherwise, A kept as the reason. An open that fails
+; (NOPATH, DOS), a failed read (IO) or an unknown VERSION is not a torn
+; write, and that slot may be the NEWER one: using the other would roll
+; the store back (S3 §4.3: fail closed).
+ts_tolerable:
+        cmp #TS_SLOT_ABSENT
+        beq @ok
+        cmp #TS_R_FORMAT
+        beq @ok
+        cmp #TS_R_CHECKSUM
+        beq @ok
+        sec
+        rts
+@ok:    clc
         rts
 
 ; ts_read_slot — X = slot. Reads the slot into TS_BUF and validates it.
@@ -551,6 +589,6 @@ ts_tmp:     .res 1
 ts_cur2:    .res 1
 ts_target:  .res 1
 ts_found:   .res 1              ; 1: ts_rec is the loaded host's record
-ts_staged:  .res 1              ; 1: ts_rec is staged for save
+ts_staged:  .res 1              ; the load's ts_state when ts_rec was staged
 ts_key:     .res TS_KEY_SIZE
 ts_rec:     .res TS_REC_SIZE

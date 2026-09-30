@@ -175,10 +175,19 @@ def test_torn_write_falls_back_to_the_older_slot():
             assert sel.slot_st[slot ^ 1] == ts.R_FORMAT
 
 
-def test_one_valid_slot_beside_an_open_failure_is_valid():
+def test_one_valid_slot_beside_an_open_failure_fails_closed():
+    # The failed slot may be the NEWER one (adv-l2 #1): using the other
+    # would roll the store back. Only absence and torn damage are tolerated.
     good = store(2, "a.example")
-    for code in (ts.R_DOS, ts.R_IO, ts.R_NOPATH):
-        assert ts.select(good, code).state == ts.ST_VALID
+    v9 = bytearray(store(3, "a.example"))
+    v9[4] = 9
+    for other, code in ((ts.R_DOS, ts.R_DOS), (ts.R_IO, ts.R_IO),
+                        (ts.R_NOPATH, ts.R_NOPATH), (bytes(v9), ts.R_VERSION)):
+        for a, b in ((good, other), (other, good)):
+            sel = ts.select(a, b)
+            assert (sel.state, sel.reason) == (ts.ST_FAIL, code), (a, b, sel)
+    for other in (None, b"", store(3, "a.example")[:40]):
+        assert ts.select(good, other).state == ts.ST_VALID
 
 
 def test_fail_closed_cases():
