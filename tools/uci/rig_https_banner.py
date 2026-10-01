@@ -209,6 +209,15 @@ def main() -> int:
         prompt = True
     except KeyError:
         prompt = False
+    # OPTIONAL_SYMBOLS (UCI-only parser state, e.g. http_sink_full) are
+    # resolved here, before any socket opens, and read one by one: they are
+    # nowhere near the span read_state() takes in one DMA.
+    optional = {}
+    for name, width in OPTIONAL_SYMBOLS.items():
+        try:
+            optional[name] = (label_addr(name), width)
+        except KeyError:
+            pass                        # not in this build: decodes as 0
     if (TYPED_HOST or TYPED_PATH) and not prompt:
         print("[fatal] TYPED_HOST/TYPED_PATH set, but this PRG has no "
               "https_target_prompt (not a UCI build with #155 phase 2)",
@@ -376,13 +385,6 @@ def main() -> int:
         # uses as its progress signal too.
         print("Letting the fetch run to completion (socket must close cleanly)...")
         addrs = {name: label_addr(name) for name in SYMBOLS}
-        widths = dict(SYMBOLS)
-        for name, width in OPTIONAL_SYMBOLS.items():
-            try:
-                addrs[name] = label_addr(name)
-                widths[name] = width
-            except KeyError:
-                pass                    # not in this build: reads as 0
 
         # ONE DMA read per poll, not seven. The symbols are scattered across
         # a few hundred bytes of CRYPTO_COLD_SHADOW, and this loop runs every
@@ -390,7 +392,7 @@ def main() -> int:
         # traffic the shared device does not need. Span, then slice; the
         # bounds come from labels.txt, so they follow the build.
         span_lo = min(addrs.values())
-        span_hi = max(addrs[n] + w for n, w in widths.items())
+        span_hi = max(addrs[n] + w for n, w in SYMBOLS.items())
         assert span_hi - span_lo <= 8192, (
             f"the http parser state now spans {span_hi - span_lo} B "
             f"(${span_lo:04X}-${span_hi:04X}); read it per symbol instead")
@@ -398,9 +400,11 @@ def main() -> int:
         def read_state():
             blob = bytes(client.read_mem(span_lo, span_hi - span_lo))
             raw = {}
-            for name, width in widths.items():
+            for name, width in SYMBOLS.items():
                 off = addrs[name] - span_lo
                 raw[name] = blob[off:off + width]
+            for name, (addr, width) in optional.items():
+                raw[name] = bytes(client.read_mem(addr, width))
             return decode_body_state(raw)
 
         # Everything above lives in CRYPTO_COLD_SHADOW, RAM under the BASIC
