@@ -570,7 +570,7 @@ LINK_MAP     := build/c64-https.map
 LINK_DBG     := build/c64-https.dbg
 LINK_OUTPUTS := $(PRG) $(LABELS) $(LINK_MAP) $(LINK_DBG)
 
-.PHONY: all link run clean ip65-libs ip65-blob package package-verify
+.PHONY: all link run clean ip65-libs ip65-blob package package-verify package-m3-demo
 
 all: $(PRG)
 
@@ -1218,3 +1218,10 @@ package:
 package-verify:
 	$(PACKAGE_PYTHON) tools/test_package_verify.py
 	$(PACKAGE_PYTHON) tools/package/verify_release.py
+
+# The BACKEND=uci-m3 "just run it" demo (TLS on the Ultimate's ESP32): one
+# PRG + .d64 + README in dist/m3-demo/. Not part of `package`: the M3
+# variant is secondary and stays out of PACKAGE_VARIANTS. The script builds
+# from clean twice (reproducibility) and reads the PRG back out of the .d64.
+package-m3-demo:
+	bash tools/package/build_m3_demo.sh
