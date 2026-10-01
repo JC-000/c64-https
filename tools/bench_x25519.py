@@ -19,7 +19,7 @@ from c64_test_harness import (
     read_bytes, write_bytes, jsr, wait_for_text,
 )
 
-from _vice_helpers import default_vice_config
+from _vice_helpers import default_vice_config, menu_wait
 
 try:
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -156,7 +156,7 @@ def main():
         transport = inst.transport
         print(f"VICE PID={inst.pid}, port={inst.port}")
 
-        grid = wait_for_text(transport, "Q=QUIT", timeout=120.0, verbose=False)
+        grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait(120), verbose=False)
         if grid is None:
             print("FATAL: Boot menu did not appear")
             sys.exit(1)

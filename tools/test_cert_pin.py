@@ -57,7 +57,7 @@ from c64_test_harness import (
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _vice_helpers import default_vice_config  # noqa: E402
+from _vice_helpers import default_vice_config, menu_wait  # noqa: E402
 from _skip_policy import verdict as exit_verdict  # noqa: E402
 import spki_pin  # noqa: E402
 
@@ -408,7 +408,7 @@ def main() -> int:
         config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
         with ViceInstanceManager(config=config) as mgr:
             t = mgr.acquire().transport
-            grid = wait_for_text(t, "Q=QUIT", timeout=float(os.environ.get("C64_INIT_TIMEOUT", "120")),
+            grid = wait_for_text(t, "Q=QUIT", timeout=menu_wait(120),
                                  verbose=False)
             if grid is None:
                 print("CANNOT RUN: menu never appeared", file=sys.stderr)

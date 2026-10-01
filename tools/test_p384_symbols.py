@@ -206,7 +206,7 @@ def main() -> int:
             ViceConfig, ViceInstanceManager,
             read_bytes, jsr, wait_for_text,
         )
-        from _vice_helpers import default_vice_config
+        from _vice_helpers import default_vice_config, menu_wait
     except ImportError:
         print("FATAL: c64-test-harness package not installed")
         return 1
@@ -239,7 +239,7 @@ def main() -> int:
         transport = inst.transport
         print(f"VICE PID={inst.pid}, port={inst.port}")
 
-        grid = wait_for_text(transport, "Q=QUIT", timeout=120.0, verbose=False)
+        grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait(120), verbose=False)
         if grid is None:
             print("FATAL: program menu did not appear within 120 s")
             mgr.release(inst)

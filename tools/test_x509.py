@@ -53,7 +53,7 @@ from c64_test_harness import (
     wait_for_text,
 )
 
-from _vice_helpers import default_vice_config
+from _vice_helpers import default_vice_config, menu_wait
 from _skip_policy import verdict  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -876,7 +876,7 @@ def main():
 
         # Wait for main menu
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait(60), verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

@@ -102,6 +102,7 @@ from _skip_policy import cannot_run, verdict  # noqa: E402
 if os.path.join(_HERE, "uci") not in sys.path:
     sys.path.insert(0, os.path.join(_HERE, "uci"))
 from _device_lock_helper import lock_timeout_s  # noqa: E402
+from _vice_helpers import menu_wait, require_menu_wait_env  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PRG_PATH = PROJECT_ROOT / "build" / "c64-https.prg"
@@ -704,6 +705,7 @@ def _run_backend(*, backend: str, vectors: list[dict],
     from c64_test_harness.keyboard import send_text
 
     if backend == "vice":
+        require_menu_wait_env()
         config = ViceConfig(
             prg_path=str(PRG_PATH), warp=True, ntsc=True, sound=False,
             extra_args=["-reu", "-reusize", "512"],
@@ -735,7 +737,7 @@ def _run_backend(*, backend: str, vectors: list[dict],
         # Wait for menu — confirms boot sequence (incl. reu_p384_overlay_init)
         # has finished and main_loop is polling.
         if backend == "vice":
-            grid = wait_for_text(transport, "Q=QUIT", timeout=180.0,
+            grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait(180),
                                  verbose=False)
             if grid is None:
                 raise RuntimeError("VICE: menu banner never appeared")

@@ -91,7 +91,7 @@ from c64_test_harness import (
     Labels, ViceInstanceManager, read_bytes, write_bytes, jsr, wait_for_text,
 )
 
-from _vice_helpers import default_vice_config, no_reu_requested
+from _vice_helpers import default_vice_config, no_reu_requested, menu_wait
 from _skip_policy import verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -447,7 +447,7 @@ def main():
         # The menu appears only after boot's sqtab_init + reu_mul_init have
         # populated all 256 REU rows, which is exactly the state this suite
         # needs, so there is nothing to initialise by hand.
-        menu_to = float(os.environ.get("C64_INIT_TIMEOUT", "120"))
+        menu_to = menu_wait(120)
         if wait_for_text(transport, "Q=QUIT", timeout=menu_to,
                          verbose=False) is None:
             print("FATAL: Main menu did not appear")

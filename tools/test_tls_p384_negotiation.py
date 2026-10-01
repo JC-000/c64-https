@@ -65,6 +65,7 @@ from c64_test_harness import (
     jsr,
     wait_for_text,
 )
+from _vice_helpers import menu_wait, require_menu_wait_env  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -396,6 +397,7 @@ def main():
     # under Known issues).  This test does not call into the dispatcher's
     # body but the link includes the sibling, so the same boot-time
     # invariants apply.
+    require_menu_wait_env()
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,
                         extra_args=["-reu", "-reusize", "512"])
 
@@ -405,7 +407,7 @@ def main():
         print(f"\n=== Starting VICE ===")
         print(f"  VICE PID={inst.pid}, port={inst.port}")
         print("  Waiting for main menu...")
-        if wait_for_text(transport, "Q=QUIT", timeout=60.0,
+        if wait_for_text(transport, "Q=QUIT", timeout=menu_wait(60),
                          verbose=False) is None:
             print("FATAL: main menu did not appear")
             sys.exit(1)

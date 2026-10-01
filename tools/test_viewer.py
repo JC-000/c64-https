@@ -41,7 +41,7 @@ from c64_test_harness import (
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _vice_helpers import default_vice_config
+from _vice_helpers import default_vice_config, menu_wait
 from _skip_policy import verdict  # noqa: E402
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -328,7 +328,7 @@ def main():
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
         print("  Waiting for main menu...")
-        if wait_for_text(transport, "Q=QUIT", timeout=120.0, verbose=False) is None:
+        if wait_for_text(transport, "Q=QUIT", timeout=menu_wait(120), verbose=False) is None:
             print("FATAL: main menu did not appear")
             sys.exit(1)
 

@@ -84,7 +84,7 @@ from cryptography.hazmat.primitives.asymmetric import x25519
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _vice_helpers import default_vice_config  # noqa: E402
+from _vice_helpers import default_vice_config, menu_wait  # noqa: E402
 from _skip_policy import verdict  # noqa: E402
 
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -300,7 +300,7 @@ def main() -> int:
         # test_ecdsa_kat_oracle.py.
         grid = wait_for_text(
             transport, "Q=QUIT",
-            timeout=float(os.environ.get("C64_INIT_TIMEOUT", "120")),
+            timeout=menu_wait(120),
             verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")

@@ -27,6 +27,7 @@ from c64_test_harness import (
     wait_for_pc,
     wait_for_text,
 )
+from _vice_helpers import menu_wait, require_menu_wait_env  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -88,6 +89,7 @@ def main():
     results = []
 
     for n in range(1, 11):
+        require_menu_wait_env()
         config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False)
         with ViceInstanceManager(config=config) as mgr:
             inst = mgr.acquire()
@@ -95,7 +97,7 @@ def main():
             print(f"  N={n}: VICE PID={inst.pid}, port={inst.port}")
 
             # Wait for program menu
-            grid = wait_for_text(transport, "Q=QUIT", timeout=60, verbose=False)
+            grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait(60), verbose=False)
             if grid is None:
                 print(f"  N={n}: FAIL - main menu did not appear")
                 results.append((n, False, 0.0, True))

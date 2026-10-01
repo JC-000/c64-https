@@ -47,7 +47,7 @@ from c64_test_harness import (
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _vice_helpers import default_vice_config  # noqa: E402
+from _vice_helpers import default_vice_config, menu_wait  # noqa: E402
 
 # `verdict` is a local name in main(); import the policy under another.
 from _skip_policy import verdict as exit_verdict  # noqa: E402
@@ -399,7 +399,7 @@ def main() -> int:
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         t = inst.transport
-        if wait_for_text(t, "Q=QUIT", timeout=float(os.environ.get("C64_INIT_TIMEOUT", "120")),
+        if wait_for_text(t, "Q=QUIT", timeout=menu_wait(120),
                          verbose=False) is None:
             print("FATAL: menu never appeared", file=sys.stderr)
             return 2

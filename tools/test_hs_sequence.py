@@ -106,7 +106,7 @@ from cryptography.x509.oid import NameOID
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _vice_helpers import default_vice_config  # noqa: E402
+from _vice_helpers import default_vice_config, menu_wait  # noqa: E402
 
 # The deframer rig (stub installer + Rig.drive) lives in the deframer's own
 # test module. Sharing it keeps ONE implementation of "pump this flight and
@@ -406,7 +406,7 @@ def main() -> int:
         print(f"  VICE PID={inst.pid}, port={inst.port}")
 
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=120.0, verbose=False)
+        grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait(120), verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             mgr.release(inst)

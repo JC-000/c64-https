@@ -27,6 +27,7 @@ from c64_test_harness import (
     wait_for_pc,
     wait_for_text,
 )
+from _vice_helpers import menu_wait, require_menu_wait_env  # noqa: E402
 from _skip_policy import verdict  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -377,6 +378,7 @@ def main():
     # Start VICE
     print("\n=== Starting VICE ===")
     extra = ["-seed", vice_seed] if vice_seed else []
+    require_menu_wait_env()
     config = ViceConfig(
         prg_path=PRG_PATH,
         warp=True,
@@ -392,7 +394,7 @@ def main():
 
         # Wait for main menu
         print("  Waiting for main menu...")
-        grid = wait_for_text(transport, "Q=QUIT", timeout=60.0, verbose=False)
+        grid = wait_for_text(transport, "Q=QUIT", timeout=menu_wait(60), verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
             sys.exit(1)

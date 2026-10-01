@@ -103,7 +103,7 @@ from c64_test_harness import (
     wait_for_text,
 )
 
-from _vice_helpers import default_vice_config
+from _vice_helpers import default_vice_config, menu_wait
 from _skip_policy import verdict  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -498,7 +498,7 @@ def main():
         print("  Waiting for main menu...")
         # Comb-profile boots run ec_precompute_256 (256 point mults) before
         # the menu — minutes of VICE time even under warp. Overridable.
-        _menu_to = float(os.environ.get("C64_INIT_TIMEOUT", "60"))
+        _menu_to = menu_wait(60)
         grid = wait_for_text(transport, "Q=QUIT", timeout=_menu_to, verbose=False)
         if grid is None:
             print("FATAL: Main menu did not appear")
