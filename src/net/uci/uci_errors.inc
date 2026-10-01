@@ -22,11 +22,13 @@
 ;   $8A  UCI_ERR_LONG_READ      theirs, datagram-only — see below
 ;   $8C  UCI_ERR_SEND_TOO_LONG  theirs; net_udp_send_len over NET_UDP_SEND_MAX
 ;   $8D  UCI_ERR_OPEN_REFUSED   theirs; firmware refused the open, with a
-;                               named refusal on the $DF1F STATUS channel
+;                               named refusal on the $DF1F STATUS channel.
+;                               MIRRORED below (BACKEND=uci-m3 emits it)
 ;   $8E  UCI_ERR_CMD_UNKNOWN    theirs; minted 2026-09-03 (wg#112), i.e.
 ;                               after v0.17.1 froze the §13.2 table and
 ;                               ~4 h BEFORE §13 was retired — outside the
-;                               table while the table was still the rule
+;                               table while the table was still the rule.
+;                               MIRRORED below (BACKEND=uci-m3 emits it)
 ;   $8F  UCI_ERR_SHORT_READ     theirs, minted after the retirement (wg#130)
 ;
 ; $8C/$8D were allocated in the retired table and this file never recorded
@@ -137,6 +139,16 @@ UCI_ERR_BAD_READ_HDR   = $8B    ; Stream family: SOCKET_READ header exceeded
                                 ; SPEC §13.2's table first (c64-lib-contract#139)
                                 ; — the last code allocated that way before
                                 ; §13 was retired.
+
+; MIRRORS of two c64-wireguard allocations, same names, same values, same
+; meanings (their src/net_abi.inc is canonical for this range). Emitted ONLY
+; by the BACKEND=uci-m3 adapter (src/net/uci-m3/net.s); the plain UCI and
+; ip65 adapters never emit them. Registered as mirrors, like $8A, in
+; src/net_err_registry_asserts.s and tools/test_net_err_registry.py.
+UCI_ERR_OPEN_REFUSED   = $8D    ; the firmware refused the open; the
+                                ; status line ($DF1F) names the refusal
+UCI_ERR_CMD_UNKNOWN    = $8E    ; "21,UNKNOWN COMMAND": the firmware lacks the
+                                ; command (uci-m3: no M3 TLS firmware)
 
 ; TCP state values stored in net_tcp_state. The NET_TCP_* spellings in
 ; net_states.inc are the contract's (§13.1); these aliases keep the

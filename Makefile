@@ -10,6 +10,8 @@
 #
 # Variables:
 #   BACKEND=ip65|uci  — select networking backend config (default: ip65)
+#   BACKEND=uci-m3    — TLS on the Ultimate's ESP32 (M3 firmware), no 6510
+#                       crypto linked; a secondary variant, never packaged
 #   CA65, LD65        — ca65 / ld65 binaries (default: cc65 toolchain in PATH)
 #   VICE              — VICE binary for `make run` (default: x64sc)
 
@@ -30,6 +32,23 @@ LD65      ?= ld65
 VICE      ?= x64sc
 BACKEND   ?= ip65
 CFG       := cfg/c64-https-$(BACKEND).cfg
+
+# BACKEND=uci-m3: HTTPS through the M3 firmware's TLS sockets (the ESP32
+# runs the TLS session; src/net/uci-m3/). It links none of the 6510 TLS or
+# crypto, so every knob that selects or re-arms a piece of that is refused
+# here rather than silently ignored. A secondary variant: it is not in
+# PACKAGE_VARIANTS, and it changes no byte of any other profile.
+ifeq ($(BACKEND),uci-m3)
+M3_REFUSED_KNOBS := USE_NISTCURVES_ONCHIP USE_NISTCURVES_ONCHIP_COMB \
+    ENABLE_P384_VERIFY USE_OVERLAY_P384_EMBED EMBED_P256_OVERLAY \
+    USE_OVERLAY_P256_EMBED COLD_BANK TRUST_STORE TLS_STREAM_DEFRAME \
+    KEEP_CRYPTO_SWAP KEEP_X509_PARSE_CERT KEEP_WORD32_ALL HTTPS_PIN_WARN \
+    HTTPS_SNI VIC_BLANK
+$(foreach k,$(M3_REFUSED_KNOBS),$(if $(strip $($(k))),$(error $(k)=$($(k)) does not apply to BACKEND=uci-m3: it links no 6510 TLS or crypto (the ESP32 does the TLS); drop the variable)))
+ifneq ($(filter-out 0 1,$(M3_ALLOW_TLS12)),)
+$(error M3_ALLOW_TLS12 must be 1 (offer TLS 1.3 and hardened 1.2) or 0/unset (TLS 1.3 only))
+endif
+endif
 
 # X25519 is always the libs/x25519 sibling (issue #245 retired the in-tree
 # src/crypto/{x25519,fe25519}.s). The old opt-in knob is refused rather than
@@ -88,6 +107,15 @@ CA65FLAGS += -D BACKEND_UCI=1
 # patience), so the check has the least to do exactly where it does not fit.
 # Documented in README and tracked on #135 rather than left to be discovered.
 CA65FLAGS += -D X509_VERIFY_NAME=1
+else ifeq ($(BACKEND),uci-m3)
+# A UCI build (the typed-target prompt, the REU body sink and the viewer
+# come with BACKEND_UCI) plus the M3 switch. -I src/net/uci after the
+# backend's own directory: uci_regs.inc and uci_errors.inc are shared,
+# net_tuning.inc is not.
+CA65FLAGS += -D BACKEND_UCI=1 -D BACKEND_UCI_M3=1 -I src/net/uci
+ifeq ($(M3_ALLOW_TLS12),1)
+CA65FLAGS += -D M3_ALLOW_TLS12=1
+endif
 else
 CA65FLAGS += -D BACKEND_IP65=1
 endif
@@ -100,8 +128,8 @@ endif
 # http_body_sink=1, streaming the HTTP response body into the REU at
 # HTTP_REU_BODY_BASE (default $10:0000 = bank 16 — needs a 16 MB REU;
 # see src/constants.inc).  UCI-only: the sink code is compiled out of
-# ip65 builds, so the flag is only honored under BACKEND=uci.
-ifeq ($(BACKEND),uci)
+# ip65 builds, so the flag is only honored under BACKEND=uci (and uci-m3).
+ifneq ($(filter uci uci-m3,$(BACKEND)),)
 ifdef HTTPS_BODY_TO_REU
 CA65FLAGS += -D HTTPS_BODY_TO_REU=1
 endif
@@ -509,8 +537,20 @@ endif
 # Either-of approach for the production wire-up will be Phase 4a.
 #SIBLING_LIB_ARCHIVES += build/lib/nistcurves-p384-sha384.a
 #SIBLING_LIB_ARCHIVES += build/lib/nistcurves-p384-curve.a
+else ifeq ($(BACKEND),uci-m3)
+# The M3 variant's whole link: no src/crypto, no sibling archives, and only
+# the top-level files that have nothing to do with the 6510 TLS. boot.s
+# stays first, so the BASIC stub's SYS 2061 lands on `start`.
+TOP_SRCS := src/boot.s src/data.s src/exports.s src/http.s src/loadaddr.s \
+    src/main.s src/net_abi_asserts.s src/net_err_registry_asserts.s \
+    src/reu_exec.s src/viewer.s
+NET_SRCS := src/net/uci-m3/net.s src/net/uci-m3/m3_cmd.s \
+    src/net/uci-m3/net_manifest.s
+CRYPTO_SRCS :=
+CRYPTO_SHARED_SRCS :=
+SIBLING_LIB_ARCHIVES :=
 else
-$(error Unknown BACKEND=$(BACKEND); expected ip65 or uci)
+$(error Unknown BACKEND=$(BACKEND); expected ip65, uci or uci-m3)
 endif
 
 TOP_OBJS    := $(patsubst src/%.s,build/%.o,$(TOP_SRCS))
