@@ -1409,6 +1409,25 @@ def test_the_build_exports_every_symbol_the_rig_reads() -> None:
             certifies="whether the build exports the symbols the hardware "
                       "rig reads",
             opt_out_env="C64_ALLOW_NO_BUILD")
+    # A UCI build in build/ is the same state one step removed: no ip65
+    # build to read. Its labels.txt lacks the ip65 adapter's symbols by
+    # design, so the assert below would report a missing export where the
+    # truth is "this check did not run". Same verdict, same opt-out as an
+    # absent build. Decided from flags.stamp, and only on positive
+    # evidence -- an unreadable stamp falls through to the real check.
+    backend = None
+    stamp = REPO / "build" / "flags.stamp"
+    if stamp.exists():
+        for line in stamp.read_text().splitlines():
+            if line.startswith("BACKEND="):
+                backend = line.split("=", 1)[1].strip()
+    require(backend in (None, "ip65"),
+            f"build/ holds a BACKEND={backend} build, not an ip65 one -- "
+            "rebuild (`make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1`)",
+            executed=0, total=1,
+            certifies="whether the build exports the symbols the hardware "
+                      "rig reads",
+            opt_out_env="C64_ALLOW_NO_BUILD")
     labels = {}
     for line in labels_path.read_text().splitlines():
         parts = line.split()

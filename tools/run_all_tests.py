@@ -22,6 +22,7 @@ from _vice_helpers import menu_wait, require_menu_wait_env  # noqa: E402
 
 PRG_PATH = os.path.join("build", "c64-https.prg")
 LABELS_PATH = os.path.join("build", "labels.txt")
+FLAGS_STAMP = os.path.join("build", "flags.stamp")
 
 # Import each test module's run function
 sys.path.insert(0, "tools")
@@ -88,6 +89,18 @@ UNDISPATCHED_SUITES = {
         "its docstring to point it at a shipped profile)"
     ),
 }
+
+
+def _stamp_value(key):
+    """`key=` from build/flags.stamp, or None if the stamp cannot say."""
+    try:
+        with open(FLAGS_STAMP) as fh:
+            for line in fh:
+                if line.startswith(key + "="):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return None
 
 
 def build():
@@ -306,6 +319,30 @@ def main():
             "hs_sequence",
             "tls_deframe_pump absent -- not a TLS_STREAM_DEFRAME build "
             "(rerun with BACKEND=uci)"))
+
+    # Same shape for the two suites bound to the default profile. build()'s
+    # bare `make` honours BACKEND / USE_NISTCURVES_ONCHIP* from the
+    # environment, so this runner does not always build the ip65 REU image
+    # these two were written against, and dispatching them anyway reports a
+    # wrong-profile build as a regression: net drives the ip65 adapter (the
+    # blob's jump table at $2000, net_save_zp, the TCP callback), and
+    # reu_row_abi refuses any on-chip build (its profile_problem(), the
+    # same CA65FLAGS test). Both decide from build/flags.stamp and skip only
+    # on positive evidence: an unreadable stamp dispatches the suite, which
+    # then fails and says why.
+    backend = _stamp_value("BACKEND")
+    if backend is not None and backend != "ip65":
+        suites.remove("net")
+        skipped_suites.append((
+            "net",
+            f"BACKEND={backend} build -- net tests the ip65 adapter "
+            "(rerun with BACKEND=ip65)"))
+    if "USE_NISTCURVES_ONCHIP" in (_stamp_value("CA65FLAGS") or ""):
+        suites.remove("reu_row_abi")
+        skipped_suites.append((
+            "reu_row_abi",
+            "on-chip build -- reu_fetch_mul_row is dead code here "
+            "(rerun without USE_NISTCURVES_ONCHIP*)"))
 
     require_menu_wait_env()
     config = ViceConfig(prg_path=PRG_PATH, warp=True, ntsc=True, sound=False,

@@ -997,6 +997,14 @@ def run_tests(transport, labels, seed):
     total_passed = 0
     total_failed = 0
 
+    # main() is not the only caller: tools/run_all_tests.py imports this
+    # function directly, and every field-op helper writes its operands
+    # through the sibling ZP pointers. Load them here too, not only in
+    # main(), or a runner-driven pass KeyErrors on every group that
+    # touches a pointer.
+    if not ZP:
+        ZP.update(load_sibling_zp())
+
     # The sibling's lookup tables are generated, not loaded; tls_ecdh.s
     # builds them ahead of every scalar mult, and so must a harness that
     # calls the field ops directly.
@@ -1075,7 +1083,7 @@ def run_tests(transport, labels, seed):
 
 
 def main():
-    global VERBOSE, FAST, KEYGEN_N, KEYGEN_ONLY, ZP
+    global VERBOSE, FAST, KEYGEN_N, KEYGEN_ONLY
     os.chdir(PROJECT_ROOT)
 
     seed = random.randint(0, 2**32 - 1)
@@ -1131,7 +1139,7 @@ def main():
     # Load labels
     labels = Labels.from_file(LABELS_PATH)
 
-    ZP = load_sibling_zp()
+    ZP.update(load_sibling_zp())  # fail before VICE, not inside run_tests
     required = [
         "x25519_clamp", "x25519_scalarmult", "x25519_tables_init",
         "x25519_scalarmult_fresh", "x25519_base_fresh",
