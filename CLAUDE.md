@@ -417,10 +417,10 @@ Second device: C64 Ultimate "Starlight", `U64_HOST=10.53.21.158`, fw 1.1.0,
 192.168.1.81), `c64-test-harness`, and go through `DeviceLock` +
 `enable_uci`. Named `rig_*.py`, not `test_*.py`, on purpose (#109/#111).
 Scratch DMA addresses come from `_memory_policy.py` (parses
-`build/labels.txt`) — never hardcode them. `rig_https_local`/`_live`/
-`_bad_finished` allocate from page 3 (`build_policy_and_low_ram_arbiter`,
-$0334-$03FF, 204 B), which no link moves; the other rigs still carve a
-linked-region tail.
+`build/labels.txt`) — never hardcode them. Every rig needing C64 scratch
+takes page 3 (`build_policy_and_low_ram_arbiter`, $0334-$03FF, 204 B),
+plus $02A7-$02FF with `page2=True`, which no link moves; none carves a
+linked-region tail (`tools/test_rig_scratch.py`, all five UCI profiles).
 
 **The acquire budget is `C64_DEVICE_LOCK_TIMEOUT`, default 1800 s**, and
 it is one number: every rig here and `tests/rig_ip65_rrnet_hw.py` takes
@@ -624,13 +624,12 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     `tools/run_all_tests.py` and ~15 others still spell the flags by hand).
     `C64_VICE_NO_REU=1` is the deliberate opt-out for proving the onchip
     image's no-REU claim — never set it on a REU-profile build.
-  - **CRYPTO_OVERLAY vs rig scratch**: new resident tenants in
-    `$4200-$5FFF` shrink what the rigs' `MemoryArbiter` can hand out, and
-    under comb that tail is small (server-name validation already broke
-    `rig_https_wiki.py`, which now drives the menu instead). Re-check rig
-    scratch after any tenant lands there. The arbiter reads
-    `build/labels.txt`; the harness write guard raises `MemoryPolicyError`
-    before the wire.
+  - **CRYPTO_OVERLAY vs rig scratch**: no rig allocates from the
+    `$4200-$5FFF` tail any more (low RAM only, see UCI rig scripts), so new
+    tenants there cannot break rig scratch; `tools/test_rig_scratch.py`
+    fails any rig that calls a tail allocator. The policy still reserves
+    every region in `build/labels.txt`; the harness write guard raises
+    `MemoryPolicyError` before the wire.
   - `CRYPTO_HOT` margin under UCI is **per profile**, even between the two
     that share `cfg/c64-https-uci.cfg`: each links a different nistcurves
     archive, and comb's cfg also moves `RODATA`/`CRYPTO_RODATA` out to
