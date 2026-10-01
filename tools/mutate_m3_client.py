@@ -32,6 +32,7 @@ NET = "src/net/uci-m3/net.s"
 CMD = "src/net/uci-m3/m3_cmd.s"
 INC = "src/net/uci-m3/m3.inc"
 HTTP = "src/http.s"
+UI = "src/net/uci-m3/m3_https_get.inc"
 
 # (name, rule, file, old, new, tests that must go red)
 MUTANTS = [
@@ -110,6 +111,18 @@ MUTANTS = [
     ("05-unframed-trusted", "S 1.6 05: trust only framed data", HTTP,
      "        lda m3_eof_code\n        cmp #5\n        bne @m3_framed",
      "        jmp @m3_framed", ["test_http_05_unframed_is_short"]),
+    ("refused-not-8d", "$8D UCI_ERR_OPEN_REFUSED on a named refusal", NET,
+     "        lda #UCI_ERR_OPEN_REFUSED   ; named in m3_status (e.g. 94,...)",
+     "        lda #UCI_ERR_CONNECT_FAIL", ["test_refusal_line_is_kept_whole",
+                                         "test_refusal_reaches_the_user"]),
+    ("unknown-not-8e", "$8E UCI_ERR_CMD_UNKNOWN on 21", NET,
+     "        lda #UCI_ERR_CMD_UNKNOWN\n        bne @ic_set",
+     "        lda #UCI_ERR_NOT_PRESENT\n        bne @ic_set",
+     ["test_no_tls_firmware", "test_no_tls_firmware_reaches_the_user"]),
+    ("status-not-shown", "the refusal's status line reaches the user", UI,
+     "m3_report_fail:\n        jsr m3_print_status",
+     "m3_report_fail:\n        nop", ["test_refusal_reaches_the_user",
+                                       "test_no_tls_firmware_reaches_the_user"]),
     ("tls12-offered", "S 1.1/1.7 flags: TLS 1.3 only by default", NET,
      "M3_FLAGS = M3_FLAG_TLS13_ONLY", "M3_FLAGS = 0", ["test_open_layout"]),
 ]

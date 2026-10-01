@@ -86,10 +86,14 @@
 .import tcp_recv_tail
 .import tcp_recv_overflow
 
-; net_last_error values: existing UCI-family codes, no new allocation. The
-; status line (m3_status) carries the firmware's actual reason.
-M3_ERR_OPEN_REFUSED = UCI_ERR_CONNECT_FAIL      ; OPEN refused, named in m3_status
-M3_ERR_NO_TLS       = UCI_ERR_NOT_PRESENT       ; no TLS firmware (21 / bad INFO)
+; net_last_error values (src/net/uci/uci_errors.inc). The firmware's own
+; reason is always in m3_status as well, and the UI prints it.
+;   UCI_ERR_OPEN_REFUSED $8D  OPEN_TLS refused with a named status (c64-
+;                             wireguard's allocation, mirrored; same meaning)
+;   UCI_ERR_CMD_UNKNOWN  $8E  "21,UNKNOWN COMMAND": no M3 TLS firmware (ditto)
+;   UCI_ERR_NOT_PRESENT  $81  no UCI, or INFO answered no capability record
+;   UCI_ERR_CONNECT_FAIL $84  the Open never ran: push rejected, or a host
+;                             the tail grammar refuses (empty, > 253 bytes)
 
 .ifdef HTTPS_PIN_SPKI
 .import m3_pin                  ; 32 B, digest order (src/boot.s)
@@ -110,9 +114,9 @@ M3_FLAGS = M3_FLAG_TLS13_ONLY
 ; =============================================================================
 ; net_init — the ER-2 startup procedure, then TLS detection.
 ; Out: C=0 the TLS firmware answered INFO; m3_info holds its record.
-;      C=1 net_last_error: $81 no UCI, or no TLS firmware (m3.inc
-;          M3_ERR_NO_TLS; m3_status holds the line, e.g. "21,UNKNOWN
-;          COMMAND"); $89 with m3_wedged set: bit 2 never cleared.
+;      C=1 net_last_error: $81 no UCI; $8E no TLS firmware (m3_status
+;          holds "21,UNKNOWN COMMAND"); $89 with m3_wedged set: bit 2
+;          never cleared.
 ; Clobbers: A, X, Y
 ; =============================================================================
 net_init:
@@ -194,7 +198,7 @@ net_init:
 ; m3_info_caps — `03 23 FF`, exactly 3 bytes (ER-4: a trailing $00 is 81 and
 ; claims). It claims nothing, so it is the one command allowed between an
 ; ABORTed Open and `03 25`. Out: C=0 m3_info = the 16-byte record.
-; C=1: no TLS firmware (M3_ERR_NO_TLS, m3_status says why) or the command
+; C=1: no TLS firmware ($8E; $81 if no record came back) or the command
 ; failed ($89 / wedged). Clobbers: A, X, Y
 ; =============================================================================
 m3_info_caps:
@@ -216,14 +220,21 @@ m3_info_caps:
         jsr m3_read_data
         jsr m3_finish
         lda m3_code
-        bne @ic_no_tls              ; 21,UNKNOWN COMMAND: no TLS firmware
+        cmp #21
+        beq @ic_unknown             ; 21,UNKNOWN COMMAND: no TLS firmware
+        cmp #0
+        bne @ic_no_record
         lda m3_rd_count
         cmp #M3_INFO_LEN
-        bne @ic_no_tls
+        bne @ic_no_record
         clc
         rts
-@ic_no_tls:
-        lda #M3_ERR_NO_TLS
+@ic_unknown:
+        lda #UCI_ERR_CMD_UNKNOWN
+        bne @ic_set                 ; always
+@ic_no_record:
+        lda #UCI_ERR_NOT_PRESENT
+@ic_set:
         sta net_last_error
 @ic_fail:
         sec
@@ -362,7 +373,7 @@ net_dhcp_acquire:
 ; firmware resolves it inside OPEN_TLS. A host of 0 or more than 253 bytes is
 ; refused here, as OPEN would refuse it with 81 (S 1.1 tail grammar).
 ; Out: C=0 staged (net_resolved_ip = $FF x4, the deferral marker);
-;      C=1 net_last_error = M3_ERR_OPEN_REFUSED. Clobbers: A, X, Y
+;      C=1 net_last_error = $84. Clobbers: A, X, Y
 ; =============================================================================
 net_dns_resolve:
         sta @dn_src+1
@@ -394,7 +405,7 @@ net_dns_resolve:
 @dn_bad:
         lda #0
         sta m3_host_len
-        lda #M3_ERR_OPEN_REFUSED
+        lda #UCI_ERR_CONNECT_FAIL
         sta net_last_error
         sec
         rts
@@ -411,7 +422,7 @@ net_dns_resolve:
 ; TRUSTED: 0x00000008). After an ABORTed Open, or a 00,OK with no handle
 ; byte to read, `03 25` is sent next (S 1.8).
 ; Out: C=0 NET_TCP_CONNECTED. C=1 NET_TCP_CONNECT_FAIL, net_last_error:
-;      M3_ERR_OPEN_REFUSED refused by the firmware; $84 push rejected;
+;      $8D refused by the firmware (m3_status names why); $84 push rejected;
 ;      $88 00,OK without a handle; $89 timeout (ABORTed) or wedged.
 ; Clobbers: A, X, Y
 ; =============================================================================
@@ -424,7 +435,7 @@ net_tcp_connect:
 :
         lda m3_host_len
         bne :+
-        lda #M3_ERR_OPEN_REFUSED
+        lda #UCI_ERR_CONNECT_FAIL
         sta net_last_error
         jmp @tc_fail
 :
@@ -514,7 +525,7 @@ net_tcp_connect:
         sta net_last_error
         bne @tc_fail                ; always
 @tc_refused:
-        lda #M3_ERR_OPEN_REFUSED
+        lda #UCI_ERR_OPEN_REFUSED   ; named in m3_status (e.g. 94,...)
         sta net_last_error
 @tc_fail:
         lda #NET_TCP_CONNECT_FAIL

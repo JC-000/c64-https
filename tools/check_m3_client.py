@@ -83,6 +83,7 @@ ST_IDLE, ST_BUSY, ST_LAST, ST_MORE = 0, 1, 2, 3
 NET_TCP_CLOSED, NET_TCP_CONNECTED = 0x00, 0x01
 NET_TCP_ERROR, NET_TCP_CONNECT_FAIL = 0x02, 0x03
 ERR_NOT_PRESENT, ERR_CONNECT_FAIL, ERR_WAIT_TIMEOUT = 0x81, 0x84, 0x89
+ERR_OPEN_REFUSED, ERR_CMD_UNKNOWN = 0x8D, 0x8E   # c64-wireguard's, mirrored
 
 STEPS_PER_UNIT = 200            # interpreted instructions per 10 ms unit
 SECOND = 100                    # units
@@ -415,6 +416,12 @@ class Memory:
         self.cpu = None
         self.dev = M3Device(self.units)
         self.cia2_writes = {}
+        # KERNAL stand-ins: CHROUT ($FFD2) = STA $FE00 / RTS, GETIN ($FFE4)
+        # = LDA $FE01 / RTS. $FE00 collects the screen, $FE01 feeds keys.
+        self.ram[0xFFD2:0xFFD6] = bytes([0x8D, 0x00, 0xFE, 0x60])
+        self.ram[0xFFE4:0xFFE8] = bytes([0xAD, 0x01, 0xFE, 0x60])
+        self.screen = bytearray()
+        self.keys = bytearray()
 
     def units(self):
         return (self.cpu.steps // STEPS_PER_UNIT) if self.cpu else 0
@@ -423,6 +430,8 @@ class Memory:
         addr &= 0xFFFF
         if 0xDF00 <= addr <= 0xDFFF:
             return self.dev.read(addr)
+        if addr == 0xFE01:
+            return self.keys.pop(0) if self.keys else 0
         if addr == 0xDD06:
             return (0xFFFF - self.units()) & 0xFF
         if addr == 0xDD07:
@@ -435,6 +444,9 @@ class Memory:
         addr &= 0xFFFF
         if 0xDF00 <= addr <= 0xDFFF:
             self.dev.write(addr, value & 0xFF)
+            return
+        if addr == 0xFE00:
+            self.screen.append(value & 0xFF)
             return
         if 0xDC00 <= addr <= 0xDDFF:
             self.cia2_writes[addr] = value & 0xFF
@@ -533,6 +545,9 @@ class Machine:
             head = (head + 1) & 0x0FFF
         return bytes(out)
 
+    def screen_text(self):
+        return bytes(self.mem.screen).replace(b"\r", b"\n").decode("latin-1")
+
     def no_violations(self):
         _check(not self.dev.violations,
                "protocol violations: " + "; ".join(self.dev.violations))
@@ -597,6 +612,8 @@ def test_no_tls_firmware(prg=None, labels=None):
     _check(m.init() is True, "net_init returned C=0 on firmware without M3")
     _check(m.status_line() == UNKNOWN, "status line %r, expected %r"
            % (m.status_line(), UNKNOWN))
+    _check(m.peek("net_last_error") == ERR_CMD_UNKNOWN, "net_last_error $%02X, "
+           "expected $8E UCI_ERR_CMD_UNKNOWN" % m.peek("net_last_error"))
     m.no_violations()
 
 
@@ -691,6 +708,8 @@ def test_refusal_line_is_kept_whole(prg=None, labels=None):
     _check(m.connect() is True, "a refused Open returned C=0")
     _check(m.status_line() == NAME_MISMATCH, "status line %r, expected %r"
            % (m.status_line(), NAME_MISMATCH))
+    _check(m.peek("net_last_error") == ERR_OPEN_REFUSED, "net_last_error "
+           "$%02X, expected $8D UCI_ERR_OPEN_REFUSED" % m.peek("net_last_error"))
     _check(m.peek("net_tcp_state") == NET_TCP_CONNECT_FAIL,
            "net_tcp_state $%02X after a refusal" % m.peek("net_tcp_state"))
     _check(m.peek("m3_owned") == 0, "a refused Open left a handle held")
@@ -898,6 +917,41 @@ def test_http_05_unframed_is_short(prg=None, labels=None):
         m.no_violations()
 
 
+def test_refusal_reaches_the_user(prg=None, labels=None):
+    """The menu path: 'G' with the default target, the Open refused with 94.
+    The user must see TLS HANDSHAKE FAILED and the WHOLE status line, and
+    net_last_error is $8D; nothing is sent."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("refuse", NAME_MISMATCH)
+    m.call("do_net_init")
+    m.mem.screen.clear()
+    m.mem.keys.extend(b"\r\r")                  # RETURN, RETURN: the defaults
+    m.call("do_https_get")
+    text = m.screen_text()
+    _check("TLS HANDSHAKE FAILED" in text, "no TLS HANDSHAKE FAILED on screen:"
+           "\n" + text)
+    _check(NAME_MISMATCH.decode().upper() in text.upper(), "the full status "
+           "line %r is not on screen:\n%s" % (NAME_MISMATCH, text))
+    _check(m.peek("net_last_error") == ERR_OPEN_REFUSED,
+           "net_last_error $%02X, expected $8D" % m.peek("net_last_error"))
+    _check(not any(c[1] == 0x11 for c in m.dev.commands()),
+           "a WRITE went out over a refused Open")
+    m.no_violations()
+
+
+def test_no_tls_firmware_reaches_the_user(prg=None, labels=None):
+    """The menu path on firmware without M3: 'I' shows NETWORK INIT FAILED
+    and the firmware's own line; net_last_error is $8E."""
+    m = Machine(prg, labels)
+    m.dev.tls = False
+    m.call("do_net_init")
+    text = m.screen_text()
+    _check("NETWORK INIT FAILED" in text and UNKNOWN.decode() in text,
+           "the user does not see why init failed:\n" + text)
+    _check(m.peek("net_last_error") == ERR_CMD_UNKNOWN,
+           "net_last_error $%02X, expected $8E" % m.peek("net_last_error"))
+
+
 TESTS = (
     test_startup_sequence,
     test_no_uci_writes_nothing,
@@ -921,6 +975,8 @@ TESTS = (
     test_long_write_is_split_at_892,
     test_http_content_length_end_to_end,
     test_http_05_unframed_is_short,
+    test_refusal_reaches_the_user,
+    test_no_tls_firmware_reaches_the_user,
 )
 
 
