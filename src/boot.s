@@ -31,7 +31,9 @@
 
         ; ---- Lane G viewer hook (UCI only; see do_https_get) ----
 .ifdef BACKEND_UCI
+        .ifdef VIEWER_LINKED            ; #155 phase 2: see Makefile KEEP_VIEWER
         .import viewer_enter
+        .endif
         .import http_body_sink
 .endif
 
@@ -736,10 +738,12 @@ do_https_get:
 .endif
         jsr http_recv_body
 
-.ifdef BACKEND_UCI
+.if .defined(BACKEND_UCI) .and .defined(VIEWER_LINKED)
         ; Lane G stretch-goal hook: when the body sink routed the
         ; response into the REU (http_body_sink != 0), drop into the
         ; scrollable viewer instead of printing the bounce buffer.
+        ; Without VIEWER_LINKED nothing sets the sink (it is SHADOW BSS,
+        ; zeroed at boot), so the hook would be a dead branch.
         lda http_body_sink
         beq @print_body
         jsr viewer_enter

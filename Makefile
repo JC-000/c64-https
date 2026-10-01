@@ -367,6 +367,29 @@ else
 CRYPTO_SRCS_EFFECTIVE := $(filter-out $(P384_SRCS),$(CRYPTO_SRCS_EFFECTIVE))
 endif
 
+# #155 phase 2 memory reclaims: code no shipped image reaches is assembled
+# out by default. Nothing is deleted; each knob re-arms its piece, and with
+# all four set the PRG is byte-identical to the pre-reclaim one on every
+# profile. Each rides CA65FLAGS as a -D, so flags.stamp sees a flip.
+#   KEEP_CRYPTO_SWAP=1      src/crypto/shared/crypto_swap.s (no importer
+#                           unless ENABLE_P384_VERIFY or an overlay embed
+#                           is on; those re-arm it by themselves)
+#   KEEP_X509_PARSE_CERT=1  x509_parse_cert + der_match_oid + OID table +
+#                           cert_* BSS in src/der_decode.s (tools/test_x509.py)
+#   KEEP_VIEWER=1           src/viewer.s + its boot.s hook on UCI; also
+#                           re-armed by HTTPS_BODY_TO_REU / VIEWER_TEST_HELPERS
+#   KEEP_WORD32_ALL=1       the uncalled routines in src/crypto/word32.s
+RECLAIM_KNOBS := KEEP_CRYPTO_SWAP KEEP_X509_PARSE_CERT KEEP_VIEWER KEEP_WORD32_ALL
+$(foreach k,$(RECLAIM_KNOBS),$(if $(filter-out 0 1,$($(k))),$(error $(k)=$($(k)): expected 1 (re-arm) or 0/unset)))
+CA65FLAGS += $(foreach k,$(RECLAIM_KNOBS),$(if $(filter 1,$($(k))),-D $(k)=1))
+# The viewer's only entry is the boot.s hook behind http_body_sink, which
+# nothing sets unless HTTPS_BODY_TO_REU does; one symbol gates both files.
+# (HTTPS_BODY_TO_REU and VIEWER_TEST_HELPERS are `ifdef` knobs above, so any
+# non-empty value counts here too.)
+ifneq ($(filter 1,$(KEEP_VIEWER))$(HTTPS_BODY_TO_REU)$(VIEWER_TEST_HELPERS),)
+CA65FLAGS += -D VIEWER_LINKED=1
+endif
+
 # Per-backend source + object selection.
 ifeq ($(BACKEND),ip65)
 NET_SRCS := $(IP65_SRCS)

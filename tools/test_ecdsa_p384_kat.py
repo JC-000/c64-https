@@ -653,7 +653,8 @@ def _build_prg() -> None:
     print("    [pass 1] make clean + make...")
     subprocess.run(["make", "clean", "BACKEND=uci"],
                    capture_output=True, cwd=str(PROJECT_ROOT))
-    r1 = subprocess.run(["make", "BACKEND=uci"],
+    # KEEP_CRYPTO_SWAP=1: default builds omit crypto_swap.o (#155 phase 2).
+    r1 = subprocess.run(["make", "BACKEND=uci", "KEEP_CRYPTO_SWAP=1"],
                         capture_output=True, text=True,
                         cwd=str(PROJECT_ROOT))
     if r1.returncode != 0:
@@ -668,7 +669,7 @@ def _build_prg() -> None:
     script.touch()
 
     print("    [pass 2] re-link overlay + main PRG with resolved addresses...")
-    r2 = subprocess.run(["make", "BACKEND=uci"],
+    r2 = subprocess.run(["make", "BACKEND=uci", "KEEP_CRYPTO_SWAP=1"],
                         capture_output=True, text=True,
                         cwd=str(PROJECT_ROOT))
     if r2.returncode != 0:

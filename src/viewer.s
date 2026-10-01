@@ -54,7 +54,10 @@
 ; TLS/HTTP/crypto is in flight, so the time-share is safe.
 ; =============================================================================
 
-.ifdef BACKEND_UCI
+; #155 phase 2 reclaim: only HTTPS_BODY_TO_REU builds can reach the viewer,
+; so it links only under VIEWER_LINKED (Makefile: HTTPS_BODY_TO_REU,
+; VIEWER_TEST_HELPERS or KEEP_VIEWER=1).
+.if .defined(BACKEND_UCI) .and .defined(VIEWER_LINKED)
 
         .include "constants.inc"
         .macpack cbm
@@ -811,4 +814,4 @@ viewer_scroll_up:
         jmp scroll_up_one
         .endif
 
-.endif ; BACKEND_UCI
+.endif ; BACKEND_UCI .and VIEWER_LINKED

@@ -11,7 +11,8 @@ i.e. an empty RTS, so those REU banks are never written.
 
 The region it writes into is not spare. Under ip65 it is TLS_CODE +
 CRYPTO_AUX_CODE + HTTP_AUX_CODE; under UCI it is HTTP_SINK_CODE +
-TLS_DEFRAME_CODE + CERT_BUF_BSS + VIEWER_CODE + HTTPS_TARGET_RODATA.
+TLS_DEFRAME_CODE + CERT_BUF_BSS + HTTPS_TARGET_RODATA (+ VIEWER_CODE in
+HTTPS_BODY_TO_REU builds).
 
 This test snapshots that span, calls `ecdsa_verify` with curve_id=1, and
 snapshots again. It asserts the SAFE behaviour — region unchanged and a clean

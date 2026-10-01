@@ -708,6 +708,17 @@ def run_tests(transport, labels):
         ("Group 2: DER Parser P-384 (2 tests)",
          lambda: test_der_parser_p384(transport, labels)),
     ]
+    # Shipped images reclaim x509_parse_cert (#155 phase 2); only a
+    # KEEP_X509_PARSE_CERT=1 build has it. On a default image (the
+    # run_all_tests.py aggregate) groups 1-2 are named SKIPs, and group 3 --
+    # the shipped ecdsa_verify path -- still runs. Any other missing DER
+    # label is still a failure via check_labels.
+    if "x509_parse_cert" in missing_labels(labels, ["x509_parse_cert"]):
+        for name, _ in test_groups:
+            print(f"  SKIP: {name}: x509_parse_cert reclaimed in this image "
+                  f"(KEEP_X509_PARSE_CERT=1 re-arms; tools/test_x509.py "
+                  f"builds it)")
+        test_groups = []
 
     for name, test_fn in test_groups:
         print(f"\n{'='*60}")
@@ -807,7 +818,10 @@ def main():
     else:
         print("\n=== Building ===")
         subprocess.run(["make", "clean"], capture_output=True, cwd=PROJECT_ROOT)
-        result = subprocess.run(["make"], capture_output=True, text=True,
+        # x509_parse_cert is reclaimed out of shipped builds (#155 phase 2);
+        # this suite is its only caller, so it re-arms it.
+        result = subprocess.run(["make", "KEEP_X509_PARSE_CERT=1"],
+                                capture_output=True, text=True,
                                 cwd=PROJECT_ROOT)
         if result.returncode != 0:
             print(f"Build failed:\n{result.stderr}")
@@ -851,6 +865,8 @@ def main():
         print("      this suite depends on (e.g. a libs/nistcurves bump renamed")
         print("      an export). Skipping the group would report success while")
         print("      testing nothing, so this is a failure.")
+        print("      (Under C64_SKIP_BUILD, the DER group needs a build made")
+        print("      with KEEP_X509_PARSE_CERT=1; shipped builds omit it.)")
         print(f"{'='*60}")
         sys.exit(1)
 

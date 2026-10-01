@@ -149,7 +149,10 @@ def main() -> int:
     if os.environ.get("C64_SKIP_BUILD") != "1":
         subprocess.run(["make", "clean", f"BACKEND={backend}"],
                        capture_output=True, cwd=PROJECT_ROOT)
-        result = subprocess.run(["make", f"BACKEND={backend}"],
+        # KEEP_CRYPTO_SWAP=1: the dispatcher under test is reclaimed out
+        # of default builds (#155 phase 2).
+        result = subprocess.run(["make", f"BACKEND={backend}",
+                                 "KEEP_CRYPTO_SWAP=1"],
                                 capture_output=True, text=True,
                                 cwd=PROJECT_ROOT)
         if result.returncode != 0:
@@ -194,7 +197,8 @@ def main() -> int:
     ]
     missing = [s for s in required_symbols if s not in labels]
     if missing:
-        print(f"FATAL: required symbols missing from build/labels.txt: {missing}")
+        print(f"FATAL: required symbols missing from build/labels.txt: {missing}"
+              " (build with KEEP_CRYPTO_SWAP=1; default builds omit crypto_swap.o)")
         return 1
     print(f"  Labels loaded: {len(required_symbols)} swap-dispatcher symbols verified")
     if VERBOSE:

@@ -266,11 +266,10 @@ references, so the wildcard pulled it in), costing 299 B of
 `CRYPTO_AUX_CODE` + 33 B of `CRYPTO_RODATA` everywhere. Both P-384-only
 objects now link only under `ENABLE_P384_VERIFY=1`. Measured consequence:
 exactly two symbols lose their only link-time consumer —
-`crypto_swap_to_p384_sha384` and `crypto_swap_to_p384_curve`. They are
-still exported unconditionally by `src/crypto/shared/crypto_swap.s` and
-still occupy bytes; nothing imports them in any of the five unarmed
-builds. That is the whole surface change, and it is measured from the
-`Imports list` of all five `build/c64-https.map` files, not estimated.
+`crypto_swap_to_p384_sha384` and `crypto_swap_to_p384_curve`. With them
+`src/crypto/shared/crypto_swap.s` had no importer in any unarmed build, so
+it now assembles empty unless `ENABLE_P384_VERIFY`, an overlay embed, or
+`KEEP_CRYPTO_SWAP=1` is set (#155 phase 2; knobs in the Makefile).
 
 Sibling-library memory requirements: code + rodata in `CRYPTO_HOT` /
 `CRYPTO_RESIDENT` ($6000-$9FFF), never crossing $A000 (boot zeroes
@@ -857,8 +856,8 @@ reachable from the pool: NET_CODE's tail is the `HTTPS_HOST`/`HTTPS_PATH`
 budget, and CRYPTO_COLD_SHADOW's only gap is alignment padding below
 TABLES_BSS.
 
-  - `http.s` is **not** in `LOADER_OVERFLOW`; its tenants are `boot.o`,
-    `vic.o` and `crypto_swap.o`. W4 moved `http.s`'s share out to
+  - `http.s` is **not** in `LOADER_OVERFLOW`; its tenants are `boot.o`
+    and `vic.o` (plus `crypto_swap.o` when re-armed). W4 moved `http.s`'s share out to
     `HTTP_AUX_CODE` (`src/http.s`, grep "W4: moved from LOADER_OVERFLOW").
   - `src/loadaddr.s` (PRG load address) and `src/exports.s` (promotes
     equates to `labels.txt`, incl. `cert_buf_size` — rigs must read it, not
