@@ -6,9 +6,13 @@
 anyone can sign a bundle an image built with it accepts. `make package`
 must refuse it. Two independent layers, each checked here:
 
-  Makefile  TRUST_RELEASE=1 + TRUST_BUNDLE=1 with the test key's 64 BYTES
-            is a parse-time $(error) — even if the .inc claims
+  Makefile  TRUST_RELEASE=1 + TRUST_BUNDLE=1 with the test key's 64 `$XX`
+            tokens is a parse-time $(error) — even if the .inc claims
             TRUST_BUNDLE_KEY_IS_TEST_ONLY = 0;
+  link      that check is textual, so the link also runs
+            tools/check_release_key.py over the ASSEMBLED PRG (the test key
+            derived from its PEM) — pinned here by the recipe it prints and
+            by the script's verdict on synthetic images;
   source    src/net/uci/trust_bundle.s `.assert`s the flag under
             -D TRUST_RELEASE (ca65 run directly, the Makefile bypassed).
 
@@ -122,6 +126,33 @@ def main():
         check(rc == 0, f"a dev build with the test key was refused (exit {rc})")
         rc, out = make_n(*UCI_BUNDLE, "TRUST_RELEASE=2")
         check(rc != 0, "TRUST_RELEASE=2 accepted")
+
+        # --- assembled-byte layer (adv-269 #1) --------------------------------
+        # The parse-time guard reads `$XX` tokens; an .inc that spells a byte
+        # in decimal and pads the count with a commented `$00` gets past it.
+        crafted = tmp / "crafted.inc"
+        t = TEST_INC.read_text().replace("TRUST_BUNDLE_KEY_IS_TEST_ONLY = 1",
+                                         "TRUST_BUNDLE_KEY_IS_TEST_ONLY = 0")
+        t = t.replace("        .byte $EA, $30,", "        .byte 234, $30,", 1)
+        t = t.replace("        ; Qy, big-endian", "        ; Qy, big-endian ; $00")
+        crafted.write_text(t)
+        rc, out = make_n(*UCI_BUNDLE, "TRUST_RELEASE=1", f"TRUST_BUNDLE_KEY_INC={crafted}")
+        check(rc == 0 and "check_release_key.py" in out,
+              f"crafted .inc: the textual guard passes it (exit {rc}), so the link "
+              "must run the assembled-byte check -- it is not in the recipe")
+        rc, out = make_n(*UCI_BUNDLE, f"TRUST_BUNDLE_KEY_INC={other}")
+        check(rc == 0 and "check_release_key.py" not in out,
+              "a dev build runs the release key check")
+        sys.path.insert(0, str(HERE))
+        import trust_bundle as tb       # noqa: PLC0415
+        key = tb.pubkey_xy(tb.load_private_key(tb.TEST_KEY_PATH).public_key())
+        for name, body, want in (("test key inside", bytes(5901) + key + bytes(99), 1),
+                                 ("no test key", bytes(6000) + key[:63] + bytes(9), 0)):
+            prg = tmp / f"{name.replace(' ', '_')}.prg"
+            prg.write_bytes(b"\x01\x08" + body)
+            p = subprocess.run([sys.executable, str(HERE / "check_release_key.py"), str(prg)],
+                               capture_output=True, text=True)
+            check(p.returncode == want, f"check_release_key.py, {name}: exit {p.returncode}")
 
         # --- source layer (Makefile bypassed) --------------------------------
         def assemble(inc: Path, release: bool):

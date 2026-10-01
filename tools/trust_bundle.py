@@ -79,6 +79,25 @@ is tools/trust_bundle_TEST_ONLY_signing_key.pem (`--test-key`); choosing and
 holding a production key is the maintainer's decision. Signing with the test
 key prints a warning, and `inc` marks it with TRUST_BUNDLE_KEY_IS_TEST_ONLY.
 
+Production key (the bundle ships only once one exists, DECISIONS 11 Q1).
+Keep the private key OUTSIDE the repository; only its public half and the
+generation floor enter a build:
+
+    openssl ecparam -name prime256v1 -genkey -noout -out ~/keys/c64-bundle.pem
+    python3 tools/trust_bundle.py inc --key ~/keys/c64-bundle.pem --floor 1 \\
+        -o ~/keys/c64-bundle.inc            # public key + floor; safe to share
+    python3 tools/trust_bundle.py build --key ~/keys/c64-bundle.pem \\
+        --generation 1 -o TRUST.P en.wikipedia.org github.com
+    make BACKEND=uci ... TRUST_STORE=1 TRUST_BUNDLE=1 \\
+        TRUST_BUNDLE_KEY_INC=~/keys/c64-bundle.inc
+
+Copy TRUST.P to TRUST_STORE_DIR (default /USB1). Raise --floor and
+--generation together whenever an older bundle must stop being accepted.
+A release (`make package`, TRUST_RELEASE=1) refuses the tree's TEST-ONLY key
+by its .inc tokens, by its IS_TEST_ONLY flag and by the assembled bytes
+(tools/check_release_key.py), so pointing TRUST_BUNDLE_KEY_INC at a real
+key is the only way a bundle-enabled release builds.
+
 Exit codes: 0 ok; 1 the bundle is invalid / a fetch failed; 2 usage.
 """
 
