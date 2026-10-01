@@ -21,7 +21,8 @@
 ; then the record for this attempt's ts_key, if any, goes to tb_spki
 ; (tb_found = 1): the hook in src/cert_pin.s warns if the server's key
 ; differs. The public key and the floor come from build/trust_key.inc
-; (TRUST_BUNDLE_KEY_INC; the tree's key is TEST-ONLY).
+; (TRUST_BUNDLE_KEY_INC; the tree's key is TEST-ONLY, and a release build
+; refuses it — see the assert below and the Makefile).
 ;
 ; VERIFY ONCE PER BOOT (DECISIONS 11, Q4): the ECDSA verify (16-30 s at
 ; 48 MHz) runs at the first 'G' that finds the file. Its digest and verdict
@@ -69,6 +70,11 @@ TB_V_NONE       = 0             ; tb_verdict: nothing judged yet
 TB_V_GOOD       = 1
 TB_V_BAD        = 2
 
+; A release (make package) must not carry the key whose private half is in
+; the repository. The Makefile refuses it too, by its bytes.
+.ifdef TRUST_RELEASE
+.assert TRUST_BUNDLE_KEY_IS_TEST_ONLY = 0, error, "TEST-ONLY trust-bundle key in a release build (TRUST_BUNDLE_KEY_INC)"
+.endif
 .assert TB_HEADER_LEN = 8 .and TB_RECORD_LEN = TS_REC_SIZE .and TB_SIG_LEN = 64, error, "bundle format v1"
 .assert TB_FILE_MAX + 1 <= TCP_RECV_MASK + 1, error, "bundle > TCP ring"
 .assert TB_MAX_RECORDS < 64, error, "tb_body_len: N * 64 must fit in 12 bits"
