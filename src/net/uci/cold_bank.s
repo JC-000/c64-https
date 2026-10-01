@@ -17,7 +17,8 @@
 ; in the same call, because every call runs a fresh copy.
 ;
 ; Boot (cold_bank_init) stashes the PRG's COLD_IMAGE into the REU at
-; COLD_REU in one DMA and keeps each group's XOR. A tenant's public name is
+; COLD_REU in one DMA and keeps each group's XOR, once per LOAD and only if
+; every group's marker arrived; cold_call refuses until it has. A tenant's public name is
 ; a resident stub, `ldy #COLD_E_x / jmp cold_call`, so callers are
 ; unchanged. cold_call:
 ;   1. refuses unless no connection is open: net_tcp_state is CLOSED or
@@ -94,11 +95,28 @@ LEN_TRUST = cold_marker_trust + 1 - COLD_RUN
 .assert LEN_TRUST <= CERT_BUF_SIZE, lderror, "cold bank: TRUST group larger than cert_buf"
 .endif
 ; The REU home (cold_bank.inc), bounded by COLD_IMAGE_MAX so these hold
-; for any image that links.
+; for any image that links. Checked against what the LINKED library says
+; its tables are (the code-read values reu_config.o exports), not against
+; a copy of the numbers: a library that moves its comb tables onto the
+; cold home fails this link.
+.import LIB_NISTCURVES_REU_BANK_COMB, LIB_NISTCURVES_REU_BANK_MUL
+.import LIB_NISTCURVES_REU_OFFSET_COMB_P256, LIB_NISTCURVES_REU_OFFSET_COMB_P384
+.import SINK_FLOOR_BANK
+COMB_P256_LO = LIB_NISTCURVES_REU_BANK_COMB * $10000 + LIB_NISTCURVES_REU_OFFSET_COMB_P256
+COMB_P384_LO = LIB_NISTCURVES_REU_BANK_COMB * $10000 + LIB_NISTCURVES_REU_OFFSET_COMB_P384
+COMB_P256_LEN = 256 * 64        ; 256 anchors x (X, Y), API.md "REU map"
+COMB_P384_LEN = 256 * 96
+COLD_HI = COLD_REU + COLD_IMAGE_MAX
 .assert __COLD_IMAGE_SIZE__ = COLD_IMAGE_MAX, lderror, "cold bank: COLD_IMAGE_MAX is not the cfg's COLD_IMAGE size"
-.assert COLD_REU >= COLD_REU_FLOOR, error, "cold bank: images overlap the Lim-Lee tables in REU bank 2"
-.assert COLD_REU + COLD_IMAGE_MAX <= $030000, error, "cold bank: images leave REU bank 2"
-.assert COLD_REU + COLD_IMAGE_MAX <= HTTP_REU_BODY_BASE, error, "cold bank: images overlap the HTTP body area"
+.assert COLD_HI <= COMB_P256_LO .or COLD_REU >= COMB_P256_LO + COMB_P256_LEN, lderror, "cold bank: images overlap the linked library's P-256 Lim-Lee table"
+.assert COLD_HI <= COMB_P384_LO .or COLD_REU >= COMB_P384_LO + COMB_P384_LEN, lderror, "cold bank: images overlap the linked library's P-384 Lim-Lee table"
+.assert COLD_HI <= LIB_NISTCURVES_REU_BANK_MUL * $10000 .or COLD_REU >= (LIB_NISTCURVES_REU_BANK_MUL + 2) * $10000, lderror, "cold bank: images overlap the multiply-row banks"
+; The HTTP body sink's region starts at bank SINK_FLOOR_BANK (src/http.s),
+; so everything here, and the library's tables, must sit below it.
+.assert COLD_HI <= SINK_FLOOR_BANK * $10000, lderror, "cold bank: images reach the HTTP body sink's banks"
+.assert COMB_P384_LO + COMB_P384_LEN <= SINK_FLOOR_BANK * $10000 .and COMB_P256_LO + COMB_P256_LEN <= SINK_FLOOR_BANK * $10000, lderror, "the Lim-Lee tables reach the HTTP body sink's banks"
+.assert LIB_NISTCURVES_REU_BANK_MUL + 2 <= SINK_FLOOR_BANK, lderror, "the multiply rows reach the HTTP body sink's banks"
+.assert COLD_HI <= HTTP_REU_BODY_BASE, error, "cold bank: images overlap the HTTP body area"
 
 .segment "CODE"
 
@@ -117,6 +135,8 @@ cold_call:
         cmp #TLS_STATE_ERROR
         bne @busy               ; a session owns cert_buf
 @free:
+        lda cold_stashed        ; nothing stashed this LOAD: cold_g_sum is
+        beq @bad                ;  not a sum of anything, the REU unknown
         ldx cold_entry_grp,y
         stx cold_g
         lda cold_g_tail_lo,x
@@ -175,14 +195,23 @@ cold_call:
 ; each group's XOR. Once per LOAD: cold_stashed is PRG data, so only a
 ; fresh LOAD reads 0 here. A re-run without one (RUN after 'Q') skips it
 ; and keeps the first stash, because $C000 is the TCP ring and has held
-; server-chosen bytes since: stashing them would run them. The marker
-; check only refuses a PRG whose image did not arrive.
+; server-chosen bytes since: stashing them would run them. Every group's
+; marker must be present at its load address, so a LOAD that stopped short
+; of the image stashes nothing, and cold_call then refuses every call.
 cold_bank_init:
         lda cold_stashed
         bne @out
-        lda __COLD_TAIL_UI_LOAD__
+        ldx #COLD_GROUPS-1      ; every group's marker must have arrived:
+@arrived:                       ;  a LOAD cut short is not stashed whole
+        lda cold_g_tl_lo,x
+        sta @tail+1
+        lda cold_g_tl_hi,x
+        sta @tail+2
+@tail:  lda $FFFF
         cmp #COLD_MARK
         bne @out
+        dex
+        bpl @arrived
         inc cold_stashed
         lda #<COLD_IMAGE_LEN
         sta cold_dlen
@@ -309,6 +338,16 @@ cold_g_tail_hi:
         .hibytes cold_marker_ui
 .ifdef TRUST_STORE
         .hibytes cold_marker_trust
+.endif
+cold_g_tl_lo:                   ; the PRG copy's marker, per group
+        .lobytes __COLD_TAIL_UI_LOAD__
+.ifdef TRUST_STORE
+        .lobytes __COLD_TAIL_TRUST_LOAD__
+.endif
+cold_g_tl_hi:
+        .hibytes __COLD_TAIL_UI_LOAD__
+.ifdef TRUST_STORE
+        .hibytes __COLD_TAIL_TRUST_LOAD__
 .endif
 cold_g_load_lo:
         .lobytes __TARGET_PROMPT_CODE_LOAD__

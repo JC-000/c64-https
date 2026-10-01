@@ -263,7 +263,8 @@ def case_boot_stash(env):
     # its bytes -- including a perfect copy of the marker.
     lo = L["__COLD_IMAGE_START__"]
     r.ram[lo:lo + span] = bytes([0xEA]) * span
-    r.ram[L["__COLD_TAIL_UI_LOAD__"]] = COLD_MARK
+    r.ram[L["__COLD_TAIL_UI_LOAD__"]] = COLD_MARK      # every marker forged
+    r.ram[L["__COLD_TAIL_TRUST_LOAD__"]] = COLD_MARK
     r.m.cpu.call(L["cold_bank_init"])
     check(len(r.reu.log) == 1, f"re-run re-stashed the ring: {r.reu.log}")
     check(bytes(r.reu.mem[COLD_REU:COLD_REU + len(ui)]) == ui,
@@ -426,7 +427,44 @@ def case_refusal_is_not_first_use(env):
           " -- reads as first use")
 
 
-CASES = [case_boot_stash, case_call_runs_the_fetched_copy,
+def case_no_stash_refuses(env):
+    """adv-l5 LOW 3a: boot skipped the stash, so cold_g_sum is still 0. Stale
+    REU bytes that carry a marker and XOR to 0 must not run (they did: 1 in
+    256 for leftovers, every time for a planted image)."""
+    L = env.labels
+    r = Rig(env, init=False)                 # no cold_bank_init at all
+    _, n, at = group(env, "trust")
+    code = bytes([0xA9, 0x42, 0x8D, 0x34, 0x03, 0x18, 0x60])  # sta $0334
+    img = bytearray(n)
+    entry = L["cold_ts_load"] - L["__COLD_RUN_TRUST_START__"]
+    img[entry:entry + len(code)] = code      # at trust_store_load's entry
+    img[-1] = COLD_MARK
+    img[-2] ^= xor(img)                      # XOR 0 == the unset cold_g_sum
+    r.reu.mem[at:at + n] = img
+    r.ram[0x0334] = 0
+    c, a, log = r.load()
+    check(c and r.ram[0x0334] != 0x42 and not r.entered,
+          f"no stash, planted image: C={c} $0334=${r.ram[0x0334]:02X} "
+          f"entered={r.entered}")
+    check(r.r8("cold_err") == R_FETCH, f"no stash: cold_err {r.r8('cold_err')}")
+
+
+def case_truncated_group_is_not_stashed(env):
+    """adv-l5 LOW 3b: a LOAD that cut the TRUST group short (its marker
+    missing) must not be stashed and summed as if it were whole."""
+    L = env.labels
+    r = Rig(env, init=False)
+    tl = L["__COLD_TAIL_TRUST_LOAD__"]
+    r.ram[tl - 64:tl + 1] = bytes(65)        # the image's tail never arrived
+    r.m.cpu.call(L["cold_bank_init"])
+    check(not r.reu.log and r.r8("cold_stashed") == 0,
+          f"a truncated TRUST group was stashed: {r.reu.log}")
+    c, a, _ = r.load()
+    check(c, "a call ran after an incomplete stash")
+
+
+CASES = [case_no_stash_refuses, case_truncated_group_is_not_stashed,
+         case_boot_stash, case_call_runs_the_fetched_copy,
          case_prompt_runs_from_its_own_group, case_guard, case_corrupt_image,
          case_groups_are_checked_apart, case_no_reu,
          case_no_reu_over_a_pristine_copy, case_no_reu_over_a_colliding_copy,

@@ -38,6 +38,10 @@ MATCH, AND THE OTHER TWO DIVERGE ON PURPOSE. An earlier draft of this file
 claimed the two "mirror branch for branch". They do not, and the claim was
 wrong in a way that reads as reassuring, so it is spelled out instead:
 
+  sink refused      MATCHES (UCI). 6502: `lda http_sink_full / bne
+                    @to_short`, first: a body the REU sink stopped at its
+                    region's end is never complete, whatever its framing
+                    says. The symbol is UCI-only (OPTIONAL_SYMBOLS).
   parse_state < 2   MATCHES. 6502: `cmp #2 / bcc @to_short` -> `sec`.
   Content-Length    MATCHES, including the PRECEDENCE: both test
                     `http_cl_valid` before `http_chunked`, and both then
@@ -163,6 +167,11 @@ SYMBOLS = {
     "http_chunked": 1,
     "http_chunk_state": 1,
 }
+#: Read when the build has them (labels.txt), 0 otherwise: UCI-only state.
+#: http_sink_full: 1 = the REU body sink refused a write past its region.
+OPTIONAL_SYMBOLS = {
+    "http_sink_full": 1,
+}
 
 
 @dataclass
@@ -175,6 +184,7 @@ class BodyState:
     body_total: int
     chunked: int
     chunk_state: int
+    sink_full: int = 0
 
     def summary(self) -> str:
         framing = ("Content-Length" if self.cl_valid
@@ -211,7 +221,17 @@ def decode_body_state(raw: dict) -> BodyState:
         body_total=_le(raw["http_body_total"]),
         chunked=_le(raw["http_chunked"]),
         chunk_state=_le(raw["http_chunk_state"]),
+        sink_full=_optional(raw, "http_sink_full"),
     )
+
+
+def _optional(raw: dict, name: str) -> int:
+    if name not in raw:
+        return 0
+    if len(bytes(raw[name])) != OPTIONAL_SYMBOLS[name]:
+        raise ValueError(f"{name}: read {len(bytes(raw[name]))} bytes, "
+                         f"expected {OPTIONAL_SYMBOLS[name]}")
+    return _le(raw[name])
 
 
 def expected_body_size(state: BodyState):
@@ -261,8 +281,15 @@ def check_body_complete(state: BodyState) -> Verdict:
         "body_total": state.body_total,
         "chunked": state.chunked,
         "chunk_state": state.chunk_state,
+        "sink_full": state.sink_full,
         "expected": expected_body_size(state),
     }
+
+    if state.sink_full:
+        return Verdict(False,
+                       f"REFUSED: the body outgrew its REU region after "
+                       f"{state.body_total:,} B consumed; the sink stopped it "
+                       "and wrote nothing past the region (http_sink_full)", ev)
 
     if state.parse_state < PARSE_STATE_BODY:
         return Verdict(False,

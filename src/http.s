@@ -30,10 +30,16 @@
 .ifdef BACKEND_UCI
         .export http_reu_body_base
         .export http_sink_blit
+        .export reu_probe_size, reu_top_bank, reu_size_ok
+        .export http_sink_room, http_sink_full
+        .export SINK_FLOOR_BANK:abs
 .endif
 
         ; Every REU execute goes through src/reu_exec.s (#191, SPEC §8.2).
         .import reu_execute
+.ifdef BACKEND_UCI
+        .import reu_dma_timeout
+.endif
 
         ; ---- imports: data.asm BSS (HTTP I/O + parser state) ----
         .import http_host_ptr
@@ -261,6 +267,10 @@ http_recv_loop:
         sta http_in_mode        ; input mode 1: parser reads this span
         jsr http_recv_response
         bcc @recv_complete      ; C=0 means parsing complete
+.ifdef BACKEND_UCI
+        lda http_sink_full      ; the body outgrew its REU region: stop
+        bne @recv_complete      ;  now (C=1 below), not at the framing
+.endif
         ; Reset timeout counter on progress
         lda #0
         sta http_recv_ticks
@@ -280,7 +290,12 @@ http_recv_loop:
         ; this call covers the poll-timeout fallback so a sink body cut
         ; short still gets its final blit + first-512 restore.
         jsr http_body_finish
+.ifdef BACKEND_UCI
+        lda http_sink_full      ; C=1 iff the sink refused a write
+        cmp #1
+.else
         clc
+.endif
         rts
 
 ; -----------------------------------------------------------------------------
@@ -332,6 +347,10 @@ http_recv_loop:
         .segment "HTTP_AUX_CODE2"
 http_recv_timeout_verdict:
         jsr http_body_finish    ; idempotent — http_sink_flushed latch
+.ifdef BACKEND_UCI
+        lda http_sink_full      ; a body the sink refused is never complete
+        bne @to_short
+.endif
         lda http_parse_state
         cmp #2                  ; 2 = body; 0/1 = status line / headers
         bcc @to_short           ; never reached the body: not a response
@@ -823,7 +842,11 @@ http_body_begin:
         sta http_reu_cursor+1
         sta http_reu_cursor+2
         sta http_sink_flushed
+.ifdef BACKEND_UCI
+        jmp sink_room_init      ; this body's REU region (and clear the latch)
+.else
         rts
+.endif
 
 ; -----------------------------------------------------------------------------
 ; http_body_done_check - is the identity body complete?
@@ -1331,6 +1354,8 @@ http_sink_blit:
         lda http_resp_len
         ora http_resp_len+1
         beq @rts
+        jsr sink_fits           ; C=1: past the region -- write nothing
+        bcs @rts
         jsr sink_reu_setup
         clc                     ; REU addr = 24-bit base + cursor
         lda http_reu_body_base
@@ -1435,6 +1460,190 @@ http_body_finish:
 @rts:
         rts
 .endif                          ; BACKEND_UCI (REU sink)
+
+.ifdef BACKEND_UCI
+; =============================================================================
+; The sink's REU region. http_sink_blit used to STASH to base + cursor with
+; no bound, and REU addresses wrap: on a 512 KB or 1 MB REU the default
+; base $10:0000 IS bank 0, and on 16 MB the 24-bit sum's carry out of the
+; bank byte is dropped. A server's body then lands on the REU-profile
+; multiply rows (banks 0-1), comb's Lim-Lee table and the cold-code bank
+; (bank 2) -- all executed or trusted later. Now every body has a region:
+;
+;   [http_reu_body_base, end), end = the REU's size as probed at boot,
+;   or bank SINK_P384_BANK when the base sits below it,
+;
+; and a base in banks 0..SINK_FLOOR_BANK-1 or the P-384 banks, past the
+; REU's end, or with no REU size established, gets an EMPTY region. A
+; blit that would cross the end writes nothing and latches
+; http_sink_full; http_recv_body then stops and every verdict is C=1.
+; =============================================================================
+        .include "reu_layout.inc"   ; REU_OVERLAY_* (reserved slots)
+        .include "cold_bank.inc"    ; COLD_REU (comb's cold-code bank)
+SINK_FLOOR_BANK = 3             ; banks 0-1: multiply rows; 2: comb Lim-Lee
+                                ;  + the cold bank (src/cold_bank.inc)
+SINK_P384_BANK  = 6             ; banks 6-7: the parked P-384 overlays
+.assert HTTP_REU_BODY_BASE >= SINK_FLOOR_BANK * $10000, error, "HTTP_REU_BODY_BASE overlaps REU banks 0-2 (multiply rows, Lim-Lee, cold bank)"
+.assert HTTP_REU_BODY_BASE < SINK_P384_BANK * $10000 .or HTTP_REU_BODY_BASE >= (SINK_P384_BANK + 2) * $10000, error, "HTTP_REU_BODY_BASE is in the P-384 banks 6-7"
+.assert HTTP_REU_BODY_BASE < $1000000, error, "HTTP_REU_BODY_BASE past a 16 MB REU"
+.assert REU_OVERLAY_P384_SHA384 >= SINK_P384_BANK * $10000 .and REU_OVERLAY_P384_CURVE + OVERLAY_SIZE <= (SINK_P384_BANK + 2) * $10000, error, "P-384 overlays left banks 6-7"
+.assert ^(COLD_REU + COLD_IMAGE_MAX - 1) < SINK_FLOOR_BANK, error, "the cold bank left banks 0-2"
+.assert REU_OVERLAY_STORE_BASE + OVERLAY_SIZE <= SINK_FLOOR_BANK * $10000 .and REU_OVERLAY_P256 + OVERLAY_SIZE <= SINK_FLOOR_BANK * $10000, error, "REU overlays left banks 0-2"
+
+        .segment "HTTP_SINK_GUARD"
+
+; -----------------------------------------------------------------------------
+; reu_probe_size - boot, BEFORE anything else writes the REU (it writes
+;   offset 0 of banks 0, 1, 2, 4, ... 128, which reu_mul_init / the comb
+;   precompute / nobody rewrite after it).
+;   Out: reu_top_bank = banks - 1 ($FF = 16 MB) and reu_size_ok = 1; or
+;   reu_size_ok = 0 when a DMA did not confirm. Bank N exists iff a byte
+;   written there reads back AND bank 0 did not change (no alias): a
+;   1750/1764/U64 REU wraps modulo its size. With no REU nothing reads
+;   back, so the size is one bank, below every region: fail closed.
+; -----------------------------------------------------------------------------
+reu_probe_size:
+        lda #0
+        sta reu_size_ok
+        sta reu_probe_bank
+        sta reu_probe_byte
+        lda #$90                ; STASH: bank 0 := 0
+        jsr reu_probe_dma
+        ldx #1
+@bank:  stx reu_probe_bank
+        stx reu_probe_byte
+        lda #$90                ; STASH: bank X := X
+        jsr reu_probe_dma
+        txa
+        eor #$FF
+        sta reu_probe_byte      ; not X, so a FETCH that never ran shows
+        lda #$91                ; FETCH bank X
+        jsr reu_probe_dma
+        cpx reu_probe_byte
+        bne @size               ; bank X does not hold a byte
+        lda #0
+        sta reu_probe_bank
+        lda #$91                ; FETCH bank 0
+        jsr reu_probe_dma
+        lda reu_probe_byte
+        bne @size               ; bank X is bank 0
+        txa
+        asl
+        tax
+        bne @bank               ; 1, 2, 4 ... 128; then all 256 banks
+@size:  dex
+        stx reu_top_bank
+        lda reu_dma_timeout     ; sticky: a confirm that ever expired
+        bne @out                ;  makes the size unknown
+        inc reu_size_ok
+@out:   rts
+
+; reu_probe_dma - A = command: one byte between reu_probe_byte and
+; reu_probe_bank:$0000. X, Y preserved (reu_execute preserves them).
+reu_probe_dma:
+        pha
+        lda #<reu_probe_byte
+        sta reu_c64_lo
+        lda #>reu_probe_byte
+        sta reu_c64_hi
+        lda #0
+        sta reu_reu_lo
+        sta reu_reu_hi
+        sta reu_len_hi
+        sta reu_addr_ctrl
+        lda reu_probe_bank
+        sta reu_reu_bank
+        lda #1
+        sta reu_len_lo
+        pla
+        jmp reu_execute
+
+; -----------------------------------------------------------------------------
+; sink_room_init - from http_body_begin: http_sink_room = this body's
+;   region size (0 = no region), http_sink_full = 0. Clobbers A, X.
+; -----------------------------------------------------------------------------
+sink_room_init:
+        lda #0
+        sta http_sink_full
+        sta http_sink_room
+        sta http_sink_room+1
+        sta http_sink_room+2
+        lda reu_size_ok
+        beq @none
+        ldx reu_top_bank
+        inx                     ; X = banks (0 = 256)
+        lda http_reu_body_base+2
+        cmp #SINK_FLOOR_BANK
+        bcc @none               ; banks 0-2
+        cmp #SINK_P384_BANK
+        bcs @high
+        cpx #0                  ; below P-384: end = min(banks, 6)
+        beq @six                ;  (X = 0 is 256 banks)
+        cpx #SINK_P384_BANK+1
+        bcc @below
+@six:   ldx #SINK_P384_BANK
+        bne @end                ; always
+@high:  cmp #SINK_P384_BANK+2
+        bcc @none               ; banks 6-7
+        cpx #0
+        beq @end                ; 16 MB: end is $1000000
+@below: stx reu_probe_bank      ; (scratch) base bank must be < banks
+        cmp reu_probe_bank
+        bcs @none
+@end:   sec                     ; room = end - base (bit 24 dropped: 16 MB)
+        lda #0
+        sbc http_reu_body_base
+        sta http_sink_room
+        lda #0
+        sbc http_reu_body_base+1
+        sta http_sink_room+1
+        txa
+        sbc http_reu_body_base+2
+        sta http_sink_room+2
+@none:  rts
+
+; -----------------------------------------------------------------------------
+; sink_fits - C=0: cursor + http_resp_len <= http_sink_room. C=1 otherwise,
+;   and http_sink_full latched (every later blit is refused too).
+;   Clobbers A.
+; -----------------------------------------------------------------------------
+sink_fits:
+        lda http_sink_full
+        bne @no
+        clc                     ; end = cursor + len, 24-bit
+        lda http_reu_cursor
+        adc http_resp_len
+        sta reu_sink_end
+        lda http_reu_cursor+1
+        adc http_resp_len+1
+        sta reu_sink_end+1
+        lda http_reu_cursor+2
+        adc #0
+        sta reu_sink_end+2
+        bcs @full
+        lda http_sink_room      ; room - end: a borrow means end > room
+        cmp reu_sink_end
+        lda http_sink_room+1
+        sbc reu_sink_end+1
+        lda http_sink_room+2
+        sbc reu_sink_end+2
+        bcc @full
+        clc
+        rts
+@full:  lda #1
+        sta http_sink_full
+@no:    sec
+        rts
+
+; Sink region state. Not BSS: CRYPTO_COLD_SHADOW has no room on comb.
+reu_size_ok:    .byte 0         ; 1: reu_top_bank is the probed size
+reu_top_bank:   .byte 0         ; banks - 1
+reu_probe_bank: .byte 0
+reu_probe_byte: .byte 0
+http_sink_room: .byte 0, 0, 0   ; this body's region, bytes (24-bit LE)
+http_sink_full: .byte 0         ; 1: a blit was refused; the body failed
+reu_sink_end:   .byte 0, 0, 0
+.endif
 
 ; =============================================================================
 ; http_get_plain - perform a plain HTTP (no TLS) GET request
