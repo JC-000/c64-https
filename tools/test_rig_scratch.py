@@ -54,6 +54,7 @@ for p in (str(UCI), str(REPO / "tools")):
         sys.path.insert(0, p)
 
 import _memory_policy as mp  # noqa: E402
+from _skip_policy import not_applicable  # noqa: E402
 
 #: Segment markers from a real uci-comb link (see module docstring). The
 #: CRYPTO_OVERLAY tail here is what the old allocation could not fit in.
@@ -551,10 +552,12 @@ def test_every_rig_allocates_on_the_current_build() -> None:
     captured fixtures above can go stale; this cannot. A non-UCI or absent
     build checks nothing here (``--build`` is the full real-link matrix)."""
     labels = REPO / "build" / "labels.txt"
-    if not labels.is_file():
-        return
-    text = labels.read_text()
+    text = labels.read_text() if labels.is_file() else ""
     if ".uci_socket_id" not in text:
+        # Out of scope, not missing: the captured-link matrix above already
+        # covers every profile; this only adds the tree's own build.
+        not_applicable("build/ holds no UCI link",
+                       certifies="the rigs' scratch on the current build")
         return
     bad = _matrix({"build/labels.txt": text}, every_rig=False)
     assert not bad, "\n    " + "\n    ".join(bad)
