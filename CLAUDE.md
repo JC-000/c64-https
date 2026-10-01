@@ -624,13 +624,12 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     `tools/run_all_tests.py` and ~15 others still spell the flags by hand).
     `C64_VICE_NO_REU=1` is the deliberate opt-out for proving the onchip
     image's no-REU claim — never set it on a REU-profile build.
-  - **CRYPTO_OVERLAY vs rig scratch**: new resident tenants in
-    `$4200-$5FFF` shrink what the rigs' `MemoryArbiter` can hand out, and
-    under comb that tail is small (server-name validation already broke
-    `rig_https_wiki.py`, which now drives the menu instead). Re-check rig
-    scratch after any tenant lands there. The arbiter reads
-    `build/labels.txt`; the harness write guard raises `MemoryPolicyError`
-    before the wire.
+  - **CRYPTO_OVERLAY vs rig scratch**: no rig allocates from the
+    `$4200-$5FFF` tail any more (low RAM only, see UCI rig scripts), so new
+    tenants there cannot break rig scratch; `tools/test_rig_scratch.py`
+    fails any rig that calls a tail allocator. The policy still reserves
+    every region in `build/labels.txt`; the harness write guard raises
+    `MemoryPolicyError` before the wire.
   - `CRYPTO_HOT` margin under UCI is **per profile**, even between the two
     that share `cfg/c64-https-uci.cfg`: each links a different nistcurves
     archive, and comb's cfg also moves `RODATA`/`CRYPTO_RODATA` out to
