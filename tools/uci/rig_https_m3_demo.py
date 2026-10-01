@@ -101,6 +101,21 @@ def wait_for(client, markers, budget):
         time.sleep(1.0)
 
 
+def wait_after(client, anchor, markers, budget):
+    """Like wait_for, but only counts text after the LAST `anchor` on the
+    screen: the earlier fetch's lines (CONNECTION CLOSED) are still there."""
+    end = time.monotonic() + budget
+    while True:
+        lines, text = screen(client)
+        tail = text[text.rfind(anchor):] if anchor in text else ""
+        for m in markers:
+            if m in tail:
+                return m, lines
+        if time.monotonic() > end:
+            return None, lines
+        time.sleep(1.0)
+
+
 def dump(lines, title):
     print(f"--- {title} ---")
     for i, line in enumerate(lines):
@@ -244,8 +259,11 @@ def main() -> int:
             fetch_in_flight = True
             client.send_text("G", finish_with_return=False)
             push_keys(client, target_keys(f"{NEGATIVE_HOST}\r/\r"))
-            m, lines = wait_for(client, ["94,CERTIFICATE", "CONNECTION CLOSED",
-                                         "NOT RESPONDING"], 300)
+            m, lines = wait_after(client, "HTTPS GET " + NEGATIVE_HOST.upper(),
+                                  ["94,CERTIFICATE", "CONNECTION CLOSED",
+                                   "NOT RESPONDING"], 300)
+            time.sleep(1.0)                 # let the status line finish
+            lines, _ = screen(client)
             if m in ("94,CERTIFICATE", "CONNECTION CLOSED"):
                 fetch_in_flight = False     # refused: nothing was opened
             dump(lines, "negative")
