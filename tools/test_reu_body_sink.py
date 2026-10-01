@@ -26,6 +26,11 @@ interpreter with a modelled REU (tools/_reu_model.py), at 512 KB, 1 MB and
     prompt runs the real prompt, not the server's code;
   * http_recv_timeout_verdict says C=1 for a refused body even when its
     Content-Length framing is otherwise satisfied.
+  * no attacker needed: the 751 KB Wikipedia demo body streamed on a
+    512 KB or 1 MB REU stops cleanly at its region's end (nothing at all
+    with the default base, which aliases bank 0) and no REU byte outside
+    the region changes. On master the same stream overwrote all 16 KB of
+    the Lim-Lee table and the cold image.
 
 The integrity check on the cold bank (marker + 8-bit XOR) is NOT what stops
 this: a writer who knows the image can satisfy it. Bounding the writes is.
@@ -206,7 +211,45 @@ def case_verdict(env):
     check(not c, "control: C=1 for a complete Content-Length body")
 
 
-CASES = [case_probe, case_regions, case_bound, case_attack, case_verdict]
+def case_benign_big_body(env):
+    """No attacker needed: the 751 KB Wikipedia demo body on a small REU.
+
+    Streamed 512 B a bounce, as body_append does. With the default base on
+    512 KB / 1 MB (it aliases bank 0) nothing may be written at all; with a
+    base in bank 3 the region ends at bank 6 and the body stops there.
+    Before the fix the same stream wrapped onto banks 0-2 (multiply rows,
+    Lim-Lee table, cold bank) and on into the P-384 banks."""
+    total = 751_073
+    for size, base, room in ((512 * KB, 0x100000, 0), (1 * MB, 0x100000, 0),
+                             (512 * KB, 0x030000, 0x030000)):
+        b = Box(env, size=size)
+        mark = bytes((i * 7 + 1) & 0xFF for i in range(len(b.reu.mem)))
+        b.reu.mem[:] = mark                     # every REU byte known
+        tag = f"{size // KB} KB base ${base:06X}"
+        check(b.body_begin(base) == room, f"{tag}: region {b.u24('http_sink_room'):#x}")
+        cursor, refused_at = 0, None
+        while cursor < total:
+            n = min(512, total - cursor)
+            data = bytes([0xEE]) * n
+            if b.blit(cursor, data):
+                cursor += n
+            else:
+                refused_at = cursor
+                break
+        check(refused_at == room, f"{tag}: stopped at {refused_at}, want {room}")
+        check(b.r8("http_sink_full") == 1, f"{tag}: not latched")
+        lo = base % size
+        inside = range(lo, lo + room)
+        changed = [a for a in range(len(mark)) if b.reu.mem[a] != mark[a]
+                   and a not in inside]
+        check(not changed, f"{tag}: {len(changed)} REU bytes written outside "
+                           f"the region, first ${changed[0]:06X}" if changed else "")
+        check(all(b.reu.mem[a] == 0xEE for a in inside),
+              f"{tag}: the region itself was not filled")
+
+
+CASES = [case_probe, case_regions, case_bound, case_attack, case_verdict,
+         case_benign_big_body]
 
 
 def main() -> int:
