@@ -4,11 +4,11 @@ Phase 3: end-to-end TCP echo test for the UCI backend.
 
 Boots the UCI-built PRG on the real Ultimate 64 Elite, then:
   1. Quits the PRG's main_loop back to BASIC (keyboard 'Q').
-  2. DMA-injects a 6502 test routine at $4200 that exercises the
-     adapter's ABI:  net_dns_resolve → net_tcp_connect → net_tcp_send
+  2. DMA-injects a 6502 test routine into low-RAM scratch that exercises
+     the adapter's ABI:  net_dns_resolve → net_tcp_connect → net_tcp_send
      → poll loop of net_poll + net_recv_byte drain → net_tcp_close.
   3. Starts a local TCP echo server on this host's LAN IP.
-  4. Triggers the routine with SYS 16896 via the keyboard buffer.
+  4. Triggers the routine with SYS via the keyboard buffer.
   5. Polls a sentinel byte, then DMA-reads the drained echo bytes.
   6. Asserts the echoed payload matches b"HELLO UCI".
 
@@ -22,9 +22,10 @@ Design notes
 * net_dns_resolve under UCI just memcpys into uci_host_buf; the U64E
   firmware does the real DNS inside TCP_CONNECT.  We stage a dotted-quad
   string ("192.168.X.Y\0") which U64E treats as a literal IP.
-* Injection address $4200 is in the NET_BSS region ($4000-$5FFF)
-  reserved to UCI_BSS; the UCI BSS allocation ends at $4120, so $4200
-  onward is free RAM at boot (zero-filled by the PRG load image).
+* Scratch is pages 2 and 3 (_memory_policy.build_policy_and_low_ram_
+  arbiter, page2=True): the routine in page 3, its data in page 2. The
+  linked CRYPTO_OVERLAY tail this used to carve is too small on the
+  fastest product.
 """
 from __future__ import annotations
 
@@ -47,7 +48,7 @@ from _device_lock_helper import (
 )
 from _prg_load import PrgLoadError, load_verified_and_run
 
-from _memory_policy import build_policy_and_arbiter
+from _memory_policy import build_policy_and_low_ram_arbiter
 from _rig_lifecycle import guard_socket_teardown, start_listener
 
 
@@ -71,6 +72,14 @@ SEND_CARRY_ADDR: int = -1
 RESULT_LEN_ADDR: int = -1
 POLL_COUNT_ADDR: int = -1
 RECV_BYTES_ADDR: int = -1
+RETRY_ADDR: int = -1
+STASH_ADDR: int = -1
+
+#: Sized to what is written: a dotted quad + NUL, and the drained echo —
+#: the routine stops storing at RESULT_BUF_BYTES, so a chatty peer cannot
+#: run the STA abs,Y past the buffer.
+HOST_BUF_BYTES   = 16
+RESULT_BUF_BYTES = 32
 
 SENTINEL_VALUE = 0x42
 ECHO_PORT      = 7777
@@ -242,8 +251,8 @@ def _build_test_routine(labels: dict[str, int], host_ip: str, port: int) -> byte
     # We don't have a free Y across the drain (net_recv_byte clobbers it).
     # Use RESULT_LEN_ADDR itself as the byte-count; TAY just before the
     # STA abs,Y and reload A from a stash slot.
-    retry_counter = 0x4546
-    stash_byte    = 0x4547
+    retry_counter = RETRY_ADDR
+    stash_byte    = STASH_ADDR
 
     emit_lda_imm(200)                 # 200 * 16 ms ≈ 3.2 s budget
     emit_sta_abs(retry_counter)
@@ -260,6 +269,9 @@ def _build_test_routine(labels: dict[str, int], host_ip: str, port: int) -> byte
     emit_sta_abs(stash_byte)          # park the byte
     emit_lda_abs(RESULT_LEN_ADDR)
     emit(0xA8)                        # TAY
+    emit(0xC0, RESULT_BUF_BYTES)      # CPY #cap — buffer full: drop the byte
+    back = (drain_top - (ROUTINE_ADDR + len(code) + 2)) & 0xFF
+    emit(0xB0, back)                  # BCS drain_top
     emit_lda_abs(stash_byte)
     emit(0x99, RESULT_BUF_ADDR & 0xFF, (RESULT_BUF_ADDR >> 8) & 0xFF)  # STA abs,Y
     emit(0xEE, RESULT_LEN_ADDR & 0xFF, (RESULT_LEN_ADDR >> 8) & 0xFF)  # INC len
@@ -339,19 +351,25 @@ def main() -> int:
     global ROUTINE_ADDR, HOST_BUF_ADDR, TEST_STRING_ADDR, RESULT_BUF_ADDR
     global SENTINEL_ADDR, PROGRESS_ADDR, CONNECT_CARRY_ADDR
     global SEND_CARRY_ADDR, RESULT_LEN_ADDR, POLL_COUNT_ADDR, RECV_BYTES_ADDR
-    memory_policy, arbiter = build_policy_and_arbiter(LABELS_PATH, PRG_PATH)
-    ROUTINE_ADDR       = arbiter.alloc(256, name="trampoline")
-    HOST_BUF_ADDR      = arbiter.alloc(64,  name="host_buf")
-    TEST_STRING_ADDR   = arbiter.alloc(32,  name="test_string")
-    RESULT_BUF_ADDR    = arbiter.alloc(128, name="result_buf")
+    global RETRY_ADDR, STASH_ADDR
+    # Low-RAM scratch, sized to what is written (#209). Routine first: it
+    # only fits page 3, and first fit then puts the data in page 2.
+    memory_policy, arbiter = build_policy_and_low_ram_arbiter(
+        LABELS_PATH, PRG_PATH, page2=True,
+    )
+    ROUTINE_ADDR = 0
+    routine_len = len(_build_test_routine(labels, "0.0.0.0", ECHO_PORT))
+    ROUTINE_ADDR       = arbiter.alloc(routine_len, name="trampoline")
+    HOST_BUF_ADDR      = arbiter.alloc(HOST_BUF_BYTES, name="host_buf")
+    TEST_STRING_ADDR   = arbiter.alloc(len(TEST_STRING), name="test_string")
+    RESULT_BUF_ADDR    = arbiter.alloc(RESULT_BUF_BYTES, name="result_buf")
     RECV_BYTES_ADDR    = RESULT_BUF_ADDR  # alias — both names refer to the
                                           # drained-bytes buffer
-    SENTINEL_ADDR      = arbiter.alloc(1,   name="sentinel")
-    PROGRESS_ADDR      = arbiter.alloc(1,   name="progress")
-    CONNECT_CARRY_ADDR = arbiter.alloc(1,   name="connect_carry")
-    SEND_CARRY_ADDR    = arbiter.alloc(1,   name="send_carry")
-    RESULT_LEN_ADDR    = arbiter.alloc(1,   name="result_len")
-    POLL_COUNT_ADDR    = arbiter.alloc(1,   name="poll_count")
+    # One block: the poll reads SENTINEL+PROGRESS as a 2-byte blob.
+    markers            = arbiter.alloc(8, name="markers")
+    (SENTINEL_ADDR, PROGRESS_ADDR, CONNECT_CARRY_ADDR, SEND_CARRY_ADDR,
+     RESULT_LEN_ADDR, POLL_COUNT_ADDR, RETRY_ADDR, STASH_ADDR) = range(
+        markers, markers + 8)
     print(
         f"MemoryPolicy reserved {len(memory_policy.reserved_regions)}"
         f" region(s); arbiter allocations:"
@@ -371,7 +389,12 @@ def main() -> int:
     routine_bytes = _build_test_routine(labels, test_host_ip, ECHO_PORT)
     print(f"Routine size    : {len(routine_bytes)} bytes @ ${ROUTINE_ADDR:04X}")
 
-    host_bytes = (test_host_ip.encode("ascii") + b"\x00").ljust(32, b"\x00")
+    host_bytes = (test_host_ip.encode("ascii") + b"\x00").ljust(
+        HOST_BUF_BYTES, b"\x00")
+    if len(host_bytes) > HOST_BUF_BYTES:
+        print(f"ERROR: host {test_host_ip!r} exceeds the {HOST_BUF_BYTES} B "
+              "host_buf allocation", file=sys.stderr)
+        return 2
 
     prg = PRG_PATH.read_bytes()
 
@@ -467,7 +490,7 @@ def main() -> int:
         )
 
         # Clear result area (sentinel + collected bytes)
-        transport.write_memory(RESULT_BUF_ADDR, bytes(0x80))
+        transport.write_memory(RESULT_BUF_ADDR, bytes(RESULT_BUF_BYTES))
 
         # --- Step 3: trigger via SYS (BASIC ROM currently enabled) ---
         sys_line = f"sys{ROUTINE_ADDR}\r"
@@ -481,8 +504,7 @@ def main() -> int:
         sentinel = 0
         while time.time() < deadline:
             time.sleep(0.25)
-            # Read [SENTINEL, PROGRESS] as a 2-byte block; SENTINEL_ADDR
-            # is $4540 and PROGRESS_ADDR = $4541.
+            # Read [SENTINEL, PROGRESS] as a 2-byte block (one allocation).
             blob = transport.read_memory(SENTINEL_ADDR, 2)
             sentinel = blob[0]
             progress = blob[1]
@@ -508,7 +530,8 @@ def main() -> int:
             print("FAIL: no bytes drained into ring", file=sys.stderr)
             return 1
 
-        drained = bytes(transport.read_memory(RESULT_BUF_ADDR, min(result_len, 64)))
+        drained = bytes(transport.read_memory(
+            RESULT_BUF_ADDR, min(result_len, RESULT_BUF_BYTES)))
         print(f"drained bytes   = {drained.hex()}  ({drained!r})")
 
         # Wait for echo server thread

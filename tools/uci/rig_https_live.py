@@ -62,8 +62,8 @@ Hardware conventions honored (see CLAUDE.md "UCI rig scripts"):
   * ``preflight_reu()`` runs under the DeviceLock right after enable_uci
     (the comb build claims REU bank 2 — LIB_NISTCURVES_REU_BANKS_USED=$04 —
     so a device with the REU disabled must be refused before the run);
-  * every DMA address comes from ``build_policy_and_arbiter_with_overlay_
-    carveout()`` — nothing is hardcoded;
+  * every DMA address comes from ``build_policy_and_low_ram_arbiter()``
+    (page 3, #209) — nothing is hardcoded;
   * the filename is ``rig_*.py`` so pytest never collects it.
 
 Deliberately NOT carried over from rig_https_local: the 6510 bus-stream

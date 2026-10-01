@@ -74,7 +74,7 @@ from _device_lock_helper import (  # noqa: E402
 from _rig_lifecycle import guard_socket_teardown  # noqa: E402
 from _prg_load import PrgLoadError, load_verified_and_run  # noqa: E402
 from _memory_policy import (  # noqa: E402
-    build_policy_and_arbiter_with_overlay_carveout,
+    LOW_RAM_SCRATCH, build_policy_and_low_ram_arbiter,
 )
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
@@ -97,7 +97,9 @@ DEBUG_BASE_DIR = Path(os.environ.get("UCI_DEBUG_DIR",
                                      "/tmp/uci_close_retry_debug"))
 
 SENTINEL_VALUE = 0xC4
-ROUTINE_MAX = 320
+# Page 3 is the only low-RAM window the routine fits in whole (#209); the
+# stale push is a subroutine so the rest of the scratch can go to page 2.
+ROUTINE_MAX = LOW_RAM_SCRATCH[1] - LOW_RAM_SCRATCH[0] + 1
 ARM_FORCED, ARM_CONTROL = 1, 0
 # The entry wait is a 5 s CIA1 TOD bound; a close that took this long spent
 # it. The clean close is a few firmware round trips.
@@ -142,10 +144,38 @@ def default_init_wait(labels: dict[str, int]) -> float:
     return 22.0
 
 
+def build_stale_push(labels: dict[str, int]) -> bytes:
+    """The FORCED arm's step 2, as a subroutine: SOCKET_READ(sock, 16) pushed
+    and never read, so the interface is left in its data phase. RTS."""
+    L = labels
+    c = bytearray()
+
+    def e(*bs): c.extend(bs)
+    def lda(v): e(0xA9, v & 0xFF)
+    def ldaa(a): e(0xAD, a & 0xFF, a >> 8)
+    def jsr(a): e(0x20, a & 0xFF, a >> 8)
+
+    lda(UCI_TARGET_NETWORK); jsr(L["uci_begin_cmd"])
+    lda(UCI_CMD_SOCKET_READ); jsr(L["uci_put_byte"])
+    ldaa(L["uci_socket_id"]); jsr(L["uci_put_byte"])
+    lda(16); jsr(L["uci_put_byte"])
+    lda(0); jsr(L["uci_put_byte"])
+    jsr(L["uci_push_wait"])                       # reply staged, never read
+    e(0x60)                                       # RTS
+    return bytes(c)
+
+
 def build_routine(labels: dict[str, int], *, routine_addr: int,
-                  host_addr: int, results: int, sentinel: int,
-                  progress: int, arm_addr: int, save01: int) -> bytes:
-    """The SYS-able routine. Reads its arm from `arm_addr`; returns to BASIC."""
+                  push_addr: int, host_addr: int, results: int,
+                  sentinel: int, progress: int, arm_addr: int,
+                  save01: int) -> bytes:
+    """The SYS-able routine. Reads its arm from `arm_addr`; returns to BASIC.
+
+    The host zeroes `results`, `sentinel` and `progress` before every SYS
+    (_run_arm), so the routine does not: that, INC for each progress step
+    and the stale push as a subroutine at `push_addr` are what fit it in
+    page 3 (#209).
+    """
     L = labels
     c = bytearray()
 
@@ -156,50 +186,39 @@ def build_routine(labels: dict[str, int], *, routine_addr: int,
     def ldaa(a): e(0xAD, a & 0xFF, a >> 8)
     def jsr(a): e(0x20, a & 0xFF, a >> 8)
     def carry_to(a): e(0x08, 0x68); sta(a)        # PHP; PLA; STA
-    def prog(n): lda(n); sta(progress)
+    def prog(): e(0xEE, progress & 0xFF, progress >> 8)   # INC: 1, 2, ... 7
 
     def tod_to(off):
         ldaa(CIA_TOD_HOUR)                        # latch
         ldaa(CIA_TOD_SEC); sta(results + off)
         ldaa(CIA_TOD_TENTHS); sta(results + off + 1)   # unlatch
 
-    ldaa(0x0001); sta(save01); e(0x29, 0xFE); sta(0x0001)   # BASIC out
-    lda(0)
-    sta(sentinel); sta(progress)
-    for i in range(RESULTS_LEN):
-        sta(results + i)
-    prog(1)
+    e(0xA5, 0x01); sta(save01); e(0x29, 0xFE); e(0x85, 0x01)   # BASIC out
+    prog()
     jsr(L["net_init"])
     lda(0)
     for name in ("tcp_recv_head", "tcp_recv_tail"):
         sta(L[name]); sta(L[name] + 1)
     lda(host_addr & 0xFF); ldx(host_addr >> 8); jsr(L["net_dns_resolve"])
-    prog(2)
+    prog()
     lda(TARGET_PORT & 0xFF); ldx(TARGET_PORT >> 8); jsr(L["net_tcp_connect"])
     carry_to(results + R_CONN_P)
     ldaa(L["net_last_error"]); sta(results + R_CONN_ERR)
     ldaa(L["uci_socket_id"]); sta(results + R_SOCK)
-    prog(3)
+    prog()
     ldaa(arm_addr)
-    e(0xF0, 0x00)                                 # BEQ skip (patched)
-    beq_at = len(c) - 1
-    lda(UCI_TARGET_NETWORK); jsr(L["uci_begin_cmd"])
-    lda(UCI_CMD_SOCKET_READ); jsr(L["uci_put_byte"])
-    ldaa(L["uci_socket_id"]); jsr(L["uci_put_byte"])
-    lda(16); jsr(L["uci_put_byte"])
-    lda(0); jsr(L["uci_put_byte"])
-    jsr(L["uci_push_wait"])                       # reply staged, never read
-    c[beq_at] = len(c) - (beq_at + 1)
+    e(0xF0, 0x03)                                 # BEQ over the JSR
+    jsr(push_addr)
     ldaa(UCI_STATUS_REG); sta(results + R_BUSY)
     lda(PRIOR_ERROR); sta(L["net_last_error"])
-    prog(4)
+    prog()
     tod_to(R_TOD0)
     jsr(L["net_tcp_close"])
     carry_to(results + R_CLOSE_P)
     tod_to(R_TOD1)
     ldaa(L["net_last_error"]); sta(results + R_CLOSE_ERR)
     ldaa(L["net_tcp_state"]); sta(results + R_CLOSE_STATE)
-    prog(5)
+    prog()
     lda(0)
     sta(L["uci_status_len"]); sta(L["uci_status_force"])
     sta(L["net_last_error"])
@@ -207,15 +226,13 @@ def build_routine(labels: dict[str, int], *, routine_addr: int,
     jsr(L["net_poll"])
     ldaa(L["net_tcp_state"]); sta(results + R_POLL_STATE)
     ldaa(L["uci_status_len"]); sta(results + R_STATUS_LEN)
-    prog(6)
+    prog()
     jsr(L["net_tcp_close"])                       # no live socket survives
     carry_to(results + R_FINAL_P)
-    prog(7)
+    prog()
     lda(SENTINEL_VALUE); sta(sentinel)
-    ldaa(save01); sta(0x0001)
+    ldaa(save01); e(0x85, 0x01)
     e(0x60)                                       # RTS to BASIC
-    if not 0 <= c[beq_at] <= 127:
-        raise ValueError("stale-push block too long for a BEQ")
     return bytes(c)
 
 
@@ -278,9 +295,9 @@ def _selfcheck() -> int:
     if missing:
         print(f"selfcheck: missing labels {missing} — not a BACKEND=uci build")
         return 2
-    code = build_routine(labels, routine_addr=0x5900, host_addr=0x5A40,
-                         results=0x5A80, sentinel=0x5A90, progress=0x5A91,
-                         arm_addr=0x5A92, save01=0x5A93)
+    code = build_routine(labels, routine_addr=0x5900, push_addr=0x5A00,
+                         host_addr=0x5A40, results=0x5A80, sentinel=0x5A90,
+                         progress=0x5A91, arm_addr=0x5A92, save01=0x5A93)
     if len(code) > ROUTINE_MAX:
         fails.append(f"routine {len(code)} B > {ROUTINE_MAX}")
     good = bytearray(RESULTS_LEN)
@@ -308,7 +325,8 @@ def _run_arm(tr, arm, a, code, host, results, sentinel, progress, arm_addr,
              labels) -> tuple[list[str], str]:
     tr.write_memory(arm_addr, bytes([arm]))
     tr.write_memory(results, bytes(RESULTS_LEN))
-    tr.write_memory(sentinel, b"\0")
+    tr.write_memory(sentinel, bytes(2))     # sentinel + progress: the routine
+                                            # INCs progress from 0
     send_text(tr, f"sys{a}\r")
     name = "FORCED" if arm == ARM_FORCED else "CONTROL"
     deadline = time.time() + 60 * _SCALE
@@ -353,17 +371,24 @@ def main() -> int:
         return 2
     init_wait = float(os.environ.get("C64_INIT_WAIT",
                                      str(default_init_wait(labels))))
-    policy, arbiter = build_policy_and_arbiter_with_overlay_carveout(
-        LABELS_PATH, PRG_PATH)
-    a = arbiter.alloc(ROUTINE_MAX, name="routine")
-    host = arbiter.alloc(64, name="host_str")
+    # Low-RAM scratch, sized to what is written (#209): the routine takes
+    # page 3, first fit puts the rest in page 2. Every linked tail this used
+    # to carve has been spent at one time or another (comb's CRYPTO_OVERLAY).
+    policy, arbiter = build_policy_and_low_ram_arbiter(
+        LABELS_PATH, PRG_PATH, page2=True)
+    push = build_stale_push(labels)
+    host_str = TARGET_HOST.encode() + b"\0"
+    a = arbiter.alloc(len(build_routine(
+        labels, routine_addr=0, push_addr=0, host_addr=0, results=0,
+        sentinel=0, progress=0, arm_addr=0, save01=0)), name="routine")
+    push_addr = arbiter.alloc(len(push), name="stale_push")
+    host = arbiter.alloc(len(host_str), name="host_str")
     results = arbiter.alloc(RESULTS_LEN, name="results")
-    sentinel = arbiter.alloc(1, name="sentinel")
-    progress = arbiter.alloc(1, name="progress")
-    arm_addr = arbiter.alloc(1, name="arm")
-    save01 = arbiter.alloc(1, name="save01")
-    code = build_routine(labels, routine_addr=a, host_addr=host,
-                         results=results, sentinel=sentinel,
+    # sentinel + progress are cleared together by _run_arm.
+    markers = arbiter.alloc(4, name="sentinel+progress+arm+save01")
+    sentinel, progress, arm_addr, save01 = range(markers, markers + 4)
+    code = build_routine(labels, routine_addr=a, push_addr=push_addr,
+                         host_addr=host, results=results, sentinel=sentinel,
                          progress=progress, arm_addr=arm_addr, save01=save01)
     if len(code) > ROUTINE_MAX:
         print(f"ERROR: routine {len(code)} B > {ROUTINE_MAX}", file=sys.stderr)
@@ -427,8 +452,10 @@ def main() -> int:
         time.sleep(2.0 * _SCALE)
         for i in range(0, len(code), 64):
             tr.write_memory(a + i, code[i:i + 64])
-        tr.write_memory(host, (TARGET_HOST.encode() + b"\0").ljust(64, b"\0"))
-        if bytes(tr.read_memory(a, len(code))) != code:
+        tr.write_memory(push_addr, push)
+        tr.write_memory(host, host_str)
+        if (bytes(tr.read_memory(a, len(code))) != code
+                or bytes(tr.read_memory(push_addr, len(push))) != push):
             print("ERROR: routine read back wrong", file=sys.stderr)
             outcome, exit_code = "STUB", 2
             return exit_code

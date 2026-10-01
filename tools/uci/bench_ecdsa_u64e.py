@@ -4,14 +4,15 @@ Benchmark + correctness-check the in-tree P-256 ecdsa_verify on a real
 Ultimate 64 Elite, at 48 MHz turbo (primary) and optionally 1 MHz.
 
 Drives the UCI-build PRG, boots it to the main_loop, quits to BASIC,
-DMA-injects a 6502 stub at $4200 that:
+DMA-injects a 6502 stub into page-3 scratch (_memory_policy.
+build_policy_and_low_ram_arbiter) that:
 
   1. Banks out BASIC ROM so the ECDSA data buffers at $B0xx are RAM-visible.
-  2. Writes a "running" sentinel ($AA) at $4540.
+  2. Writes a "running" sentinel ($AA) at RUN_SENTINEL.
   3. Calls ecdsa_verify.
-  4. PHP/PLA-captures the P register into $4542 (bit 0 = carry).
-  5. Writes a "done" sentinel ($55) at $4541.
-  6. Parks.
+  4. PHP/PLA-captures the P register into CARRY_BYTE (bit 0 = carry).
+  5. Writes a "done" sentinel ($55) at DONE_SENTINEL.
+  6. Returns to BASIC.
 
 The host pre-loads pubkey_x/y, hash, sig_r, sig_s, sig_len=32, hash_len=32,
 curve_id=0 into the ecdsa_* buffers via DMA, then triggers the stub and
@@ -71,7 +72,7 @@ from _device_lock_helper import (
 )
 from _prg_load import PrgLoadError, load_verified_and_run
 
-from _memory_policy import build_policy_and_arbiter
+from _memory_policy import build_policy_and_low_ram_arbiter
 from _device_prep import DevicePrepError, prepare_device
 from _reu_preflight import ReuPreflightError, preflight_reu
 
@@ -92,11 +93,11 @@ VECTORS_PATH = Path(
 # or with any future CRYPTO_OVERLAY-resident segment.  The historical
 # values were $4200 (ROUTINE_ADDR) + $4540-$4543 — *inside* the
 # X25519_RODATA + X25519_BSS span under the sibling flag.
-ROUTINE_ADDR: int = -1   # arbiter.alloc(320, name="ecdsa_stub")
-RUN_SENTINEL: int = -1   # arbiter.alloc(1,   name="run_sentinel")
-DONE_SENTINEL: int = -1  # arbiter.alloc(1,   name="done_sentinel")
-CARRY_BYTE: int = -1     # arbiter.alloc(1,   name="carry_byte")
-PROGRESS_BYTE: int = -1  # arbiter.alloc(1,   name="progress_byte")
+ROUTINE_ADDR: int = -1   # arbiter.alloc(<stub length>, name="ecdsa_stub")
+RUN_SENTINEL: int = -1   # the 4-byte "run+done+carry+progress" allocation
+DONE_SENTINEL: int = -1
+CARRY_BYTE: int = -1
+PROGRESS_BYTE: int = -1
 
 RUN_VALUE  = 0xAA
 DONE_VALUE = 0x55
@@ -223,7 +224,7 @@ def _run_single(transport: Ultimate64Transport,
                 timeout_s: float) -> dict:
     """Run one ecdsa_verify on the U64E. Returns a dict with timing + carry."""
     # Clear sentinels ahead of time and stage inputs.
-    transport.write_memory(RUN_SENTINEL, bytes([0, 0, 0, 0]))  # 4540-4543
+    transport.write_memory(RUN_SENTINEL, bytes(4))  # run/done/carry/progress
     _prepare_vector_buffers(transport, labels, vec)
 
     # Set turbo (idempotent — set each run in case the machine reset it).
@@ -239,8 +240,8 @@ def _run_single(transport: Ultimate64Transport,
     send_text(transport, sys_line)
 
     # Now poll — but we want the wall-clock to span only the verify call.
-    # The stub writes RUN_VALUE->$4540 *before* jsr ecdsa_verify and
-    # DONE_VALUE->$4541 *after*. Wait for RUN_VALUE first to start the
+    # The stub writes RUN_VALUE->RUN_SENTINEL *before* jsr ecdsa_verify and
+    # DONE_VALUE->DONE_SENTINEL *after*. Wait for RUN_VALUE first to start the
     # clock, then wait for DONE_VALUE and stop the clock.
 
     # Helper: retry read_memory with a short sleep on transient HTTP errors.
@@ -397,19 +398,24 @@ def main() -> int:
     vectors = json.loads(VECTORS_PATH.read_text())["vectors"]
     print(f"Loaded {len(vectors)} vectors")
 
-    # --- Memory policy + arbiter: replace the hardcoded $4200-$4543
-    # scratch addresses (which silently overlapped X25519_RODATA/BSS
-    # under USE_X25519_SIBLING=1) with arbiter-allocated ones derived
-    # from build/labels.txt.  The transport is created inside the
-    # try-block below; we attach the policy there.
+    # --- Scratch: page 3, sized to what is written (#209) ---
+    # _memory_policy.build_policy_and_low_ram_arbiter says why $0334-$03FF
+    # and not a tail of some linked region: the uci-comb CRYPTO_OVERLAY tail
+    # this bench used to carve is smaller than the 324 B it asked for. The
+    # four marker bytes are one allocation because _run_single clears them with
+    # a single 4-byte write. The transport is created inside the try-block
+    # below; we attach the policy there.
     global ROUTINE_ADDR, RUN_SENTINEL, DONE_SENTINEL
     global CARRY_BYTE, PROGRESS_BYTE
-    memory_policy, arbiter = build_policy_and_arbiter(LABELS_PATH, PRG_PATH)
-    ROUTINE_ADDR  = arbiter.alloc(320, name="ecdsa_stub")
-    RUN_SENTINEL  = arbiter.alloc(1,   name="run_sentinel")
-    DONE_SENTINEL = arbiter.alloc(1,   name="done_sentinel")
-    CARRY_BYTE    = arbiter.alloc(1,   name="carry_byte")
-    PROGRESS_BYTE = arbiter.alloc(1,   name="progress_byte")
+    memory_policy, arbiter = build_policy_and_low_ram_arbiter(
+        LABELS_PATH, PRG_PATH)
+    markers = arbiter.alloc(4, name="run+done+carry+progress")
+    RUN_SENTINEL, DONE_SENTINEL, CARRY_BYTE, PROGRESS_BYTE = (
+        markers, markers + 1, markers + 2, markers + 3)
+    # Every operand in the stub is absolute, so its length does not depend
+    # on where it lands: measure it at 0, then allocate exactly that.
+    ROUTINE_ADDR = 0
+    ROUTINE_ADDR = arbiter.alloc(len(_build_stub(labels)), name="ecdsa_stub")
     print(
         f"MemoryPolicy reserved {len(memory_policy.reserved_regions)}"
         f" region(s); arbiter allocations:"
