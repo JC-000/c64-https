@@ -75,16 +75,14 @@ answering "what would this build?". **`-n`/`-q`/`-t` are now exempt
 (#174)**: they still run the compare and `$(warning)` what a real build
 would delete, but they write nothing — not the stamp, not the objects.
 `-q` and the `make -npq` completion idiom matter as much as `-n`. The
-guard has to find the single-letter options in `MAKEFLAGS`, and
-`$(firstword ...)` is **not** where they are: a long option arrives as
-its own `--word` and pushes the letters elsewhere, so
-`make -n --no-print-directory` reads `[ --no-print-directory -n]` — last,
-and dash-prefixed. Worse, `--no-print-directory` itself contains an `n`
-and a `t`, so searching the first word calls a *real* build a dry run and
-skips an invalidation it needed. The guard therefore takes every word
-that is neither `--`-prefixed nor a `VAR=value` assignment and strips one
-leading dash; the option matrix behind that is in the Makefile comment
-and pinned by two tests. Real builds are byte-for-byte unchanged.
+guard reads the letters from `$(MFLAGS)`, **not** `$(MAKEFLAGS)`: under
+`-e` (3.81) the latter is the environment's raw text, so
+`MAKEFLAGS=--dry-run make -e` used to take the real path. It drops `--`
+words (`--no-print-directory` holds an `n` and a `t`) and 4.x's
+argument words (`-Itools`, `-Otarget`), then strips one dash. A
+command-line `MAKEFLAGS=`/`MFLAGS=` is a parse-time `$(error)`: make
+decodes it only after parse, where no guard can see it. Matrix in the
+Makefile comment, pinned in `tools/test_build_flags_stamp.py`. Real builds are byte-for-byte unchanged.
 
 The target *strings* `HTTPS_HOST`/`HTTPS_PATH`/`HTTPS_SNI` keep their own
 narrower stamp, the generated `build/https_host.inc` (#128): it invalidates
