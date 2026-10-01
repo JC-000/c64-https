@@ -35,6 +35,7 @@
         .export http_sink_blit
         .export reu_probe_size, reu_top_bank, reu_size_ok
         .export http_sink_room, http_sink_full
+        .export SINK_FLOOR_BANK:abs
 .endif
 
         ; Every REU execute goes through src/reu_exec.s (#191, SPEC §8.2).

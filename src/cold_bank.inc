@@ -26,10 +26,10 @@ COLD_E_TS_SAVE  = 3             ; trust_store_save        (COLD_G_TRUST)
 ; table and $4000-$9F9F the P-384 one (parked, not deleted: libs/nistcurves
 ; API.md's REU map, "$9FA0-$FFFF safe for consumer use"). reu_layout.inc's
 ; $20100/$22100/$24100 overlay slots sit inside the P-256 table and are
-; never used here. cold_bank.s asserts the images stay in
-; [COLD_REU_FLOOR, bank 3) and below HTTP_REU_BODY_BASE.
+; never used here. cold_bank.s asserts at link time that the images miss
+; the LINKED library's tables (its exported bank/offset symbols) and stay
+; below the HTTP body sink's banks.
 COLD_REU        = $02A000
-COLD_REU_FLOOR  = $029FA0
 COLD_IMAGE_MAX  = $1000         ; the cfg's COLD_IMAGE size: every group
 
 COLD_MARK       = $5C           ; each group's last byte
