@@ -29,7 +29,14 @@
         ; uci-comb cold-code bank (src/net/uci/cold_bank.s)
         .include "cold_bank.inc"
         .import cold_bank_init, cold_call, cold_err
-        .export cold_target_prompt
+        .export cold_target_prompt, cold_call_ui
+.endif
+.ifdef TRUST_STORE
+        ; #155 phase 2 (L3): the trust policy, src/net/uci/trust_policy.s
+        .import trust_pre, trust_post
+.ifdef TRUST_BUNDLE
+        .import trust_bundle
+.endif
 .endif
 
         ; ---- exports: entry + print helpers ----
@@ -610,9 +617,22 @@ do_https_get:
         ; in tls_hostname, so SNI, the Host header, the firmware's DNS and
         ; x509_verify_hostname all read the one typed, lowercased name.
         jsr https_target_prompt
+.ifdef TRUST_STORE
+        ; L3: the trust policy decides what the hook enforces, before the
+        ; dial. Its only keyboard reads are in trust_pre and trust_post.
+        bcs @no_dial
+        jsr trust_pre
+.endif
         bcc @target_set
+@no_dial:
         rts                     ; refused: reported, nothing dialled
 @target_set:
+.ifdef TRUST_BUNDLE
+        jsr trust_bundle        ; advisory pins; never refuses
+.endif
+.ifdef TRUST_STORE
+@redial:                        ; trust_post's one-fetch UNPINNED retry
+.endif
         ; --- DNS resolve (UCI: stages the name for TCP_CONNECT) ---
         lda #<tls_hostname
         ldx #>tls_hostname
@@ -691,7 +711,11 @@ do_https_get:
         lda #<dns_fail_msg
         ldy #>dns_fail_msg
         jsr print_string
+.ifdef TRUST_STORE
+        jmp @finish             ; every exit after trust_pre: trust_post
+.else
         rts
+.endif
 
 @dns_ok:
         lda #<dns_ok_msg
@@ -707,7 +731,11 @@ do_https_get:
         lda #<tcp_fail_msg
         ldy #>tcp_fail_msg
         jsr print_string
+.ifdef TRUST_STORE
+        jmp @finish
+.else
         rts
+.endif
 
 @tcp_ok:
         lda #<tcp_ok_msg
@@ -722,7 +750,11 @@ do_https_get:
         ldy #>tls_fail_msg
         jsr print_string
         jsr net_tcp_close
+.ifdef TRUST_STORE
+        jmp @finish
+.else
         rts
+.endif
 
 @tls_ok:
         lda #<tls_ok_msg
@@ -789,6 +821,15 @@ do_https_get:
         lda #<done_msg
         ldy #>done_msg
         jsr print_string
+.ifdef TRUST_STORE
+@finish:
+        ; The socket is closed on every path that reaches here, so the
+        ; store may be written and the operator asked (trust_post).
+        jsr trust_post
+        bcs :+
+        jmp @redial             ; C=0: once more, unpinned
+:
+.endif
         rts
 
 ; =============================================================================
@@ -903,6 +944,10 @@ ascii_chrout:
 .ifdef COLD_BANK
 https_target_prompt:
         ldy #COLD_E_TARGET
+; cold_call_ui — cold_call for a tenant the operator is waiting on: a
+; refusal by the bank itself (cold_err != 0) is reported as COLD BANK FAIL.
+; Out: the tenant's C, or C=1 when the bank refused.
+cold_call_ui:
         jsr cold_call
         bcc @tp_out
         lda cold_err            ; 0: the prompt ran and refused the entry

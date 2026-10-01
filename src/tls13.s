@@ -78,7 +78,7 @@
 ; --- Key schedule (tls_keyschedule.s) ---
 .import tls_derive_handshake_keys
 .import tls_derive_traffic_keys
-.ifdef HTTPS_PIN_SPKI
+.if .defined(HTTPS_PIN_SPKI) .or .defined(TRUST_STORE) ; #155: the pin / trust hook
 .import cert_pin_hs_keys        ; #155: wrappers, so the pin costs this
 .import cert_pin_send_finished  ;  file (ip65 LOADER) no bytes at all
 .endif
@@ -196,7 +196,7 @@ tls_connect:
         jsr tls_transcript_hash
 
         ; derive handshake keys from ECDHE shared secret
-.ifdef HTTPS_PIN_SPKI
+.if .defined(HTTPS_PIN_SPKI) .or .defined(TRUST_STORE) ; #155: the pin / trust hook
         jsr cert_pin_hs_keys    ; #155: clears the pin status, then derives
 .else
         jsr tls_derive_handshake_keys
@@ -280,7 +280,7 @@ tls_connect:
         ; the right value.  Both derivations sign the same transcript
         ; (Transcript-Hash(ClientHello..ServerFinished)), so the single
         ; snapshot above is shared cleanly.
-.ifdef HTTPS_PIN_SPKI
+.if .defined(HTTPS_PIN_SPKI) .or .defined(TRUST_STORE) ; #155: the pin / trust hook
         ; #155 interlock: C=1 without sending anything unless the SPKI pin
         ; check RAN this connection and allowed it, so a flight that omits the
         ; Certificate gets no client Finished and no traffic keys.
