@@ -13,13 +13,18 @@
 .ifndef COLD_BANK_INC_INCLUDED
 COLD_BANK_INC_INCLUDED = 1
 
-COLD_G_UI       = 0             ; TARGET_PROMPT_CODE, COLD_TAIL_UI
-COLD_G_TRUST    = 1             ; TRUST_STORE_CODE, COLD_TAIL_TRUST (TRUST_STORE=1)
+COLD_G_UI       = 0             ; TARGET_PROMPT_CODE, TRUST_BUNDLE_CODE
+                                ;  (TRUST_BUNDLE=1), COLD_TAIL_UI: no DOS
+COLD_G_TRUST    = 1             ; TRUST_STORE_CODE, TRUST_POLICY_CODE,
+                                ;  COLD_TAIL_TRUST (TRUST_STORE=1)
 
 COLD_E_TARGET   = 0             ; https_target_prompt     (COLD_G_UI)
 COLD_E_TS_LOAD  = 1             ; trust_store_load        (COLD_G_TRUST)
 COLD_E_TS_STAGE = 2             ; trust_store_stage       (COLD_G_TRUST)
 COLD_E_TS_SAVE  = 3             ; trust_store_save        (COLD_G_TRUST)
+COLD_E_TP_PRE   = 4             ; trust_pre               (COLD_G_TRUST)
+COLD_E_TP_POST  = 5             ; trust_post              (COLD_G_TRUST)
+COLD_E_TB_CHECK = 6             ; trust_bundle            (COLD_G_UI, TRUST_BUNDLE=1)
 
 ; Where the images live in the REU: bank 2 from $A000, laid out as the PRG
 ; carries them at COLD_IMAGE. Bank 2 $0000-$3FFF is comb's P-256 Lim-Lee

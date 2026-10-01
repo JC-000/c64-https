@@ -10,7 +10,11 @@
 ; COLD_RUN_<group>), never copied there after a link:
 ;   COLD_G_UI     TARGET_PROMPT_CODE  https_target_prompt (src/boot.s)
 ;                 COLD_TAIL_UI        its marker byte
+;                 TRUST_BUNDLE_CODE   trust_bundle (src/net/uci/trust_bundle.s,
+;                                     TRUST_BUNDLE=1): no DOS, so it rides here
 ;   COLD_G_TRUST  TRUST_STORE_CODE    trust_store_load/_stage/_save
+;                 TRUST_POLICY_CODE   trust_pre/_post (src/net/uci/trust_policy.s),
+;                                     which call the store directly
 ;                 COLD_TAIL_TRUST     its marker byte     (TRUST_STORE=1)
 ; Their state that outlives a call stays resident (TRUST_STORE_BSS); what
 ; is in an image itself is either constant or written before it is read
@@ -38,8 +42,9 @@
 ; that never ran must not read as "first use".
 ;
 ; Call sites, all outside a connection: do_https_get calls
-; https_target_prompt before net_dns_resolve and net_tcp_connect; nothing
-; in the PRG calls the store yet (rigs and the 6502 suites do, idle).
+; https_target_prompt, trust_pre and trust_bundle before net_dns_resolve and
+; net_tcp_connect, and trust_post after net_tcp_close. A tenant never calls
+; another group: the policy reaches the store inside its own group.
 ;
 ; Clobbers A, X, Y and the caller-saved state of the tenant it runs.
 
@@ -60,6 +65,10 @@
 .ifdef TRUST_STORE
 .include "trust_store.inc"
 .import cold_ts_load, cold_ts_stage, cold_ts_save
+.import cold_tp_pre, cold_tp_post
+.ifdef TRUST_BUNDLE
+.import cold_tb_check
+.endif
 .import ts_state, ts_reason, ts_found, ts_staged
 .import __COLD_RUN_TRUST_START__, __TRUST_STORE_CODE_LOAD__, __COLD_TAIL_TRUST_LOAD__
 .export cold_marker_trust
@@ -293,18 +302,31 @@ cold_entry_lo:
         .lobytes cold_target_prompt-1
 .ifdef TRUST_STORE
         .lobytes cold_ts_load-1, cold_ts_stage-1, cold_ts_save-1
+        .lobytes cold_tp_pre-1, cold_tp_post-1
+.ifdef TRUST_BUNDLE
+        .lobytes cold_tb_check-1
+.endif
 .endif
 cold_entry_hi:
         .hibytes cold_target_prompt-1
 .ifdef TRUST_STORE
         .hibytes cold_ts_load-1, cold_ts_stage-1, cold_ts_save-1
+        .hibytes cold_tp_pre-1, cold_tp_post-1
+.ifdef TRUST_BUNDLE
+        .hibytes cold_tb_check-1
+.endif
 .endif
 cold_entry_grp:
         .byte COLD_G_UI
 .ifdef TRUST_STORE
         .byte COLD_G_TRUST, COLD_G_TRUST, COLD_G_TRUST
+        .byte COLD_G_TRUST, COLD_G_TRUST
+.ifdef TRUST_BUNDLE
+        .byte COLD_G_UI
+.endif
 .endif
 .assert COLD_E_TARGET = 0 .and COLD_E_TS_LOAD = 1 .and COLD_E_TS_STAGE = 2 .and COLD_E_TS_SAVE = 3, error, "cold bank: entry table order"
+.assert COLD_E_TP_PRE = 4 .and COLD_E_TP_POST = 5 .and COLD_E_TB_CHECK = 6, error, "cold bank: entry table order"
 .assert COLD_G_UI = 0 .and COLD_G_TRUST = 1, error, "cold bank: group table order"
 
 ; Per group: image length, REU address (in bank ^COLD_REU), marker's run
