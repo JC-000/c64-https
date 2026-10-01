@@ -17,7 +17,8 @@
 ; in the same call, because every call runs a fresh copy.
 ;
 ; Boot (cold_bank_init) stashes the PRG's COLD_IMAGE into the REU at
-; COLD_REU in one DMA and keeps each group's XOR. A tenant's public name is
+; COLD_REU in one DMA and keeps each group's XOR, once per LOAD and only if
+; every group's marker arrived; cold_call refuses until it has. A tenant's public name is
 ; a resident stub, `ldy #COLD_E_x / jmp cold_call`, so callers are
 ; unchanged. cold_call:
 ;   1. refuses unless no connection is open: net_tcp_state is CLOSED or
@@ -134,6 +135,8 @@ cold_call:
         cmp #TLS_STATE_ERROR
         bne @busy               ; a session owns cert_buf
 @free:
+        lda cold_stashed        ; nothing stashed this LOAD: cold_g_sum is
+        beq @bad                ;  not a sum of anything, the REU unknown
         ldx cold_entry_grp,y
         stx cold_g
         lda cold_g_tail_lo,x
@@ -192,14 +195,23 @@ cold_call:
 ; each group's XOR. Once per LOAD: cold_stashed is PRG data, so only a
 ; fresh LOAD reads 0 here. A re-run without one (RUN after 'Q') skips it
 ; and keeps the first stash, because $C000 is the TCP ring and has held
-; server-chosen bytes since: stashing them would run them. The marker
-; check only refuses a PRG whose image did not arrive.
+; server-chosen bytes since: stashing them would run them. Every group's
+; marker must be present at its load address, so a LOAD that stopped short
+; of the image stashes nothing, and cold_call then refuses every call.
 cold_bank_init:
         lda cold_stashed
         bne @out
-        lda __COLD_TAIL_UI_LOAD__
+        ldx #COLD_GROUPS-1      ; every group's marker must have arrived:
+@arrived:                       ;  a LOAD cut short is not stashed whole
+        lda cold_g_tl_lo,x
+        sta @tail+1
+        lda cold_g_tl_hi,x
+        sta @tail+2
+@tail:  lda $FFFF
         cmp #COLD_MARK
         bne @out
+        dex
+        bpl @arrived
         inc cold_stashed
         lda #<COLD_IMAGE_LEN
         sta cold_dlen
@@ -326,6 +338,16 @@ cold_g_tail_hi:
         .hibytes cold_marker_ui
 .ifdef TRUST_STORE
         .hibytes cold_marker_trust
+.endif
+cold_g_tl_lo:                   ; the PRG copy's marker, per group
+        .lobytes __COLD_TAIL_UI_LOAD__
+.ifdef TRUST_STORE
+        .lobytes __COLD_TAIL_TRUST_LOAD__
+.endif
+cold_g_tl_hi:
+        .hibytes __COLD_TAIL_UI_LOAD__
+.ifdef TRUST_STORE
+        .hibytes __COLD_TAIL_TRUST_LOAD__
 .endif
 cold_g_load_lo:
         .lobytes __TARGET_PROMPT_CODE_LOAD__
