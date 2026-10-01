@@ -708,6 +708,17 @@ def run_tests(transport, labels):
         ("Group 2: DER Parser P-384 (2 tests)",
          lambda: test_der_parser_p384(transport, labels)),
     ]
+    # Shipped images reclaim x509_parse_cert (#155 phase 2); only a
+    # KEEP_X509_PARSE_CERT=1 build has it. On a default image (the
+    # run_all_tests.py aggregate) groups 1-2 are named SKIPs, and group 3 --
+    # the shipped ecdsa_verify path -- still runs. Any other missing DER
+    # label is still a failure via check_labels.
+    if "x509_parse_cert" in missing_labels(labels, ["x509_parse_cert"]):
+        for name, _ in test_groups:
+            print(f"  SKIP: {name}: x509_parse_cert reclaimed in this image "
+                  f"(KEEP_X509_PARSE_CERT=1 re-arms; tools/test_x509.py "
+                  f"builds it)")
+        test_groups = []
 
     for name, test_fn in test_groups:
         print(f"\n{'='*60}")
