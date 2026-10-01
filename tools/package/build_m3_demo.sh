@@ -8,6 +8,9 @@
 #   c64-https-uci-m3-demo.d64   that PRG alone, bootable with LOAD"*",8,1
 #   README.txt                  what it is, what it needs, how to run it, and
 #                               the provenance (commit, flags, sha256s)
+#   SHA256SUMS                  the three files above, `shasum -a 256 -c` form
+#
+# These four are the GitHub pre-release's assets; nothing else is written.
 #
 # Separate from `make package` on purpose. The M3 variant is SECONDARY (the
 # 6510 crypto is the product), so it is not in PACKAGE_VARIANTS, and nothing
@@ -36,7 +39,12 @@ MAKE_ARGS=(BACKEND=uci-m3 "HTTPS_HOST=$DEMO_HOST" "HTTPS_PATH=$DEMO_PATH")
 
 # What the firmware side published; quoted in the README, checked nowhere
 # here (the device is not involved in a build).
-FIRMWARE="1541ultimate esp-tls/m3 f2e46946 or later (U64 firmware 3.15 with ESP32 IDENT 1.309)"
+# esp-tls/m3 f2e46946 is a LOCAL firmware branch, not fetchable upstream:
+# the requirement is the interface, and the commit is only where it was
+# validated. The upstream PR numbers are not known yet; the README carries a
+# marked slot for them (UPSTREAM_PRS overrides it once they exist).
+FIRMWARE="M3-SPEC v1 + errata v1.1/v1.2 firmware (validated on esp-tls/m3 f2e46946)"
+UPSTREAM_PRS="${UPSTREAM_PRS:-[TO BE FILLED IN: 1541ultimate upstream PR number(s)]}"
 SPEC="M3-SPEC v1 (= r7.7), sha256 c265fdfcfdd08dee989a96eee25fae66fb6650ee4be8bb24f8dd791d9ee3db9f, with errata v1.1 (f9a39ff334b34cb0e1a63d5d508675de552ac8eacb23ccd6095a7f4c72788f9a) and v1.2 (a6802f40db3229d53591ef6e0773641d723186e779dd8726abff5915cbe551a4)"
 
 die() { echo "[m3-demo] ERROR: $*" >&2; exit 1; }
@@ -114,6 +122,7 @@ What it needs
 -------------
   - An Ultimate 64 (Elite) running firmware with the M3 TLS sockets:
     $FIRMWARE.
+    1541ultimate upstream PR(s): $UPSTREAM_PRS
   - Its WiFi module up (the ESP32 does the TLS), the network connected, and
     the clock set by SNTP (certificate dates are checked).
   - The Ultimate's Command Interface enabled.
@@ -163,6 +172,9 @@ What an unsupported device shows
 
 Source: https://github.com/JC-000/c64-https (src/net/uci-m3/).
 EOF
+
+# SHA256SUMS last, over everything a release would attach (shasum -c format).
+( cd "$OUT" && shasum -a 256 "$NAME.prg" "$NAME.d64" README.txt > SHA256SUMS )
 
 echo "[m3-demo] done: $OUT"
 echo "[m3-demo]   $NAME.prg  $prg_sha"
