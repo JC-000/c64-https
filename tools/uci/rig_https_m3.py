@@ -9,7 +9,8 @@ verdicts that need more than one image or a failure:
                      mismatch, 93 for an untrusted chain), and the client
                      must surface it: "TLS HANDSHAKE FAILED" plus the
                      firmware's own status line on screen, nothing sent,
-                     the handle not held (m3_owned = 0).
+                     the handle not held (m3_owned = 0), net_last_error
+                     $8D UCI_ERR_OPEN_REFUSED.
   ab HOST PATH PRG_B LABELS_B
                      A/B oracle: the same URL through this build (A, the
                      M3 PRG in build/) and through B (a 6510-TLS UCI PRG).
@@ -59,6 +60,9 @@ TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
 INIT_WAIT = float(os.environ.get("C64_INIT_WAIT", "120"))
 FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "900"))
 RUN_DIR = Path(os.environ.get("UCI_DEBUG_DIR", "/tmp/uci_https_debug"))
+
+
+UCI_ERR_OPEN_REFUSED = 0x8D     # c64-wireguard's code, mirrored (uci_errors.inc)
 
 
 class Fail(Exception):
@@ -152,8 +156,11 @@ def verdict_refuse(client, lab, host, code, m, lines) -> None:
     n = bytes(client.read_mem(lab["m3_status_len"], 1))[0]
     line = bytes(client.read_mem(lab["m3_status"], n)).decode("ascii", "replace")
     owned = bytes(client.read_mem(lab["m3_owned"], 1))[0]
+    err = bytes(client.read_mem(lab["net_last_error"], 1))[0]
     print(f"  firmware status line: {line!r}")
-    print(f"  m3_owned={owned}")
+    print(f"  m3_owned={owned}  net_last_error=${err:02X}")
+    if err != UCI_ERR_OPEN_REFUSED:
+        raise Fail(f"net_last_error ${err:02X}, expected $8D UCI_ERR_OPEN_REFUSED")
     shown = bool(line) and any(line[:20].upper() in ln.upper() for ln in lines)
     if not line.startswith(code + ","):
         raise Fail(f"refused with {line!r}, expected code {code}")
