@@ -8,6 +8,7 @@ LOAD"*",8,1 and RUN, and then drives the menu:
   1. 'I', then 'G' with RETURN, RETURN: the built-in default target
      (en.wikipedia.org /wiki/Commodore_64). It must end HTTP 200 with the
      body complete by its own framing (tools/http_body_checks.py).
+  1b. 'G' with github.com /robots.txt: HTTP 200, complete (timed too).
   2. 'G' with a name the certificate does not carry (NEGATIVE_HOST, a
      nip.io name for a Wikipedia address): it must end "TLS HANDSHAKE
      FAILED" with the firmware's "94,..." line on screen, no handle held,
@@ -56,6 +57,7 @@ D64 = REPO / "dist" / "m3-demo" / "c64-https-uci-m3-demo.d64"
 DISK_FILE = "c64-https-m3"
 PRG = REPO / "build" / "c64-https.prg"
 LABELS = REPO / "build" / "labels.txt"
+SECOND_HOST, SECOND_PATH = "github.com", "/robots.txt"
 NEGATIVE_HOST = os.environ.get("NEGATIVE_HOST", "208-80-153-224.nip.io")
 TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
 FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "900"))
@@ -237,11 +239,13 @@ def main() -> int:
                 raise Fail(f"network init: {m}")
 
             # --- 1. the default target ----------------------------------
+            t0 = time.monotonic()
             fetch_in_flight = True          # #234: a socket may be live
             client.send_text("G", finish_with_return=False)
             push_keys(client, target_keys("\r\r"))
             m, lines = wait_for(client, ["CONNECTION CLOSED", "TLS HANDSHAKE FAILED",
                                          "NOT RESPONDING"], FETCH_TIMEOUT)
+            took = time.monotonic() - t0
             if m == "CONNECTION CLOSED":
                 fetch_in_flight = False
             dump(lines, "default fetch")
@@ -252,8 +256,31 @@ def main() -> int:
             print(f"  {state.summary()}")
             print(f"  HTTP status   : {status.reason}")
             print(f"  body complete : {body.reason}")
+            print(f"  default fetch : {took:.0f} s from 'G' to CONNECTION CLOSED"
+                  " (1 s screen polling)")
             if not (status.ok and body.ok):
                 raise Fail("the default fetch is not HTTP 200 + complete")
+
+            # --- 1b. a second positive, the README's second URL ----------
+            t0 = time.monotonic()
+            fetch_in_flight = True
+            client.send_text("G", finish_with_return=False)
+            push_keys(client, target_keys(f"{SECOND_HOST}\r{SECOND_PATH}\r"))
+            m, lines = wait_after(client, "HTTPS GET " + SECOND_HOST.upper(),
+                                  ["CONNECTION CLOSED", "TLS HANDSHAKE FAILED",
+                                   "NOT RESPONDING"], FETCH_TIMEOUT)
+            took = time.monotonic() - t0
+            if m == "CONNECTION CLOSED":
+                fetch_in_flight = False
+            if m != "CONNECTION CLOSED":
+                dump(lines, "second fetch")
+                raise Fail(f"{SECOND_HOST}{SECOND_PATH} ended with {m!r}")
+            state = body_state(client, lab)
+            status, body = check_http_status(state), check_body_complete(state)
+            print(f"  {SECOND_HOST}{SECOND_PATH}: {status.reason}; {body.reason}; "
+                  f"{took:.0f} s")
+            if not (status.ok and body.ok):
+                raise Fail(f"{SECOND_HOST}{SECOND_PATH} is not HTTP 200 + complete")
 
             # --- 2. the negative ----------------------------------------
             fetch_in_flight = True
