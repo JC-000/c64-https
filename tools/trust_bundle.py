@@ -87,6 +87,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import sys
 from dataclasses import dataclass
 
@@ -125,17 +126,30 @@ class BundleError(ValueError):
     """The file is not a valid v1 bundle (structure, signature or floor)."""
 
 
+# The hostname charset the C64's typed-host prompt accepts, after A-Z -> a-z:
+# labels of [a-z0-9-], dot-separated, none empty. Anything else (a ":443", a
+# path, a trailing dot) would hash to a key the C64 can never look up.
+_HOST_RE = re.compile(rb"[a-z0-9-]+(\.[a-z0-9-]+)*")
+
+
 def canonical_host(host: str) -> bytes:
-    """The exact bytes hashed into a host key: ASCII, A-Z folded to a-z."""
+    """The exact bytes hashed into a host key: ASCII, A-Z folded to a-z.
+
+    Every input path (--pin, live fetch, the library calls) goes through
+    here, and anything outside the hostname charset is an error, never
+    silently trimmed.
+    """
     try:
         raw = host.encode("ascii")
     except UnicodeEncodeError:
         raise BundleError(f"host {host!r} is not ASCII (give the IDNA A-label)")
     if not raw or len(raw) > MAX_HOST_LEN:
         raise BundleError(f"host {host!r}: length must be 1..{MAX_HOST_LEN}")
-    if raw.endswith(b".") or any(c <= 0x20 or c >= 0x7F for c in raw):
-        raise BundleError(f"host {host!r}: trailing dot or non-printable byte")
-    return raw.lower()                  # bytes.lower() folds A-Z only
+    canon = ts.lower_ascii(raw)
+    if not _HOST_RE.fullmatch(canon):
+        raise BundleError(f"host {host!r}: only [a-z0-9.-] with no empty label "
+                          "(no port, path, or trailing dot)")
+    return canon
 
 
 def host_key(host: str) -> bytes:
@@ -376,10 +390,20 @@ def parse_pin_arg(arg: str) -> tuple:
     return host, pin
 
 
+def split_hostport(arg: str) -> tuple:
+    host, sep, port = arg.rpartition(":")
+    if not sep:
+        return arg, 443
+    if not port.isdigit():
+        raise BundleError(f"{arg!r}: port must be a number")
+    return host, int(port)
+
+
 def fetch_pin(host: str) -> bytes:
     sys.path.insert(0, TOOLS_DIR)
     import spki_pin                     # noqa: E402 — needs the tools dir
-    h, port = spki_pin.split_hostport(host)
+    h, port = split_hostport(host)
+    canonical_host(h)                   # refuse before touching the network
     cert = spki_pin.fetch_leaf(h, port, None, insecure=False)
     try:
         pin = bytes.fromhex(spki_pin.pin_of(cert))
@@ -456,7 +480,8 @@ def main(argv=None) -> int:
             key = load_private_key(_key_path(args))
             warn_if_test_key(key.public_key())
             recs = [leaf_record(h, pin) for h, pin in map(parse_pin_arg, args.pin)]
-            recs += [leaf_record(h.rsplit(":", 1)[0], fetch_pin(h))
+            # HOST[:PORT] is fetch syntax; the record is keyed on HOST.
+            recs += [leaf_record(split_hostport(h)[0], fetch_pin(h))
                      for h in args.hosts]
             blob = sign(key, args.generation, recs)
             with open(args.out, "wb") as f:

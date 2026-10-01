@@ -124,12 +124,25 @@ def test_layout_is_the_documented_one() -> None:
 
 def test_host_key_folds_ascii_case_only() -> None:
     assert tb.host_key("GitHub.COM") == tb.host_key("github.com")
-    for bad in ("", "a" * 64, "example.com.", "bücher.de", "a b"):
+    assert tb.canonical_host("xn--bcher-kva.DE") == b"xn--bcher-kva.de"
+    for bad in ("", "a" * 64, "example.com.", "bücher.de", "a b",
+                "en.wikipedia.org:443", "en.wikipedia.org/wiki", ".example.com",
+                "a..b", "a_b.com", "*.example.com"):
         try:
             tb.host_key(bad)
         except tb.BundleError:
             continue
         raise AssertionError(f"host {bad!r} accepted")
+
+
+def test_pin_with_a_port_is_refused() -> None:
+    # adv-l4 finding: `--pin host:443=HEX` used to sign a record keyed on
+    # "host:443", which the C64 can never look up.
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "b.bin")
+        rc = tb.main(["build", "--test-key", "--generation", "1", "-o", out,
+                      "--pin", "en.wikipedia.org:443=" + WIKI_PIN.hex()])
+        assert rc == 1 and not os.path.exists(out)
 
 
 def test_signing_is_deterministic_and_sorted() -> None:
