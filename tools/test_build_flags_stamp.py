@@ -155,6 +155,38 @@ DRY_RUN_INVOCATIONS = (
     ("-q", "--warn-undefined-variables"),
 )
 
+# The same question asked through the ENVIRONMENT under `-e`. GNU make 3.81
+# then hands the makefile the environment's MAKEFLAGS TEXT verbatim, so a
+# guard that scans $(MAKEFLAGS) for single-letter words sees `--dry-run`, finds
+# no `n` word, and takes the REAL path: every object and the PRG deleted at
+# exit 0. Each long spelling is its own row because each one is a separate
+# way to miss; `--que` is an abbreviation make accepts. 4.x normalises
+# MAKEFLAGS even under -e, so these rows are red on 3.81 only.
+DRY_RUN_ENV_INVOCATIONS = (
+    ({"MAKEFLAGS": "--dry-run"}, ("-e",)),
+    ({"MAKEFLAGS": "--just-print"}, ("-e",)),
+    ({"MAKEFLAGS": "--recon"}, ("-e",)),
+    ({"MAKEFLAGS": "--question"}, ("-e",)),
+    ({"MAKEFLAGS": "--que"}, ("-e",)),
+    ({"MAKEFLAGS": "--touch"}, ("-e",)),
+    ({"MAKEFLAGS": "--dry-run --no-print-directory"}, ("-e",)),
+    ({"MAKEFLAGS": "-s --dry-run"}, ("-e",)),
+)
+
+# REAL builds that carry option text with an `n`, `q` or `t` in it, and so
+# must still invalidate. `-I tools` is the 4.x trap: 4.x records it in
+# MAKEFLAGS/MFLAGS as the word `-Itools`, whose `t` a dash-stripping scan
+# reads as -t. The `-e` rows are the real-build side of the table above.
+REAL_BUILD_INVOCATIONS = (
+    ({}, ("--no-print-directory",)),
+    ({}, ("--warn-undefined-variables",)),
+    ({}, ("--silent",)),
+    ({}, ("-I", "tools")),
+    ({}, ("-e",)),
+    ({"MAKEFLAGS": "--no-print-directory"}, ("-e",)),
+    ({"MAKEFLAGS": "--warn-undefined-variables"}, ("-e",)),
+)
+
 
 def _toolchain_missing():
     for tool in ("ca65", "ld65"):
@@ -211,13 +243,16 @@ class Farm:
     def __exit__(self, *exc):
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def make(self, *flags, dry_run=False, opts=(), check=True):
+    def make(self, *flags, dry_run=False, opts=(), env=None, check=True):
         cmd = ["make"] + (["-n"] if dry_run else []) + list(opts) + list(flags)
         proc = subprocess.run(cmd, cwd=self.dir, text=True,
+                              env=dict(os.environ, **(env or {})),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if check:
+            shown = " ".join(f"{k}={v}" for k, v in (env or {}).items())
             assert proc.returncode == 0, (
-                f"`{' '.join(cmd)}` failed ({proc.returncode}):\n{proc.stdout}"
+                f"`{shown} {' '.join(cmd)}` failed ({proc.returncode}):\n"
+                f"{proc.stdout}"
             )
         return proc
 
@@ -584,9 +619,11 @@ def test_dry_run_options_do_not_touch_the_tree():
         stamp = farm.path(STAMP).read_text()
         assert objs, "the baseline build produced no objects — vacuous"
 
-        for opts in DRY_RUN_INVOCATIONS:
-            shown = " ".join(opts)
-            farm.make(*comb, opts=list(opts), check=False)
+        for env, opts in ([({}, o) for o in DRY_RUN_INVOCATIONS]
+                          + list(DRY_RUN_ENV_INVOCATIONS)):
+            shown = " ".join([f"{k}='{v}'" for k, v in env.items()]
+                             + list(opts))
+            farm.make(*comb, opts=list(opts), env=env, check=False)
             assert farm.exists(PRG), (
                 f"`make {shown}` with a changed flag set DELETED {PRG}. A dry "
                 "run must not mutate the tree: -n/-q/-t answer 'what would "
@@ -609,17 +646,20 @@ def test_dry_run_options_do_not_touch_the_tree():
             )
 
         # And the tree is still genuinely usable: a real rebuild of the
-        # baseline flags must be a no-op, not a full rebuild.
+        # baseline flags must be a no-op, not a full rebuild — with and
+        # without `-e`, which the rows above route through.
         # Compared over the baseline's objects: `-t` creates (touches) any
         # object the comb flag set has and UCI does not (the cold bank's
         # cold_bank.o), which no UCI link reads and the next real comb
         # build's invalidation deletes. That is make's -t, not a rebuild.
-        proc = farm.make(*UCI)
-        after = farm.mtimes()
-        assert {k: after.get(k) for k in objs} == objs, (
-            "after the dry runs, a real rebuild of the SAME flags "
-            "re-assembled objects:\n" + proc.stdout
-        )
+        for opts in ((), ("-e",)):
+            proc = farm.make(*UCI, opts=list(opts))
+            after = farm.mtimes()
+            assert {k: after.get(k) for k in objs} == objs, (
+                f"after the dry runs, a real `make {' '.join(opts)}` of the "
+                "SAME flags re-assembled objects:\n" + proc.stdout
+            )
+            assert farm.sha() == prg_sha
 
 
 def test_an_unrelated_option_does_not_suppress_invalidation():
@@ -659,11 +699,13 @@ def test_an_unrelated_option_does_not_suppress_invalidation():
     # Cheap probe: real build, links nothing (the goal is already up to
     # date once the parse-time block has written it), two common long
     # options plus one that shares no letters with n/q/t.
-    for opt in ("--no-print-directory", "--warn-undefined-variables", "--silent"):
+    for env, opts in REAL_BUILD_INVOCATIONS:
+        opt = " ".join([f"{k}='{v}'" for k, v in env.items()] + list(opts))
         with Farm() as farm:
             farm.make(*UCI)
             assert farm.exists(PRG)
-            farm.make(opt, "BACKEND=ip65", STAMP, check=False)
+            farm.make("BACKEND=ip65", STAMP, opts=list(opts), env=env,
+                      check=False)
             assert not farm.exists(PRG), (
                 f"`make {opt} BACKEND=ip65` did NOT invalidate. It is a real "
                 "build, not a dry run, so the parse-time block must have "
@@ -684,6 +726,13 @@ def test_an_unrelated_option_does_not_suppress_invalidation():
         onchip = farm.sha()
         farm.make("--no-print-directory", *comb)
         flipped = farm.sha()
+        # And through the environment under -e, back to onchip.
+        farm.make(*UCI, opts=["-e"],
+                  env={"MAKEFLAGS": "--no-print-directory"})
+        assert farm.sha() == onchip, (
+            "MIXED LINK: `MAKEFLAGS=--no-print-directory make -e` flipping "
+            "comb -> onchip did not reproduce the onchip image."
+        )
     assert onchip != oracle, "comb and onchip images are identical — vacuous"
     assert flipped == oracle, (
         "MIXED LINK: `make --no-print-directory` with changed flags produced\n"
@@ -694,6 +743,41 @@ def test_an_unrelated_option_does_not_suppress_invalidation():
         "objects. Same size, different hash, exit 0 — the failure mode "
         "CLAUDE.md says only a sha256 catches."
     )
+
+
+def test_hand_set_makeflags_is_refused_without_touching_the_tree():
+    """A command-line MAKEFLAGS=/MFLAGS= is refused at parse time (#174).
+
+    The guard reads $(MFLAGS), make's own record of its options. A
+    command-line `MAKEFLAGS=--dry-run` IS a dry run — make decodes it after
+    reading the makefiles, so no recipe runs — but at parse time MFLAGS
+    does not show it yet, and a command-line `MFLAGS=` is text make never
+    parsed. Either would let the guard take the wrong path, so the makefile
+    refuses both before any stamp block runs. The refusal must itself be
+    side-effect-free: exit non-zero, tree untouched.
+    """
+    _require_toolchain()
+    comb = ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1")
+    with Farm() as farm:
+        farm.make(*UCI)
+        prg_sha = farm.sha()
+        objs = farm.mtimes()
+        for assign in ("MAKEFLAGS=--dry-run", "MAKEFLAGS=", "MFLAGS=",
+                       "MFLAGS=-n"):
+            for opts in ((), ("-n",)):
+                proc = farm.make(*comb, assign, opts=list(opts), check=False)
+                shown = " ".join(list(opts) + [assign])
+                assert proc.returncode != 0, (
+                    f"`make {shown}` was accepted; the dry-run guard cannot "
+                    "see options passed that way:\n" + proc.stdout
+                )
+                assert "assigned by hand" in proc.stdout, proc.stdout
+                assert farm.exists(PRG) and farm.sha() == prg_sha, (
+                    f"`make {shown}` touched {PRG}"
+                )
+                assert farm.mtimes() == objs, (
+                    f"`make {shown}` touched the objects"
+                )
 
 
 def test_unchanged_flags_rebuild_nothing():

@@ -708,38 +708,62 @@ FLAGS_STAMP := build/flags.stamp
 #
 #     make                              ->  []
 #     make -n                           ->  [n]
-#     make -q                           ->  [q]
-#     make -t                           ->  [t]
 #     make --dry-run                    ->  [n]
 #     make -npq                         ->  [qpn]
-#     make -s -n                        ->  [sn]
-#     make BACKEND=uci HTTPS_HOST=en.host.invalid  ->  []
-#     make --no-print-directory         ->  [ --no-print-directory]
-#     make --warn-undefined-variables   ->  [ --warn-undefined-variables]
 #     make -n --no-print-directory      ->  [ --no-print-directory -n]
 #     make --no-print-directory --warn-undefined-variables
 #                                       ->  [ --warn-undefined-variables - --no-print-directory]
 #
-# Two things the last four rows kill. `--no-print-directory` contains an `n`
-# AND a `t`; `--warn-undefined-variables` contains an `n` — so searching the
-# first word calls a REAL build a dry run, skips the invalidation, and the
-# link reuses the previous profile's objects. That is the mixed link this
-# whole mechanism exists to prevent, produced by the guard meant to protect
-# it, and it is worse than the bug in #174: same PRG size, different hash,
-# exit 0. And the letters are not first, nor undashed, when a long option is
-# present, so `$(filter-out -%,$(firstword ...))` is not a fix either — it
-# re-opens #174 on `make -n --no-print-directory`. Both were measured, both
-# directions.
+# `--no-print-directory` contains an `n` AND a `t`; `--warn-undefined-variables`
+# an `n` — so searching the first word calls a REAL build a dry run, skips the
+# invalidation, and the link reuses the previous profile's objects: the mixed
+# link this whole mechanism exists to prevent, at exit 0. And the letters are
+# not first, nor undashed, when a long option is present, so
+# `$(filter-out -%,$(firstword ...))` re-opens #174 on
+# `make -n --no-print-directory`. Both were measured, both directions.
 #
-# So: take every word that is neither `--`-prefixed nor a `VAR=value`
-# assignment (make 4.x appends those after a `--`), and strip one leading
-# dash. A stray bare `-` word, as in the last row above, patsubsts to the
-# empty string and drops out. 52/52 correct across the option matrix in
-# tools/test_build_flags_stamp.py's two guard tests.
+# Nor is $(MAKEFLAGS) itself trustworthy: it is an ordinary variable, and
+# under `-e` the environment's TEXT replaces make's parse of it on 3.81:
+#
+#     MAKEFLAGS=--dry-run make -e       ->  MAKEFLAGS=[--dry-run]  MFLAGS=[-ne]
+#     MAKEFLAGS=--t make -e             ->  MAKEFLAGS=[--t]        MFLAGS=[-te]
+#
+# Both are dry runs the word scan read as real builds — and deleted the tree.
+# Recognising the long spellings instead is a losing game (--dry-run,
+# --just-print, --recon, --question, --touch, and every unambiguous prefix,
+# which differ between versions: 3.81 takes `--t` as --touch, 4.4.1 calls
+# it ambiguous). So read $(MFLAGS): make rebuilds it from its own option
+# table, the environment cannot replace it (not even under -e), and its
+# letter bundle is always dash-prefixed. Nor does it carry 4.x's `-- VAR=value`
+# tail: on 4.4.1 $(MAKEFLAGS) for `make HTTPS_HOST=en.wikipedia.org` ends in
+# that assignment, whose `n` and `t` the word scan read as a dry run (its
+# `%=%` filter never matched: a pattern takes one `%`), so a real retarget
+# skipped every invalidation.
+#
+#     3.81:  make -n --no-print-directory  ->  [- --no-print-directory -n]
+#     4.4.1: make -n --no-print-directory  ->  [-n --no-print-directory]
+#     4.4.1: make -j4 -O -I inc_nt         ->  [-Iinc_nt -j4 -Otarget]
+#
+# The last row is the 4.x trap: options that take an argument get their own
+# `-<letter><arg>` word, and `-Otarget` has a `t`, `-Iinc_nt` an `n` and a
+# `t`. So drop `--` words and every word led by an argument-taking option
+# letter, then strip the dash. A bare `-` word patsubsts to empty and drops
+# out.
+#
+# MFLAGS is make's state AT PARSE TIME, and a COMMAND-LINE `MAKEFLAGS=` is
+# only decoded after the makefiles are read: `make MAKEFLAGS=--dry-run` is a
+# dry run (its recipes do not run, on 3.81 and 4.4.1) while MFLAGS is still
+# empty, and `make -n MAKEFLAGS=` empties $(MAKEFLAGS) while it dry-runs.
+# No parse-time predicate can see the first, and a command-line MFLAGS= is
+# user text by definition, so both assignments are refused outright. A
+# parent make passes both through the environment, which stays allowed.
 #
 # Testing for `n` alone is not enough — `make -q` is equally destructive and
-# equally a dry run, and `-t` is the third.
-MAKE_OPT_LETTERS := $(patsubst -%,%,$(filter-out --% %=%,$(MAKEFLAGS)))
+# equally a dry run, and `-t` is the third. Every parse-time stamp block
+# below gates on MAKE_DRY_RUN and nothing else.
+$(foreach v,MFLAGS MAKEFLAGS,$(if $(filter command override,$(firstword $(origin $(v)))),\
+    $(error $(v) is assigned by hand ($(origin $(v))). The #174 dry-run guard cannot see options passed that way; pass them as options)))
+MAKE_OPT_LETTERS := $(patsubst -%,%,$(filter-out --% -C% -E% -f% -I% -j% -l% -o% -O% -W%,$(MFLAGS)))
 MAKE_DRY_RUN := $(strip \
     $(findstring n,$(MAKE_OPT_LETTERS)) \
     $(findstring q,$(MAKE_OPT_LETTERS)) \
