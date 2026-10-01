@@ -219,7 +219,9 @@ http_get:
 ; Output: C=0 complete; http_status / http_resp_buf (body) / http_resp_len
 ;         populated. C=1 if the body is short of its framing when the tick
 ;         budget expires (#211), or at once if the record layer aborted the
-;         connection on an AEAD tag failure (tls_state = ERROR, #239).
+;         connection on an AEAD tag failure (tls_state = ERROR, #239). An
+;         unframed body is complete only on the peer's close_notify; the
+;         budget expiring under it is C=1 (RFC 8446 6.1 truncation).
 ;         Caller closes the connection.
 ; Clobbers: A, X, Y, zp_ptr
 ; =============================================================================
@@ -303,9 +305,9 @@ http_recv_loop:
 ;   - no byte for M3_B_HTTP_IDLE (60 s, CIA2 clock): a framed body is
 ;     judged by its framing (short of it: C=1); an UNFRAMED one is C=1.
 ;     Its end IS the close, and no close came, so nothing says it is whole.
-; So an unframed body is complete only on 01, the peer's close_notify.
-; (The TLS arm above still hands a stalled unframed body to the shared
-; verdict, whose unframed arm answers C=0; that is unchanged here.)
+; So an unframed body is complete only on 01, the peer's close_notify --
+; the same rule as the TLS arm above, which ends one only on a decrypted
+; close_notify alert (http_recv_close_verdict).
 ; Output and caller contract as the TLS http_recv_body above.
 ; =============================================================================
         .import m3_dl_arm
@@ -347,10 +349,7 @@ http_recv_body:
         ldy #M3_DL_APP
         jsr m3_dl_expired
         bcc @m3_loop
-        lda http_cl_valid       ; stalled: framed -> the framing decides,
-        ora http_chunked        ;  unframed -> no close came: incomplete
-        beq @m3_dead
-        jmp http_recv_timeout_verdict
+        jmp http_recv_timeout_verdict   ; stalled: no clean end (unframed: C=1)
 @m3_ended:
         cmp #NET_TCP_CLOSED
         bne @m3_dead
@@ -361,7 +360,7 @@ http_recv_body:
         ora http_chunked
         beq @m3_dead            ; 05 + no framing: possibly truncated
 @m3_framed:
-        jmp http_recv_timeout_verdict
+        jmp http_recv_close_verdict
 @m3_dead:
         jsr http_body_finish
         sec
@@ -376,6 +375,9 @@ http_recv_body:
 ; -----------------------------------------------------------------------------
 ; http_recv_timeout_verdict - decide the carry when http_recv_body's tick
 ;   budget expires (issue #211).  Tail-called, never returns to the caller.
+; http_recv_close_verdict - the same, when the stream ended cleanly: a
+;   decrypted close_notify alert (TLS arms) or SOCKET_READ 01 (uci-m3).
+;   The two differ only on an unframed body; see that arm below.
 ;
 ;   The budget used to fall straight through into @recv_complete's `clc`,
 ;   so a body tens of kilobytes short of its Content-Length reached the
@@ -390,9 +392,13 @@ http_recv_body:
 ;     Content-Length seen     -> http_body_done_check: C=0 iff the 24-bit
 ;       consumed count equals it.
 ;     chunked, no terminal chunk -> C=1.
-;     neither framing         -> C=0.  The historical "accept whatever we
-;       have" is still right for a Connection: close stream with no length
-;       and no chunking, which is what the budget exists to terminate.
+;     neither framing         -> C=0 via http_recv_close_verdict, C=1 via
+;       http_recv_timeout_verdict.  A Connection: close body's end IS the
+;       close, so only a clean close says it is whole.  The budget expiring
+;       is a stall, and on ip65/uci a peer FIN without close_notify looks
+;       exactly like one (nothing on the TLS receive path reads
+;       net_tcp_state): both are RFC 8446 6.1's truncation case.  This arm
+;       used to answer C=0 to the budget ("accept whatever we have").
 ;
 ;   http_body_finish runs on every arm, so a caller can inspect the partial
 ;   body (and a sink body gets its final blit) whatever the verdict.
@@ -420,19 +426,24 @@ http_recv_body:
 ;   Clobbers: A, and whatever http_body_finish / http_body_done_check do.
 ; -----------------------------------------------------------------------------
         .segment "HTTP_AUX_CODE2"
+http_recv_close_verdict:
+        clc                     ; C=0: the peer ended the stream cleanly
+        .byte $24               ; BIT zp: skips the SEC below
 http_recv_timeout_verdict:
+        sec                     ; C=1: no clean end (budget / stall)
+        php                     ; http_body_finish clobbers C
         jsr http_body_finish    ; idempotent — http_sink_flushed latch
-        lda http_parse_state
-        cmp #2                  ; 2 = body; 0/1 = status line / headers
-        bcc @to_short           ; never reached the body: not a response
+        plp                     ; C = 1 iff no clean end (kept: AND/LDA
+        lda http_parse_state    ;  leave C alone, unlike CMP)
+        and #2                  ; 2 = body; 0/1 = status line / headers
+        beq @to_short           ; never reached the body: not a response
         lda http_cl_valid
         beq @to_unframed
         jmp http_body_done_check    ; tail call: C=0 iff total == length
 @to_unframed:
         lda http_chunked
         bne @to_short           ; chunked: terminal chunk never arrived
-        clc
-        rts
+        rts                     ; unframed: complete only on a clean end
 @to_short:
         sec
         rts
@@ -452,7 +463,7 @@ http_recv_timeout_verdict:
 ;   record that is not application data. The peer sends nothing after one.
 ;   close_notify (AlertDescription 0, in an alert of exactly 2 B —
 ;   anything else would leave tls_rec_buf+1 a stale byte) now hands to
-;   http_recv_timeout_verdict — C=1 at once if short of Content-Length,
+;   http_recv_close_verdict — C=1 at once if short of Content-Length,
 ;   C=0 at once if it ends an unframed (Connection: close) body. Any other
 ;   alert returns C=1 at once (tls_state is not latched: the record
 ;   authenticated; the peer's description stays in tls_rec_buf+1).
@@ -462,7 +473,7 @@ http_recv_timeout_verdict:
 ;   records (NewSessionTicket) still count as ticks, as before.
 ;
 ;   Otherwise count the tick, loop, or hand the expired budget to
-;   http_recv_timeout_verdict.
+;   http_recv_timeout_verdict (no clean end: an unframed body is C=1).
 ;
 ;   TLS_CODE, not HTTP_AUX_CODE2: both are CRYPTO_OVERLAY on ip65, but
 ;   under UCI HTTP_AUX_CODE2 is CRYPTO_OVERLAY — whose comb tail is the
@@ -482,14 +493,13 @@ http_recv_tick:
         bne @tick_abort         ;  (non-close: C=1)
         lda tls_rec_buf+1       ; AlertDescription: 0 = close_notify
         bne @tick_abort         ; any other alert: the peer failed us
-        beq @tick_verdict       ; close_notify: framing decides now
+        jmp http_recv_close_verdict ; close_notify: framing decides now
 @tick_count:
         inc http_recv_ticks
         bne @tick_more
         inc http_recv_ticks+1
         bne @tick_more
-@tick_verdict:
-        jmp http_recv_timeout_verdict   ; budget wrapped / alert: framing decides
+        jmp http_recv_timeout_verdict   ; budget wrapped: no clean end
 @tick_more:
         jmp http_recv_loop
 @tick_abort:

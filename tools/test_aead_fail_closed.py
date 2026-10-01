@@ -33,6 +33,12 @@ Two neighbours of the same conflation are pinned here too:
     tick. It is an orderly close, so ``tls_state`` is NOT latched. Any
     OTHER alert (AlertDescription != 0), or an alert that is not exactly
     2 B, returns C=1 at once.
+  * close_notify is the ONLY end of an unframed body: the same body
+    followed by silence (a stall, or a FIN without close_notify, which the
+    TLS receive path cannot tell apart) or by half a record reaches the
+    tick budget and is C=1, where it used to be C=0. Those two cases assert
+    the budget was actually reached (polls >= 65,536), so a C=1 from some
+    abort arm cannot pass them.
 
 Added after adversarial review of PR #240:
 
@@ -688,6 +694,49 @@ def run_tests(transport, labels) -> tuple[int, int]:
             ("tls_state still CONNECTED", r["tls_state"] == TLS_STATE_CONNECTED),
             (f"at once (polls <= {MAX_POLLS_AFTER_FAIL})",
              r["polls"] <= MAX_POLLS_AFTER_FAIL),
+        ]))
+
+    # --- R: an unframed body that just stops (no close_notify) ----------
+    # The idle budget expiring is not an end: an unframed body ends ONLY on
+    # close_notify (H). A peer FIN without one is this same case on ip65
+    # and uci: nothing on the TLS receive path reads net_tcp_state (only
+    # net_poll does, and it is stubbed), so a FIN changes what a tick
+    # costs, never the verdict -- RFC 8446 S6.1's truncation rule.
+    r = run_receive(transport, labels, stream=unframed,
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "unframed body, then silence (stall / FIN without close_notify)",
+        "was: C=0 when the tick budget expired -- a stalled Connection: "
+        "close body read as a complete fetch",
+        r, [
+            ("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=1 (incomplete)", r["carry"] == 1),
+            ("HTTP 200 parsed", r["status"] == 200),
+            ("body consumed == 5", r["body_total"] == 5),
+            ("tls_state still CONNECTED", r["tls_state"] == TLS_STATE_CONNECTED),
+            # The verdict came from the budget, not from an abort arm.
+            ("reached via the tick budget (polls >= 65,536)",
+             r["polls"] >= 0x10000),
+        ]))
+
+    # --- S: an unframed body, then a record cut mid-way ------------------
+    rec2 = seal(app_key, app_iv, 1, TLS_CT_APPLICATION, b" world")
+    r = run_receive(transport, labels,
+                    stream=unframed + rec2[:len(rec2) // 2],
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "unframed body, then half a record and silence",
+        "a connection cut mid-record is a truncation, never an end",
+        r, [
+            ("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=1 (incomplete)", r["carry"] == 1),
+            ("body consumed == 5", r["body_total"] == 5),
+            ("only record 1 authenticated (tls_read_seq = 1)",
+             r["read_seq"] == 1),
+            ("reached via the tick budget (polls >= 65,536)",
+             r["polls"] >= 0x10000),
         ]))
 
     # --- I: control — a bad byte BEFORE the keys still just resyncs -------
