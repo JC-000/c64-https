@@ -22,7 +22,7 @@
         ; or an operator (https_target_prompt, UCI only) may give.
         HTTPS_HOST_MAX = 63
         HTTPS_PATH_MAX = 100
-.ifdef HTTPS_PIN_SPKI
+.if .defined(HTTPS_PIN_SPKI) .and (.not .defined(BACKEND_UCI_M3))
         .import cert_pin_banner
 .endif
 .ifdef COLD_BANK
@@ -51,6 +51,7 @@
         ; c64-https owns the §8.2 reu_mul for libs/nistcurves' REU profile.
         ; The X25519 sibling is built onchip (no REU surface), so it
         ; neither provides nor needs one.
+        .ifndef BACKEND_UCI_M3          ; uci-m3 links no 6510 crypto
         .export reu_mul_init
         ; Under USE_NISTCURVES_ONCHIP the sibling's rebuilt
         ; mul_8x8_onchip.o exports reu_fetch_mul_row unconditionally
@@ -65,6 +66,7 @@
 
         ; ---- exports: Phase 3 P-384 overlay REU stash ----
         .export reu_p384_overlay_init
+        .endif                          ; BACKEND_UCI_M3
 
         ; ---- exports: menu handlers ----
         .export do_net_init
@@ -298,7 +300,7 @@ start:
         ; print banner tail (trailing blank line before the menu)
         lda #<banner_msg_tail
         ldy #>banner_msg_tail
-.ifdef HTTPS_PIN_SPKI
+.if .defined(HTTPS_PIN_SPKI) .and (.not .defined(BACKEND_UCI_M3))
         jsr cert_pin_banner     ; #155: "SPKI PIN xxxxxxxx", then the tail
 .else
         jsr print_string
@@ -306,6 +308,8 @@ start:
 
         cli                     ; re-enable interrupts
 
+.ifndef BACKEND_UCI_M3
+        ; (uci-m3: the ESP32 does all of the TLS; none of this exists.)
         ; initialize hardware entropy sources and seed DRBG
         jsr entropy_init
         jsr drbg_init_entropy
@@ -405,6 +409,7 @@ start:
         ; Inert under BACKEND=ip65 and every shipped UCI build (see
         ; reu_p384_overlay_init's body for the conditional).
         jsr reu_p384_overlay_init
+.endif ; BACKEND_UCI_M3
 
         ; Auto-initialize networking at boot so the banner shows the
         ; firmware-assigned IP without waiting for the user to press 'I'.
@@ -448,12 +453,14 @@ main_loop:
         jsr do_net_init
         jmp main_loop
 @not_i:
+.ifndef BACKEND_UCI_M3                  ; uci-m3: every connection is TLS
         ; 'H' = plain HTTP GET
         cmp #$48
         bne @not_h
         jsr do_http_get
         jmp main_loop
 @not_h:
+.endif
         ; 'G' = HTTPS GET
         cmp #$47
         bne @not_g
@@ -484,7 +491,11 @@ do_net_init:
         lda #<net_fail_msg
         ldy #>net_fail_msg
         jsr print_string
+.ifdef BACKEND_UCI_M3
+        jmp m3_report_fail      ; the firmware's line, or PRESS RESET
+.else
         rts
+.endif
 
 @init_ok:
         lda #<net_ok_msg
@@ -502,7 +513,11 @@ do_net_init:
         lda #<dhcp_fail_msg
         ldy #>dhcp_fail_msg
         jsr print_string
+.ifdef BACKEND_UCI_M3
+        jmp m3_report_fail
+.else
         rts
+.endif
 
 @dhcp_ok:
         lda #<dhcp_ok_msg
@@ -594,6 +609,7 @@ do_http_get:
 ; =============================================================================
 ; do_https_get - full HTTPS GET flow (menu-driven)
 ; =============================================================================
+.ifndef BACKEND_UCI_M3                  ; uci-m3's own arm follows the .else
 do_https_get:
         ; check network is up
         lda net_initialized
@@ -790,6 +806,9 @@ do_https_get:
         ldy #>done_msg
         jsr print_string
         rts
+.else
+        .include "m3_https_get.inc"     ; src/net/uci-m3/: do_https_get
+.endif ; BACKEND_UCI_M3
 
 ; =============================================================================
 ; print_resp_body - print up to 200 bytes of http_resp_buf to screen.
@@ -1162,6 +1181,7 @@ tgt_fail:           .byte 0     ; bit 7: the host field was refused
         .segment "CODE"
 .endif ; BACKEND_UCI
 
+.ifndef BACKEND_UCI_M3                  ; no 6510 crypto, no REU tables
 ; =============================================================================
 ; REU multiply table initialization (from c64-x25519 optimizations)
 ; =============================================================================
@@ -1443,6 +1463,7 @@ reu_p384_overlay_init:
 .endif ; .ifdef USE_OVERLAY_P256_EMBED
 
         rts
+.endif ; BACKEND_UCI_M3
 
 ; =============================================================================
 ; Strings (read-only)
@@ -1529,7 +1550,11 @@ print_local_ip:
 banner_msg:
         .byte "C64-HTTPS CLIENT V0.1"
         .byte $0d, $0d
+.ifdef BACKEND_UCI_M3
+        .byte "TLS BY THE ULTIMATE (M3 FIRMWARE)"
+.else
         .byte "TLS 1.3 / CHACHA20-POLY1305"
+.endif
         .byte $0d, 0
 
 banner_msg_tail:
@@ -1552,7 +1577,11 @@ comb_precompute_msg:
         .endif
 
 menu_msg:
+.ifdef BACKEND_UCI_M3
+        .byte "I=INIT  G=HTTPS  Q=QUIT"
+.else
         .byte "I=INIT  H=HTTP  G=HTTPS  Q=QUIT"
+.endif
         .byte $0d, $0d, 0
 
 init_msg:

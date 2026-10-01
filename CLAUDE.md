@@ -112,6 +112,13 @@ Variables:
   - `BACKEND=ip65|uci` — selects `cfg/c64-https-$(BACKEND).cfg`,
     `src/net/$(BACKEND)/`, and the `-I src/net/$(BACKEND)` include path
     that resolves `net_tuning.inc`. Default ip65.
+  - `BACKEND=uci-m3` — secondary variant: TLS runs on the Ultimate's ESP32
+    (M3 firmware; M3-SPEC v1 + errata v1.1/v1.2), `src/net/uci-m3/` +
+    `cfg/c64-https-uci-m3.cfg`, no 6510 TLS/crypto linked, every crypto knob
+    `$(error)`s, not in `PACKAGE_VARIANTS`. `HTTPS_PIN_SPKI_SHA256` = trust
+    PIN, `M3_ALLOW_TLS12=1` offers hardened 1.2. Model + mutants:
+    `tools/check_m3_client.py`, `tools/mutate_m3_client.py` (standalone,
+    need an m3 build); hardware: `rig_https_banner.py`, `rig_https_m3.py`.
   - `USE_NISTCURVES_ONCHIP=1` — libs/nistcurves FP_ONCHIP_MUL profile: no
     REU row-fetch DMA, wins above ~18-22 MHz. Keeps the **base**
     `cfg/c64-https-$(BACKEND).cfg` — it only adds a `-D` and swaps the
