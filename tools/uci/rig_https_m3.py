@@ -179,7 +179,8 @@ def verdict_ab(rows) -> None:
 
 
 def main(argv) -> int:
-    if len(argv) < 2 or argv[1] not in ("refuse", "ab"):
+    if (len(argv) < 2 or argv[1] not in ("refuse", "ab")
+            or len(argv) != {"refuse": 4, "ab": 6}[argv[1]]):
         print(__doc__)
         return 2
     if not PRG_A.is_file() or "m3_wedged" not in labels(LABELS_A):
