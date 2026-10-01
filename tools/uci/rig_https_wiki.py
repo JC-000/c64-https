@@ -697,6 +697,9 @@ def main() -> int:
             print("Menu mode: pressing 'G' (no DMA trampoline, no scratch)")
             fetch_in_flight = True  # #234: open until the viewer sees 'Q'
             send_text(transport, "g")
+            if "https_target_prompt" in labels:
+                # #155 phase 2: RETURN, RETURN keeps the build-time target.
+                send_text(transport, "\r\r")
         else:
             print("Sending 'Q' to exit PRG main_loop...")
             send_text(transport, "q\r")

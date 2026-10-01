@@ -43,10 +43,16 @@ release walks you through the choice:
 | `c64-https-uci-onchip` | Ultimate 64 / C64 Ultimate at turbo, REU off | boots straight to the menu |
 | `c64-https-uci-comb` | Ultimate 64 / C64 Ultimate at turbo, REU **on** | fastest — 1.73x quicker verify (16.4 s vs 28.4 s, U64E at 48 MHz). Builds a 16 KB table into REU bank 2 at each boot first: ~34 s at 64 MHz, ~45 s at 48 MHz. |
 
-Every image is built for **one** host, baked in at build time (`make
-HTTPS_HOST=...`). The packaging scripts never override it, so an image carries
-whatever the Makefile default was when it was built — and **that default
-changed between v0.4.2 and v0.4.3**:
+Every image carries **one** default host, baked in at build time (`make
+HTTPS_HOST=...`). On the two **UCI** images, `G` first asks for a host and a
+path (`HOST [default]:`, `PATH [default]:`); RETURN on an empty field keeps
+the default, a typed host is lowercased and gets the same name check, and an
+entry the prompt cannot take whole (over 63 / 100 characters, a character
+outside `a-z 0-9 . -` in the host, an empty label, a path not starting with
+`/`) prints `INVALID TARGET` and dials nothing. Type `_` with the left-arrow
+key. `ip65-onchip` has no prompt. The packaging scripts never override the
+default, so an image carries whatever the Makefile default was when it was
+built — and **that default changed between v0.4.2 and v0.4.3**:
 
 - **v0.4.2's images, and every release before it, carry `www.foo.bar`.**
   `.bar` is a delegated gTLD, so that is a name a third party can register. It
@@ -431,7 +437,7 @@ The knobs, all read straight from the Makefile:
 | `BACKEND=ip65\|uci` | selects `cfg/c64-https-$(BACKEND).cfg` and `src/net/$(BACKEND)/`. Default `ip65`. |
 | `USE_NISTCURVES_ONCHIP=1` | no-REU P-256 verify profile. Keeps the base cfg. |
 | `USE_NISTCURVES_ONCHIP_COMB=1` | implies onchip, adds the Lim-Lee comb + a boot precompute into REU bank 2. **Needs an REU.** Switches to `cfg/c64-https-$(BACKEND)-onchip.cfg`. |
-| `HTTPS_HOST=` / `HTTPS_PATH=` | the single target baked into the image. Hosts over 63 chars are a build error. |
+| `HTTPS_HOST=` / `HTTPS_PATH=` | the target baked into the image (the only one on ip65; the RETURN default of the UCI prompt). Hosts over 63 chars are a build error. |
 | `HTTPS_SNI=` | SNI override, when it must differ from `HTTPS_HOST` (e.g. dialling an IP). |
 | `HTTPS_PIN_SPKI_SHA256=` | pin the server's leaf key (SHA-256 of its SPKI; `tools/spki_pin.py <host>`). Aborts on any other key. Unset = no pin. |
 | `HTTPS_PIN_WARN=1` | with a pin: report a mismatch on screen and continue instead of aborting. |

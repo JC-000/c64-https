@@ -2,8 +2,9 @@
 ; x509_name.s — RFC 6125 server name validation (issue #135)
 ;
 ; Compares the leaf certificate's subjectAltName dNSName entries against the
-; host we actually asked for (tls_hostname, populated by http_get for both the
-; menu path and the DMA-trampoline path the rigs use).
+; host we actually asked for (tls_hostname: set by https_target_prompt on the
+; menu path -- typed or the build-time default -- and by http_get on the
+; DMA-trampoline path the rigs use).
 ;
 ; READ THIS BEFORE TRUSTING IT. Name validation alone does NOT authenticate a
 ; server. This client performs no certificate chain validation — no trust
