@@ -25,12 +25,6 @@
 .ifdef HTTPS_PIN_SPKI
         .import cert_pin_banner
 .endif
-.ifdef COLD_BANK
-        ; uci-comb cold-code bank (src/net/uci/cold_bank.s)
-        .include "cold_bank.inc"
-        .import cold_bank_init, cold_call, cold_err
-        .export cold_target_prompt
-.endif
 
         ; ---- exports: entry + print helpers ----
         .export start
@@ -275,11 +269,6 @@ start:
         inc @zbss_store+2
         dex
         bne @zbss_page
-.ifdef COLD_BANK
-        ; Before anything else can touch the image's copy at $C000 (the
-        ; TCP ring's range): stash it into the REU.
-        jsr cold_bank_init
-.endif
 
         ; clear screen
         lda #$93
@@ -893,35 +882,12 @@ ascii_chrout:
 ;
 ; Its own segment, TARGET_PROMPT_CODE, because the room is in a different
 ; region per cfg: CRYPTO_OVERLAY under c64-https-uci.cfg, LOADER under the
-; comb cfg with COLD_BANK=0, and the REU under the comb default: it is
-; linked to run in cert_buf and fetched there per call by
-; src/net/uci/cold_bank.s, whose refusal the stub below reports as COLD BANK
-; FAIL with C=1 (nothing dialled). The call site in do_https_get is smaller
+; comb cfg (see the cfg comments). The call site in do_https_get is smaller
 ; than the inline block the ip65 arm keeps.
 ; Clobbers: A, X, Y, zp_ptr.
 ; =============================================================================
-.ifdef COLD_BANK
-https_target_prompt:
-        ldy #COLD_E_TARGET
-        jsr cold_call
-        bcc @tp_out
-        lda cold_err            ; 0: the prompt ran and refused the entry
-        beq @tp_refused         ;  (it printed INVALID TARGET)
-        lda #<cold_fail_msg     ; the bank refused: say so, dial nothing
-        ldy #>cold_fail_msg
-        jsr print_string
-@tp_refused:
-        sec
-@tp_out:
-        rts
-cold_fail_msg:
-        .byte $0d, "COLD BANK FAIL", $0d, 0
-        .segment "TARGET_PROMPT_CODE"
-cold_target_prompt:
-.else
         .segment "TARGET_PROMPT_CODE"
 https_target_prompt:
-.endif
         lda #0                  ; #204: a new attempt starts here, before
         sta tls_reached_connected ;  any refusal, DNS or TCP failure
         sta tgt_fail

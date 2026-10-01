@@ -122,10 +122,9 @@ Variables:
     precompute into REU bank 2 (**needs an REU**; ~45 s boot at 48 MHz,
     ~36 min at 1 MHz — rigs need `C64_INIT_WAIT`). Fastest above ~5-7 MHz.
     This is the **only** flag that retargets `$(CFG)`, to
-    `cfg/c64-https-$(BACKEND)-onchip-cold.cfg` (the cold-code bank,
-    `src/net/uci/cold_bank.s`; `COLD_BANK=0` = `-onchip.cfg`, resident) —
-    both exist for uci only, so there is no ip65 comb build. Confirm from
-    the `ld65 -C` line, not from the profile name.
+    `cfg/c64-https-$(BACKEND)-onchip.cfg` — which exists for uci only, so
+    there is no ip65 comb build. Confirm from the `ld65 -C` line, not from
+    the profile name.
   - `USE_X25519_SIBLING` — **retired, `$(error)`-guarded (#245)**: every
     build links the `libs/x25519` sibling; any value is refused.
   - `EMBED_P256_OVERLAY=1` — **retired, `$(error)`-guarded (#118)**: the

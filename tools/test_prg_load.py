@@ -31,18 +31,14 @@ import _prg_load as pl  # noqa: E402
 ROM = bytes.fromhex("94e37be3") + b"CBMBASIC" * 4
 
 
-def make_prg(code_end=0x9FD8, image_end=0xFE00, tail_byte=0, at=None,
-             window=b""):
-    """$0801: 10 SYS2061 ; then code bytes to code_end, zeros to image_end.
-    tail_byte lands at `at` (default: the last byte); `window` is carried at
-    $C000, as uci-comb carries its cold-code image."""
+def make_prg(code_end=0x9FD8, image_end=0xFE00, tail_byte=0):
+    """$0801: 10 SYS2061 ; then code bytes to code_end, zeros to image_end."""
     stub = bytes([0x0B, 0x08, 0x0A, 0x00, 0x9E]) + b"2061" + bytes([0, 0, 0])
     code = bytes((i * 7 + 3) & 0xFF or 1 for i in range(code_end - 0x080D))
-    tail = bytearray(image_end - code_end)
+    tail = bytes(image_end - code_end)
     if tail_byte:
-        tail[(image_end - 1 if at is None else at) - code_end] = tail_byte
-    tail[0xC000 - code_end:0xC000 - code_end + len(window)] = window
-    return bytes([0x01, 0x08]) + stub + code + bytes(tail)
+        tail = tail[:-1] + bytes([tail_byte])
+    return bytes([0x01, 0x08]) + stub + code + tail
 
 
 class FakeClient:
@@ -60,8 +56,6 @@ class FakeClient:
         body = prg[2:]
         end = min(la + len(body), 0xA000)          # $A000+ reads as ROM
         self.mem[la:end] = body[:end - la]
-        if la + len(body) > 0xC000:                # $C000-$CFFF is RAM
-            self.mem[0xC000:0xD000] = body[0xC000 - la:0xD000 - la]
         if self.loads < len(self.flips) and self.flips[self.loads] is not None:
             self.mem[la + self.flips[self.loads]] ^= 0x5A
         self.loads += 1
@@ -142,36 +136,6 @@ def test_a_non_zero_tail_refuses_the_image() -> None:
         assert "$FDFF" in str(exc), exc
     else:
         raise AssertionError("code past $A000 would go unverified silently")
-
-
-COLD = bytes((i * 13 + 5) & 0xFF or 1 for i in range(0x646))
-
-
-def test_the_c000_ram_window_is_carried_and_compared() -> None:
-    """uci-comb carries its cold-code image at $C000 (plain RAM): it loads,
-    it is compared, and the report says so."""
-    c = FakeClient()
-    rep = run(c, make_prg(window=COLD))
-    assert c.typed == ["SYS2061"], c.typed
-    assert rep["verified_ram_window"] == "$C000-$CFFF", rep
-    c = FakeClient(flips=[0xC100 - 0x0801] * 2)
-    try:
-        run(c, make_prg(window=COLD))
-    except pl.PrgLoadError as exc:
-        assert "$C100" in str(exc), exc
-    else:
-        raise AssertionError("a flip in the $C000 window was not seen")
-    assert c.typed == [], "a run was started on an image known to be wrong"
-
-
-def test_non_zero_bytes_outside_both_windows_still_refuse() -> None:
-    for addr in (0xA000, 0xBFFF, 0xD000, 0xFDFF):
-        try:
-            pl.image_span(make_prg(tail_byte=0xEA, at=addr, window=COLD))
-        except pl.PrgLoadError as exc:
-            assert f"${addr:04X}" in str(exc), exc
-        else:
-            raise AssertionError(f"a byte at ${addr:04X} would go unverified")
 
 
 def test_a_zeroed_head_is_rewritten_then_verified() -> None:

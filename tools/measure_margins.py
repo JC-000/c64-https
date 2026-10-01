@@ -66,12 +66,6 @@ PROFILES = {
     "uci-comb":         ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1"),
     "ip65-wiki":        ("BACKEND=ip65",) + WIKI,
     "ip65-onchip-wiki": ("BACKEND=ip65", "USE_NISTCURVES_ONCHIP=1") + WIKI,
-    # The comb Wikipedia demo with the trust store (#155 phase 2): the
-    # build the cold bank exists for. HTTPS_BODY_TO_REU re-arms the viewer.
-    "uci-comb-demo-store": ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1",
-                            "HTTPS_HOST=en.wikipedia.org",
-                            "HTTPS_PATH=/wiki/Commodore_64",
-                            "HTTPS_BODY_TO_REU=1", "TRUST_STORE=1"),
 }
 
 
@@ -154,38 +148,6 @@ def parse_map_segments(text):
     return segs
 
 
-def parse_cfg_split_segments(text):
-    """SEGMENTS whose `run =` area differs from their `load =` area.
-
-    [{name, load, run}] in cfg order. The map's "Segment list" gives such a
-    segment's RUN address only; its bytes in the file sit in the load area,
-    packed in cfg order. That packing is all this tool assumes, so a split
-    segment with its own align/start/offset is refused, not guessed.
-    """
-    text = re.sub(r"#[^\n]*", "", text)
-    m = re.search(r"\bSEGMENTS\s*\{(.*?)\}", text, re.S)
-    if not m:
-        return []
-    out = []
-    for entry in m.group(1).split(";"):
-        name, sep, body = entry.strip().partition(":")
-        if not sep:
-            continue
-        attrs = {}
-        for item in body.split(","):
-            key, eq, val = item.partition("=")
-            if eq:
-                attrs[key.strip().lower()] = val.strip()
-        if "run" not in attrs or attrs["run"] == attrs.get("load"):
-            continue
-        if {"align", "start", "offset"} & attrs.keys():
-            raise ParseError(f"segment {name.strip()}: load/run split with "
-                             "its own placement attribute")
-        out.append({"name": name.strip(), "load": attrs["load"],
-                    "run": attrs["run"]})
-    return out
-
-
 def cfg_from_stamp(text):
     """The cfg path in build/flags.stamp's LD65FLAGS `-C` argument."""
     m = re.search(r"^LD65FLAGS=(?:.*?\s)?-C\s+(\S+)", text, re.M)
@@ -197,48 +159,23 @@ def cfg_from_stamp(text):
 # ---------------------------------------------------------------------------
 # Measurement (pure)
 # ---------------------------------------------------------------------------
-def measure(areas, segments, split=()):
+def measure(areas, segments):
     """Per file-backed area: occupancy, tail free and largest interior hole.
 
     `overflow` is how far a segment that STARTS in the area runs past its
     end. ld65 writes the map even when a link fails on a memory-area
     overflow, so a map is not evidence of a good link: any non-zero
     overflow means the figures describe a failed link, not margins.
-
-    `split` (parse_cfg_split_segments) adds what the map does not show: a
-    load/run-split segment's bytes in its LOAD area, and a row for a RUN
-    area that is not file-backed, measured from the split segments that
-    run there only (other areas may overlay its addresses).
     """
-    by_name = {s["name"]: s for s in segments}
-    cursor = {}
-    placed = []
-    for sp in split:
-        seg = by_name.get(sp["name"])
-        area = next((a for a in areas if a["name"] == sp["load"]), None)
-        if seg is None or not seg["size"] or area is None:
-            continue
-        lo = cursor.get(area["name"], area["start"])
-        placed.append({"name": sp["name"], "start": lo,
-                       "end": lo + seg["size"] - 1, "size": seg["size"]})
-        cursor[area["name"]] = lo + seg["size"]
-    segments = list(segments) + placed
-    runs = {sp["run"] for sp in split}
     out = []
     for a in areas:
-        if a["size"] == 0 or a["name"] == "LOADADDR":
+        if not a["file"] or a["size"] == 0 or a["name"] == "LOADADDR":
             continue
-        if not a["file"]:
-            if a["name"] not in runs:
-                continue
-            a = dict(a, only=[by_name[sp["name"]] for sp in split
-                              if sp["run"] == a["name"] and sp["name"] in by_name])
-        mine = a.get("only", segments)
-        overflow = max([s["end"] - a["end"] for s in mine
+        overflow = max([s["end"] - a["end"] for s in segments
                         if s["size"] and a["start"] <= s["start"] <= a["end"]
                         and s["end"] > a["end"]], default=0)
         spans = sorted((max(s["start"], a["start"]), min(s["end"], a["end"]))
-                       for s in mine
+                       for s in segments
                        if s["size"] and s["start"] <= a["end"]
                        and s["end"] >= a["start"])
         row = {"region": a["name"], "start": a["start"], "end": a["end"],
@@ -267,10 +204,8 @@ def measure(areas, segments, split=()):
 
 
 def measure_files(map_path, cfg_path):
-    cfg = Path(cfg_path).read_text()
-    return measure(parse_cfg_memory(cfg),
-                   parse_map_segments(Path(map_path).read_text()),
-                   parse_cfg_split_segments(cfg))
+    return measure(parse_cfg_memory(Path(cfg_path).read_text()),
+                   parse_map_segments(Path(map_path).read_text()))
 
 
 # ---------------------------------------------------------------------------

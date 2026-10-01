@@ -243,55 +243,6 @@ def test_format_rows_shows_every_region():
     assert "     56 B" in text
 
 
-# --- load/run-split segments (the comb cold bank) ---------------------------
-SPLIT_CFG = """\
-MEMORY {
-    OVL:  start = $4200, size = $1E00, file = %O;
-    IMG:  start = $C000, size = $0800, file = %O;
-    RUN:  start = $4200, size = $0800, type = rw;
-}
-SEGMENTS {
-    BUF:  load = OVL, type = bss, start = $4200;   # run = RUN in a comment
-    T1:   load = IMG, run = RUN, type = ro, define = yes;
-    T2:   load = IMG, run = RUN, type = ro, optional = yes;
-    TAIL: load = IMG, run = RUN, type = ro;
-}
-"""
-SPLIT_SEGS = [
-    {"name": "BUF", "start": 0x4200, "end": 0x49FF, "size": 0x800},
-    {"name": "T1", "start": 0x4200, "end": 0x43A8, "size": 0x1A9},
-    {"name": "T2", "start": 0x43A9, "end": 0x4844, "size": 0x49C},
-    {"name": "TAIL", "start": 0x4845, "end": 0x4845, "size": 1},
-]
-
-
-def test_split_segments_are_read_from_the_cfg():
-    names = [(s["name"], s["load"], s["run"])
-             for s in mm.parse_cfg_split_segments(SPLIT_CFG)]
-    assert names == [("T1", "IMG", "RUN"), ("T2", "IMG", "RUN"),
-                     ("TAIL", "IMG", "RUN")], names
-
-
-def test_split_segment_bytes_land_in_the_load_area_and_run_area_is_reported():
-    rows = {r["region"]: r for r in mm.measure(
-        mm.parse_cfg_memory(SPLIT_CFG), SPLIT_SEGS,
-        mm.parse_cfg_split_segments(SPLIT_CFG))}
-    # 0x1A9 + 0x49C + 1 = 0x646 B packed from $C000: last used $C645.
-    assert rows["IMG"]["last_used"] == 0xC645 and rows["IMG"]["tail"] == 442
-    # RUN counts only what runs there, not BUF, which overlays it.
-    assert rows["RUN"]["last_used"] == 0x4845 and rows["RUN"]["tail"] == 442
-    # Without the split list the image area reads empty: the bug fixed.
-    plain = {r["region"]: r for r in mm.measure(
-        mm.parse_cfg_memory(SPLIT_CFG), SPLIT_SEGS)}
-    assert plain["IMG"]["empty"] and "RUN" not in plain
-
-
-def test_split_segment_with_its_own_placement_is_refused():
-    bad = SPLIT_CFG.replace("T2:   load = IMG, run = RUN,",
-                            "T2:   load = IMG, run = RUN, align = $100,")
-    assert _raises(mm.parse_cfg_split_segments, bad)
-
-
 # --- the real cfgs ----------------------------------------------------------
 def test_every_shipped_cfg_parses_with_the_regions_the_docs_name():
     need = {
@@ -303,10 +254,6 @@ def test_every_shipped_cfg_parses_with_the_regions_the_docs_name():
         "cfg/c64-https-uci-onchip.cfg": {"LOADER", "NET_CODE", "NET_BSS_TAIL",
                                          "CRYPTO_OVERLAY", "CRYPTO_HOT",
                                          "CRYPTO_COLD_SHADOW"},
-        "cfg/c64-https-uci-onchip-cold.cfg": {"LOADER", "NET_CODE",
-                                              "NET_BSS_TAIL", "CRYPTO_OVERLAY",
-                                              "CRYPTO_HOT", "CRYPTO_COLD_SHADOW",
-                                              "COLD_IMAGE"},
     }
     for cfg, regions in need.items():
         areas = {a["name"] for a in mm.parse_cfg_memory((REPO / cfg).read_text())

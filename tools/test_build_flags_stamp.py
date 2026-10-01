@@ -610,13 +610,8 @@ def test_dry_run_options_do_not_touch_the_tree():
 
         # And the tree is still genuinely usable: a real rebuild of the
         # baseline flags must be a no-op, not a full rebuild.
-        # Compared over the baseline's objects: `-t` creates (touches) any
-        # object the comb flag set has and UCI does not (the cold bank's
-        # cold_bank.o), which no UCI link reads and the next real comb
-        # build's invalidation deletes. That is make's -t, not a rebuild.
         proc = farm.make(*UCI)
-        after = farm.mtimes()
-        assert {k: after.get(k) for k in objs} == objs, (
+        assert farm.mtimes() == objs, (
             "after the dry runs, a real rebuild of the SAME flags "
             "re-assembled objects:\n" + proc.stdout
         )
@@ -792,8 +787,6 @@ def test_stamp_records_the_whole_command_line():
         text = farm.path(STAMP).read_text()
         farm.make("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1")
         comb_text = farm.path(STAMP).read_text()
-        farm.make("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1", "COLD_BANK=0")
-        resident_text = farm.path(STAMP).read_text()
     for expected in ("BACKEND=uci",
                      "-D USE_NISTCURVES_ONCHIP=1",
                      "-D X509_VERIFY_NAME=1",           # backend-derived
@@ -804,15 +797,9 @@ def test_stamp_records_the_whole_command_line():
             f"build/flags.stamp does not record {expected!r}:\n{text}"
         )
     # The cfg is a derived input, not a knob anyone types: comb retargets
-    # $(CFG) to the -onchip-cold variant (the cold-code bank), COLD_BANK=0
-    # back to -onchip, and that swap must show up too.
-    assert ("-C cfg/c64-https-uci-onchip-cold.cfg" in comb_text
-            and "-D COLD_BANK=1" in comb_text), (
+    # $(CFG) to the -onchip variant, and that swap must show up too.
+    assert "-C cfg/c64-https-uci-onchip.cfg" in comb_text, (
         f"build/flags.stamp does not record the comb cfg:\n{comb_text}"
-    )
-    assert ("-C cfg/c64-https-uci-onchip.cfg" in resident_text
-            and "COLD_BANK" not in resident_text), (
-        f"build/flags.stamp does not record COLD_BANK=0's cfg:\n{resident_text}"
     )
 
 

@@ -289,25 +289,6 @@ else
 SIBLING_LIB_ARCHIVES := build/lib/nistcurves-p256.a
 endif
 
-# #155 phase 2: the cold-code bank (src/net/uci/cold_bank.s). Code that runs
-# only while no connection is open (the typed-target prompt, the trust
-# store) is kept in the REU and fetched into cert_buf per call, through a
-# guarded trampoline. Comb only, which already needs an REU. Default ON;
-# COLD_BANK=0 links that code resident again, byte-identical to the image
-# before the bank existed (it keeps the comb cfg above).
-ifneq ($(filter-out 0 1,$(COLD_BANK)),)
-$(error COLD_BANK must be 1 (default on comb: cold code in the REU) or 0 (resident))
-endif
-ifeq ($(USE_NISTCURVES_ONCHIP_COMB),1)
-ifneq ($(COLD_BANK),0)
-CA65FLAGS += -D COLD_BANK=1
-CFG := cfg/c64-https-$(BACKEND)-onchip-cold.cfg
-UCI_SRCS += src/net/uci/cold_bank.s
-endif
-else ifeq ($(COLD_BANK),1)
-$(error COLD_BANK=1 needs USE_NISTCURVES_ONCHIP_COMB=1: the cold bank is comb-only)
-endif
-
 # X25519: the libs/x25519 sibling (issue #245), onchip profile on every
 # build — see tools/integration/build_x25519.sh for why one profile. The
 # wrapper routes the sibling's code per source. fe25519.s goes to

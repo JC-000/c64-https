@@ -292,9 +292,9 @@ section of `build/c64-https.map` for the **three shipped products**
 |---|---|---|
 | `ip65-onchip` | `BACKEND=ip65 USE_NISTCURVES_ONCHIP=1` | `cfg/c64-https-ip65.cfg` |
 | `uci-onchip` | `BACKEND=uci USE_NISTCURVES_ONCHIP=1` | `cfg/c64-https-uci.cfg` |
-| `uci-comb` | `BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1` | `cfg/c64-https-uci-onchip-cold.cfg` (`COLD_BANK=0`: `cfg/c64-https-uci-onchip.cfg`) |
+| `uci-comb` | `BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1` | `cfg/c64-https-uci-onchip.cfg` |
 
-Note the third row: the `-onchip*.cfg` swap is driven by
+Note the third row: the `-onchip.cfg` swap is driven by
 `USE_NISTCURVES_ONCHIP_COMB`, **not** by `USE_NISTCURVES_ONCHIP` — plain
 onchip keeps the base cfg, and `cfg/c64-https-ip65-onchip.cfg` does not
 exist. The cfg files are the authority for region bounds; this section is a
@@ -436,7 +436,7 @@ The knobs, all read straight from the Makefile:
 |---|---|
 | `BACKEND=ip65\|uci` | selects `cfg/c64-https-$(BACKEND).cfg` and `src/net/$(BACKEND)/`. Default `ip65`. |
 | `USE_NISTCURVES_ONCHIP=1` | no-REU P-256 verify profile. Keeps the base cfg. |
-| `USE_NISTCURVES_ONCHIP_COMB=1` | implies onchip, adds the Lim-Lee comb + a boot precompute into REU bank 2. **Needs an REU.** Switches to `cfg/c64-https-$(BACKEND)-onchip-cold.cfg`: code that runs only with no connection open (the target prompt, the trust store) is kept in the REU and fetched into `cert_buf` per call. `COLD_BANK=0` keeps it resident and links `cfg/c64-https-$(BACKEND)-onchip.cfg`. |
+| `USE_NISTCURVES_ONCHIP_COMB=1` | implies onchip, adds the Lim-Lee comb + a boot precompute into REU bank 2. **Needs an REU.** Switches to `cfg/c64-https-$(BACKEND)-onchip.cfg`. |
 | `HTTPS_HOST=` / `HTTPS_PATH=` | the target baked into the image (the only one on ip65; the RETURN default of the UCI prompt). Hosts over 63 chars are a build error. |
 | `HTTPS_SNI=` | SNI override, when it must differ from `HTTPS_HOST` (e.g. dialling an IP). |
 | `HTTPS_PIN_SPKI_SHA256=` | pin the server's leaf key (SHA-256 of its SPKI; `tools/spki_pin.py <host>`). Aborts on any other key. Unset = no pin. |

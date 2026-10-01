@@ -29,9 +29,6 @@ fails most of these cases.
 Usage:
     python3 tools/test_typed_target.py            # builds uci-onchip
     C64_SKIP_BUILD=1 python3 tools/test_typed_target.py
-    C64_TT_PROFILE="BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1" C64_INIT_WAIT=900 \
-        python3 tools/test_typed_target.py        # uci-comb: the prompt runs
-                                                  # from the cold bank
 
 Exit: 0 all pass, 1 a check failed, 2 could not run (not a UCI build,
 no VICE, no menu).
@@ -39,7 +36,6 @@ no VICE, no menu).
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import sys
 import time
@@ -58,8 +54,7 @@ from _petscii_keys import target_keys as keys  # noqa: E402
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
 LABELS_PATH = os.path.join(PROJECT_ROOT, "build", "labels.txt")
-BUILD = ["make", *shlex.split(os.environ.get(
-    "C64_TT_PROFILE", "BACKEND=uci USE_NISTCURVES_ONCHIP=1"))]
+BUILD = ["make", "BACKEND=uci", "USE_NISTCURVES_ONCHIP=1"]
 
 REQUIRED = [
     "do_https_get", "net_initialized", "net_tcp_connect", "uci_host_buf",
@@ -362,12 +357,6 @@ def main() -> int:
                   f"{s.default_path.decode()!r}")
             try:
                 s.run()
-                if labels.address("cold_err") is not None:
-                    # uci-comb: every prompt above ran from the cold bank;
-                    # a refusal there would have printed COLD BANK FAIL.
-                    err = read_bytes(t, labels["cold_err"], 1)[0]
-                    s.check("cold bank: the prompt ran from cert_buf "
-                            "(cold_err == 0)", err == 0, f"cold_err={err}")
             except (HarnessTimeout, RuntimeError) as exc:
                 # A prompt that never returns (it waits for a RETURN the
                 # case did not send because it expected a refusal) hangs

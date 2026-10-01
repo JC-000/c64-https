@@ -68,5 +68,3 @@ TS_R_CHANGED    = 11            ; the store changed on disk since the load
 TS_R_FULL       = 12            ; TS_MAX_RECS records and the host is new
 TS_R_WRITE      = 13            ; open/write/close of the target slot failed
 TS_R_VERIFY     = 14            ; read-back is not the generation just written
-TS_R_COLD       = 15            ; uci-comb: the cold bank could not run the store
-                                ;  (src/net/uci/cold_bank.s)
