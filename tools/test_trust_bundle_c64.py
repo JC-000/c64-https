@@ -53,7 +53,8 @@ from c64_test_harness import (  # noqa: E402
 
 import trust_bundle as tb  # noqa: E402
 from _skip_policy import cannot_run, verdict  # noqa: E402
-from _vice_helpers import default_vice_config  # noqa: E402
+from _vice_helpers import (  # noqa: E402
+    default_vice_config, menu_wait, require_menu_wait_env)
 
 PROJECT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PRG_PATH = os.path.join(PROJECT_ROOT, "build", "c64-https.prg")
@@ -157,6 +158,7 @@ def cases():
 
 
 def main():
+    require_menu_wait_env()             # before a build we would waste
     os.chdir(PROJECT_ROOT)
     make_args = shlex.split(os.environ.get("C64_MAKE_ARGS", ""))
     profile = " ".join(make_args) or "(bare make: ip65, REU profile)"
@@ -191,7 +193,7 @@ def main():
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
-        menu_to = float(os.environ.get("C64_INIT_TIMEOUT", "60"))
+        menu_to = menu_wait(60)
         if wait_for_text(transport, "Q=QUIT", timeout=menu_to, verbose=False) is None:
             mgr.release(inst)
             return cannot_run("main menu never appeared", executed=0, total=4,

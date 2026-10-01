@@ -9,6 +9,7 @@ tool is the host half only; loading and verifying on the C64 is not here.
 Byte format, version 1. Multi-byte integers are LITTLE-endian unless marked
 BE. Records reuse the TOFU store's 64 B layout (S3-trust-design.md §5), so one
 C64 record parser serves both files; only the magic and the trailer differ.
+The record codec and host key are tools/trust_store.py's, imported, not copied.
 
     offset  len  field
     ------  ---  -----------------------------------------------------------
@@ -89,6 +90,10 @@ import os
 import sys
 from dataclasses import dataclass
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import trust_store as ts  # noqa: E402 — record layout + host key, one source
+
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -102,11 +107,10 @@ SAMPLE_BUNDLE_PATH = os.path.join(TOOLS_DIR, "trust_bundle_sample_TEST_ONLY.bin"
 
 MAGIC = b"C6TB"
 VERSION = 1
-HEADER_LEN = 8
-RECORD_LEN = 64
+HEADER_LEN = ts.HDR_SIZE
+RECORD_LEN = ts.REC_SIZE
 SIG_LEN = 64
-MAX_RECORDS = 32
-HOST_KEY_LEN = 16
+MAX_RECORDS = ts.MAX_RECS
 DISPLAY_LEN = 12
 MAX_HOST_LEN = 63                       # boot.s's HTTPS_HOST assert
 
@@ -135,46 +139,29 @@ def canonical_host(host: str) -> bytes:
 
 
 def host_key(host: str) -> bytes:
-    return hashlib.sha256(canonical_host(host)).digest()[:HOST_KEY_LEN]
+    return ts.host_key(canonical_host(host))
 
 
-@dataclass(frozen=True)
-class Record:
-    host_key: bytes
-    spki_sha256: bytes
-    mode: int = MODE_BUNDLE_LEAF
-    flags: int = FLAG_WARN_ONLY
-    use_count: int = 0
-    display: bytes = b""
+# One record codec for both files: trust_store.Record (key, spki, mode, flags,
+# uses, display) is the TOFU store's own pack/unpack.
+Record = ts.Record
 
-    @classmethod
-    def leaf(cls, host: str, spki_sha256: bytes) -> "Record":
-        canon = canonical_host(host)
-        return cls(host_key=host_key(host), spki_sha256=spki_sha256,
-                   display=canon[:DISPLAY_LEN])
 
-    def pack(self) -> bytes:
-        out = (self.host_key + self.spki_sha256
-               + bytes([self.mode, self.flags])
-               + self.use_count.to_bytes(2, "little")
-               + self.display.ljust(DISPLAY_LEN, b"\x00"))
-        assert len(out) == RECORD_LEN, len(out)
-        return out
+def leaf_record(host: str, spki_sha256: bytes) -> Record:
+    canon = canonical_host(host)
+    return ts.Record.for_host(canon, spki_sha256, mode=MODE_BUNDLE_LEAF,
+                              flags=FLAG_WARN_ONLY, display=canon[:DISPLAY_LEN])
 
-    @classmethod
-    def unpack(cls, b: bytes) -> "Record":
-        return cls(host_key=b[0:16], spki_sha256=b[16:48], mode=b[48],
-                   flags=b[49], use_count=int.from_bytes(b[50:52], "little"),
-                   display=b[52:64].rstrip(b"\x00"))
 
-    def check(self) -> None:
-        if self.mode != MODE_BUNDLE_LEAF:
-            raise BundleError(f"record mode ${self.mode:02X} is not BUNDLE_LEAF")
-        if self.flags != FLAG_WARN_ONLY:
-            raise BundleError(f"record flags ${self.flags:02X}: v1 leaf pins "
-                              "must be exactly WARN_ONLY ($01)")
-        if self.use_count != 0:
-            raise BundleError("record use count must be 0 in a bundle")
+def check_record(rec: Record) -> None:
+    """What a bundle record may hold, beyond what the store codec checks."""
+    if rec.mode != MODE_BUNDLE_LEAF:
+        raise BundleError(f"record mode ${rec.mode:02X} is not BUNDLE_LEAF")
+    if rec.flags != FLAG_WARN_ONLY:
+        raise BundleError(f"record flags ${rec.flags:02X}: v1 leaf pins "
+                          "must be exactly WARN_ONLY ($01)")
+    if rec.uses != 0:
+        raise BundleError("record use count must be 0 in a bundle")
 
 
 @dataclass(frozen=True)
@@ -195,12 +182,12 @@ def pack_header(generation: int, n: int) -> bytes:
 
 
 def unsigned_body(generation: int, records) -> bytes:
-    recs = sorted(records, key=lambda r: r.host_key)
-    keys = [r.host_key for r in recs]
+    recs = sorted(records, key=lambda r: r.key)
+    keys = [r.key for r in recs]
     if len(set(keys)) != len(keys):
         raise BundleError("two records share a host key (duplicate host)")
     for r in recs:
-        r.check()
+        check_record(r)
     return pack_header(generation, len(recs)) + b"".join(r.pack() for r in recs)
 
 
@@ -284,8 +271,8 @@ def parse(blob: bytes) -> Bundle:
                                        HEADER_LEN + (i + 1) * RECORD_LEN])
                     for i in range(n))
     for i, rec in enumerate(records):
-        rec.check()
-        if i and not records[i - 1].host_key < rec.host_key:
+        check_record(rec)
+        if i and not records[i - 1].key < rec.key:
             raise BundleError(f"record {i}: host keys not strictly ascending")
     r = int.from_bytes(blob[end:end + 32], "big")
     s = int.from_bytes(blob[end + 32:end + 64], "big")
@@ -418,9 +405,9 @@ def dump_text(blob: bytes) -> str:
            f"signed SHA-256 {hashlib.sha256(b.signed).hexdigest()}",
            f"r {b.r:064x}", f"s {b.s:064x}"]
     for i, rec in enumerate(b.records):
-        out.append(f"  [{i:2d}] {rec.host_key.hex()}  spki {rec.spki_sha256.hex()}"
+        out.append(f"  [{i:2d}] {rec.key.hex()}  spki {rec.spki.hex()}"
                    f"  mode ${rec.mode:02X} flags ${rec.flags:02X}"
-                   f"  {rec.display.decode('ascii', 'replace')!r}")
+                   f"  {rec.display.rstrip(bytes(1)).decode('ascii', 'replace')!r}")
     return "\n".join(out)
 
 
@@ -468,8 +455,8 @@ def main(argv=None) -> int:
         if args.cmd == "build":
             key = load_private_key(_key_path(args))
             warn_if_test_key(key.public_key())
-            recs = [Record.leaf(h, pin) for h, pin in map(parse_pin_arg, args.pin)]
-            recs += [Record.leaf(h.rsplit(":", 1)[0], fetch_pin(h))
+            recs = [leaf_record(h, pin) for h, pin in map(parse_pin_arg, args.pin)]
+            recs += [leaf_record(h.rsplit(":", 1)[0], fetch_pin(h))
                      for h in args.hosts]
             blob = sign(key, args.generation, recs)
             with open(args.out, "wb") as f:

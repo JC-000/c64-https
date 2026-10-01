@@ -91,7 +91,7 @@ WIKI_PIN = bytes.fromhex(
 
 
 def _pins(n):
-    return [tb.Record.leaf(f"host{i}.example", hashlib.sha256(bytes([i])).digest())
+    return [tb.leaf_record(f"host{i}.example", hashlib.sha256(bytes([i])).digest())
             for i in range(n)]
 
 
@@ -106,7 +106,7 @@ def _rejects(blob, floor=0):
 # --- tests --------------------------------------------------------------------
 
 def test_layout_is_the_documented_one() -> None:
-    blob = tb.sign(KEY, 0x1234, [tb.Record.leaf("En.Wikipedia.ORG", WIKI_PIN)])
+    blob = tb.sign(KEY, 0x1234, [tb.leaf_record("En.Wikipedia.ORG", WIKI_PIN)])
     assert len(blob) == 8 + 64 + 64
     assert blob[:4] == b"C6TB" and blob[4] == 1
     assert blob[5:7] == b"\x34\x12", "generation is u16 LITTLE-endian"
@@ -136,7 +136,7 @@ def test_signing_is_deterministic_and_sorted() -> None:
     recs = _pins(5)
     a = tb.sign(KEY, 3, recs)
     assert a == tb.sign(KEY, 3, list(reversed(recs)))
-    keys = [r.host_key for r in tb.parse(a).records]
+    keys = [r.key for r in tb.parse(a).records]
     assert keys == sorted(keys)
 
 
@@ -158,7 +158,7 @@ def test_openssl_cli_accepts_it() -> None:
             executed=0, total=1,
             certifies="the bundle signature under an independent verifier",
             opt_out_env="C64_ALLOW_SKIP")
-    blob = tb.sign(KEY, 1, [tb.Record.leaf("en.wikipedia.org", WIKI_PIN)])
+    blob = tb.sign(KEY, 1, [tb.leaf_record("en.wikipedia.org", WIKI_PIN)])
     with tempfile.TemporaryDirectory() as d:
         bpath = os.path.join(d, "b.bin")
         with open(bpath, "wb") as f:
@@ -190,7 +190,7 @@ def test_bit_flips_fail_the_c64_math_too() -> None:
     # What the C64 computes, byte for byte, with no host-side parsing: any
     # flip in the signed part or the trailer must fail the raw ECDSA check.
     # A sample, since the pure-Python verify is slow.
-    blob = tb.sign(KEY, 5, [tb.Record.leaf("en.wikipedia.org", WIKI_PIN)])
+    blob = tb.sign(KEY, 5, [tb.leaf_record("en.wikipedia.org", WIKI_PIN)])
     assert indep_verify_struct(tb.c64_verify_struct(blob, QXY))
     for i in (0, 5, 6, 7, 8, 30, 60, 71, 72, 103, 104, 135):
         t = bytearray(blob)
@@ -289,14 +289,36 @@ def test_inc_assembles_and_emits_the_key() -> None:
     assert out == b"C6TB" + QXY, out.hex()
 
 
+def test_bundle_records_parse_with_the_trust_store_reader() -> None:
+    # One record codec (trust_bundle imports trust_store's), so this is the
+    # shared-parser claim end to end: the bundle's record bytes, rewrapped as
+    # a C6TS store file, decode with the store's own reader to the same
+    # records, keyed by the store's own host_key.
+    import trust_store as ts
+    hosts = ["En.Wikipedia.ORG", "github.com", "lwn.net"]
+    blob = tb.sign(KEY, 9, [tb.leaf_record(h, hashlib.sha256(h.encode()).digest())
+                            for h in hosts])
+    b = tb.parse(blob)
+    raw = blob[tb.HEADER_LEN:-tb.SIG_LEN]
+    gen, recs = ts.decode(ts.encode(b.generation, [
+        raw[i:i + ts.REC_SIZE] for i in range(0, len(raw), ts.REC_SIZE)]))
+    assert gen == 9 and len(recs) == len(hosts)
+    assert {r.key for r in recs} == {ts.host_key(h) for h in hosts}
+    for r in recs:
+        assert (r.mode, r.flags, r.uses) == (tb.MODE_BUNDLE_LEAF, tb.FLAG_WARN_ONLY, 0)
+        assert r.pack() == ts.Record.unpack(r.pack()).pack()
+    assert tb.MODE_BUNDLE_LEAF not in (ts.MODE_TOFU, ts.MODE_ACCEPTED,
+                                       ts.MODE_OVERRIDE)
+
+
 def test_committed_sample_bundle() -> None:
     blob = open(tb.SAMPLE_BUNDLE_PATH, "rb").read()
     b = tb.verify(blob, PUB, 1)
     assert b.generation == 1
     [rec] = b.records
-    assert rec.host_key == tb.host_key("en.wikipedia.org")
+    assert rec.key == tb.host_key("en.wikipedia.org")
     assert rec.mode == tb.MODE_BUNDLE_LEAF and rec.flags == tb.FLAG_WARN_ONLY
-    assert len(rec.spki_sha256) == 32
+    assert len(rec.spki) == 32
     assert indep_verify_struct(tb.c64_verify_struct(blob, QXY))
 
 
