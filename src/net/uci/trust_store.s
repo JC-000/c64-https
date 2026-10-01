@@ -76,9 +76,34 @@ FA_WRITE_NEW    = $0A           ; FA_WRITE | FA_CREATE_ALWAYS: empties it
 ; ts_body_len computes 8 + 64 * N with shifts; these are what it assumes.
 .assert TS_HDR_SIZE = 8 && TS_SUM_SIZE = 8 && TS_REC_SIZE = 64, error, "ts_body_len"
 
+.ifdef COLD_BANK
+; uci-comb: TRUST_STORE_CODE runs from the REU through cert_buf
+; (src/net/uci/cold_bank.s). The public entries are resident stubs; lookup
+; only reads resident state, and stays resident so that it answers from
+; ts_found even when the bank refuses.
+.include "cold_bank.inc"
+.import cold_call
+.export cold_ts_load, cold_ts_stage, cold_ts_save
+
+.segment "CODE"
+trust_store_load:
+        ldy #COLD_E_TS_LOAD
+        jmp cold_call
+trust_store_stage:
+        ldy #COLD_E_TS_STAGE
+        jmp cold_call
+trust_store_save:
+        ldy #COLD_E_TS_SAVE
+        jmp cold_call
+.endif
+
 .segment "TRUST_STORE_CODE"
 
+.ifdef COLD_BANK
+cold_ts_load:
+.else
 trust_store_load:
+.endif
         sta @host+1
         stx @host+2
         lda #$00
@@ -138,6 +163,9 @@ ts_rec_in:
         bpl :-
         rts
 
+.ifdef COLD_BANK
+.segment "CODE"
+.endif
 trust_store_lookup:
         lda ts_found            ; 0 or 1
         eor #$01
@@ -145,8 +173,12 @@ trust_store_lookup:
         lda #<ts_rec
         ldx #>ts_rec
         rts
-
+.ifdef COLD_BANK
+.segment "TRUST_STORE_CODE"
+cold_ts_stage:
+.else
 trust_store_stage:
+.endif
         sta zp_ptr
         stx zp_ptr+1
         jsr ts_rec_in
@@ -165,7 +197,11 @@ trust_store_stage:
         sta ts_found
         rts
 
+.ifdef COLD_BANK
+cold_ts_save:
+.else
 trust_store_save:
+.endif
         jsr ts_guard
         bcs ts_refuse
         lda ts_staged           ; the state of the load that was staged

@@ -52,6 +52,13 @@ Usage:
     python3 tools/test_trust_store_6502.py     # make clean && make <profile>
     C64_SKIP_BUILD=1 python3 tools/test_trust_store_6502.py
     C64_TS_PROFILE="BACKEND=uci TRUST_STORE=1" python3 tools/test_trust_store_6502.py
+    C64_TS_PROFILE="BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1 TRUST_STORE=1" \
+        python3 tools/test_trust_store_6502.py
+
+On a uci-comb image the store runs from the cold bank (src/net/uci/
+cold_bank.s): each machine gets a modelled REU (tools/_reu_model.py) and
+runs cold_bank_init first, as boot does, so every case below goes through
+the trampoline and executes the copy it fetched into cert_buf.
 
 Leaves build/ holding the TRUST_STORE=1 image. Exit 0 pass, 1 fail, 2
 could not run.
@@ -72,6 +79,7 @@ import test_uci_data_acc as cpu_mod                        # noqa: E402
 from test_uci_data_acc import CPU, CPUError               # noqa: E402
 from test_uci_timeout_recovery import Memory              # noqa: E402
 from _skip_policy import cannot_run, verdict              # noqa: E402
+from _reu_model import REU, Bus                           # noqa: E402
 import trust_store as ts                                  # noqa: E402
 
 REPO = HERE.parent
@@ -395,6 +403,11 @@ class Machine:
             self.mem.write(labels[n], 0)
         self.cpu = FastCPU(self.mem, labels,
                            os.environ.get("C64_TS_REAL_SHA") == "1")
+        self.reu = None
+        if "cold_bank_init" in labels:          # uci-comb: the cold bank
+            self.reu = REU(self.mem.ram)
+            self.mem.uci = Bus(self.reu, dos)
+            self.cpu.call(labels["cold_bank_init"])
 
     def r8(self, name, off=0):
         return self.mem.ram[self.labels[name] + off]
@@ -864,6 +877,9 @@ def main() -> int:
                           total=len(CASES), certifies=CERTIFIES)
     global DIR, A, B
     lo, hi = env.labels["ts_name"], env.labels["ts_letter"]
+    if "__TRUST_STORE_CODE_RUN__" in env.labels:  # cold bank: linked to run
+        delta = env.labels["__TRUST_STORE_CODE_LOAD__"] - env.labels["__TRUST_STORE_CODE_RUN__"]
+        lo, hi = lo + delta, hi + delta         #  in cert_buf, carried at $C000
     prefix = env.image[lo - env.load_addr:hi - env.load_addr].decode("ascii")
     DIR = prefix.rsplit("/", 1)[0]
     A, B = prefix + "A", prefix + "B"
