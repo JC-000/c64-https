@@ -2,8 +2,9 @@
 
 Enough of the register file for src/reu_exec.s and src/net/uci/cold_bank.s:
 STASH / FETCH with both addresses incrementing, the execute bit with the
-$FF00 trigger disabled, and status bit 6 (END OF BLOCK), which a read
-clears. Nothing else (no SWAP/VERIFY, no autoload, no fixed addresses);
+$FF00 trigger disabled, autoload, and status bit 6 (END OF BLOCK), which a
+read clears. Addresses wrap modulo the REU's size, as a 1750/1764/U64 REU
+does. Nothing else (no SWAP/VERIFY, no fixed addresses);
 asking for it raises rather than doing something plausible.
 
 `present=False` models a machine with no REU: commands do nothing. What
@@ -12,7 +13,8 @@ reu_execute's confirm expire (reu_dma_timeout), 0xFF makes it believe a
 DMA that never happened -- the case only a check of the fetched bytes
 catches.
 
-Used by tools/test_cold_bank.py and tools/test_trust_store_6502.py.
+Used by tools/test_cold_bank.py, tools/test_trust_store_6502.py and
+tools/test_reu_body_sink.py.
 """
 from __future__ import annotations
 
@@ -52,10 +54,9 @@ class REU:
     def _execute(self, cmd: int) -> None:
         if not cmd & 0x10:
             raise NotImplementedError("REU: $FF00-triggered execute")
-        if cmd & 0x20:
-            raise NotImplementedError("REU: autoload")
         if self.regs[0x0A]:
             raise NotImplementedError("REU: fixed-address transfer")
+        saved = bytes(self.regs)        # autoload restores them afterwards
         op = cmd & 0x03
         c64 = self.regs[2] | self.regs[3] << 8
         reu = (self.regs[4] | self.regs[5] << 8 | self.regs[6] << 16) % len(self.mem)
@@ -70,6 +71,8 @@ class REU:
             self.log.append(("fetch", c64, reu, n))
         else:
             raise NotImplementedError(f"REU: transfer type {op}")
+        if cmd & 0x20:
+            self.regs[2:9] = saved[2:9]
         self.status |= 0x40             # END OF BLOCK
 
 

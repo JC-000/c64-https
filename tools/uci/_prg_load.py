@@ -23,8 +23,8 @@ device has been measured zeroing 2-5 s after READY (the RR-Net rig and
 c64-wireguard, independently), and SYS does not read it.
 
   * $0801-$9FFF is compared, and so is $C000-$CFFF (plain RAM: the
-    uci-comb cold bank's image is carried there until boot stashes it in
-    the REU). The rest of the tail is BSS zero fill or sits under a ROM /
+    cold-code bank's image, src/net/uci/cold_bank.s, is carried there
+    until boot stashes it in the REU). The rest of the tail is BSS zero fill or sits under a ROM /
     I/O, so a host read there does not return what was loaded; the one
     property of it that IS decidable from the file - all zeros - is
     checked instead. The report names both spans.
@@ -53,8 +53,8 @@ from c64_test_harness.execute import parse_basic_sys_address
 #: First address NOT compared: $A000+ is CRYPTO_COLD_SHADOW, RAM under the
 #: BASIC ROM, which a host read returns as ROM until boot.s banks it out.
 VERIFY_END = 0xA000
-#: A second span that IS compared: RAM no ROM shadows. uci-comb carries its
-#: cold-code image here (src/net/uci/cold_bank.s); every other image zeros.
+#: A second span that IS compared: RAM no ROM shadows. The cold-code bank
+#: (src/net/uci/cold_bank.s) carries its image here; other images zeros.
 RAM_WINDOW = (0xC000, 0xD000)
 #: The head-zeroing event lands 2-5 s after READY; re-check past it.
 HEAD_SETTLE_S = 7.0
