@@ -51,6 +51,25 @@ Added after adversarial review of PR #240:
     key generation / ClientHello / the ServerHello parser stubbed, and the
     new server's bytes becoming visible only on the first poll.
 
+Reconnect state (two ``tls_connect`` runs in one boot):
+
+  * ``tls_read_seq`` / ``tls_write_seq`` were zeroed only at the
+    traffic-key switch, never at ``tls_connect`` entry, so the first
+    connection of a boot ran on BSS that boot had zeroed and every later
+    one decrypted EncryptedExtensions with the previous connection's read
+    count: tag failure at ``tls_last_state`` $03 on hardware, every build.
+    Pinned by running the real ``tls_connect`` twice from a clean boot
+    state — ServerHello and handshake-key derivation stubbed, the
+    handshake read key written by the suite — against EncryptedExtensions
+    sealed at seq 0 followed by a tag-flipped record, so a connection that
+    decrypts EE ends at $04 and one that cannot ends at $03. The first run
+    is the control; the second inherits whatever the first left behind;
+  * ``tls_rx_reset`` itself, the single per-connection reset point, from a
+    fully dirtied state: ring, both counters, ``tcp_recv_overflow``,
+    ``tls_last_state``, record reader;
+  * ``tls_connect``'s first instruction is ``JSR tls_rx_reset``, so nothing
+    a connection reads runs before that reset.
+
 Menu wait: ``C64_INIT_WAIT`` seconds (default 120; a comb image's boot
 precompute needs ~135 s in VICE).
 
@@ -156,6 +175,11 @@ REQUIRED_LABELS = [
     "tls_ecdh_generate_keypair",
     "tls_send_client_hello",
     "tls_parse_server_hello",
+    "tls_recv_server_hello",
+    "tls_transcript_hash",
+    "tls_derive_handshake_keys",
+    "tls_rx_reset",
+    "tls_write_seq",
 ]
 
 # src/constants.inc
@@ -485,6 +509,104 @@ def run_connect_stale(transport, labels, *, stale: bytes, server: bytes,
             "progress": read_bytes(transport, labels["tls_recv_progress"], 1)[0],
             "rec_type": read_bytes(transport, labels["tls_rec_type"], 1)[0],
             "last_state": read_bytes(transport, labels["tls_last_state"], 1)[0],
+        }
+    finally:
+        p.restore()
+
+
+def run_connect_ee(transport, labels, *, records: bytes, key: bytes,
+                   iv: bytes) -> dict:
+    """Run the real tls_connect up to the encrypted flight.
+
+    Key generation, the ClientHello send, ServerHello receipt, the
+    transcript snapshot and handshake-key derivation are stubbed; the
+    handshake read key/IV are *key*/*iv*. *records* (the server's
+    encrypted flight) become visible on the first net_poll. The AEAD
+    sequence counters, tcp_recv_overflow and tls_last_state are NOT
+    touched here: they are whatever the previous run (or the caller) left,
+    which is the point.
+    """
+    n = len(records)
+    p = Patcher(transport)
+    try:
+        p.patch(STUB_ADDR, build_tail_setter(labels, n), "tail-setter net_poll")
+        p.patch(labels["net_poll"], bytes([0x4C, *_lohi(STUB_ADDR)]),
+                "net_poll JMP")
+        p.patch(labels["drbg_fill_bytes"], bytes([0x60]), "drbg RTS")
+        p.patch(labels["tls_ecdh_generate_keypair"], bytes([0x60]),
+                "keypair RTS")
+        p.patch(labels["tls_send_client_hello"], bytes([0x18, 0x60]),
+                "ClientHello CLC/RTS")
+        p.patch(labels["tls_recv_server_hello"], bytes([0x18, 0x60]),
+                "ServerHello CLC/RTS")
+        p.patch(labels["tls_transcript_hash"], bytes([0x60]),
+                "transcript hash RTS")
+        # HTTPS_PIN_SPKI builds call cert_pin_hs_keys in its place.
+        for name in ("tls_derive_handshake_keys", "cert_pin_hs_keys"):
+            if labels.address(name) is not None:
+                p.patch(labels[name], bytes([0x18, 0x60]), f"{name} CLC/RTS")
+        p.patch(labels["tls_hs_read_key"], key, "tls_hs_read_key")
+        p.patch(labels["tls_hs_read_iv"], iv, "tls_hs_read_iv")
+        p.patch(DRIVER_ADDR, build_driver(labels["tls_connect"]), "driver")
+        p.patch(LATCH_ADDR, bytes([POISON]), "carry latch")
+        p.patch(COUNTER_ADDR, bytes(3), "poll counter")
+        p.patch(labels["tls_rec_len"], bytes(2), "tls_rec_len")
+        p.patch(labels["tcp_recv_buf"], records, "tcp_recv_buf")
+        p.patch(labels["tcp_recv_head"], bytes(2), "tcp_recv_head")
+        p.patch(labels["tcp_recv_tail"], bytes(2), "tcp_recv_tail")
+        timed_out = False
+        try:
+            jsr(transport, DRIVER_ADDR, timeout=JSR_TIMEOUT,
+                recover_on_timeout=True)
+        except Exception as e:  # noqa: BLE001
+            timed_out = True
+            print(f"        JSR did not return within {JSR_TIMEOUT:.0f} s: {e}")
+        c = read_bytes(transport, COUNTER_ADDR, 3)
+        return {
+            "timed_out": timed_out,
+            "carry": read_bytes(transport, LATCH_ADDR, 1)[0],
+            "polls": c[0] | (c[1] << 8) | (c[2] << 16),
+            "tls_state": read_bytes(transport, labels["tls_state"], 1)[0],
+            "last_state": read_bytes(transport, labels["tls_last_state"], 1)[0],
+            "read_seq": int.from_bytes(
+                read_bytes(transport, labels["tls_read_seq"], 8), "big"),
+            "write_seq": int.from_bytes(
+                read_bytes(transport, labels["tls_write_seq"], 8), "big"),
+            "overflow": read_bytes(transport, labels["tcp_recv_overflow"],
+                                   1)[0],
+        }
+    finally:
+        p.restore()
+
+
+def run_rx_reset_dirty(transport, labels) -> dict:
+    """JSR tls_rx_reset with every field it owns dirtied."""
+    p = Patcher(transport)
+    try:
+        p.patch(DRIVER_ADDR, build_driver(labels["tls_rx_reset"]), "driver")
+        p.patch(labels["tls_read_seq"], bytes([0x5A] * 8), "tls_read_seq")
+        p.patch(labels["tls_write_seq"], bytes([0xA5] * 8), "tls_write_seq")
+        p.patch(labels["tcp_recv_overflow"], bytes([1]), "tcp_recv_overflow")
+        p.patch(labels["tls_last_state"], bytes([TLS_STATE_ENCRYPTED_EXT]),
+                "tls_last_state")
+        p.patch(labels["tcp_recv_head"], bytes([0x10, 0x00]), "tcp_recv_head")
+        p.patch(labels["tcp_recv_tail"], bytes([0x34, 0x02]), "tcp_recv_tail")
+        p.patch(labels["tls_recv_state"], bytes([1]), "tls_recv_state")
+        p.patch(labels["tls_recv_count"], bytes([3, 1]), "tls_recv_count")
+        jsr(transport, DRIVER_ADDR, timeout=30.0)
+        return {
+            "read_seq": read_bytes(transport, labels["tls_read_seq"], 8).hex(),
+            "write_seq": read_bytes(transport, labels["tls_write_seq"],
+                                    8).hex(),
+            "overflow": read_bytes(transport, labels["tcp_recv_overflow"],
+                                   1)[0],
+            "last_state": read_bytes(transport, labels["tls_last_state"], 1)[0],
+            "head": read_bytes(transport, labels["tcp_recv_head"], 2).hex(),
+            "tail": read_bytes(transport, labels["tcp_recv_tail"], 2).hex(),
+            "recv_state": read_bytes(transport, labels["tls_recv_state"],
+                                     1)[0],
+            "recv_count": read_bytes(transport, labels["tls_recv_count"],
+                                     2).hex(),
         }
     finally:
         p.restore()
@@ -923,6 +1045,65 @@ def run_tests(transport, labels) -> tuple[int, int]:
              r["rec_type"] == TLS_CT_HANDSHAKE and r["progress"] == 4),
             (f"at once (polls <= {MAX_POLLS_AFTER_FAIL})",
              r["polls"] <= MAX_POLLS_AFTER_FAIL)]))
+
+    # --- R: a second connection in one boot inherits nothing -------------
+    # EE (type 8, empty extensions) at seq 0, then a record that fails its
+    # tag at seq 1: a connection that decrypts EE ends at $04, one that
+    # cannot ends at $03 — the hardware symptom.
+    ee = seal(hs_key, hs_iv, 0, TLS_CT_HANDSHAKE, bytes([8, 0, 0, 2, 0, 0]))
+    flight = ee + flip_tag_bit(seal(hs_key, hs_iv, 1, TLS_CT_HANDSHAKE,
+                                    b"z" * 24))
+    # Boot zeroes BSS; start the pair from that state.
+    write_bytes(transport, labels["tls_read_seq"], bytes(8))
+    write_bytes(transport, labels["tls_write_seq"], bytes(8))
+    write_bytes(transport, labels["tcp_recv_overflow"], bytes(1))
+    r = run_connect_ee(transport, labels, records=flight, key=hs_key, iv=hs_iv)
+    tally(_report(
+        "first tls_connect of a boot: EncryptedExtensions decrypts "
+        "(control, green both ways)",
+        "zeroed counters, as boot leaves them; the run ends on the "
+        "tag-flipped second record",
+        r, [("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=1", r["carry"] == 1),
+            ("EE decrypted: failure hit CERTIFICATE (tls_last_state = $04)",
+             r["last_state"] == TLS_STATE_CERTIFICATE),
+            ("tls_read_seq = 1", r["read_seq"] == 1)]))
+    # The previous connection also sent records and lost ring bytes.
+    write_bytes(transport, labels["tls_write_seq"], (5).to_bytes(8, "big"))
+    write_bytes(transport, labels["tcp_recv_overflow"], bytes([1]))
+    r = run_connect_ee(transport, labels, records=flight, key=hs_key, iv=hs_iv)
+    tally(_report(
+        "second tls_connect in the same boot: EncryptedExtensions decrypts",
+        "was: the counters were zeroed only at the traffic-key switch, so "
+        "EE was decrypted at the previous connection's read count and "
+        "failed its tag at $03 (every handshake after the first per boot)",
+        r, [("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=1", r["carry"] == 1),
+            ("EE decrypted: failure hit CERTIFICATE (tls_last_state = $04, "
+             "not $03)", r["last_state"] == TLS_STATE_CERTIFICATE),
+            ("tls_read_seq = 1 (restarted from 0)", r["read_seq"] == 1),
+            ("tls_write_seq = 0 (restarted)", r["write_seq"] == 0),
+            ("tcp_recv_overflow cleared", r["overflow"] == 0)]))
+
+    r = run_rx_reset_dirty(transport, labels)
+    tally(_report(
+        "tls_rx_reset from a fully dirtied state",
+        "the single per-connection reset tls_connect runs first",
+        r, [("tls_read_seq = 0", r["read_seq"] == "00" * 8),
+            ("tls_write_seq = 0", r["write_seq"] == "00" * 8),
+            ("tcp_recv_overflow = 0", r["overflow"] == 0),
+            ("tls_last_state = 0", r["last_state"] == 0),
+            ("ring emptied (head = tail)", r["head"] == r["tail"] == "3402"),
+            ("record reader at a boundary",
+             r["recv_state"] == 0 and r["recv_count"] == "0000")]))
+
+    head = read_bytes(transport, labels["tls_connect"], 3)
+    tally(_report(
+        "tls_connect's first instruction is JSR tls_rx_reset",
+        "nothing a connection reads may run before the reset",
+        {"bytes": head.hex()},
+        [("JSR tls_rx_reset",
+          head == bytes([0x20, *_lohi(labels["tls_rx_reset"])]))]))
 
     # --- E: tls_connect's error exit keeps the record layer's verdict -----
     r = run_connect_error_exit(transport, labels, TLS_STATE_ERROR,

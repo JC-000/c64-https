@@ -20,6 +20,7 @@ deliberate — see "Why not pytest" below.
 | `rig_https_local.py` | full TLS 1.3 handshake + HTTP GET (ECDSA-P256 cert) |
 | `rig_https_bad_finished.py` | the negative path: the client must ABORT on a forged server Finished |
 | `rig_https_print_body.py` | issue #28 — the decrypted body renders correctly on screen |
+| `rig_https_refetch.py` | several menu-driven HTTPS fetches in ONE boot — per-connection state a second `tls_connect` would inherit |
 | `rig_https_local_p384.py` | the P-384 cert profile (blocked: no P-384 PRG builds today) |
 | `bench_ecdsa_u64e.py` | ECDSA-P256 verify wall-clock across a clock sweep |
 
