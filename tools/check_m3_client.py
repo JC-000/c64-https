@@ -142,6 +142,7 @@ class M3Device:
         self.slow = {}                  # command byte -> delay in units
         self.forced_blocks = None       # READ: override the reply blocks
         self.next_handle = 5
+        self.release_delays = []        # per-`03 25` delays, then FAST
         # observation
         self.log = []                   # (units, command bytes)
         self.ctrl_writes = []           # (units, value)
@@ -328,6 +329,8 @@ class M3Device:
                 self.violations.append("RELEASE of %d bytes (ER-4: exactly 2)"
                                        % len(cmd))
                 return [], INVALID, delay
+            if self.release_delays:
+                delay = self.release_delays.pop(0)
             n = 0
             for h in [h for h, s in self.sessions.items() if not s["claimed"]]:
                 del self.sessions[h]
@@ -341,6 +344,10 @@ class M3Device:
             d = self.open_delay if op not in self.never else NEVER
             if kind == "refuse":
                 return [], arg, d
+            if kind == "okempty":               # 00,OK and no handle byte
+                h = self.next_handle
+                self.sessions[h] = {"rx": [], "claimed": False}
+                return [], OK, d
             h = arg
             self.sessions[h] = {"rx": [], "claimed": False}
             self.gone.discard(h)
@@ -695,6 +702,7 @@ def test_wedge_writes_nothing_more(prg=None, labels=None):
     n = (len(m.dev.ctrl_writes), len(m.dev.log))
     m.call("net_tcp_close")
     m.call("net_poll")
+    m.call("net_dhcp_acquire")          # reaches m3_begin: must refuse
     _check((len(m.dev.ctrl_writes), len(m.dev.log)) == n,
            "the client kept writing to a wedged interface (ER-11)")
 
@@ -952,6 +960,167 @@ def test_no_tls_firmware_reaches_the_user(prg=None, labels=None):
            "net_last_error $%02X, expected $8E" % m.peek("net_last_error"))
 
 
+def test_http_unframed_stall_is_short(prg=None, labels=None):
+    """An unframed (Connection: close) body is complete ONLY on 01. A stall
+    of M3_B_HTTP_IDLE with no end is INCOMPLETE (C=1), as is 05."""
+    m = _connected(Machine(prg, labels))
+    resp = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\npartial body"
+    carry, status, _ = _http_fetch(m, [("data", resp)])     # then idle forever
+    _check(status == 200, "http_status %d" % status)
+    _check(carry is True, "an unframed body that stalled with no close_notify "
+           "was reported complete (C=0)")
+    m.no_violations()
+
+
+def test_read_end_05_is_gone(prg=None, labels=None):
+    """S 1.6: $0000 + 05 is GONE like 01: CLOSED, never CLOSEd."""
+    m = _connected(Machine(prg, labels))
+    m.dev.sessions[5]["rx"] = [("end", NO_NOTIFY)]
+    m.call("net_poll")
+    _check(m.peek("net_tcp_state") == NET_TCP_CLOSED,
+           "net_tcp_state $%02X after 05, expected CLOSED" % m.peek("net_tcp_state"))
+    _check(m.peek("m3_eof_code") == 5, "m3_eof_code is not 5")
+    n = len(m.dev.log)
+    m.call("net_tcp_close")
+    _check(len(m.dev.log) == n, "CLOSE sent after 05 (GONE, M10)")
+    m.no_violations()
+
+
+def _block_case(blocks, req_note):
+    def run(prg, labels):
+        m = _connected(Machine(prg, labels))
+        m.dev.forced_blocks = (blocks, OK)
+        m.call("net_poll")
+        _check(m.peek("net_tcp_state") == NET_TCP_ERROR, "%s: net_tcp_state "
+               "$%02X, expected ERROR (ER-5: a hole in the stream)"
+               % (req_note, m.peek("net_tcp_state")))
+        m.call("net_tcp_close")
+        _check(m.dev.commands()[-1] == b"\x03\x09\x05",
+               "%s: the handle was not CLOSEd" % req_note)
+        m.no_violations()
+    return run
+
+
+def test_short_block_is_dead(prg=None, labels=None):
+    """ER-5: the header says 10, the (last) block holds 3: a hole."""
+    _block_case([b"\x0a\x00abc"], "short block")(prg, labels)
+
+
+def test_block_tail_is_dead(prg=None, labels=None):
+    """ER-5: the header says 3, the block holds 8: the tail was dropped."""
+    _block_case([b"\x03\x00abcdefgh"], "block longer than its header")(prg, labels)
+
+
+def test_overclaimed_header_is_dead(prg=None, labels=None):
+    """ER-5: a header over the request (not $FFFF): the excess is dropped."""
+    _block_case([bytes([0x00, 0x04]) + bytes(1024)], "over-claimed header")(prg, labels)
+
+
+def test_rejected_push_is_not_a_reply(prg=None, labels=None):
+    """A PUSH the FPGA refused (bit 3) never ran: C=1 with $84 for an Open,
+    and nothing is read as its reply."""
+    m = Machine(prg, labels)
+    _check(m.init() is False, "net_init failed")
+    real = m.dev._push
+    def push(cmd, now):
+        if len(cmd) > 1 and cmd[1] == 0x21:
+            m.dev.error_busy = True
+            m.dev.pushes_rejected += 1
+            m.dev.state = ST_IDLE
+            return
+        real(cmd, now)
+    m.dev._push = push
+    _check(m.connect() is True, "a rejected Open returned C=0")
+    _check(m.peek("net_last_error") == ERR_CONNECT_FAIL, "net_last_error $%02X, "
+           "expected $84 (push rejected)" % m.peek("net_last_error"))
+    _check(not m.dev.sessions, "a session is open after a rejected push")
+    m.no_violations()
+
+
+def test_ok_without_handle_is_released(prg=None, labels=None):
+    """S 1.1: 00,OK with no handle byte: no handle is assumed; `03 25` next
+    closes the session the firmware did open. C=1, $88."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("okempty", None)
+    _check(m.init() is False, "net_init failed")
+    _check(m.connect() is True, "an Open with no handle byte returned C=0")
+    _check(m.peek("net_last_error") == 0x88, "net_last_error $%02X, expected "
+           "$88" % m.peek("net_last_error"))
+    ops = m.dev.ops()
+    _check(ops[ops.index(0x21) + 1] == 0x25, "the command after the handle-less "
+           "Open was not `03 25`")
+    _check(not m.dev.sessions, "the handle-less session is still open")
+    m.no_violations()
+
+
+def test_entry_waits_for_idle(prg=None, labels=None):
+    """A command must not be written into an interface that is not idle: a
+    stale reply left pending is waited out, then ABORTed (unknown PUSH:
+    ABORT + 45 s), and the command then runs unrejected."""
+    m = _connected(Machine(prg, labels))
+    m.dev.state, m.dev.response, m.dev.status = ST_LAST, b"stale", OK
+    m.dev.rp = m.dev.sp = 0
+    m.call("net_tcp_close")
+    _check(m.dev.pushes_rejected == 0, "a PUSH hit a non-idle interface "
+           "(%d rejected)" % m.dev.pushes_rejected)
+    _check(not m.dev.sessions, "the CLOSE did not run")
+    m.no_violations()
+
+
+def test_ffff_other_errno_stops(prg=None, labels=None):
+    """ER-7: only `02,NO DATA: 11` is idle. Any other $FFFF line (here
+    `02,NO DATA: 12`, the same length) means the number is not ours."""
+    m = _connected(Machine(prg, labels))
+    m.dev.forced_blocks = ([b"\xff\xff"], b"02,NO DATA: 12")
+    m.call("net_poll")
+    _check(m.peek("net_tcp_state") != NET_TCP_CONNECTED,
+           "`02,NO DATA: 12` was taken as idle")
+    m.no_violations()
+
+
+def test_wedge_halts_the_ui(prg=None, labels=None):
+    """ER-11: on a wedge the UI prints PRESS RESET and HALTS: it must never
+    return to the menu, where a key would write to the UCI again."""
+    m = Machine(prg, labels)
+    m.call("do_net_init")
+    m.dev.never.add(0x21)
+    m.mem.keys.extend(b"\r\r")
+    halted = False
+    try:
+        m.call("do_https_get", budget=6_000_000)
+    except CPUError:
+        halted = True
+    text = m.screen_text()
+    _check("NOT RESPONDING" in text, "no PRESS RESET message:\n" + text)
+    _check(halted, "do_https_get returned after a wedge (ER-11: halt)")
+
+
+def test_sweep_stops_at_a_wedge(prg=None, labels=None):
+    """ER-2/ER-11: a CLOSE that never completes during the startup sweep
+    wedges the interface; the sweep stops and nothing more is written."""
+    m = Machine(prg, labels)
+    m.dev.never.add(0x09)
+    _check(m.init() is True, "net_init returned C=0 over a wedge")
+    _check(len(m.dev.log) == 1, "%d commands after the wedge, expected the one "
+           "CLOSE" % len(m.dev.log))
+    _check(m.dev.aborts == 2, "%d ABORTs: the startup one and the overrun's"
+           % m.dev.aborts)
+
+
+def test_release_is_retried_once(prg=None, labels=None):
+    """Appendix A: an ABORTed `03 25` is sent again."""
+    m = Machine(prg, labels)
+    m.dev.open_delay = 50 * SECOND
+    m.dev.release_delays = [15 * SECOND]
+    _check(m.init() is False, "net_init failed")
+    _check(m.connect() is True, "a 50 s Open returned C=0")
+    rel = [c for c in m.dev.commands() if c == b"\x03\x25"]
+    _check(len(rel) == 2, "%d `03 25` sent; the ABORTed one must be sent again"
+           % len(rel))
+    _check(not m.dev.sessions, "the ABORTed Open's session survived")
+    m.no_violations()
+
+
 TESTS = (
     test_startup_sequence,
     test_no_uci_writes_nothing,
@@ -977,6 +1146,18 @@ TESTS = (
     test_http_05_unframed_is_short,
     test_refusal_reaches_the_user,
     test_no_tls_firmware_reaches_the_user,
+    test_http_unframed_stall_is_short,
+    test_read_end_05_is_gone,
+    test_short_block_is_dead,
+    test_block_tail_is_dead,
+    test_overclaimed_header_is_dead,
+    test_rejected_push_is_not_a_reply,
+    test_ok_without_handle_is_released,
+    test_entry_waits_for_idle,
+    test_ffff_other_errno_stops,
+    test_wedge_halts_the_ui,
+    test_sweep_stops_at_a_wedge,
+    test_release_is_retried_once,
 )
 
 

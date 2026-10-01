@@ -35,6 +35,13 @@ HTTP = "src/http.s"
 UI = "src/net/uci-m3/m3_https_get.inc"
 
 # (name, rule, file, old, new, tests that must go red)
+#
+# Not listed, because it is EQUIVALENT (verified, not assumed): deleting the
+# startup sweep's own `cmp #M3_EXEC_WEDGED / beq @init_fail` exit. After a
+# wedge, the sweep's next m3_begin refuses (m3_wedged) and net_init fails
+# there instead, having written nothing: the same observable outcome. The
+# guard that carries the rule is that refusal, and "begin-ignores-wedge"
+# below shows it is load-bearing (test_wedge_writes_nothing_more goes red).
 MUTANTS = [
     ("abort-not-0c", "ER-2 $0C at startup", NET,
      "ldy #(UCI_CTRL_ABORT | UCI_CTRL_CLR_ERR)", "ldy #UCI_CTRL_ABORT",
@@ -123,6 +130,41 @@ MUTANTS = [
      "m3_report_fail:\n        jsr m3_print_status",
      "m3_report_fail:\n        nop", ["test_refusal_reaches_the_user",
                                        "test_no_tls_firmware_reaches_the_user"]),
+    # adv-271 round 1: the finding, and the mutants the suite could not see
+    ("stall-unframed-trusted", "an unframed body is whole only on 01", HTTP,
+     "        lda http_cl_valid       ; stalled: framed -> the framing decides,\n"
+     "        ora http_chunked        ;  unframed -> no close came: incomplete\n"
+     "        beq @m3_dead\n", "", ["test_http_unframed_stall_is_short"]),
+    ("05-as-owned", "S 1.6: 05 is GONE, never CLOSEd", NET,
+     "        cmp #5\n        bne @p_dead_owned", "        cmp #$FF\n        bne @p_dead_owned",
+     ["test_read_end_05_is_gone"]),
+    ("bad-gate-removed", "ER-5: a short / over-long block is a hole", NET,
+     "        lda m3_bad\n        bne @p_dead_owned\n", "",
+     ["test_short_block_is_dead", "test_block_tail_is_dead",
+      "test_overclaimed_header_is_dead"]),
+    ("rejected-as-reply", "a rejected PUSH never ran", CMD,
+     "        lda #M3_EXEC_REJECTED\n        sec", "        lda #M3_EXEC_REPLY\n        clc",
+     ["test_rejected_push_is_not_a_reply"]),
+    ("ok-without-handle", "S 1.1: never assume a session; `03 25`", NET,
+     "        lda m3_rd_count\n        beq @tc_no_handle\n", "",
+     ["test_ok_without_handle_is_released"]),
+    ("no-entry-wait", "write nothing into a busy interface", CMD,
+     "        lda #(UCI_STAT_STATE | UCI_STAT_ABORT_PENDING | UCI_STAT_CMD_BUSY)\n"
+     "        jsr m3_wait_clear\n        bcc @b_idle", "        jmp @b_idle",
+     ["test_entry_waits_for_idle"]),
+    ("idle-11-unchecked", "ER-7: only `: 11` is idle", NET,
+     "        lda m3_status+12\n        cmp #'1'\n        bne @p_not_ours\n"
+     "        lda m3_status+13\n        cmp #'1'\n        bne @p_not_ours\n", "",
+     ["test_ffff_other_errno_stops"]),
+    ("halt-is-rts", "ER-11: halt on a wedge", UI,
+     "@cw_halt:\n        jmp @cw_halt", "@cw_halt:\n        rts",
+     ["test_wedge_halts_the_ui"]),
+    ("begin-ignores-wedge", "ER-11: nothing is written once wedged", CMD,
+     "        bit m3_wedged\n        bmi @b_wedged\n", "",
+     ["test_sweep_stops_at_a_wedge", "test_wedge_writes_nothing_more"]),
+    ("no-release-retry", "Appendix A: resend an ABORTed `03 25`", NET,
+     "        dec m3_tries\n        bne @rl_again\n", "",
+     ["test_release_is_retried_once"]),
     ("tls12-offered", "S 1.1/1.7 flags: TLS 1.3 only by default", NET,
      "M3_FLAGS = M3_FLAG_TLS13_ONLY", "M3_FLAGS = 0", ["test_open_layout"]),
 ]

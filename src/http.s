@@ -300,7 +300,12 @@ http_recv_loop:
 ;     exactly that case;
 ;   - the session died (NET_TCP_ERROR: 12/14/16/17, a hole, a stale
 ;     handle): C=1;
-;   - no byte for M3_B_HTTP_IDLE (60 s, CIA2 clock): the framing decides.
+;   - no byte for M3_B_HTTP_IDLE (60 s, CIA2 clock): a framed body is
+;     judged by its framing (short of it: C=1); an UNFRAMED one is C=1.
+;     Its end IS the close, and no close came, so nothing says it is whole.
+; So an unframed body is complete only on 01, the peer's close_notify.
+; (The TLS arm above still hands a stalled unframed body to the shared
+; verdict, whose unframed arm answers C=0; that is unchanged here.)
 ; Output and caller contract as the TLS http_recv_body above.
 ; =============================================================================
         .import m3_dl_arm
@@ -342,6 +347,9 @@ http_recv_body:
         ldy #M3_DL_APP
         jsr m3_dl_expired
         bcc @m3_loop
+        lda http_cl_valid       ; stalled: framed -> the framing decides,
+        ora http_chunked        ;  unframed -> no close came: incomplete
+        beq @m3_dead
         jmp http_recv_timeout_verdict
 @m3_ended:
         cmp #NET_TCP_CLOSED
