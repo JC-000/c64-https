@@ -53,7 +53,7 @@ from _device_lock_helper import (  # noqa: E402
 from _prg_load import PrgLoadError, load_verified_and_run  # noqa: E402
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
-from boot_check import decode_screen, screen_text  # noqa: E402
+from boot_check import decode_screen  # noqa: E402
 from rig_https_local import (  # noqa: E402
     _create_run_dir, _prune_old_run_dirs,
 )
@@ -95,33 +95,36 @@ def load_labels() -> dict[str, int]:
     return out
 
 
-def last_line(client) -> str:
-    lines = decode_screen(bytes(client.read_mem(0x0400, 1000)))
-    rows = [r for r in screen_text(lines).splitlines() if r.strip()]
-    return rows[-1].strip() if rows else ""
+def screen_rows(client) -> list[str]:
+    """Non-blank screen rows, uppercased. decode_screen rows are lowercase,
+    and screen_text joins them into ONE string, which cannot say which row
+    is last."""
+    return [r.strip().upper() for r in
+            decode_screen(bytes(client.read_mem(0x0400, 1000))) if r.strip()]
 
 
-def is_terminal(line: str) -> bool:
-    return any(line.startswith(t) for t in TERMINAL)
+def is_terminal(rows: list[str]) -> bool:
+    return bool(rows) and any(rows[-1].startswith(t) for t in TERMINAL)
 
 
 def wait_screen(client, pred, budget: float) -> tuple[bool, str]:
+    """Poll until pred(rows); returns (seen, last row)."""
     deadline = time.monotonic() + budget
-    line = ""
+    rows: list[str] = []
     while time.monotonic() < deadline:
-        line = last_line(client)
-        if pred(line):
-            return True, line
+        rows = screen_rows(client)
+        if pred(rows):
+            return True, rows[-1] if rows else ""
         time.sleep(1.0)
-    return False, line
+    return False, rows[-1] if rows else ""
 
 
 def dump(client, title: str) -> None:
     lines = decode_screen(bytes(client.read_mem(0x0400, 1000)))
     print(f"--- {title} ---")
-    for i, row in enumerate(screen_text(lines).splitlines()):
+    for i, row in enumerate(lines):
         if row.strip():
-            print(f"{i:02d}: {row}")
+            print(f"{i:02d}: {row.upper()}")
     print("--- end ---")
 
 
@@ -202,13 +205,14 @@ def main() -> int:
             print(f"[fatal] {exc}", file=sys.stderr)
             return 4
 
-        ok, line = wait_screen(client, lambda s: "Q=QUIT" in s,
+        ok, line = wait_screen(client, lambda r: "Q=QUIT" in " ".join(r),
                                INIT_WAIT + 30)
         if not ok:
             dump(client, "boot timeout")
             return 1
         client.send_text("I", finish_with_return=False)
-        ok, line = wait_screen(client, lambda s: "DHCP OK" in s, DHCP_TIMEOUT)
+        ok, line = wait_screen(client, lambda r: "DHCP OK" in " ".join(r),
+                               DHCP_TIMEOUT)
         if not ok:
             dump(client, "DHCP timeout")
             return 1
@@ -229,7 +233,7 @@ def main() -> int:
             push_keys(client, keep_target)
             # The previous fetch's terminal line is still the last line until
             # this one prints its banner; wait for it to move first.
-            ok, line = wait_screen(client, lambda s: not is_terminal(s), 30)
+            ok, line = wait_screen(client, lambda r: not is_terminal(r), 30)
             if not ok:
                 dump(client, f"fetch {n}: 'G' never started a fetch")
                 return 1
