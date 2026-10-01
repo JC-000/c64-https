@@ -29,6 +29,7 @@ old allocation died. On the pre-fix rigs these tests fail with
 
     python3 tools/test_rig_scratch.py
     python3 tools/test_rig_scratch.py --build    # also against fresh links
+    python3 tools/test_rig_scratch.py --labels a/labels.txt b/labels.txt
 """
 
 from __future__ import annotations
@@ -447,7 +448,7 @@ def check_rig_on_profile(rig: str, labels_text: str) -> str | None:
     return None
 
 
-def _matrix(fixtures: dict[str, str]) -> list[str]:
+def _matrix(fixtures: dict[str, str], *, every_rig: bool = True) -> list[str]:
     bad, ran = [], {}
     for rig in allocating_rigs():
         for prof, text in fixtures.items():
@@ -457,7 +458,7 @@ def _matrix(fixtures: dict[str, str]) -> list[str]:
             ran[rig] = ran.get(rig, 0) + 1
             if why:
                 bad.append(f"{rig} on {prof}: {why}")
-    for rig in allocating_rigs():
+    for rig in allocating_rigs() if every_rig else ():
         if not ran.get(rig):
             bad.append(f"{rig} runs on none of {sorted(fixtures)}")
     return bad
@@ -545,9 +546,25 @@ def test_page2_window_withholds_the_vectors() -> None:
                    for r in policy.reserved_regions)
 
 
-def build_profiles() -> dict[str, dict]:
-    """make each profile from clean in this checkout -> fixture entries."""
-    out = {}
+def test_every_rig_allocates_on_the_current_build() -> None:
+    """The real build/labels.txt, whole, when build/ holds a UCI link — the
+    captured fixtures above can go stale; this cannot. A non-UCI or absent
+    build checks nothing here (``--build`` is the full real-link matrix)."""
+    labels = REPO / "build" / "labels.txt"
+    if not labels.is_file():
+        return
+    text = labels.read_text()
+    if ".uci_socket_id" not in text:
+        return
+    bad = _matrix({"build/labels.txt": text}, every_rig=False)
+    assert not bad, "\n    " + "\n    ".join(bad)
+
+
+def build_profiles() -> tuple[dict[str, dict], dict[str, str]]:
+    """make each profile from clean in this checkout.
+
+    -> (fixture entries, each profile's whole real labels.txt)"""
+    out, full = {}, {}
     for name, line in PROFILES.items():
         subprocess.run(["make", "clean"], cwd=REPO, check=True,
                        capture_output=True)
@@ -557,25 +574,37 @@ def build_profiles() -> dict[str, dict]:
             raise RuntimeError(f"{name}: make failed\n{r.stdout[-800:]}"
                                f"{r.stderr[-800:]}")
         prg = (REPO / "build" / "c64-https.prg").read_bytes()
+        full[name] = (REPO / "build" / "labels.txt").read_text()
         out[name] = {
             "make": line,
             "prg_sha256": hashlib.sha256(prg).hexdigest(),
-            "labels": fixture_from_labels(
-                (REPO / "build" / "labels.txt").read_text()),
+            "labels": fixture_from_labels(full[name]),
         }
-    return out
+    return out, full
 
 
 def main() -> int:
+    if "--labels" in sys.argv[1:]:
+        # Real labels.txt files from builds made elsewhere, checked whole.
+        paths = sys.argv[sys.argv.index("--labels") + 1:]
+        bad = _matrix({p: Path(p).read_text() for p in paths},
+                      every_rig=False)
+        for b in bad:
+            print(f"  FAIL  {b}")
+        print(f"\nlabels matrix ({len(paths)} file(s)): "
+              f"{'FAIL' if bad else 'PASS'}")
+        return 1 if bad else 0
     if "--build" in sys.argv[1:]:
         # Against fresh links of this tree, not the checked-in capture.
-        built = build_profiles()
+        built, full = build_profiles()
         for name, entry in built.items():
             print(f"  built {name}: {entry['prg_sha256'][:16]}")
         if "--write-fixtures" in sys.argv[1:]:
             PROFILES_JSON.write_text(json.dumps(built, indent=1) + "\n")
             print(f"  wrote {PROFILES_JSON.relative_to(REPO)}")
-        bad = _matrix({n: e["labels"] for n, e in built.items()})
+        # The whole real labels.txt of each fresh link, not the trimmed
+        # capture: this is the run that cannot go stale.
+        bad = _matrix(full)
         for b in bad:
             print(f"  FAIL  {b}")
         print(f"\nbuilt-profile matrix: {'FAIL' if bad else 'PASS'}")
