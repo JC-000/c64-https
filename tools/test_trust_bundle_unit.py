@@ -127,7 +127,8 @@ def test_host_key_folds_ascii_case_only() -> None:
     assert tb.canonical_host("xn--bcher-kva.DE") == b"xn--bcher-kva.de"
     for bad in ("", "a" * 64, "example.com.", "bücher.de", "a b",
                 "en.wikipedia.org:443", "en.wikipedia.org/wiki", ".example.com",
-                "a..b", "a_b.com", "*.example.com"):
+                "a..b", "a_b.com", "*.example.com",
+                "-example.com", "example-.com", "a.-b.com"):
         try:
             tb.host_key(bad)
         except tb.BundleError:

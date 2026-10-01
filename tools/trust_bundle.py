@@ -129,7 +129,8 @@ class BundleError(ValueError):
 # The hostname charset the C64's typed-host prompt accepts, after A-Z -> a-z:
 # labels of [a-z0-9-], dot-separated, none empty. Anything else (a ":443", a
 # path, a trailing dot) would hash to a key the C64 can never look up.
-_HOST_RE = re.compile(rb"[a-z0-9-]+(\.[a-z0-9-]+)*")
+_HOST_LABEL = rb"[a-z0-9]([a-z0-9-]*[a-z0-9])?"  # RFC 1123: no edge hyphen
+_HOST_RE = re.compile(_HOST_LABEL + rb"(\." + _HOST_LABEL + rb")*")
 
 
 def canonical_host(host: str) -> bytes:
