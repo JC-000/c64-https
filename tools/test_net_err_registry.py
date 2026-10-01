@@ -108,12 +108,12 @@ CERTIFIES = ("agreement between this repo's net_last_error allocations and "
              "c64-wireguard's canonical registry")
 
 # The codes we define that are c64-wireguard allocations, mirrored here with
-# their names, values and meanings: $8A reserved and never emitted; $8D and
-# $8E emitted by BACKEND=uci-m3 only. They are checked in the opposite
+# their names, values and meanings: $8A reserved and never emitted; $8D,
+# $8E and $8F emitted by BACKEND=uci-m3 only. They are checked in the opposite
 # direction from every other code (each must EQUAL theirs, name and value),
 # and are excluded from the collision sweep by name, never by value.
 MIRRORED = frozenset({"UCI_ERR_LONG_READ", "UCI_ERR_OPEN_REFUSED",
-                      "UCI_ERR_CMD_UNKNOWN"})
+                      "UCI_ERR_CMD_UNKNOWN", "UCI_ERR_SHORT_READ"})
 
 # The env var that opts out of the cross-repo checks. DELIBERATELY NOT the
 # repo-wide C64_ALLOW_SKIP: that one also gates test_build_flags_stamp.py's

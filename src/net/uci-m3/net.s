@@ -662,6 +662,8 @@ net_poll:
 :       jmp @p_dead_owned           ; ABORTed READ: data lost, CLOSE it
 
 @p_reply:
+        lda #0
+        sta m3_bad                  ; 0, or the code a bad block earns
         ; ER-12: test bit 7 before the header. No data = an empty reply.
         lda UCI_STATUS
         jsr m3_settle
@@ -695,8 +697,6 @@ net_poll:
         jmp @p_0000
 :
         ; --- data: n = header, capped at the request ---------------------
-        lda #0
-        sta m3_bad
         lda m3_req
         cmp m3_hdr+0
         lda m3_req+1
@@ -704,7 +704,7 @@ net_poll:
         bcs @p_copy_init
         lda #UCI_ERR_BAD_READ_HDR   ; over-claim that is not $FFFF
         sta net_last_error
-        inc m3_bad
+        sta m3_bad
         lda m3_req
         sta m3_hdr+0
         lda m3_req+1
@@ -718,7 +718,8 @@ net_poll:
         uci_fence
         and #UCI_STAT_DATA_AV
         bne :+
-        inc m3_bad                  ; the block ended short of its header
+        lda #UCI_ERR_SHORT_READ     ; the block ended short of its header
+        sta m3_bad
         jmp @p_copied
 :
         clc
@@ -749,7 +750,10 @@ net_poll:
         jsr m3_discard_data
         lda m3_discarded
         beq :+
-        inc m3_bad
+        lda m3_bad
+        bne :+                      ; keep the first reason
+        lda #UCI_ERR_BAD_READ_HDR   ; bytes past the header: dropped
+        sta m3_bad
 :
         lda UCI_STATUS
         jsr m3_settle
@@ -766,7 +770,7 @@ net_poll:
         jsr m3_read_status
         jsr m3_accept
         lda m3_bad
-        bne @p_dead_hdr
+        bne @p_dead_code
         lda #M3_POLL_DATA
         sta m3_poll_result
         rts
@@ -792,10 +796,8 @@ net_poll:
 @p_not_ours:
         ; "02,NO DATA: 9": the number is no longer ours. Any other $FFFF
         ; status means it now names a socket opened later (ER-7). Either
-        ; way: stop, and do not CLOSE it. $86: the READ failed; the status
-        ; line (m3_status) says how.
-        lda #UCI_ERR_READ_FAIL
-        sta net_last_error
+        ; way: stop, and do not CLOSE it. (No net_last_error code yet: the
+        ; status line says which; a code is pending the fleet registry.)
         lda #0
         sta m3_owned
         lda #NET_TCP_ERROR
@@ -818,20 +820,21 @@ net_poll:
         rts
 
 ; The session is dead but the handle is still ours (the caller CLOSEs).
-; The status line keeps the firmware's reason; net_last_error says which
-; side of the READ failed (finding 7 of the uci-m3 code review):
-;   $86 UCI_ERR_READ_FAIL     the READ answered a dead session ($0000 +
-;                             12/14/16/17)
-;   $8B UCI_ERR_BAD_READ_HDR  the reply is not in a documented shape: no
-;                             header (81/82), a 1-byte header, a block
-;                             short of or longer than its header, Data More
-@p_dead_read:
-        lda #UCI_ERR_READ_FAIL
-        bne @p_dead_code            ; always
+; The status line keeps the firmware's reason. net_last_error, for a READ
+; reply the client could not use (finding 7 of the uci-m3 code review):
+;   $8F UCI_ERR_SHORT_READ    the block ended short of its header
+;                             (c64-wireguard's code, mirrored)
+;   $8B UCI_ERR_BAD_READ_HDR  any other shape: no header (81/82), a 1-byte
+;                             header, bytes past the header, Data More
+; A dead session ($0000 + 12/14/16/17, @p_dead_read) sets no code yet; one
+; is pending the fleet registry, and the status line says what happened.
 @p_dead_hdr:
+        lda m3_bad
+        bne @p_dead_code            ; the reason the block was refused
         lda #UCI_ERR_BAD_READ_HDR
 @p_dead_code:
         sta net_last_error
+@p_dead_read:
 @p_dead_owned:
         lda #NET_TCP_ERROR
         sta net_tcp_state

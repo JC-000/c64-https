@@ -84,7 +84,7 @@ NET_TCP_CLOSED, NET_TCP_CONNECTED = 0x00, 0x01
 NET_TCP_ERROR, NET_TCP_CONNECT_FAIL = 0x02, 0x03
 ERR_NOT_PRESENT, ERR_CONNECT_FAIL, ERR_WAIT_TIMEOUT = 0x81, 0x84, 0x89
 ERR_OPEN_REFUSED, ERR_CMD_UNKNOWN = 0x8D, 0x8E   # c64-wireguard's, mirrored
-ERR_READ_FAIL, ERR_BAD_READ_HDR = 0x86, 0x8B
+ERR_BAD_READ_HDR, ERR_SHORT_READ = 0x8B, 0x8F
 
 
 def _code(m, want, what):
@@ -778,7 +778,6 @@ def test_read_end_14_is_closed(prg=None, labels=None):
     m.call("net_poll")
     _check(m.peek("net_tcp_state") == NET_TCP_ERROR,
            "net_tcp_state $%02X after 14, expected ERROR" % m.peek("net_tcp_state"))
-    _code(m, ERR_READ_FAIL, "$0000 + 14")
     m.call("net_tcp_close")
     _check(m.dev.commands()[-1] == b"\x03\x09\x05", "no CLOSE after a sticky "
            "14: the entry stays in the table (91 after two)")
@@ -793,7 +792,6 @@ def test_read_not_ours_stops(prg=None, labels=None):
     m.call("net_poll")
     _check(m.peek("net_tcp_state") != NET_TCP_CONNECTED,
            "still CONNECTED after `02,NO DATA: 9`: it would poll forever")
-    _code(m, ERR_READ_FAIL, "$FFFF + `: 9`")
     n = len(m.dev.log)
     m.call("net_poll")
     m.call("net_tcp_close")
@@ -1003,7 +1001,7 @@ def test_read_end_05_is_gone(prg=None, labels=None):
     m.no_violations()
 
 
-def _block_case(blocks, req_note):
+def _block_case(blocks, req_note, want_code=ERR_BAD_READ_HDR):
     def run(prg, labels):
         m = _connected(Machine(prg, labels))
         m.dev.forced_blocks = (blocks, OK)
@@ -1011,7 +1009,7 @@ def _block_case(blocks, req_note):
         _check(m.peek("net_tcp_state") == NET_TCP_ERROR, "%s: net_tcp_state "
                "$%02X, expected ERROR (ER-5: a hole in the stream)"
                % (req_note, m.peek("net_tcp_state")))
-        _code(m, ERR_BAD_READ_HDR, req_note)
+        _code(m, want_code, req_note)
         m.call("net_tcp_close")
         _check(m.dev.commands()[-1] == b"\x03\x09\x05",
                "%s: the handle was not CLOSEd" % req_note)
@@ -1021,7 +1019,7 @@ def _block_case(blocks, req_note):
 
 def test_short_block_is_dead(prg=None, labels=None):
     """ER-5: the header says 10, the (last) block holds 3: a hole."""
-    _block_case([b"\x0a\x00abc"], "short block")(prg, labels)
+    _block_case([b"\x0a\x00abc"], "short block", ERR_SHORT_READ)(prg, labels)
 
 
 def test_block_tail_is_dead(prg=None, labels=None):

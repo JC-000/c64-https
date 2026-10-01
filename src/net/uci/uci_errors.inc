@@ -29,7 +29,8 @@
 ;                               ~4 h BEFORE §13 was retired — outside the
 ;                               table while the table was still the rule.
 ;                               MIRRORED below (BACKEND=uci-m3 emits it)
-;   $8F  UCI_ERR_SHORT_READ     theirs, minted after the retirement (wg#130)
+;   $8F  UCI_ERR_SHORT_READ     theirs, minted after the retirement (wg#130).
+;                               MIRRORED below (BACKEND=uci-m3 emits it)
 ;
 ; $8C/$8D were allocated in the retired table and this file never recorded
 ; them. Comments only, deliberately — an equate here would imply we emit
@@ -111,12 +112,7 @@ UCI_ERR_CMD_FAILED     = $82    ; push rejected (not idle) at PUSH_CMD
 UCI_ERR_NO_IP          = $83    ; GET_IPADDR returned all-zero IP
 UCI_ERR_CONNECT_FAIL   = $84    ; push rejected (not idle) at TCP_CONNECT
 UCI_ERR_SEND_FAIL      = $85    ; push rejected (not idle) at SOCKET_WRITE
-UCI_ERR_READ_FAIL      = $86    ; push rejected (not idle) at SOCKET_READ.
-                                ; uci-m3 also: the READ failed — a dead
-                                ; session ($0000 + 12/14/16/17) or a number
-                                ; no longer ours ($FFFF + not ": 11"); the
-                                ; status line says which (c64-wireguard's
-                                ; table: "SOCKET_READ returned an error")
+UCI_ERR_READ_FAIL      = $86    ; push rejected (not idle) at SOCKET_READ
 UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE wrote fewer bytes than requested
 UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
 UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
@@ -145,10 +141,10 @@ UCI_ERR_BAD_READ_HDR   = $8B    ; Stream family: SOCKET_READ header exceeded
                                 ; — the last code allocated that way before
                                 ; §13 was retired. uci-m3 also uses it for a
                                 ; READ reply in no documented shape: no
-                                ; header (81/82), a 1-byte header, a block
-                                ; short of or longer than its header.
+                                ; header (81/82), a 1-byte header, bytes past
+                                ; the header, a Data More block.
 
-; MIRRORS of two c64-wireguard allocations, same names, same values, same
+; MIRRORS of three c64-wireguard allocations, same names, same values, same
 ; meanings (their src/net_abi.inc is canonical for this range). Emitted ONLY
 ; by the BACKEND=uci-m3 adapter (src/net/uci-m3/net.s); the plain UCI and
 ; ip65 adapters never emit them. Registered as mirrors, like $8A, in
@@ -157,6 +153,8 @@ UCI_ERR_OPEN_REFUSED   = $8D    ; the firmware refused the open; the
                                 ; status line ($DF1F) names the refusal
 UCI_ERR_CMD_UNKNOWN    = $8E    ; "21,UNKNOWN COMMAND": the firmware lacks the
                                 ; command (uci-m3: no M3 TLS firmware)
+UCI_ERR_SHORT_READ     = $8F    ; a READ reply's block ended short of the
+                                ; total its header announced (uci-m3)
 
 ; TCP state values stored in net_tcp_state. The NET_TCP_* spellings in
 ; net_states.inc are the contract's (§13.1); these aliases keep the
