@@ -67,6 +67,7 @@
 .export trust_store_stage, trust_store_save
 .export ts_state, ts_reason, ts_slot, ts_gen, ts_slot_st, ts_sgen
 .export ts_key, ts_rec, ts_found, ts_staged
+.export ts_read_file
 
 TS_BUF          = tcp_recv_buf
 FA_READ         = $01
@@ -445,24 +446,10 @@ ts_tolerable:
 ; Out: A = TS_SLOT_OK / TS_SLOT_ABSENT / TS_R_* with Z set iff OK;
 ; ts_sgen[slot] = its generation when OK.
 ts_read_slot:
-        jsr ts_set_name
-        lda #<ts_name
-        ldx #>ts_name
-        ldy #FA_READ
-        jsr dos_open
-        bcs @open_failed
         lda #<(TS_FILE_MAX + 1) ; one more than fits: a bigger file shows
-        sta dos_len
-        lda #>(TS_FILE_MAX + 1)
-        sta dos_len+1
-        lda #<TS_BUF
-        ldx #>TS_BUF
-        jsr dos_read
-        ror ts_tmp              ; bit 7 = the read failed
-        jsr dos_close
-        bcs @io
-        bit ts_tmp
-        bmi @io
+        ldy #>(TS_FILE_MAX + 1)
+        jsr ts_read_file
+        bne ts_rts              ; it did not open or did not read
         ldx #3                  ; a read shorter than the header leaves
                                 ; stale bytes here; the size check below
                                 ; (dos_cnt == 16 + 64 * N) still rejects it
@@ -495,8 +482,6 @@ ts_read_slot:
         sta ts_sgen+1,y
         lda #TS_SLOT_OK
         rts
-@io:    lda #TS_R_IO
-        rts
 @format:
         lda #TS_R_FORMAT
         rts
@@ -505,6 +490,36 @@ ts_read_slot:
         rts
 @checksum:
         lda #TS_R_CHECKSUM
+ts_rts: rts
+
+; ts_read_file — X = the file's letter - 'A' (a slot, or the trust
+; bundle's TRUST.P), A/Y = the most bytes to read. Reads the file into
+; TS_BUF, dos_cnt = the bytes read. Out: A = TS_SLOT_OK with Z set, or
+; TS_SLOT_ABSENT / TS_R_NOPATH / TS_R_DOS / TS_R_IO with Z clear.
+ts_read_file:
+        sta ts_size             ; parked: dos_open does not keep dos_len
+        sty ts_size+1
+        jsr ts_set_name
+        lda #<ts_name
+        ldx #>ts_name
+        ldy #FA_READ
+        jsr dos_open
+        bcs @open_failed
+        lda ts_size
+        sta dos_len
+        lda ts_size+1
+        sta dos_len+1
+        lda #<TS_BUF
+        ldx #>TS_BUF
+        jsr dos_read
+        ror ts_tmp              ; bit 7 = the read failed
+        jsr dos_close
+        bcs @io
+        bit ts_tmp
+        bmi @io
+        lda #TS_SLOT_OK
+        rts
+@io:    lda #TS_R_IO
         rts
 @open_failed:
         ; "FILE DOESN'T EXIST" / "PATH DOESN'T EXIST": [0] and [5] tell
