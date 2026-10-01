@@ -131,8 +131,16 @@ class Suite:
         else:
             self.failed += 1
 
-    def type_and_get(self, codes: list[int]) -> None:
-        """Poison the observables, queue *codes*, run do_https_get once."""
+    def type_and_get(self, codes: list[int], buffered: bool = False) -> None:
+        """Poison the observables, queue *codes*, run do_https_get once.
+
+        *buffered* writes the keys straight into the KERNAL buffer ($0277,
+        count $C6, at most 10) instead of VICE's feed, so all of them --
+        including any typed AFTER the entry's last RETURN -- are already
+        queued when the prompt finishes. That is the only way to see
+        whether a refusal flushes type-ahead: the feed hands keys over a
+        frame at a time and could deliver the tail after the flush.
+        """
         t, L = self.t, self.L
         write_bytes(t, 0x00C6, b"\x00")                  # empty KERNAL buffer
         write_bytes(t, SCREEN, b"\x20" * 1000)
@@ -140,8 +148,13 @@ class Suite:
         write_bytes(t, L["uci_host_buf"], bytes([POISON]) * 8)
         write_bytes(t, L["tls_hostname"], bytes([POISON]) * 64)
         write_bytes(t, L["tls_hostname_len"], bytes([POISON]))
-        for i in range(0, len(codes), 10):
-            t.inject_keys(codes[i:i + 10])
+        if buffered:
+            assert len(codes) <= 10, "the KERNAL buffer holds 10 keys"
+            write_bytes(t, 0x0277, bytes(codes))
+            write_bytes(t, 0x00C6, bytes([len(codes)]))
+        else:
+            for i in range(0, len(codes), 10):
+                t.inject_keys(codes[i:i + 10])
         call(t, L["do_https_get"], timeout=60.0)
 
     def host_state(self) -> dict:
@@ -211,9 +224,10 @@ class Suite:
         self.check(f"name check REJECTS a certificate naming only {other!r}",
                    self.name_check([other]) == 1, "C=0")
 
-    def refused(self, title: str, codes: list[int]) -> None:
+    def refused(self, title: str, codes: list[int],
+                buffered: bool = False) -> None:
         print(f"\n  {title}")
-        self.type_and_get(codes)
+        self.type_and_get(codes, buffered)
         s = self.host_state()
         self.check("nothing dialled", not s["dialled"], "net_tcp_connect ran")
         self.check("net_dns_resolve never ran (uci_host_buf untouched)",
@@ -298,6 +312,10 @@ class Suite:
                      keys("a..b\r/hiq\r"))
         self.refused("space in path, operator types on",
                      keys("\r/a hiq\r"))
+        # Type-ahead already in the KERNAL buffer when the refusal lands:
+        # only the flush keeps this 'h' from dialling zimmers.net.
+        self.refused("refusal with 'h' typed ahead in the key buffer",
+                     keys("a \r/p\rh"), buffered=True)
 
 
 def main() -> int:
