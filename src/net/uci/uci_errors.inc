@@ -111,7 +111,12 @@ UCI_ERR_CMD_FAILED     = $82    ; push rejected (not idle) at PUSH_CMD
 UCI_ERR_NO_IP          = $83    ; GET_IPADDR returned all-zero IP
 UCI_ERR_CONNECT_FAIL   = $84    ; push rejected (not idle) at TCP_CONNECT
 UCI_ERR_SEND_FAIL      = $85    ; push rejected (not idle) at SOCKET_WRITE
-UCI_ERR_READ_FAIL      = $86    ; push rejected (not idle) at SOCKET_READ
+UCI_ERR_READ_FAIL      = $86    ; push rejected (not idle) at SOCKET_READ.
+                                ; uci-m3 also: the READ failed — a dead
+                                ; session ($0000 + 12/14/16/17) or a number
+                                ; no longer ours ($FFFF + not ": 11"); the
+                                ; status line says which (c64-wireguard's
+                                ; table: "SOCKET_READ returned an error")
 UCI_ERR_SHORT_WRITE    = $87    ; SOCKET_WRITE wrote fewer bytes than requested
 UCI_ERR_NO_SOCKET      = $88    ; socket-open response yielded no socket_id
 UCI_ERR_WAIT_TIMEOUT   = $89    ; a bounded wait exceeded its wall-clock budget
@@ -138,7 +143,10 @@ UCI_ERR_BAD_READ_HDR   = $8B    ; Stream family: SOCKET_READ header exceeded
                                 ; net_last_error for post-mortems. Allocated in
                                 ; SPEC §13.2's table first (c64-lib-contract#139)
                                 ; — the last code allocated that way before
-                                ; §13 was retired.
+                                ; §13 was retired. uci-m3 also uses it for a
+                                ; READ reply in no documented shape: no
+                                ; header (81/82), a 1-byte header, a block
+                                ; short of or longer than its header.
 
 ; MIRRORS of two c64-wireguard allocations, same names, same values, same
 ; meanings (their src/net_abi.inc is canonical for this range). Emitted ONLY

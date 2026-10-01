@@ -12,10 +12,12 @@
 ; it is at most 40 bytes (ER-8). A wedged interface prints PRESS RESET and
 ; halts, writing nothing more to the UCI (ER-11).
 
+        .include "m3.inc"               ; M3_HINT_*
         .import m3_status
         .import m3_status_len
         .import m3_wedged
         .import m3_open_reply
+        .import m3_open_hint
 
 do_https_get:
         lda net_initialized
@@ -43,7 +45,8 @@ do_https_get:
         lda #<tls_fail_msg
         ldy #>tls_fail_msg
         jsr print_string
-        jmp m3_report_fail
+        jsr m3_print_open_fail
+        jmp m3_check_wedge
 
 @open_ok:
         lda #<tls_ok_msg
@@ -99,6 +102,24 @@ do_https_get:
         lda #<done_msg
         ldy #>done_msg
         jmp print_string
+
+; m3_print_open_fail — why the Open failed. The firmware's line, plus the
+; client's reading when it has one (m3_open_hint). For a reply the client
+; itself refused (not TLS 1.3, malformed) the last status line is the
+; `03 25` that released the session, so only the reason is printed.
+m3_print_open_fail:
+        ldx m3_open_hint
+        cpx #M3_HINT_NOT_TLS13
+        bcs @pf_hint                ; 2, 3: the client's reason only
+        jsr m3_print_status
+        ldx m3_open_hint
+        beq @pf_out                 ; 0: the firmware's line says it all
+@pf_hint:
+        lda m3_hint_lo-1,x
+        ldy m3_hint_hi-1,x
+        jmp print_string
+@pf_out:
+        rts
 
 ; m3_report_fail — print the firmware's status line, then the wedge check.
 m3_report_fail:
@@ -158,6 +179,11 @@ m3_print_version:
 m3_open_msg:    .byte "OPEN TLS (ULTIMATE)...", $0d, 0
 m3_tls_msg:     .byte "PROTOCOL TLS ", 0
 m3_short_msg:   .byte "BODY INCOMPLETE:", $0d, 0
+m3_hint_1:      .byte "THE SERVER DOES NOT DO TLS 1.3", $0d, 0
+m3_hint_2:      .byte "REFUSED: THE SESSION IS NOT TLS 1.3", $0d, 0
+m3_hint_3:      .byte "REFUSED: MALFORMED OPEN REPLY", $0d, 0
+m3_hint_lo:     .byte <m3_hint_1, <m3_hint_2, <m3_hint_3
+m3_hint_hi:     .byte >m3_hint_1, >m3_hint_2, >m3_hint_3
 m3_wedge_msg:   .byte $0d, "NETWORK INTERFACE NOT RESPONDING", $0d
                 .byte "- PRESS RESET", $0d, 0
 .ifdef HTTPS_PIN_SPKI

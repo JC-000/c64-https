@@ -1142,37 +1142,7 @@ net_dns_resolve:
 ;
 ; Output: A = byte, C=0 on success, C=1 if buffer empty.
 ; =============================================================================
-net_recv_byte:
-        lda tcp_recv_head+0
-        cmp tcp_recv_tail+0
-        bne @nrb_not_empty
-        lda tcp_recv_head+1
-        cmp tcp_recv_tail+1
-        beq @nrb_empty
-@nrb_not_empty:
-        clc
-        lda tcp_recv_head+0
-        adc #<tcp_recv_buf
-        sta @nrb_ld+1
-        lda tcp_recv_head+1
-        adc #>tcp_recv_buf
-        sta @nrb_ld+2
-@nrb_ld:
-        lda $ffff               ; SMC: patched above
-        pha
-        inc tcp_recv_head+0
-        bne @nrb_mask
-        inc tcp_recv_head+1
-@nrb_mask:
-        lda tcp_recv_head+1
-        and #>TCP_RECV_MASK
-        sta tcp_recv_head+1
-        pla
-        clc
-        rts
-@nrb_empty:
-        sec
-        rts
+        .include "net_recv_byte.inc"    ; src/net/, shared with uci-m3
 
 ; =============================================================================
 ; Banner string — consumed by boot.s's startup print
