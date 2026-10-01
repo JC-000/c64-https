@@ -467,6 +467,14 @@ def main() -> int:
                 # read net_tcp_state=CLOSED while it was still readable.
                 if state.parse_state < PARSE_STATE_BODY:
                     closed_before = why
+                    # Where the handshake stopped: tls13.s keeps the state
+                    # the abort hit in tls_last_state ($04 = Certificate).
+                    try:
+                        last = bytes(client.read_mem(
+                            label_addr("tls_last_state"), 1))[0]
+                        print(f"  tls_last_state=${last:02X}")
+                    except KeyError:
+                        pass
                 settled = check_fetch_settled(
                     False, now - started, FETCH_TIMEOUT)
                 break
