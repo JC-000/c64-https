@@ -25,6 +25,9 @@
 .if .defined(HTTPS_PIN_SPKI) .and (.not .defined(BACKEND_UCI_M3))
         .import cert_pin_banner
 .endif
+.ifdef BACKEND_UCI
+        .import reu_probe_size
+.endif
 .ifdef COLD_BANK
         ; uci-comb cold-code bank (src/net/uci/cold_bank.s)
         .include "cold_bank.inc"
@@ -44,7 +47,7 @@
         .ifdef VIEWER_LINKED            ; #155 phase 2: see Makefile KEEP_VIEWER
         .import viewer_enter
         .endif
-        .import http_body_sink
+        .import http_body_sink, http_sink_full
 .endif
 
         ; ---- exports: REU multiply table routines ----
@@ -278,6 +281,12 @@ start:
         inc @zbss_store+2
         dex
         bne @zbss_page
+.ifdef BACKEND_UCI
+        ; The REU's size bounds the HTTP body sink's region (src/http.s).
+        ; Probed before anything else writes the REU: it writes offset 0
+        ; of banks 0, 1, 2, 4 ... 128, which boot rewrites afterwards.
+        jsr reu_probe_size
+.endif
 .ifdef COLD_BANK
         ; Before anything else can touch the image's copy at $C000 (the
         ; TCP ring's range): stash it into the REU.
@@ -793,7 +802,14 @@ do_https_get:
         ; zeroed at boot), so the hook would be a dead branch.
         lda http_body_sink
         beq @print_body
+        lda http_sink_full      ; the body outgrew its REU region: the
+        bne @sink_full          ;  sink stopped it, and wrote nothing past
         jsr viewer_enter
+        jmp @close
+@sink_full:
+        lda #<sink_full_msg
+        ldy #>sink_full_msg
+        jsr print_string
         jmp @close
 @print_body:
 .endif
@@ -811,6 +827,11 @@ do_https_get:
 .else
         .include "m3_https_get.inc"     ; src/net/uci-m3/: do_https_get
 .endif ; BACKEND_UCI_M3
+
+.if .defined(BACKEND_UCI) .and .defined(VIEWER_LINKED)
+sink_full_msg:
+        .byte "BODY TOO BIG FOR THE REU", $0d, 0
+.endif
 
 ; =============================================================================
 ; print_resp_body - print up to 200 bytes of http_resp_buf to screen.

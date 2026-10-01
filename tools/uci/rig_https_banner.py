@@ -91,7 +91,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from http_body_checks import (  # noqa: E402
     EXIT_FAIL, EXIT_INCONCLUSIVE, EXIT_PASS, PARSE_STATE_BODY, STALL_ABORT,
     STALL_GRACE,
-    SYMBOLS, StallTracker, check_body_complete, check_fetch_settled,
+    OPTIONAL_SYMBOLS, SYMBOLS, StallTracker, check_body_complete, check_fetch_settled,
     check_http_status, close_confirmed, decide_exit, decode_body_state,
     early_stop_step, poll_until, stall_config_error,
 )
@@ -376,6 +376,13 @@ def main() -> int:
         # uses as its progress signal too.
         print("Letting the fetch run to completion (socket must close cleanly)...")
         addrs = {name: label_addr(name) for name in SYMBOLS}
+        widths = dict(SYMBOLS)
+        for name, width in OPTIONAL_SYMBOLS.items():
+            try:
+                addrs[name] = label_addr(name)
+                widths[name] = width
+            except KeyError:
+                pass                    # not in this build: reads as 0
 
         # ONE DMA read per poll, not seven. The symbols are scattered across
         # a few hundred bytes of CRYPTO_COLD_SHADOW, and this loop runs every
@@ -383,7 +390,7 @@ def main() -> int:
         # traffic the shared device does not need. Span, then slice; the
         # bounds come from labels.txt, so they follow the build.
         span_lo = min(addrs.values())
-        span_hi = max(addrs[n] + w for n, w in SYMBOLS.items())
+        span_hi = max(addrs[n] + w for n, w in widths.items())
         assert span_hi - span_lo <= 8192, (
             f"the http parser state now spans {span_hi - span_lo} B "
             f"(${span_lo:04X}-${span_hi:04X}); read it per symbol instead")
@@ -391,7 +398,7 @@ def main() -> int:
         def read_state():
             blob = bytes(client.read_mem(span_lo, span_hi - span_lo))
             raw = {}
-            for name, width in SYMBOLS.items():
+            for name, width in widths.items():
                 off = addrs[name] - span_lo
                 raw[name] = blob[off:off + width]
             return decode_body_state(raw)
