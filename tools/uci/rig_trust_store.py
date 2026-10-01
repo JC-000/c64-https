@@ -370,7 +370,7 @@ def run_phases(r: Rig):
         # they are linked, in cert_buf. The load above must have fetched
         # them there and nothing may have run since.
         err = r.tr.read_memory(r.L["cold_err"], 1)[0]
-        mark = r.tr.read_memory(r.L["cold_marker"], 1)[0]
+        mark = r.tr.read_memory(r.L["cold_marker_trust"], 1)[0]
         r.require(err == 0 and mark == COLD_MARK,
                   f"cold bank: the image is in cert_buf (cold_err={err}, "
                   f"marker=${mark:02X})")
