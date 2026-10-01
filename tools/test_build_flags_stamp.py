@@ -237,6 +237,80 @@ class Farm:
         return out
 
 
+class X25519Farm(Farm):
+    """A Farm whose libs/x25519 is a private COPY, so a test may edit it.
+
+    Everything else under libs/ stays a symlink into the checkout. The copy
+    carries no .git, so tools/integration/sibling_src_digest.sh takes its
+    find(1) fallback here; the git path is what every real build exercises.
+    """
+
+    def __init__(self):
+        super().__init__()
+        os.unlink(self.dir / "libs")
+        (self.dir / "libs").mkdir()
+        for entry in (REPO / "libs").iterdir():
+            if entry.name == "x25519":
+                shutil.copytree(entry, self.dir / "libs" / "x25519",
+                                ignore=shutil.ignore_patterns(".git"))
+            else:
+                os.symlink(entry, self.dir / "libs" / entry.name)
+
+    def mutate_fe25519_add(self):
+        """Carry-in 1 instead of 0: every fe25519_add result off by one."""
+        src = self.path("libs/x25519/src/fe25519.s")
+        text = src.read_text()
+        head, sep, tail = text.partition(".proc fe25519_add")
+        assert sep, "fe25519_add not found in libs/x25519/src/fe25519.s"
+        body, loop, rest = tail.partition("@add_loop:")
+        assert loop and body.count("        clc\n") == 1, (
+            "fe25519_add's single carry-clear before @add_loop moved; "
+            "re-aim this mutation")
+        src.write_text(head + sep + body.replace("        clc\n",
+                                                 "        sec\n") + loop + rest)
+
+
+def test_sibling_source_edit_matches_a_clean_build():
+    """A libs/x25519 source edit must reach the PRG without `make clean`.
+
+    build/lib/x25519.a used to depend only on its wrapper and the flags
+    stamp, so an edited sibling source -- which is what a submodule pin
+    bump is -- left the old archive linked at exit 0 ("Nothing to be done").
+    build/lib/x25519.src.stamp (a content digest, compared at parse time)
+    is what deletes it now. The inverse is pinned too: an untouched tree
+    must not rebuild the archive or relink.
+    """
+    _require_toolchain()
+    with X25519Farm() as farm:
+        farm.mutate_fe25519_add()
+        farm.make()
+        oracle = farm.sha()
+    with X25519Farm() as farm:
+        farm.make()
+        before = farm.sha()
+        archive = farm.path("build/lib/x25519.a").stat().st_mtime_ns
+        prg = farm.path(PRG).stat().st_mtime_ns
+        farm.make()
+        assert farm.path("build/lib/x25519.a").stat().st_mtime_ns == archive, (
+            "an unchanged libs/x25519 rebuilt build/lib/x25519.a")
+        assert farm.path(PRG).stat().st_mtime_ns == prg, (
+            "an unchanged libs/x25519 relinked the PRG")
+        farm.mutate_fe25519_add()
+        farm.make()
+        after = farm.sha()
+
+    assert before != oracle, (
+        "the fe25519_add mutation does not change the PRG even from a clean "
+        "tree -- this test's oracle is vacuous; re-aim the mutation")
+    assert after == oracle, (
+        "STALE SIBLING ARCHIVE: after editing libs/x25519/src/fe25519.s, "
+        f"`make` produced\n  {after}\nbut a clean build of the edited tree "
+        f"produces\n  {oracle}\n"
+        + ("i.e. the OLD crypto is still linked. " if after == before else "")
+        + "build/lib/x25519.src.stamp should have deleted build/lib/x25519.a "
+        "at parse time.")
+
+
 def _clean_build_sha(*flags):
     """The PRG a `make clean` build of these flags produces — the oracle."""
     with Farm() as farm:

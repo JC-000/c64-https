@@ -382,7 +382,14 @@ CONTRACT_DEFINES="-D SHARED_SQTAB_INIT -D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_
 # actually proves the values landed.
 CONTRACT_ZP_DEFINES="-D nistcurves_zp_ptr2=0x3d -D fp_mul_i=0x39 -D fp_mul_j=0x3a"
 echo "[p256/$PROFILE] building libs/nistcurves $UPSTREAM_TARGET (APP_OWNED + gated bare exports)..."
-make -s -C "$LIB_DIR" "$UPSTREAM_TARGET" CONTRACT_DEFINES="$CONTRACT_DEFINES" CONTRACT_ZP_DEFINES="$CONTRACT_ZP_DEFINES" >/dev/null
+# -B: upstream's make is mtime-based and its objects live in
+# libs/nistcurves/build, which `make clean` does not touch. Measured: a
+# source restored in the same second its object was built (macOS Make 3.81,
+# 1-second resolution) left the edited object in place, and `make clean &&
+# make` linked it at exit 0. This script only runs when the top-level
+# Makefile has decided the archive must be rebuilt, so rebuild it whole
+# (~0.2 s).
+make -B -s -C "$LIB_DIR" "$UPSTREAM_TARGET" CONTRACT_DEFINES="$CONTRACT_DEFINES" CONTRACT_ZP_DEFINES="$CONTRACT_ZP_DEFINES" >/dev/null
 
 if [ ! -f "$UPSTREAM_ARCHIVE" ]; then
     echo "ERROR: upstream archive missing: $UPSTREAM_ARCHIVE" >&2
