@@ -13,6 +13,11 @@ real TRUST.A / TRUST.B):
         TRUST_STORE_DIR=/USB1/c64https-test
     U64_HOST=... python3 tools/uci/rig_trust_store.py
 
+On uci-comb (USE_NISTCURVES_ONCHIP_COMB=1) the store runs from the cold
+bank (src/net/uci/cold_bank.s): every call is fetched from the REU into
+cert_buf. Boot then includes the ~45 s precompute at 48 MHz, so set
+C64_INIT_WAIT (e.g. 90), the seconds the boot may take to reach the menu.
+
 Everything happens in /USB1/c64https-test/, which the rig creates, requires
 to hold nothing but TRUST.A / TRUST.B, and removes at the end. No socket is
 ever opened (the program's boot DHCP is the only network traffic), so the
@@ -89,6 +94,7 @@ TEAR_LEN = 100
 SENT = 0xA5
 OP_LOAD, OP_SAVE, OP_TEAR = 0, 1, 2
 FA_WRITE_NEW = 0x0A
+COLD_MARK = 0x5C                # src/cold_bank.inc
 SPKI_1 = hashlib.sha256(b"rig key one").digest()
 SPKI_2 = hashlib.sha256(b"rig key two").digest()
 NEEDED = ("trust_store_load", "trust_store_stage", "trust_store_save",
@@ -110,8 +116,12 @@ def load_labels():
 def image_store_path(prg: bytes, labels) -> str:
     """The TRUST_STORE_DIR baked into the image (ts_name, up to the letter)."""
     load = prg[0] | prg[1] << 8
-    off = labels["ts_name"] - load + 2
-    end = labels["ts_letter"] - load + 2
+    # Cold bank: ts_name is linked to run in cert_buf; the PRG carries it
+    # in the image at $C000.
+    delta = (labels["__TRUST_STORE_CODE_LOAD__"] - labels["__TRUST_STORE_CODE_RUN__"]
+             if "__TRUST_STORE_CODE_RUN__" in labels else 0)
+    off = labels["ts_name"] + delta - load + 2
+    end = labels["ts_letter"] + delta - load + 2
     return prg[off:end].decode("ascii", "replace")
 
 
@@ -240,7 +250,8 @@ class Rig:
         load_verified_and_run(self.client, self.prg)
         # Boot runs net_init (DHCP) before the menu; the store needs neither,
         # but 'q' must reach the menu, not the boot.
-        deadline = time.monotonic() + (30.0 if SCALE == 1 else 180.0)
+        deadline = time.monotonic() + float(os.environ.get(
+            "C64_INIT_WAIT", 30.0 if SCALE == 1 else 180.0))
         while time.monotonic() < deadline:
             if self.tr.read_memory(self.L["net_initialized"], 1)[0]:
                 break
@@ -354,6 +365,15 @@ def run_phases(r: Rig):
     c, a, st = r.load("lwn.net")                    # TS_BUF = TRUST.B's image
     r.check(st["slot"] == 1, "loaded slot B (the tear targets A)")
     pre_b = fb2
+    if "cold_call" in r.L:
+        # Cold bank: OP_TEAR jsr's ts_set_name / dos_open / dos_write where
+        # they are linked, in cert_buf. The load above must have fetched
+        # them there and nothing may have run since.
+        err = r.tr.read_memory(r.L["cold_err"], 1)[0]
+        mark = r.tr.read_memory(r.L["cold_marker_trust"], 1)[0]
+        r.require(err == 0 and mark == COLD_MARK,
+                  f"cold bank: the image is in cert_buf (cold_err={err}, "
+                  f"marker=${mark:02X})")
     rp, ra, took = r.sys(OP_TEAR)
     ra &= 1                                         # the write's carry
     torn_open = ftp.get(A_PATH)
@@ -518,7 +538,8 @@ def main() -> int:
              arbiter.alloc(1, name="result_p"))
     sha = hashlib.sha256(prg).hexdigest()
     print(f"PRG sha256 {sha}\nstore {path}A/B; routine {code_len} B @ ${alloc[0]:04X}; "
-          f"{TURBO_MHZ} MHz; device {HOST}")
+          f"{TURBO_MHZ} MHz; device {HOST}; "
+          f"{'cold bank (REU -> cert_buf)' if 'cold_call' in L else 'resident store'}")
 
     lock = DeviceLock(HOST)
     try:
