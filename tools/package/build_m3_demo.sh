@@ -8,7 +8,8 @@
 #   c64-https-uci-m3-demo.d64   that PRG alone, bootable with LOAD"*",8,1
 #   README.txt                  what it is, what it needs, how to run it, and
 #                               the provenance (commit, flags, sha256s)
-#   SHA256SUMS                  the three files above, `shasum -a 256 -c` form
+#   SHA256SUMS                  sha256 of the PRG, the .d64 and README.txt,
+#                               in `shasum -a 256 -c` form
 #
 # These four are the GitHub pre-release's assets; nothing else is written.
 #
@@ -127,9 +128,8 @@ What it needs
     the clock set by SNTP (certificate dates are checked).
   - The Ultimate's Command Interface enabled.
   - No REU. Turbo is optional but recommended: the client paces every UCI
-    register access for the FPGA, so the default article (about 750 KB)
-    takes about 3.5 min at 48 MHz and hours at 1 MHz. Small pages are
-    fine at any speed.
+    register access for the FPGA, so large pages are slow at 1 MHz (not
+    measured there; see the measured 48 MHz times below).
   Interface implemented: $SPEC.
 
 How to run it
@@ -148,15 +148,29 @@ How to run it
 
 Three URLs to try
 -----------------
-  1. $DEMO_HOST $DEMO_PATH   (the default: about 750 KB; about 3.5 min at
-     48 MHz, the body counted to its Content-Length)
-  2. github.com /robots.txt               (14 KB)
+  1. $DEMO_HOST $DEMO_PATH   (the default)
+  2. github.com /robots.txt
   3. 208-80-153-224.nip.io /              (a NEGATIVE: a Wikipedia address
      under a name its certificate does not carry. Expected:
-     TLS HANDSHAKE FAILED / 94,CERTIFICATE NAME MISMATCH: 0x00000004)
+     TLS HANDSHAKE FAILED / 94,CERTIFICATE NAME MISMATCH: 0x00000004.
+     It depends on two things outside this project: the nip.io DNS service,
+     and 208.80.153.224 still serving Wikipedia. If either changes, pick
+     another <ip-with-dashes>.nip.io name for a site whose certificate does
+     not name it.)
+
+Measured with THIS image (PRG sha256 above), validated on an Ultimate 64
+Elite (U64E), firmware 3.15 git f2e46946, 48 MHz, the .d64 mounted on drive
+8 and loaded with LOAD"*",8,1 (tools/uci/rig_https_m3_demo.py), 2026-10-01:
+  1. HTTP 200, 751,108 B consumed == Content-Length, 207 s from G to
+     CONNECTION CLOSED (the page size changes as the article is edited).
+  2. HTTP 200, 14,181 B consumed == Content-Length, 7 s.
+  3. Refused: 94,CERTIFICATE NAME MISMATCH: 0x00000004.
+  Other Ultimate models, and other clock speeds, have not been tested.
 
 What an unsupported device shows
 --------------------------------
+(Per the M3 spec and our model tests, not yet observed on hardware with
+this image.)
   - Firmware without the M3 commands: I prints NETWORK INIT FAILED and the
     firmware's answer, 21,UNKNOWN COMMAND.
   - No Command Interface (a plain C64, or the interface disabled): NETWORK
