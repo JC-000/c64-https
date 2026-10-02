@@ -103,15 +103,17 @@ ASSERTS_TU = REPO / "src" / "net_err_registry_asserts.s"
 IP65_FAMILY = (0x40, 0x7F)
 UCI_FAMILY = (0x80, 0xBF)
 
-TOTAL_CHECKS = 10
+TOTAL_CHECKS = 11
 CERTIFIES = ("agreement between this repo's net_last_error allocations and "
              "c64-wireguard's canonical registry")
 
-# The one code we define that is a c64-wireguard allocation: mirrored here,
-# reserved, never emitted, so the name is readable in our diagnostics. It is
-# checked in the opposite direction from every other code (it must EQUAL
-# theirs), and is excluded from the collision sweep by name, never by value.
-MIRRORED = "UCI_ERR_LONG_READ"
+# The codes we define that are c64-wireguard allocations, mirrored here with
+# their names, values and meanings: $8A reserved and never emitted; $8D and
+# $8E emitted by BACKEND=uci-m3 only. They are checked in the opposite
+# direction from every other code (each must EQUAL theirs, name and value),
+# and are excluded from the collision sweep by name, never by value.
+MIRRORED = frozenset({"UCI_ERR_LONG_READ", "UCI_ERR_OPEN_REFUSED",
+                      "UCI_ERR_CMD_UNKNOWN"})
 
 # The env var that opts out of the cross-repo checks. DELIBERATELY NOT the
 # repo-wide C64_ALLOW_SKIP: that one also gates test_build_flags_stamp.py's
@@ -315,7 +317,7 @@ def test_every_code_is_in_its_family_range():
 
 def test_every_code_is_registered_in_the_asserts_tu():
     """The assembler cannot check a code nobody registered with it."""
-    registered = _registered_names() | {MIRRORED}
+    registered = _registered_names() | MIRRORED
     missing = sorted(n for n in _our_codes() if n not in registered)
     assert not missing, (
         f"error codes defined in our headers but not registered in "
@@ -358,7 +360,7 @@ def test_no_code_of_ours_sits_on_a_peer_owned_value():
         by_value.setdefault(pvalue, []).append(pname)
     clashes = []
     for name, (value, _path, _family) in sorted(_our_codes().items()):
-        if name == MIRRORED:
+        if name in MIRRORED:
             continue
         if value in by_value:
             clashes.append(f"{name} = ${value:02X} == {by_value[value]}")
@@ -380,8 +382,9 @@ def test_every_snapshot_entry_is_asserted_by_a_macro():
     missing = []
     for name, value in sorted(snapshot.items(), key=lambda kv: kv[1]):
         family = "IP65" if _in(value, IP65_FAMILY) else "UCI"
-        if name == "NET_ERR_PEER_UCI_LONG_READ":
-            continue        # the mirror: asserted for equality outside the macro
+        if name.replace("NET_ERR_PEER_", "") in {
+                m.replace("UCI_ERR_", "UCI_") for m in MIRRORED}:
+            continue        # a mirror: asserted for equality outside the macro
         if name not in refs[family]:
             missing.append(f"{name} (${value:02X}) missing from "
                            f"NET_ERR_ASSERT_{family}")
@@ -479,7 +482,7 @@ def test_no_code_of_ours_is_claimed_by_the_peer_registry():
     registry = _peer_registry(root)
     bad = []
     for name, (value, _path, _family) in sorted(_our_codes().items()):
-        if name == MIRRORED:
+        if name in MIRRORED:
             continue
         row = registry.get(value)
         if row and row[1] == "c64-wireguard":
@@ -503,6 +506,29 @@ def test_every_code_of_ours_appears_in_the_peer_registry():
         f"{unlisted}. Allocate them in {root}/src/net_abi.inc — a code that "
         f"is not in the registry is a code the next lane will mint over "
         f"(#184).")
+
+
+def test_mirrors_match_the_peer_registry():
+    """Every mirrored code carries the peer's NAME at the peer's VALUE, and
+    the peer still owns it. A mirror is only worth having if a post-mortem
+    reading our byte reads exactly what c64-wireguard means by it."""
+    root = _require_peer()
+    registry = _peer_registry(root)
+    ours = _our_codes()
+    wrong = []
+    for name in sorted(MIRRORED):
+        if name not in ours:
+            wrong.append(f"{name} is listed as a mirror but defined in "
+                         f"neither header")
+            continue
+        value = ours[name][0]
+        row = registry.get(value)
+        if row != (name, "c64-wireguard"):
+            wrong.append(f"{name} = ${value:02X}, but the registry row at "
+                         f"${value:02X} is {row}")
+    assert not wrong, ("mirrors that do not match the canonical registry: "
+                       + "; ".join(wrong)
+                       + f". Registry: {root}/src/net_abi.inc (#184).")
 
 
 def main():

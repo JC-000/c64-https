@@ -10,7 +10,9 @@
         .include "constants.inc"
 
         ; ---- exports ----
+.ifndef BACKEND_UCI_M3
         .export http_get
+.endif
         .export http_build_get
         .export http_recv_body
         .export http_recv_response
@@ -97,6 +99,7 @@
 ; =============================================================================
         .segment "CODE"
 
+.ifndef BACKEND_UCI_M3          ; uci-m3: no 6510 TLS; see the .else below
 http_get:
         jsr http_resp_init      ; a failure below must not leave the last
                                 ;  fetch's http_status behind
@@ -278,6 +281,89 @@ http_recv_loop:
         jsr http_body_finish
         clc
         rts
+.else
+; =============================================================================
+; http_recv_body - BACKEND=uci-m3: the same parser, fed from the rx ring.
+;
+; The ESP32 runs the TLS session, so the ring holds PLAINTEXT here and the
+; parser reads it as the plain-HTTP path does (http_in_mode 0). Ends:
+;   - the response's own framing completes (Content-Length / last chunk):
+;     C=0 at once;
+;   - the stream ends: net_poll saw $0000 + 01 or 05 (NET_TCP_CLOSED). The
+;     framing decides (http_recv_timeout_verdict). With 05 (no close_notify,
+;     S 1.6) an UNFRAMED body is C=1: "trust the data only if the protocol
+;     framed its length", and a Connection: close body without a length is
+;     exactly that case;
+;   - the session died (NET_TCP_ERROR: 12/14/16/17, a hole, a stale
+;     handle): C=1;
+;   - no byte for M3_B_HTTP_IDLE (60 s, CIA2 clock): a framed body is
+;     judged by its framing (short of it: C=1); an UNFRAMED one is C=1.
+;     Its end IS the close, and no close came, so nothing says it is whole.
+; So an unframed body is complete only on 01, the peer's close_notify.
+; (The TLS arm above still hands a stalled unframed body to the shared
+; verdict, whose unframed arm answers C=0; that is unchanged here.)
+; Output and caller contract as the TLS http_recv_body above.
+; =============================================================================
+        .import m3_dl_arm
+        .import m3_dl_expired
+        .import m3_eof_code
+        .import tcp_recv_tail
+        .include "m3.inc"
+
+http_recv_body:
+        jsr http_resp_init      ; no state from an earlier response
+        lda #0
+        sta http_in_mode        ; input mode 0: the ring (plaintext here)
+@m3_progress:
+        lda tcp_recv_tail
+        sta @m3_tail
+        lda tcp_recv_tail+1
+        sta @m3_tail+1
+        lda #<M3_B_HTTP_IDLE
+        ldx #>M3_B_HTTP_IDLE
+        ldy #M3_DL_APP
+        jsr m3_dl_arm
+@m3_loop:
+        jsr net_poll
+        jsr http_recv_response
+        bcc @m3_complete
+        lda net_tcp_state
+        cmp #NET_TCP_CONNECTED
+        bne @m3_ended
+        lda tcp_recv_tail
+        cmp @m3_tail
+        bne @m3_progress
+        lda tcp_recv_tail+1
+        cmp @m3_tail+1
+        bne @m3_progress
+        ldy #M3_DL_APP
+        jsr m3_dl_expired
+        bcc @m3_loop
+        lda http_cl_valid       ; stalled: framed -> the framing decides,
+        ora http_chunked        ;  unframed -> no close came: incomplete
+        beq @m3_dead
+        jmp http_recv_timeout_verdict
+@m3_ended:
+        cmp #NET_TCP_CLOSED
+        bne @m3_dead
+        lda m3_eof_code
+        cmp #5
+        bne @m3_framed          ; 01: everything delivered, cleanly
+        lda http_cl_valid
+        ora http_chunked
+        beq @m3_dead            ; 05 + no framing: possibly truncated
+@m3_framed:
+        jmp http_recv_timeout_verdict
+@m3_dead:
+        jsr http_body_finish
+        sec
+        rts
+@m3_complete:
+        jsr http_body_finish
+        clc
+        rts
+@m3_tail: .word 0
+.endif ; BACKEND_UCI_M3
 
 ; -----------------------------------------------------------------------------
 ; http_recv_timeout_verdict - decide the carry when http_recv_body's tick
@@ -375,6 +461,7 @@ http_recv_timeout_verdict:
 ;   rigs' MemoryArbiter scratch — while TLS_CODE is NET_CODE, which has
 ;   the room. Nothing here may go in CODE (ip65 LOADER).
 ; -----------------------------------------------------------------------------
+.ifndef BACKEND_UCI_M3
         .segment "TLS_CODE"
 http_recv_tick:
         bit tls_state
@@ -404,6 +491,8 @@ http_recv_tick:
 
 http_recv_ticks: .word 0        ; consecutive no-data ticks (was @recv_timeout)
 
+.endif ; BACKEND_UCI_M3
+
 ; -----------------------------------------------------------------------------
 ; http_resp_init - forget the previous response. The one reset of per-response
 ;   state, run at the start of every request (http_get, http_get_plain,
@@ -411,8 +500,9 @@ http_recv_ticks: .word 0        ; consecutive no-data ticks (was @recv_timeout)
 ;   never parses a status line, cannot leave the last fetch's http_status
 ;   (or body count, framing flags, parser state) for a reader to find — and
 ;   again by http_recv_body for callers that drive it directly.
-;   Under ip65 in CRYPTO_CODE (CRYPTO_RESIDENT): CODE is the LOADER and
-;   TLS_CODE's CRYPTO_OVERLAY has single-digit bytes free.
+;   Every backend, uci-m3 included (outside its .ifndef). Under ip65 in
+;   CRYPTO_CODE (CRYPTO_RESIDENT): CODE is the LOADER and TLS_CODE's
+;   CRYPTO_OVERLAY has single-digit bytes free.
 ;   Clobbers: A
 ; -----------------------------------------------------------------------------
 .ifdef BACKEND_UCI

@@ -189,6 +189,16 @@ NET_ERR_ASSERT_UCI UCI_ERR_BAD_READ_HDR, "UCI_ERR_BAD_READ_HDR"
 ; cannot go through a macro, it goes here beside this note.
 NET_ERR_CLAIM_VALUE UCI_ERR_LONG_READ
 
+; TWO MORE MIRRORS, same shape and same reasoning as $8A, except that these
+; two ARE emitted — by BACKEND=uci-m3 only (src/net/uci-m3/net.s), with the
+; peer's meanings exactly: $8D the firmware refused an open and named the
+; refusal on the status channel; $8E the firmware answered "21,UNKNOWN
+; COMMAND". Equal to the peer values, claimed by hand, pinned below.
+.assert UCI_ERR_OPEN_REFUSED = NET_ERR_PEER_UCI_OPEN_REFUSED, error, "UCI_ERR_OPEN_REFUSED must mirror c64-wireguard's $8D exactly (#184)"
+.assert UCI_ERR_CMD_UNKNOWN = NET_ERR_PEER_UCI_CMD_UNKNOWN, error, "UCI_ERR_CMD_UNKNOWN must mirror c64-wireguard's $8E exactly (#184)"
+NET_ERR_CLAIM_VALUE UCI_ERR_OPEN_REFUSED
+NET_ERR_CLAIM_VALUE UCI_ERR_CMD_UNKNOWN
+
 ; PUBLISHED VALUES, PINNED. The registry's single rule is that a published
 ; value is never reassigned — not renumbered to close a gap, not reused
 ; because a code turned out unreachable. These literals are that rule made
@@ -210,6 +220,8 @@ NET_ERR_CLAIM_VALUE UCI_ERR_LONG_READ
 .assert UCI_ERR_NO_SOCKET    = $88, error, "UCI_ERR_NO_SOCKET is published as $88 and must never be reassigned (#184)"
 .assert UCI_ERR_WAIT_TIMEOUT = $89, error, "UCI_ERR_WAIT_TIMEOUT is published as $89 and must never be reassigned (#184)"
 .assert UCI_ERR_LONG_READ    = $8A, error, "UCI_ERR_LONG_READ is published as $8A and must never be reassigned (#184)"
+.assert UCI_ERR_OPEN_REFUSED = $8D, error, "UCI_ERR_OPEN_REFUSED is published as $8D and must never be reassigned (#184)"
+.assert UCI_ERR_CMD_UNKNOWN  = $8E, error, "UCI_ERR_CMD_UNKNOWN is published as $8E and must never be reassigned (#184)"
 .assert UCI_ERR_BAD_READ_HDR = $8B, error, "UCI_ERR_BAD_READ_HDR is published as $8B and must never be reassigned (#184)"
 
 ; $00 is "no error" in every family, fleet-wide, and is not allocatable.

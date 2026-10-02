@@ -77,8 +77,8 @@ Hardware conventions honored (CLAUDE.md "UCI rig scripts"):
   * turbo set BEFORE reset with the read-skip-write pattern — and an
     unreadable turbo read now aborts rather than writing blind (#187);
   * /Temp GC after enable_uci (fw <= 3.14d writemem leak);
-  * every DMA address from build_policy_and_arbiter_with_overlay_
-    carveout() — nothing hardcoded;
+  * every DMA address from build_policy_and_low_ram_arbiter() (pages 2
+    and 3, outside the link) — nothing hardcoded;
   * DEBUG_CAPTURE (6510 bus stream) is NOT wired here at all — OFF;
   * progress is read-only DMA at ~1-2 Hz (reads are wedge-safe;
     writemem is the leaky side), progress PRINTS at most every 10 s;
@@ -118,8 +118,7 @@ from _device_lock_helper import (
     LockTimeoutConfigError, acquire_device_lock,
 )
 from _prg_load import PrgLoadError, load_verified_and_run
-from _memory_policy import (build_policy,
-                            build_policy_and_arbiter_with_overlay_carveout)
+from _memory_policy import build_policy, build_policy_and_low_ram_arbiter
 from _device_prep import REQUIRED_REU_SIZE, DevicePrepError, prepare_device
 from _rig_lifecycle import (
     guard_socket_teardown, teardown_warning, tls_evidence_addrs,
@@ -154,10 +153,10 @@ EXPECT_STATUS = int(os.environ.get("EXPECT_STATUS", "200"))
 
 # Issue #135 fallout: the DMA trampoline's ~464 B of harness scratch came out
 # of the CRYPTO_OVERLAY tail, which the 491 B src/x509_name.s consumed on the
-# comb profile, leaving too little (tools/measure_margins.py measures the
-# tail today). Menu mode needs no scratch at all and is the
-# default; WIKI_TRAMPOLINE=1 restores the old path for a host/path that does
-# not match what the PRG was built with.
+# comb profile. Menu mode needs no scratch at all and is the default;
+# WIKI_TRAMPOLINE=1 runs the trampoline, now from low-RAM scratch sized to
+# what it writes (#209), for a host/path that does not match what the PRG
+# was built with.
 MENU_MODE = os.environ.get("WIKI_TRAMPOLINE") != "1"
 MENU_STABLE_POLLS = int(os.environ.get("MENU_STABLE_POLLS", "3"))
 # Wikipedia's robot policy 403s UA-less clients; the reference fetch
@@ -549,13 +548,22 @@ def main() -> int:
         print(f"\nMemoryPolicy reserved {len(memory_policy.reserved_regions)}"
               f" region(s); menu mode allocates no C64 scratch")
     else:
-        memory_policy, arbiter = build_policy_and_arbiter_with_overlay_carveout(
-            LABELS_PATH, PRG_PATH,
+        # Low-RAM scratch, sized to what is written (#209): every linked
+        # tail this used to carve has been spent at one time or another,
+        # most recently the comb CRYPTO_OVERLAY tail. The routine goes first
+        # so it takes page 3; first fit then puts the strings and markers in
+        # page 2 or behind the routine, whichever has room.
+        memory_policy, arbiter = build_policy_and_low_ram_arbiter(
+            LABELS_PATH, PRG_PATH, page2=True,
         )
-        routine_addr  = arbiter.alloc(256, name="trampoline")
-        host_str_addr = arbiter.alloc(64,  name="host_str")
-        path_str_addr = arbiter.alloc(128, name="path_str")
-        marker_base   = arbiter.alloc(16,  name="markers")
+        routine_len = len(build_wiki_routine(
+            labels, routine_addr=0, host_str_addr=0, path_str_addr=0,
+            sentinel_addr=0, progress_addr=0, carry_flag_addr=0,
+            host_len=len(WIKI_HOST), path_len=len(WIKI_PATH), port=WIKI_PORT))
+        routine_addr  = arbiter.alloc(routine_len, name="trampoline")
+        path_str_addr = arbiter.alloc(len(WIKI_PATH) + 1, name="path_str")
+        host_str_addr = arbiter.alloc(len(WIKI_HOST) + 1, name="host_str")
+        marker_base   = arbiter.alloc(3, name="sentinel+progress+carry")
         sentinel_addr, progress_addr, carry_flag_addr = (
             marker_base, marker_base + 1, marker_base + 2)
         print(f"\nMemoryPolicy reserved {len(memory_policy.reserved_regions)}"
@@ -711,11 +719,9 @@ def main() -> int:
             for i in range(0, len(routine_bytes), CHUNK):
                 transport.write_memory(routine_addr + i,
                                        routine_bytes[i:i + CHUNK])
-            transport.write_memory(host_str_addr,
-                                   (host_bytes + b"\x00").ljust(64, b"\x00"))
-            transport.write_memory(path_str_addr,
-                                   (path_bytes + b"\x00").ljust(128, b"\x00"))
-            transport.write_memory(marker_base, bytes(16))
+            transport.write_memory(host_str_addr, host_bytes + b"\x00")
+            transport.write_memory(path_str_addr, path_bytes + b"\x00")
+            transport.write_memory(marker_base, bytes(3))
 
             # Arm the REU body sink explicitly. The HTTPS_BODY_TO_REU build
             # sets http_body_sink=1 in do_https_get (the menu 'G' path), but

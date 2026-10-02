@@ -569,12 +569,25 @@ LOW_RAM_HARNESS_WRITERS_UNUSED = frozenset({
 })
 
 
+#: $02A7-$02FF: 89 B that neither the KERNAL nor BASIC ever touches — the
+#: last KERNAL variable is the PAL/NTSC flag at $02A6, and $0300 starts the
+#: BASIC vectors. The second low-RAM window, for the rigs whose routine plus
+#: data outgrow page 3 on its own. Like page 3 it is outside the link: no
+#: c64-https or sibling-library object is placed or addressed there (the
+#: only $02A7 in libs/ is nistcurves' standalone main.s boot sentinel, which
+#: is not in the archive this repo links), and c64-test-harness declares no
+#: writer in it. $0300-$0333 between the two windows — BASIC vectors, the
+#: SYS register save, the KERNAL vectors — is withheld from the arbiter.
+LOW_RAM_SCRATCH_PAGE2 = (0x02A7, 0x02FF)
+
+
 def build_policy_and_low_ram_arbiter(
     labels_path: str | Path,
     prg_path: str | Path,
     *,
     unknown: UnknownPolicy = UnknownPolicy.WARN,
     extra_reserved: tuple[MemoryRegion, ...] = (),
+    page2: bool = False,
 ) -> tuple[MemoryPolicy, MemoryArbiter]:
     """Policy + an arbiter scoped to :data:`LOW_RAM_SCRATCH` (#209).
 
@@ -582,22 +595,38 @@ def build_policy_and_low_ram_arbiter(
     reshapes CRYPTO_OVERLAY cannot take the rigs' scratch with it. 204 B:
     size allocations to what is written (a 117 B trampoline, a 64 B host,
     an 8 B path and 3 marker bytes is 192 B), not to round numbers.
+
+    ``page2=True`` adds :data:`LOW_RAM_SCRATCH_PAGE2`, 293 B in all but in
+    two pieces: no single allocation can exceed 204 B, so allocate the
+    routine first (it lands in page 3) and the data after it (first fit
+    puts it in page 2).
     """
-    lo, hi = LOW_RAM_SCRATCH
+    windows = [LOW_RAM_SCRATCH]
+    if page2:
+        windows.insert(0, LOW_RAM_SCRATCH_PAGE2)
     unknown_writers = sorted(
         f"{r.span} {r.owner}" for r in HARNESS_SCRATCH
+        for lo, hi in windows
         if r.start <= hi and r.end > lo
         and r.owner not in LOW_RAM_HARNESS_WRITERS_UNUSED)
     if unknown_writers:
+        spans = ", ".join(f"${lo:04X}-${hi:04X}" for lo, hi in windows)
         raise RuntimeError(
-            "c64-test-harness declares page-3 writers this repo has not "
-            "audited against the rigs' low-RAM scratch window "
-            f"${lo:04X}-${hi:04X}: {unknown_writers}. Check whether any "
-            "tools/uci rig calls them; if none does, add the owner to "
-            "LOW_RAM_HARNESS_WRITERS_UNUSED in tools/uci/_memory_policy.py.")
+            "c64-test-harness declares low-RAM writers this repo has not "
+            f"audited against the rigs' scratch window(s) {spans}: "
+            f"{unknown_writers}. Check whether any tools/uci rig calls them; "
+            "if none does, add the owner to LOW_RAM_HARNESS_WRITERS_UNUSED "
+            "in tools/uci/_memory_policy.py.")
+    if page2:
+        # The gap between the windows, reserved in the policy (not just the
+        # arbiter) so the transport refuses a write there too.
+        extra_reserved = extra_reserved + (MemoryRegion(
+            LOW_RAM_SCRATCH_PAGE2[1] + 1, LOW_RAM_SCRATCH[0],
+            note="BASIC/KERNAL vectors"),)
     policy = build_policy(labels_path, prg_path, unknown=unknown,
                           extra_reserved=extra_reserved)
-    arbiter = MemoryArbiter(policy=policy, window=LOW_RAM_SCRATCH,
+    arbiter = MemoryArbiter(policy=policy,
+                            window=(windows[0][0], windows[-1][1]),
                             exclude_harness_scratch=False)
     return policy, arbiter
 
@@ -605,6 +634,7 @@ def build_policy_and_low_ram_arbiter(
 __all__ = [
     "LOW_RAM_HARNESS_WRITERS_UNUSED",
     "LOW_RAM_SCRATCH",
+    "LOW_RAM_SCRATCH_PAGE2",
     "build_policy",
     "build_arbiter",
     "build_policy_and_arbiter",

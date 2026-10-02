@@ -31,7 +31,7 @@ from _device_lock_helper import (
 )
 from _prg_load import PrgLoadError, load_verified_and_run
 
-from _memory_policy import build_policy_and_arbiter
+from _memory_policy import build_policy_and_low_ram_arbiter
 from _rig_lifecycle import guard_socket_teardown
 
 
@@ -48,6 +48,8 @@ SENTINEL_ADDR: int = -1
 PROGRESS_ADDR: int = -1
 CARRY_FLAG_ADDR: int = -1
 
+HOST_STR_BYTES   = 32
+PATH_STR_BYTES   = 8
 SENTINEL_VALUE   = 0xBB
 LIVE_HOSTNAME    = "www.zimmers.net"
 LIVE_PORT        = 80
@@ -232,15 +234,26 @@ def main() -> int:
     for n in sorted(required):
         print(f"  {n:20s} = ${labels[n]:04X}")
 
+    # --- Scratch: page 3, sized to what is written (#209) ---
+    # _memory_policy.build_policy_and_low_ram_arbiter says why $0334-$03FF
+    # and not a tail of some linked region: on the fastest product the
+    # CRYPTO_OVERLAY tail this rig used to carve is smaller than the 387 B it
+    # asked for.
     global ROUTINE_ADDR, HOST_STR_ADDR, PATH_STR_ADDR
     global SENTINEL_ADDR, PROGRESS_ADDR, CARRY_FLAG_ADDR
-    memory_policy, arbiter = build_policy_and_arbiter(LABELS_PATH, PRG_PATH)
-    ROUTINE_ADDR    = arbiter.alloc(256, name="trampoline")
-    HOST_STR_ADDR   = arbiter.alloc(64,  name="host_str")
-    PATH_STR_ADDR   = arbiter.alloc(64,  name="path_str")
-    SENTINEL_ADDR   = arbiter.alloc(1,   name="sentinel")
-    PROGRESS_ADDR   = arbiter.alloc(1,   name="progress")
-    CARRY_FLAG_ADDR = arbiter.alloc(1,   name="carry_flag")
+    memory_policy, arbiter = build_policy_and_low_ram_arbiter(
+        LABELS_PATH, PRG_PATH,
+    )
+    markers         = arbiter.alloc(3, name="sentinel+progress+carry")
+    SENTINEL_ADDR, PROGRESS_ADDR, CARRY_FLAG_ADDR = (
+        markers, markers + 1, markers + 2)
+    HOST_STR_ADDR   = arbiter.alloc(HOST_STR_BYTES, name="host_str")
+    PATH_STR_ADDR   = arbiter.alloc(PATH_STR_BYTES, name="path_str")
+    # Every operand in the routine is absolute, so its length does not
+    # depend on where it lands: measure it at 0, then allocate exactly that.
+    ROUTINE_ADDR    = 0
+    routine_len     = len(_build_http_routine(labels, len(LIVE_HOSTNAME), 0))
+    ROUTINE_ADDR    = arbiter.alloc(routine_len, name="trampoline")
     print(
         f"MemoryPolicy reserved {len(memory_policy.reserved_regions)}"
         f" region(s); arbiter allocations:"
@@ -256,6 +269,10 @@ def main() -> int:
 
     host_str = hostname_bytes + b"\x00"
     path_str = b"/\x00"
+    if len(host_str) > HOST_STR_BYTES:
+        print(f"ERROR: host {LIVE_HOSTNAME!r} exceeds the {HOST_STR_BYTES} B "
+              "host_str allocation", file=sys.stderr)
+        return 2
 
     prg = PRG_PATH.read_bytes()
 
@@ -313,9 +330,11 @@ def main() -> int:
                 ROUTINE_ADDR + i,
                 routine_bytes[i:i + CHUNK],
             )
-        transport.write_memory(HOST_STR_ADDR, host_str.ljust(32, b"\x00"))
-        transport.write_memory(PATH_STR_ADDR, path_str.ljust(8, b"\x00"))
-        transport.write_memory(SENTINEL_ADDR, bytes(16))
+        transport.write_memory(HOST_STR_ADDR,
+                               host_str.ljust(HOST_STR_BYTES, b"\x00"))
+        transport.write_memory(PATH_STR_ADDR,
+                               path_str.ljust(PATH_STR_BYTES, b"\x00"))
+        transport.write_memory(SENTINEL_ADDR, bytes(3))
 
         # Trigger
         sys_line = f"sys{ROUTINE_ADDR}\r"
