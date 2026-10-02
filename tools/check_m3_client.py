@@ -149,6 +149,7 @@ class M3Device:
         self.forced_blocks = None       # READ: override the reply blocks
         self.next_handle = 5
         self.release_delays = []        # per-`03 25` delays, then FAST
+        self.abort_never = False        # an ABORT that is never serviced
         # observation
         self.log = []                   # (units, command bytes)
         self.ctrl_writes = []           # (units, value)
@@ -174,7 +175,7 @@ class M3Device:
             self.sp = 0
             self._load_block()
         if (self.abort_pending and self.done_at is None
-                and self.pending is None):
+                and self.pending is None and not self.abort_never):
             if self.abort_due is None:
                 self.abort_due = now + 1
             elif now >= self.abort_due:
@@ -350,6 +351,14 @@ class M3Device:
             d = self.open_delay if op not in self.never else NEVER
             if kind == "refuse":
                 return [], arg, d
+            if kind == "oklong":                # 00,OK and `arg` bytes (> 8)
+                h = self.next_handle
+                self.sessions[h] = {"rx": [], "claimed": False}
+                return [bytes([h, 4, 3, 1, 0x13, 0x1D, 0, 0]) + bytes(arg - 8)], OK, d
+            if kind == "refusedata":            # a refusal WITH reply bytes
+                h = self.next_handle
+                self.sessions[h] = {"rx": [], "claimed": False}
+                return [bytes([h, 4, 3, 1, 0x13, 0x1D, 0, 0])], arg, d
             if kind == "okshort":               # 00,OK and only `arg` bytes
                 h = self.next_handle
                 self.sessions[h] = {"rx": [], "claimed": False}
@@ -1218,6 +1227,7 @@ def test_non_tls13_session_is_refused(prg=None, labels=None):
     _check(not m.dev.sessions, "the 1.2 session was not released")
     _check(m.peek("m3_open_hint") == 2, "m3_open_hint %d, expected 2"
            % m.peek("m3_open_hint"))
+    _code(m, ERR_CONNECT_FAIL, "a non-1.3 session")
     m.no_violations()
 
 
@@ -1236,6 +1246,104 @@ def test_alert14_reads_as_no_tls13(prg=None, labels=None):
     _check("DOES NOT DO TLS 1.3" in text, "alert 40 was not read as 'no TLS "
            "1.3':\n" + text)
     m.no_violations()
+
+
+def _ui_open(m, open_result):
+    """'I' then 'G' with the defaults, the Open answered by `open_result`."""
+    m.dev.open_result = open_result
+    m.call("do_net_init")
+    m.mem.screen.clear()
+    m.mem.keys.extend(b"\r\r")
+    m.call("do_https_get")
+    return m.screen_text()
+
+
+def test_hint_texts_reach_the_user(prg=None, labels=None):
+    """The client's own reasons are printed, each its own text: not TLS 1.3
+    (hint 2), malformed reply (hint 3). The `03 25` status is not shown."""
+    for result, want in ((("okversion", 0x0303), "SESSION IS NOT TLS 1.3"),
+                         (("okshort", 3), "MALFORMED OPEN REPLY")):
+        m = Machine(prg, labels)
+        text = _ui_open(m, result)
+        _check(want in text, "%r not on screen for %r:\n%s" % (want, result, text))
+        _check("00,OK" not in text, "the release's 00,OK was printed as the "
+               "reason:\n" + text)
+        m.no_violations()
+
+
+def test_long_open_reply_is_released(prg=None, labels=None):
+    """S 1.1: a 10-byte 00,OK reply is not 8 bytes either: released."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("oklong", 10)
+    _check(m.init() is False, "net_init failed")
+    _check(m.connect() is True, "a 10-byte Open reply was accepted")
+    _check(not m.dev.sessions, "the session of a long reply was kept")
+    m.no_violations()
+
+
+def test_reply_version_major_checked(prg=None, labels=None):
+    """Both version bytes count: 04 04 is not TLS 1.3 either."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("okversion", 0x0404)
+    _check(m.init() is False, "net_init failed")
+    _check(m.connect() is True, "version 0x0404 was accepted as TLS 1.3")
+    _check(not m.dev.sessions, "the session was kept")
+    m.no_violations()
+
+
+def test_refusal_with_data_is_released(prg=None, labels=None):
+    """A refusal has an empty reply. One WITH bytes cannot be trusted, and
+    the session it may have opened is released (`03 25`)."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("refusedata", b"14,TLS ALERT RECEIVED: 40")
+    _check(m.init() is False, "net_init failed")
+    _check(m.connect() is True, "a refusal returned C=0")
+    ops = m.dev.ops()
+    _check(ops[ops.index(0x21) + 1:ops.index(0x21) + 2] == [0x25], "no `03 25` "
+           "after a refusal that carried reply bytes")
+    _check(not m.dev.sessions, "the session leaked")
+    m.no_violations()
+
+
+def test_only_version_alerts_read_as_no_tls13(prg=None, labels=None):
+    """40, 70 and 71 mean "no TLS 1.3"; any other alert (112
+    unrecognized_name here) is shown as the alert it is, with no hint."""
+    for n, want in ((40, True), (70, True), (71, True), (112, False), (4, False)):
+        m = Machine(prg, labels)
+        line = b"14,TLS ALERT RECEIVED: %d" % n
+        text = _ui_open(m, ("refuse", line))
+        _check(line.decode() in text, "alert %d: status line missing" % n)
+        _check(("DOES NOT DO TLS 1.3" in text) is want, "alert %d: 'no TLS "
+               "1.3' shown=%s, expected %s" % (n, not want, want))
+
+
+def test_data_more_wedge_keeps_89(prg=None, labels=None):
+    """A Data More block whose ABORT never lands is a wedge: $89 stays, it
+    is not overwritten by the block's own reason."""
+    m = _connected(Machine(prg, labels))
+    m.dev.forced_blocks = ([b"\x0a\x00abc", b"defghij"], OK)
+    m.dev.abort_never = True
+    m.call("net_poll", budget=80_000_000)
+    _code(m, ERR_WAIT_TIMEOUT, "a wedged Data More ABORT")
+    _check(m.peek("m3_wedged") & 0x80, "m3_wedged not set")
+
+
+def test_held_session_message(prg=None, labels=None):
+    """When an earlier session could not be CLOSEd, 'G' says so (and to
+    press I) instead of a stale TLS HANDSHAKE FAILED / 00,OK."""
+    m = Machine(prg, labels)
+    m.call("do_net_init")
+    _check(m.connect() is False, "connect failed")
+    _reject_ops(m, 0x09, 4)                     # this close and the next
+    m.call("net_tcp_close")
+    m.mem.screen.clear()
+    m.mem.keys.extend(b"\r\r")
+    m.call("do_https_get")
+    text = m.screen_text()
+    _check("STILL OPEN" in text and "PRESS I" in text, "no 'session still "
+           "open' message:\n" + text)
+    _check("00,OK" not in text and "TLS HANDSHAKE FAILED" not in text,
+           "a stale status was printed:\n" + text)
 
 
 TESTS = (
@@ -1280,6 +1388,13 @@ TESTS = (
     test_short_open_reply_is_released,
     test_non_tls13_session_is_refused,
     test_alert14_reads_as_no_tls13,
+    test_hint_texts_reach_the_user,
+    test_long_open_reply_is_released,
+    test_reply_version_major_checked,
+    test_refusal_with_data_is_released,
+    test_only_version_alerts_read_as_no_tls13,
+    test_data_more_wedge_keeps_89,
+    test_held_session_message,
 )
 
 
@@ -1292,7 +1407,7 @@ def run(prg=None, labels=None, only=None, quiet=False):
         try:
             fn(prg, labels)
             results[fn.__name__] = None
-        except (AssertionError, CPUError) as exc:
+        except Exception as exc:        # noqa: BLE001 — a crash is a red
             results[fn.__name__] = "%s: %s" % (type(exc).__name__, exc)
         if not quiet:
             err = results[fn.__name__]

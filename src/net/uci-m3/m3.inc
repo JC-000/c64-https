@@ -73,9 +73,11 @@ M3_EXEC_WEDGED      = 3         ; bit 2 still set at the post-ABORT deadline
 
 ; m3_open_hint: the client's own reading of a failed Open, for the UI.
 M3_HINT_NONE        = 0
-M3_HINT_NO_TLS13    = 1         ; 14 under REQUIRE_TLS13: no TLS 1.3 there
+M3_HINT_NO_TLS13    = 1         ; 14 + alert 40/70/71 under REQUIRE_TLS13
 M3_HINT_NOT_TLS13   = 2         ; 00,OK but a version other than 1.3
-M3_HINT_MALFORMED   = 3         ; 00,OK with a reply that is not 8 bytes
+M3_HINT_MALFORMED   = 3         ; a reply that is not 8 bytes + 00, or
+                                ; reply bytes with a refusal
+M3_HINT_HELD        = 4         ; an earlier session could not be CLOSEd
 
 ; m3_poll_result: what the last net_poll saw.
 M3_POLL_DATA        = 0         ; bytes went into the ring

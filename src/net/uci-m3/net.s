@@ -440,6 +440,8 @@ net_tcp_connect:
         ; The old handle could not be closed. Opening over it would lose
         ; the number and leave its session in the table (91 after two);
         ; refuse instead. 'I' re-runs the startup sweep, which frees it.
+        lda #M3_HINT_HELD
+        sta m3_open_hint
         lda #UCI_ERR_CONNECT_FAIL
         sta net_last_error
         jmp @tc_fail
@@ -510,7 +512,14 @@ net_tcp_connect:
         jsr m3_read_data
         jsr m3_finish
         lda m3_code
-        bne @tc_refused
+        beq :+
+        ; A refusal has an EMPTY reply (S 1.1). Bytes with a non-00 status
+        ; are a reply we cannot trust: release defensively, as below.
+        lda m3_rd_count
+        bne @tc_malformed
+        lda m3_code
+        bne @tc_refused             ; always
+:
         ; S 1.1: success is EXACTLY 8 bytes. Fewer (or more, dropped by the
         ; discard) is a reply we cannot trust any byte of, the handle
         ; included: release the session it may have opened.
@@ -566,14 +575,25 @@ net_tcp_connect:
 .endif
 @tc_refused:
 .ifndef M3_ALLOW_TLS12
-        ; Firmware-side rule (errata v1.3, coming): with REQUIRE_TLS13, ANY
-        ; 14 during the Open means the server cannot or will not do TLS 1.3
-        ; (a 1.2-only server may answer 40, not 70). Do not key on 70.
+        ; With REQUIRE_TLS13, a 14 whose alert says "no version or suite we
+        ; share" means the server will not do TLS 1.3: 40 handshake_failure
+        ; (what a 1.2-only server sends, measured: badssl.com), 70
+        ; protocol_version (S 1.7) and 71 insufficient_security. Any other
+        ; alert (e.g. 112 unrecognized_name) is just that alert: the status
+        ; line, "14,TLS ALERT RECEIVED: N", says so, with no hint.
         cmp #14
-        bne :+
+        bne @tc_refused_code
+        jsr m3_status_number        ; A = N, $FF if none
+        cmp #40
+        beq @tc_no13
+        cmp #70
+        beq @tc_no13
+        cmp #71
+        bne @tc_refused_code
+@tc_no13:
         lda #M3_HINT_NO_TLS13
         sta m3_open_hint
-:
+@tc_refused_code:
 .endif
         lda #UCI_ERR_OPEN_REFUSED   ; named in m3_status (e.g. 94,...)
         sta net_last_error
@@ -581,6 +601,63 @@ net_tcp_connect:
         lda #NET_TCP_CONNECT_FAIL
         sta net_tcp_state
         sec
+        rts
+
+; =============================================================================
+; m3_status_number — A = the decimal number after the first ':' in m3_status
+; (up to 3 digits, leading space skipped), $FF if there is none or it is
+; over 255. Used for "14,TLS ALERT RECEIVED: N". Clobbers: A, X, Y.
+; =============================================================================
+m3_status_number:
+        ldy #0
+@sn_colon:
+        cpy m3_status_len
+        bcs @sn_none
+        lda m3_status,y
+        iny
+        cmp #':'
+        bne @sn_colon
+        cpy m3_status_len
+        bcs @sn_none
+        lda m3_status,y
+        cmp #' '
+        bne :+
+        iny
+:       ldx #0                      ; X = digits taken
+        lda #0
+        sta m3_num
+@sn_digit:
+        cpy m3_status_len
+        bcs @sn_end
+        lda m3_status,y
+        sec
+        sbc #'0'
+        cmp #10
+        bcs @sn_end
+        sta m3_num+1
+        lda m3_num                  ; num = num * 10 + digit, 8-bit checked
+        cmp #26
+        bcs @sn_none                ; num*10 would pass 255
+        asl
+        sta m3_num
+        asl
+        asl
+        adc m3_num                  ; x8 + x2 (C clear: <= 250)
+        adc m3_num+1
+        bcs @sn_none
+        sta m3_num
+        iny
+        inx
+        cpx #4
+        bcc @sn_digit
+        bcs @sn_none                ; a 4th digit: not an alert number
+@sn_end:
+        txa
+        beq @sn_none
+        lda m3_num
+        rts
+@sn_none:
+        lda #$FF
         rts
 
 ; =============================================================================
@@ -765,7 +842,9 @@ net_poll:
         lda #<M3_B_POST_ABORT
         ldx #>M3_B_POST_ABORT
         jsr m3_abort_wait
-        jmp @p_dead_hdr
+        bcc :+
+        jmp @p_dead_owned           ; wedged: keep the abort's $89
+:       jmp @p_dead_hdr
 @p_last:
         jsr m3_read_status
         jsr m3_accept
@@ -1072,6 +1151,7 @@ m3_eof_code:        .res 1      ; 1 or 5 once READ ended the stream
 m3_poll_result:     .res 1      ; M3_POLL_*
 m3_open_reply:      .res M3_OPEN_REPLY_LEN
 m3_open_hint:       .res 1      ; M3_HINT_*: why the last Open was refused
+m3_num:             .res 2      ; m3_status_number scratch
 m3_info:            .res M3_INFO_LEN
 m3_ipaddr:          .res 12
 m3_host_buf:        .res M3_HOST_MAX + 1

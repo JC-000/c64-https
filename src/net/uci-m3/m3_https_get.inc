@@ -42,7 +42,14 @@ do_https_get:
         jsr net_tcp_connect     ; OPEN_TLS: DNS, connect, handshake, verify
         bcc @open_ok
 @open_fail:
-        lda #<tls_fail_msg
+        lda m3_open_hint
+        cmp #M3_HINT_HELD
+        bne :+
+        lda #<m3_hint_4             ; no handshake was tried: say why
+        ldy #>m3_hint_4
+        jsr print_string
+        jmp m3_check_wedge
+:       lda #<tls_fail_msg
         ldy #>tls_fail_msg
         jsr print_string
         jsr m3_print_open_fail
@@ -182,6 +189,8 @@ m3_short_msg:   .byte "BODY INCOMPLETE:", $0d, 0
 m3_hint_1:      .byte "THE SERVER DOES NOT DO TLS 1.3", $0d, 0
 m3_hint_2:      .byte "REFUSED: THE SESSION IS NOT TLS 1.3", $0d, 0
 m3_hint_3:      .byte "REFUSED: MALFORMED OPEN REPLY", $0d, 0
+m3_hint_4:      .byte "A PREVIOUS SESSION IS STILL OPEN", $0d
+                .byte "- PRESS I TO RESET THE NETWORK", $0d, 0
 m3_hint_lo:     .byte <m3_hint_1, <m3_hint_2, <m3_hint_3
 m3_hint_hi:     .byte >m3_hint_1, >m3_hint_2, >m3_hint_3
 m3_wedge_msg:   .byte $0d, "NETWORK INTERFACE NOT RESPONDING", $0d
