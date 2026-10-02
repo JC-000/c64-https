@@ -156,6 +156,7 @@ NET_ERR_ASSERT_UCI UCI_ERR_SHORT_WRITE,  "UCI_ERR_SHORT_WRITE"
 NET_ERR_ASSERT_UCI UCI_ERR_NO_SOCKET,    "UCI_ERR_NO_SOCKET"
 NET_ERR_ASSERT_UCI UCI_ERR_WAIT_TIMEOUT, "UCI_ERR_WAIT_TIMEOUT"
 NET_ERR_ASSERT_UCI UCI_ERR_BAD_READ_HDR, "UCI_ERR_BAD_READ_HDR"
+NET_ERR_ASSERT_UCI UCI_ERR_STREAM_LOST,  "UCI_ERR_STREAM_LOST"
 
 ; THE ONE DELIBERATE OVERLAP. UCI_ERR_LONG_READ = $8A is c64-wireguard's
 ; allocation, mirrored here as a reserved-never-emitted equate so the name
@@ -226,6 +227,7 @@ NET_ERR_CLAIM_VALUE UCI_ERR_SHORT_READ
 .assert UCI_ERR_OPEN_REFUSED = $8D, error, "UCI_ERR_OPEN_REFUSED is published as $8D and must never be reassigned (#184)"
 .assert UCI_ERR_SHORT_READ   = $8F, error, "UCI_ERR_SHORT_READ is published as $8F and must never be reassigned (#184)"
 .assert UCI_ERR_CMD_UNKNOWN  = $8E, error, "UCI_ERR_CMD_UNKNOWN is published as $8E and must never be reassigned (#184)"
+.assert UCI_ERR_STREAM_LOST  = $90, error, "UCI_ERR_STREAM_LOST is published as $90 and must never be reassigned (#184)"
 .assert UCI_ERR_BAD_READ_HDR = $8B, error, "UCI_ERR_BAD_READ_HDR is published as $8B and must never be reassigned (#184)"
 
 ; $00 is "no error" in every family, fleet-wide, and is not allocatable.

@@ -796,8 +796,10 @@ net_poll:
 @p_not_ours:
         ; "02,NO DATA: 9": the number is no longer ours. Any other $FFFF
         ; status means it now names a socket opened later (ER-7). Either
-        ; way: stop, and do not CLOSE it. (No net_last_error code yet: the
-        ; status line says which; a code is pending the fleet registry.)
+        ; way: stop, and do not CLOSE it. $90: the stream is lost; the
+        ; status line says how.
+        lda #UCI_ERR_STREAM_LOST
+        sta net_last_error
         lda #0
         sta m3_owned
         lda #NET_TCP_ERROR
@@ -826,15 +828,17 @@ net_poll:
 ;                             (c64-wireguard's code, mirrored)
 ;   $8B UCI_ERR_BAD_READ_HDR  any other shape: no header (81/82), a 1-byte
 ;                             header, bytes past the header, Data More
-; A dead session ($0000 + 12/14/16/17, @p_dead_read) sets no code yet; one
-; is pending the fleet registry, and the status line says what happened.
+;   $90 UCI_ERR_STREAM_LOST   a dead session ($0000 + 12/14/16/17,
+;                             @p_dead_read); the status line says which
 @p_dead_hdr:
         lda m3_bad
         bne @p_dead_code            ; the reason the block was refused
         lda #UCI_ERR_BAD_READ_HDR
+        bne @p_dead_code            ; always
+@p_dead_read:
+        lda #UCI_ERR_STREAM_LOST
 @p_dead_code:
         sta net_last_error
-@p_dead_read:
 @p_dead_owned:
         lda #NET_TCP_ERROR
         sta net_tcp_state

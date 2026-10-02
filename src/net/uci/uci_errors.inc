@@ -156,6 +156,14 @@ UCI_ERR_CMD_UNKNOWN    = $8E    ; "21,UNKNOWN COMMAND": the firmware lacks the
 UCI_ERR_SHORT_READ     = $8F    ; a READ reply's block ended short of the
                                 ; total its header announced (uci-m3)
 
+; OURS, minted in c64-wireguard/src/net_abi.inc (the canonical registry)
+; for BACKEND=uci-m3, the only emitter: a READ found the established stream
+; unusable — the firmware ended it with an error ($0000 + 12/14/16/17: the
+; session is dead but the handle is still ours) or the handle is no longer
+; ours ($FFFF + anything but "02,NO DATA: 11"). The status line says which.
+; Deliberately NOT $86, which means only "our push was rejected".
+UCI_ERR_STREAM_LOST    = $90
+
 ; TCP state values stored in net_tcp_state. The NET_TCP_* spellings in
 ; net_states.inc are the contract's (§13.1); these aliases keep the
 ; historical names readable in diagnostics and in c64-wireguard's copy.

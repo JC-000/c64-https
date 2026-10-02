@@ -84,7 +84,7 @@ NET_TCP_CLOSED, NET_TCP_CONNECTED = 0x00, 0x01
 NET_TCP_ERROR, NET_TCP_CONNECT_FAIL = 0x02, 0x03
 ERR_NOT_PRESENT, ERR_CONNECT_FAIL, ERR_WAIT_TIMEOUT = 0x81, 0x84, 0x89
 ERR_OPEN_REFUSED, ERR_CMD_UNKNOWN = 0x8D, 0x8E   # c64-wireguard's, mirrored
-ERR_BAD_READ_HDR, ERR_SHORT_READ = 0x8B, 0x8F
+ERR_BAD_READ_HDR, ERR_SHORT_READ, ERR_STREAM_LOST = 0x8B, 0x8F, 0x90
 
 
 def _code(m, want, what):
@@ -778,6 +778,7 @@ def test_read_end_14_is_closed(prg=None, labels=None):
     m.call("net_poll")
     _check(m.peek("net_tcp_state") == NET_TCP_ERROR,
            "net_tcp_state $%02X after 14, expected ERROR" % m.peek("net_tcp_state"))
+    _code(m, ERR_STREAM_LOST, "$0000 + 14")
     m.call("net_tcp_close")
     _check(m.dev.commands()[-1] == b"\x03\x09\x05", "no CLOSE after a sticky "
            "14: the entry stays in the table (91 after two)")
@@ -792,6 +793,7 @@ def test_read_not_ours_stops(prg=None, labels=None):
     m.call("net_poll")
     _check(m.peek("net_tcp_state") != NET_TCP_CONNECTED,
            "still CONNECTED after `02,NO DATA: 9`: it would poll forever")
+    _code(m, ERR_STREAM_LOST, "$FFFF + `: 9`")
     n = len(m.dev.log)
     m.call("net_poll")
     m.call("net_tcp_close")
