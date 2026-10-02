@@ -366,7 +366,9 @@ drops a symbol fails the link by name on both backends. Surface:
     `UCI_HOST_BUF_MAX = 64` would be reported as an ip65-family
     error code needing allocation in c64-wireguard's registry. The
     `NET_FAMILY_*` bits in `src/net/net_families.inc` are the same cross-repo
-    copy problem and are still unguarded.
+    copy problem, guarded by `tools/test_net_families_drift.py` (same peer
+    lookup and `C64_NO_PEER_REGISTRY=1` opt-out; names and values both
+    ways, fails on any line it cannot parse).
   - Gone, per §13.1: `net_tcp_set_recv_cb` (stub), `net_recv_ready`,
     `net_dhcp` (alias), and `net_print_ip` — IP printing is consumer UI and
     is now `print_local_ip` in `boot.s`, one copy for both backends.
