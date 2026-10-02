@@ -65,6 +65,7 @@ for a human to take cross-repo. Bits are append-only and never reused, so
 the fix is never "renumber ours".
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -206,17 +207,24 @@ def _peer_file():
         raise FamiliesParseError(
             f"c64-wireguard checkout {root} has no {PEER_REL}: the peer "
             f"moved or deleted its copy of the family bits")
-    if path.resolve() == OURS.resolve():
+    # samefile, not resolve(): resolve() keeps the case it was given, so on
+    # case-insensitive APFS a /DOCUMENTS/ spelling of our own tree compares
+    # unequal. (st_dev, st_ino) does not care how the path was spelled.
+    if os.path.samefile(path, OURS):
         raise FamiliesParseError(
-            f"the peer families file {path} resolves to ours ({OURS}); "
-            f"comparing a file with itself certifies nothing")
+            f"the peer families file {path} is the same file as ours "
+            f"({OURS}); comparing a file with itself certifies nothing")
     return path
 
 
 def _peer_revision(root):
     """'<short HEAD>[ (dirty)]' for the peer checkout, for the results line."""
+    # Strip every GIT_* variable: a leaked GIT_DIR (git hooks export it)
+    # overrides -C and would report the CALLER's repository as the peer's.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
     def git(*args):
-        return subprocess.run(["git", "-C", str(root), *args],
+        return subprocess.run(["git", "-C", str(root), *args], env=env,
                               capture_output=True, text=True, timeout=10)
     try:
         head = git("rev-parse", "--short", "HEAD")
