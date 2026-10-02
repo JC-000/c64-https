@@ -35,6 +35,7 @@
 .export tls_connect
 .export tls_send
 .export tls_recv
+.export tls_rx_inner
 .export tls_close
 .export tls_send_client_hello
 .export tls_recv_server_hello
@@ -372,13 +373,22 @@ tls_send:
 ; tls_recv - receive and decrypt application data
 ; Input: none (reads from TCP receive buffer)
 ; Output: C=0 success (data in tls_app_buf), C=1 no data or error
+;         tls_rx_inner = the inner content type of a record THIS call
+;         received and authenticated, else 0. tls_rec_type alone cannot say
+;         that: tls_recv_record sets it from a record's plaintext 5-byte
+;         header before any payload arrives, so after a C=1 it may describe
+;         a header nobody authenticated (adv-277: an injected
+;         15 03 03 00 02 read as an alert).
 ; =============================================================================
 tls_recv:
+        lda #0
+        sta tls_rx_inner
         jsr net_poll
         jsr tls_record_recv_and_decrypt
         bcs @recv_fail
         ; verify it's application data
-        lda tls_rec_type
+        lda tls_rec_type        ; inner type: decrypted, outer was 23
+        sta tls_rx_inner
         cmp #TLS_CT_APPLICATION
         bne @recv_fail
         ; set tls_app_ptr to tls_rec_buf, tls_app_len to tls_rec_len
@@ -395,6 +405,7 @@ tls_recv:
 @recv_fail:
         sec
         rts
+tls_rx_inner: .byte 0
 
 ; =============================================================================
 ; tls_close - send close_notify alert and tear down

@@ -80,7 +80,7 @@
         .import tls_send
         .import tls_recv
         .import tls_state       ; #239: bit 7 = record layer aborted
-        .import tls_rec_type    ; #239: last record decrypted was an alert
+        .import tls_rx_inner    ; #239: this tls_recv authenticated an alert
         .import tls_rec_buf     ; #239: its AlertDescription byte
         .import tls_rec_len     ; #239: ... valid only if the alert is 2 B
 
@@ -467,10 +467,15 @@ http_recv_timeout_verdict:
 ;   C=0 at once if it ends an unframed (Connection: close) body. Any other
 ;   alert returns C=1 at once (tls_state is not latched: the record
 ;   authenticated; the peer's description stays in tls_rec_buf+1).
-;   tls_rec_type / tls_rec_buf hold the last decrypted record until the
-;   next record's header and payload arrive, and nothing is sent after an
-;   alert, so the test is stable across the idle ticks behind it. Other non-application
-;   records (NewSessionTicket) still count as ticks, as before.
+;   The type comes from tls_rx_inner, which is non-zero only on the tick
+;   whose tls_recv received AND authenticated that record — never from
+;   tls_rec_type, which the next record's plaintext header overwrites
+;   before its payload arrives: an injected `15 03 03 00 02` over a stale
+;   tls_rec_buf+1 of 0 used to read as close_notify (adv-277, a
+;   truncation attack). The record layer rejects any outer type but 23
+;   once encrypted, so the type is always the decrypted inner one, padding
+;   stripped. Other non-application records (NewSessionTicket) still
+;   count as ticks, as before.
 ;
 ;   Otherwise count the tick, loop, or hand the expired budget to
 ;   http_recv_timeout_verdict (no clean end: an unframed body is C=1).
@@ -485,7 +490,7 @@ http_recv_timeout_verdict:
 http_recv_tick:
         bit tls_state
         bmi @tick_abort         ; aborted by the record layer: not idle
-        lda tls_rec_type
+        lda tls_rx_inner        ; 0 unless this tls_recv authenticated it
         cmp #TLS_CT_ALERT
         bne @tick_count
         lda tls_rec_len         ; an alert is exactly 2 B; any other size
@@ -936,9 +941,11 @@ http_body_begin:
 ;     24-bit consumed count http_body_total equals http_content_length.
 ;     Works whether or not the stored copy was truncated at 512 B —
 ;     that is the W4 fix.
-;   Content-Length absent: legacy behaviour — the 512 B buffer cap ends
-;     the read in buffer mode (streaming fallback preserved); in sink
-;     mode there is no cap and the caller's poll-timeout is the bound.
+;   Content-Length absent: never complete here. A full 512 B buffer is
+;     not the end of the body (it used to answer C=0, buffer mode only);
+;     bytes past it are counted and discarded as under Content-Length,
+;     and only the peer's close_notify ends the read
+;     (http_recv_close_verdict) — the budget expiring is C=1.
 ;   Clobbers: A
 ; -----------------------------------------------------------------------------
 http_body_done_check:
@@ -955,19 +962,9 @@ http_body_done_check:
         bne @more
         clc
         rts
-@no_cl:
-.ifdef BACKEND_UCI
-        lda http_body_sink
-        bne @more               ; sink mode: no 512 B cap
-.endif
-        lda http_resp_len+1
-        cmp #$02
-        bcs @full               ; high byte >= 2 means >= 512
+@no_cl:                         ; no length: only the close ends it
 @more:
         sec
-        rts
-@full:
-        clc
         rts
         .segment "HTTP_AUX_CODE"
 
@@ -1097,13 +1094,9 @@ hex_digit:
 ; of declaring the response complete.  Termination events:
 ;   1. http_resp_len reaches Content-Length (identity encoding), or
 ;   2. the terminal chunk 0\r\n\r\n is consumed (chunked encoding), or
-;   3. buffer full at 512 B (identity encoding only — chunked keeps
-;      consuming/discarding so it can find the terminal chunk), or
-;   4. caller-side poll-timeout in http_recv_body's @recv_loop (the
-;      caller gives up after ~65 k empty ticks with no data — the
-;      "accept whatever we have" fallback for responses with neither
-;      Content-Length nor chunked framing; we send Connection: close,
-;      so the peer's close ends those).
+;   3. neither framing: the caller's verdict — complete only on the
+;      peer's close_notify, incomplete if the poll budget expires (a
+;      full 512 B buffer is not an end; later bytes are discarded).
 http_state_body:
         lda http_chunked
         beq @plain
