@@ -1536,7 +1536,14 @@ http_body_finish:
 ; Input: http_host_ptr/http_host_len = hostname
 ;        http_path_ptr/http_path_len = path
 ;        http_port = port (typically 80)
-; Output: C=0 success (response in http_resp_buf), C=1 failure
+; Output: C=0 complete (response in http_resp_buf), C=1 failure or not
+;         known complete. Plain HTTP has no close_notify, so a body with
+;         no Content-Length and no chunking ends at the peer's TCP close
+;         (net_tcp_state reads CLOSED with the ring drained; on ip65 an
+;         RST reads the same): C=0.
+;         Unframed and still open when the 512 B buffer fills: C=1 at
+;         once, http_resp_buf holding the first 512 B (truncated, not
+;         complete). The poll budget expiring is C=1 on every framing.
 ; =============================================================================
         .segment "CODE"
 http_get_plain:
@@ -1578,26 +1585,43 @@ http_get_plain:
                                 ; (plain HTTP — ring holds plaintext)
 
         ; --- 7. Poll + parse loop (with timeout) ---
+        ; @poll_timeout is a budget for the whole fetch: 65,536 polls,
+        ; NOT reset on progress. Expiry is C=1, never "accept what we got".
         lda #0
         sta @poll_timeout
         sta @poll_timeout+1
 @plain_poll:
         jsr net_poll
         jsr http_recv_response
-        bcc @plain_done         ; C=0 means complete
-        ; reset timeout on any progress (data was consumed)
+        bcc @plain_done         ; C=0: the response's own framing ended it
+        lda http_parse_state
+        cmp #2
+        bcc @plain_tick         ; no body yet
+        lda http_cl_valid
+        ora http_chunked
+        bne @plain_tick         ; framed: only the framing ends it
+        lda net_tcp_state       ; unframed: the peer's close ends it, and
+        beq @plain_done         ;  the ring is drained (parser ran dry)
+        lda http_resp_len+1
+        cmp #2
+        bcs @plain_short        ; still open at 512 B: truncated (C=1)
+@plain_tick:
         inc @poll_timeout
         bne @plain_poll
         inc @poll_timeout+1
         bne @plain_poll
-        ; timeout: accept whatever we got so far
+@plain_short:                   ; budget expired / truncated
+        sec
+        .byte $24               ; BIT zp: skips the CLC
 @plain_done:
+        clc
+        php
         jsr http_body_finish    ; sink finalize (idempotent; no-op unless
                                 ;  http_body_sink=1 — see @recv_complete)
 
         ; --- 8. Close TCP ---
         jsr net_tcp_close
-        clc
+        plp
         rts
 
 @poll_timeout: .word 0
