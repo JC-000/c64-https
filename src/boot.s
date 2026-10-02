@@ -38,7 +38,7 @@ SINK_PROBE = 1
 .endif
 .ifdef TRUST_STORE
         ; #155 phase 2 (L3): the trust policy, src/net/uci/trust_policy.s
-        .import trust_pre, trust_post
+        .import trust_pre, trust_post, trust_state_init
 .ifdef TRUST_BUNDLE
         .import trust_bundle
 .endif
@@ -305,6 +305,9 @@ start:
         ; Before anything else can touch the image's copy at $C000 (the
         ; TCP ring's range): stash it into the REU.
         jsr cold_bank_init
+.endif
+.ifdef TRUST_STORE
+        jsr trust_state_init    ; RUN after 'Q' must not inherit an accept
 .endif
 
         ; clear screen

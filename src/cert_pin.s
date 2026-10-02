@@ -92,10 +92,11 @@
 .include "trust_store.inc"
 .include "trust_policy.inc"
 .export tp_mode, tp_bwarn, tp_ovr_armed, tp_got, tp_override, tp_ovr_key
-.export print_hex4, print_hexn, tp_cmp_got
+.export print_hex4, print_hexn, tp_cmp_got, trust_state_init
 .import ts_rec
 .ifdef TRUST_BUNDLE
 .export tb_found, tb_spki
+.import tb_loaded, tb_noted, tb_verdict
 .endif
 .endif
 
@@ -117,7 +118,14 @@ PIN_Y_OFFSET    = 59                    ; Qy's offset inside that TLV
 PIN_ST_MATCH    = $01
 PIN_ST_BAD      = $80
 
+; Under TRUST_STORE the hook has its own segment, so a cfg can place it
+; without moving the plain pin's CERT_PIN_CODE (comb: NET_CODE, adv-268 /
+; #273 -- CRYPTO_HOT has no room for it beside the wider body sink).
+.ifdef TRUST_STORE
+.segment "TRUST_HOOK_CODE"
+.else
 .segment "CERT_PIN_CODE"
+.endif
 
 ; -----------------------------------------------------------------------------
 ; cert_pin_check — tail of x509_extract_pubkey's success exit
@@ -263,7 +271,8 @@ cert_pin_check:
         ldy #>tb_spki
         jsr tp_cmp_got
         beq @pass
-        sta tp_bwarn                    ; A != 0 here
+        lda #1                          ; NOT A: on a mismatch tp_cmp_got
+        sta tp_bwarn                    ;  leaves the pin's byte there, $00 too
         ldx #TP_REP_BUNDLE
         jsr tp_report
 .endif
@@ -276,6 +285,7 @@ cert_pin_check:
 .endif
 
 ; tp_cmp_got — A/Y = 32 B. Z=1 iff they equal tp_got. Clobbers zp_ptr, Y.
+; Only Z is the verdict: on a mismatch A is whatever byte differed (maybe 0).
 tp_cmp_got:
         sta zp_ptr
         sty zp_ptr+1
@@ -287,6 +297,22 @@ tp_cmp_got:
         bpl @c
         lda #0                          ; Z=1: all equal
 @out:   rts
+
+; trust_state_init — boot (src/boot.s start): forget the policy's state.
+; TRUST_POLICY_BSS is not under the boot-zeroed shadow, so without this an
+; accept armed before 'Q' survives RUN (or a reset and SYS) -- adv-268 #2.
+trust_state_init:
+        lda #0
+        ldx #tp_bss_end - tp_bss_start
+:       sta tp_bss_start-1,x
+        dex
+        bne :-
+.ifdef TRUST_BUNDLE
+        sta tb_loaded
+        sta tb_noted
+        sta tb_verdict
+.endif
+        rts
 .endif ; TRUST_STORE
 
 ; Everything below — the interlock, the status byte, the diagnostic and the
@@ -403,9 +429,9 @@ tp_rep_exp_hi:  .hibytes TP_REP_EXPS
 
 .ifdef HTTPS_PIN_SPKI
 .ifdef TRUST_STORE
-; A pinned trust build: the pin's own pieces ride CERT_PIN_CODE, which the
-; comb cfgs put where the room is (CERT_PIN_UI's region is the tighter one).
-.segment "CERT_PIN_CODE"
+; A pinned trust build: the pin's own pieces ride TRUST_HOOK_CODE, which
+; the comb cfgs put where the room is (CERT_PIN_UI's region is the tighter one).
+.segment "TRUST_HOOK_CODE"
 .endif
 ; -----------------------------------------------------------------------------
 ; cert_pin_banner — boot banner line, so a pinned build is identifiable
@@ -471,7 +497,7 @@ print_hexn:
 
 .ifdef HTTPS_PIN_SPKI
 .ifdef TRUST_STORE
-.segment "CERT_PIN_CODE"
+.segment "TRUST_HOOK_CODE"
 .endif
 cert_pin_expected:
         .byte HTTPS_PIN_SPKI_BYTES
@@ -505,6 +531,7 @@ tp_bundle_msg:
 ; The policy's resident state: it outlives the cold calls that set and
 ; read it (src/net/uci/trust_policy.s) and the handshake in between.
 .segment "TRUST_POLICY_BSS"
+tp_bss_start:
 tp_mode:      .res 1            ; TP_M_*: this connection's mode
 tp_bwarn:     .res 1            ; != 0: the bundle pin disagreed
 tp_ovr_armed: .res 1            ; != 0: tp_override applies to tp_ovr_key
@@ -515,6 +542,8 @@ tp_ovr_key:   .res TS_KEY_SIZE  ; ...for this host key (ts_key)
 tb_found:     .res 1            ; != 0: tb_spki is the bundle's pin
 tb_spki:      .res TP_HASH_LEN
 .endif
+tp_bss_end:
+.assert tp_bss_end - tp_bss_start <= 255, error, "trust_state_init clears with X"
 .endif
 
 .endif ; HTTPS_PIN_SPKI .or TRUST_STORE

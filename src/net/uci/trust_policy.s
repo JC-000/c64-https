@@ -93,19 +93,31 @@ DISPLAY_LEN     = 12
 .ifdef COLD_BANK
 ; uci-comb: the bodies run from the cold bank's TRUST group. These stubs
 ; are the public names; cold_call_ui reports a refusal ("COLD BANK FAIL")
-; and returns C=1, which both callers read as "stop".
+; and returns C=1, which both callers read as "stop". A refusal by the
+; bank itself (cold_err != 0: a socket in ERROR, a latched DMA timeout)
+; skips the body's own clears, so the stub makes the one that must not be
+; skipped: the attempt consumes the armed accept and the mode, resident.
 .include "cold_bank.inc"
-.import cold_call_ui
+.import cold_call_ui, cold_err
 .import cold_ts_load, cold_ts_stage, cold_ts_save
 .export cold_tp_pre, cold_tp_post
 
 .segment "CODE"
 trust_pre:
         ldy #COLD_E_TP_PRE
-        jmp cold_call_ui
+        .byte $2C               ; bit abs: skips the ldy below
 trust_post:
         ldy #COLD_E_TP_POST
-        jmp cold_call_ui
+        jsr cold_call_ui
+        bcc @out                ; the body ran and said C=0
+        lda cold_err
+        beq @stop               ; the body ran: its clears are done
+        lda #TP_M_NONE
+        sta tp_mode
+        sta tp_ovr_armed
+@stop:  sec
+@out:   rts
+.assert TP_M_NONE = 0, error, "the refusal clears tp_ovr_armed with TP_M_NONE"
 
 TP_TS_LOAD  = cold_ts_load
 TP_TS_STAGE = cold_ts_stage

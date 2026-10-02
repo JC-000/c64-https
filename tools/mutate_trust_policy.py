@@ -24,13 +24,23 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 TEST = "tools/test_trust_policy_6502.py"
-IMAGE = "onchip-pinned"                 # pin + bundle + store: every path
+IMAGE = os.environ.get("C64_MUT_IMAGE", "onchip-pinned")  # pin + bundle + store
 HOOK = "src/cert_pin.s"
 POLICY = "src/net/uci/trust_policy.s"
 BUNDLE = "src/net/uci/trust_bundle.s"
 
-#: (what the weaker policy does, scenarios that must go red, [(file, find, replace)])
+#: (what the weaker policy does, scenarios that must go red,
+#:  [(file, find, replace)][, image -- default IMAGE])
 MUTANTS = [
+    ("RUN after Q keeps an armed accept", "sc_restart",
+     [("src/boot.s", "        jsr trust_state_init    ; RUN after 'Q' must not inherit an accept\n", "")]),
+    ("a cold-bank refusal of trust_post leaves the accept armed", "sc_bank_refuses_post",
+     [(POLICY, "        lda #TP_M_NONE\n        sta tp_mode\n        sta tp_ovr_armed\n@stop:",
+               "        lda #TP_M_NONE\n        nop\n        nop\n        nop\n        nop\n        nop\n        nop\n@stop:")],
+     "comb"),
+    ("a bundle mismatch is flagged with A, which may be $00", "sc_bundle",
+     [(HOOK, "        lda #1                          ; NOT A: on a mismatch tp_cmp_got\n",
+             "        nop\n        nop\n")]),
     ("an armed accept takes ANY key, not the armed hash", "sc_accept_exact",
      [(HOOK, "        jsr tp_cmp_got\n        bne @changed\n",
              "        jsr tp_cmp_got\n        nop\n        nop\n")]),
@@ -85,8 +95,8 @@ MUTANTS = [
 ]
 
 
-def run_test(scenarios: str) -> int:
-    env = dict(os.environ, C64_TP_IMAGES=IMAGE, C64_TP_SCENARIOS=scenarios,
+def run_test(scenarios: str, image: str = IMAGE) -> int:
+    env = dict(os.environ, C64_TP_IMAGES=image, C64_TP_SCENARIOS=scenarios,
                PYTHONDONTWRITEBYTECODE="1")
     p = subprocess.run([sys.executable, TEST], cwd=REPO, env=env,
                        capture_output=True, text=True)
@@ -95,10 +105,10 @@ def run_test(scenarios: str) -> int:
 
 def main(argv) -> int:
     picks = [int(a) for a in argv] or list(range(1, len(MUTANTS) + 1))
-    files = {f for _, _, edits in MUTANTS for f, _, _ in edits}
+    files = {f for m in MUTANTS for f, _, _ in m[2]}
     original = {f: (REPO / f).read_text() for f in files}
-    every = ",".join(sorted({s for _, sc, _ in MUTANTS for s in sc.split(",")}))
-    rc = run_test(every)
+    every = ",".join(sorted({s for m in MUTANTS for s in m[1].split(",")}))
+    rc = max(run_test(every, im) for im in sorted({IMAGE} | {m[3] for m in MUTANTS if len(m) > 3}))
     print(f"baseline (unmutated, {every}): exit {rc}")
     if rc != 0:
         print("baseline is not green: nothing below would mean anything")
@@ -106,7 +116,8 @@ def main(argv) -> int:
     survived = []
     try:
         for i in picks:
-            what, scen, edits = MUTANTS[i - 1]
+            what, scen, edits = MUTANTS[i - 1][:3]
+            image = MUTANTS[i - 1][3] if len(MUTANTS[i - 1]) > 3 else IMAGE
             for f in files:
                 (REPO / f).write_text(original[f])
             for f, find, repl in edits:
@@ -117,7 +128,7 @@ def main(argv) -> int:
                     break
                 (REPO / f).write_text(text.replace(find, repl))
             else:
-                rc = run_test(scen)
+                rc = run_test(scen, image)
                 verdict = {1: "killed", 0: "SURVIVED", 2: "DID NOT BUILD"}.get(rc, f"exit {rc}")
                 print(f"  [{i}] {verdict:13} {what}  ({scen})")
                 if rc != 1:

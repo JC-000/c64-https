@@ -45,6 +45,10 @@ Scenarios (each run on every image built):
                          UNPINNED fetch, banner, no DOS write
   changed -> unpinned    redials once, Finished sent, never records
   no trust_pre           the hook refuses (tp_mode = NONE)
+  restart                `start` calls trust_state_init, which forgets an
+                         armed accept and a cached bundle verdict
+  bank refuses post      (comb) a cold-bank refusal of trust_post still
+                         consumes the armed accept and the mode
   interlock (#152)       no Certificate in the flight, or a refused hook
                          whose carry the record layer drops: no Finished
   build pin (pinned img) the pin's host: no DOS traffic at all, PIN FAIL
@@ -199,6 +203,7 @@ class Rig:
         # scenario knobs
         self.server_key = None              # None: the flight has no Certificate
         self.ignore_hook_carry = False      # model a record layer that drops it
+        self.close_state = NET_CLOSED       # what net_tcp_close leaves behind
         self.name_ok = True
         self.connect_ok = True
         self.bundle_pub = None              # cryptography public key
@@ -273,7 +278,7 @@ class Rig:
 
     def _close(self):
         self.events.append("close")
-        self.ram[self.L["net_tcp_state"]] = NET_CLOSED
+        self.ram[self.L["net_tcp_state"]] = self.close_state
         self._ret(False)
 
     def _finished(self):
@@ -637,6 +642,46 @@ def sc_interlock(env):
           f"{env.name} interlock: Finished after KEY CHANGED with the carry dropped")
 
 
+def sc_restart(env):
+    """adv-268 #2: RUN after 'Q' (or a reset and SYS) re-enters `start`,
+    which must forget an armed accept: TRUST_POLICY_BSS is not boot-zeroed."""
+    L = env.labels
+    jsr = bytes([0x20, L["trust_state_init"] & 0xFF, L["trust_state_init"] >> 8])
+    lo, hi = L["start"] - env.load_addr, L["main_loop"] - env.load_addr
+    check(jsr in env.image[lo:hi], f"{env.name} restart: start never calls trust_state_init")
+    dos = Dos({A_: store_with(HOST, K1)})
+    r = Rig(env, dos)
+    r.server_key = K2
+    r.get(HOST, keys=[KEY_A])
+    if "tb_verdict" in L:
+        r.ram[L["tb_verdict"]] = 1
+    check(r.r8("tp_ovr_armed") == 1, f"{env.name} restart: not armed")
+    r.cpu.call(L["trust_state_init"])
+    check(r.r8("tp_ovr_armed") == 0 and r.rn("tp_override", 32) == bytes(32)
+          and r.rn("tp_ovr_key", 16) == bytes(16) and r.r8("tp_mode") == 0,
+          f"{env.name} restart: the armed accept survived trust_state_init")
+    if "tb_verdict" in L:
+        check(r.r8("tb_verdict") == 0, f"{env.name} restart: a bundle verdict survived")
+
+
+def sc_bank_refuses_post(env):
+    """adv-268 #3 (comb): when the cold bank refuses trust_post, the
+    attempt's armed accept and mode are consumed anyway."""
+    if "cold_call" not in env.labels:
+        return
+    dos = Dos({A_: store_with(HOST, K1)})
+    r = Rig(env, dos)
+    r.server_key = K2
+    r.get(HOST, keys=[KEY_A])                       # armed for K2
+    check(r.r8("tp_ovr_armed") == 1, f"{env.name} bank refusal: not armed")
+    r.close_state = 2                               # ERROR: the bank refuses
+    r.server_key = K3
+    scr = r.get(HOST)
+    check("COLD BANK FAIL" in scr, f"{env.name} bank refusal: trust_post was not refused")
+    check(r.r8("tp_ovr_armed") == 0 and r.r8("tp_mode") == TP["TP_M_NONE"],
+          f"{env.name} bank refusal: armed={r.r8('tp_ovr_armed')} mode={r.r8('tp_mode')} survived")
+
+
 def sc_build_pin(env):
     r = Rig(env)
     r.server_key = K2                               # the pin is K1
@@ -712,6 +757,24 @@ def sc_bundle(env):
     rec = lookup(dos, HOST)
     check(rec is not None and rec.mode == ts.MODE_ACCEPTED and rec.spki == spki_hash(K2),
           f"{env.name} bundle mismatch: A did not record ACCEPTED/K2: {rec}")
+
+    # adv-268 #1: a pin byte of $00 where the hashes first differ (scanning
+    # from byte 31 down) must still flag the mismatch and ask RECORD KEY?
+    got = spki_hash(K2)
+    for name, pin in (("byte 31 = $00", got[:31] + b"\0"),
+                      ("byte 30 = $00, 31 equal", got[:30] + b"\0" + got[31:])):
+        if pin == got:
+            continue
+        rec = tb.Record.for_host(tb.canonical_host(HOST), pin, mode=tb.MODE_BUNDLE_LEAF,
+                                 flags=tb.FLAG_WARN_ONLY, display=HOST.encode()[:12])
+        dos = Dos({P_: bundle_file([rec], gen=floor())})
+        r = Rig(env, dos)
+        r.server_key = K2
+        scr = r.get(HOST, keys=[0x0D])
+        check("BUNDLE MISMATCH EXP" in scr and r.r8("tp_bwarn") != 0 and "RECORD KEY? A=YES" in scr,
+              f"{env.name} bundle pin {name}: the mismatch was not flagged:\n{scr}")
+        check(lookup(dos, HOST) is None,
+              f"{env.name} bundle pin {name}: the server's key was recorded without A")
 
     # every rejection: the fetch still happens, nothing pinned
     other = ec.generate_private_key(ec.SECP256R1())
@@ -799,7 +862,8 @@ def main():
         scenarios = [sc_first_use, sc_match, sc_changed_refused, sc_accept_exact,
                      sc_accept_other_host, sc_near_collision, sc_type_ahead,
                      sc_name_fail, sc_store_fail, sc_changed_unpinned,
-                     sc_no_trust_pre, sc_interlock]
+                     sc_no_trust_pre, sc_interlock, sc_bank_refuses_post,
+                     sc_restart]
         if env.pinned:
             scenarios.append(sc_build_pin)
         if env.bundle:
