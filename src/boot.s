@@ -145,6 +145,7 @@
         .import http_get_plain
         .import http_build_get
         .import http_recv_body
+        .import http_resp_init
         ; (http_body_sink for the HTTPS_BODY_TO_REU flag-set below is
         ;  imported by the Lane G viewer-hook block above — the knob is
         ;  UCI-only, matching that block's BACKEND_UCI guard.)
@@ -620,6 +621,7 @@ do_https_get:
         rts
 
 @net_ok:
+        jsr http_resp_init      ; no http_status etc. from the last fetch
 .ifdef BACKEND_UCI
         ; #155 phase 2: the operator types the target (https_target_prompt,
         ; below). It sets everything the ip65 arm sets inline, with the host

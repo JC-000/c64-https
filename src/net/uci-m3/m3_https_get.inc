@@ -24,6 +24,7 @@ do_https_get:
         ldy #>no_net_msg
         jmp print_string
 @net_ok:
+        jsr http_resp_init      ; no http_status etc. from the last fetch
         jsr https_target_prompt ; sets tls_hostname + http_host/path, banner
         bcc @target_set
         rts                     ; refused: reported, nothing dialled

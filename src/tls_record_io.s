@@ -25,6 +25,7 @@
 .export tls_recv_state
 .export tls_recv_count
 .export tls_rx_reset
+.export tls_seq_reset
 
 .include "net_abi.inc"          ; net_tcp_send, net_recv_byte, net_send_len
 .import tls_record_encrypt
@@ -36,6 +37,8 @@
 .import tls_state
 .import tls_last_state
 .import tls_recv_sub_progress
+.import tls_write_seq
+.import tls_read_seq
 
 .segment "CODE"
 
@@ -388,14 +391,25 @@ tls_record_recv_and_decrypt:
 ; CRYPTO_RESIDENT half of the CRYPTO_OVERLAY+CRYPTO_RESIDENT pool, because
 ; TLS_CODE's half (CRYPTO_OVERLAY) would be left with single-digit bytes.
 ;
-; tls_rx_reset: called at tls_connect entry. Drops whatever an earlier
-;   connection left unread in the TCP ring (head := tail) and puts the
-;   record reader back at a record boundary. Nothing that far back reset
+; tls_rx_reset: called at tls_connect entry — the ONE place a new
+;   connection's inherited record-layer state is cleared. Drops whatever an
+;   earlier connection left unread in the TCP ring (head := tail), zeroes
+;   both AEAD sequence counters, clears tcp_recv_overflow and
+;   tls_last_state (both describe one connection), and puts the record
+;   reader back at a record boundary. Nothing that far back reset
 ;   either, so after an aborted fetch the next connect used to read the old
 ;   connection's ciphertext as its "ServerHello". Safe to discard: TLS 1.3
 ;   is client-first — the server sends nothing on a new connection until it
 ;   has our ClientHello, which tls_connect has not sent yet — and both
 ;   backends append to the ring only inside net_poll, never asynchronously.
+;   The counters used to be zeroed only at the traffic-key switch, so the
+;   first connection of a boot ran on BSS that boot had zeroed and every
+;   later one decrypted EncryptedExtensions with the previous connection's
+;   application-data read count: AEAD tag failure at tls_last_state $03.
+;
+; tls_seq_reset: zero tls_write_seq / tls_read_seq. Also tls_connect's
+;   RFC 8446 §5.3 reset at the handshake -> application key switch.
+;   Out: A = 0. Clobbers X.
 ;
 ; tls_rec_decrypt_chk: in front of tls_record_decrypt. Once records are
 ;   encrypted a record of 16 B or less cannot hold a tag plus an inner type,
@@ -432,11 +446,23 @@ tls_rx_reset:
         sta tcp_recv_head
         lda tcp_recv_tail+1
         sta tcp_recv_head+1
+        jsr tls_seq_reset       ; A = 0 on return
+        sta tcp_recv_overflow
+        sta tls_last_state
 tls_rec_reader_reset:
         lda #0
         sta tls_recv_state
         sta tls_recv_count
         sta tls_recv_count+1
+        rts
+
+tls_seq_reset:
+        lda #0
+        ldx #7
+:       sta tls_write_seq,x
+        sta tls_read_seq,x
+        dex
+        bpl :-
         rts
 
 tls_rec_decrypt_chk:

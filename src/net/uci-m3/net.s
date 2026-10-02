@@ -433,6 +433,16 @@ net_tcp_connect:
         beq :+
         jsr net_tcp_close           ; one session at a time
 :
+        ; New session: empty rx ring, no error. The ring holds plaintext
+        ; here and http_recv_body parses it directly, so what the last
+        ; session left unread must not become this one's response.
+        lda #0
+        sta tcp_recv_head
+        sta tcp_recv_head+1
+        sta tcp_recv_tail
+        sta tcp_recv_tail+1
+        sta tcp_recv_overflow
+        sta net_last_error
         lda m3_host_len
         bne :+
         lda #UCI_ERR_CONNECT_FAIL

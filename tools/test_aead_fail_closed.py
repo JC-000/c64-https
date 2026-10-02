@@ -51,6 +51,35 @@ Added after adversarial review of PR #240:
     key generation / ClientHello / the ServerHello parser stubbed, and the
     new server's bytes becoming visible only on the first poll.
 
+Reconnect state (two ``tls_connect`` runs in one boot):
+
+  * ``tls_read_seq`` / ``tls_write_seq`` were zeroed only at the
+    traffic-key switch, never at ``tls_connect`` entry, so the first
+    connection of a boot ran on BSS that boot had zeroed and every later
+    one decrypted EncryptedExtensions with the previous connection's read
+    count: tag failure at ``tls_last_state`` $03 on hardware, every build.
+    Pinned by running the real ``tls_connect`` twice from a clean boot
+    state — ServerHello and handshake-key derivation stubbed, the
+    handshake read key written by the suite — against EncryptedExtensions
+    sealed at seq 0 followed by a tag-flipped record, so a connection that
+    decrypts EE ends at $04 and one that cannot ends at $03. The first run
+    is the control; the second inherits whatever the first left behind;
+  * ``tls_rx_reset`` itself, the single per-connection reset point, from a
+    fully dirtied state: ring, both counters, ``tcp_recv_overflow``,
+    ``tls_last_state``, record reader;
+  * ``tls_connect``'s first instruction is ``JSR tls_rx_reset``, so nothing
+    a connection reads runs before that reset;
+  * ``http_status`` (and the rest of the response state) is reset at the
+    start of every request: ``http_get`` / ``http_get_plain`` with the DNS
+    step failing must not leave the previous fetch's 200 for a reader;
+  * ``net_tcp_connect`` empties the rx ring and clears
+    ``tcp_recv_overflow`` / ``net_last_error`` on both backends. ip65: a
+    plain-HTTP fetch run after an HTTPS fetch that left ciphertext unread
+    (``http_get_plain`` parses the ring directly), with the ip65 connect /
+    send stubbed and the response appended to the ring on the first poll.
+    UCI (no UCI device in VICE): ``net_tcp_connect`` with ``uci_wait_idle``
+    failing at once, which is after the reset.
+
 Menu wait: ``C64_INIT_WAIT`` seconds (default 120; a comb image's boot
 precompute needs ~135 s in VICE).
 
@@ -156,6 +185,23 @@ REQUIRED_LABELS = [
     "tls_ecdh_generate_keypair",
     "tls_send_client_hello",
     "tls_parse_server_hello",
+    "tls_recv_server_hello",
+    "tls_transcript_hash",
+    "tls_derive_handshake_keys",
+    "tls_rx_reset",
+    "tls_write_seq",
+    "net_dns_resolve",
+    "net_tcp_connect",
+    "net_tcp_send",
+    "net_tcp_close",
+    "net_last_error",
+    "http_get",
+    "http_get_plain",
+    "http_host_ptr",
+    "http_host_len",
+    "http_path_ptr",
+    "http_path_len",
+    "http_port",
 ]
 
 # src/constants.inc
@@ -490,6 +536,266 @@ def run_connect_stale(transport, labels, *, stale: bytes, server: bytes,
         p.restore()
 
 
+def run_connect_ee(transport, labels, *, records: bytes, key: bytes,
+                   iv: bytes) -> dict:
+    """Run the real tls_connect up to the encrypted flight.
+
+    Key generation, the ClientHello send, ServerHello receipt, the
+    transcript snapshot and handshake-key derivation are stubbed; the
+    handshake read key/IV are *key*/*iv*. *records* (the server's
+    encrypted flight) become visible on the first net_poll. The AEAD
+    sequence counters, tcp_recv_overflow and tls_last_state are NOT
+    touched here: they are whatever the previous run (or the caller) left,
+    which is the point.
+    """
+    n = len(records)
+    p = Patcher(transport)
+    try:
+        p.patch(STUB_ADDR, build_tail_setter(labels, n), "tail-setter net_poll")
+        p.patch(labels["net_poll"], bytes([0x4C, *_lohi(STUB_ADDR)]),
+                "net_poll JMP")
+        p.patch(labels["drbg_fill_bytes"], bytes([0x60]), "drbg RTS")
+        p.patch(labels["tls_ecdh_generate_keypair"], bytes([0x60]),
+                "keypair RTS")
+        p.patch(labels["tls_send_client_hello"], bytes([0x18, 0x60]),
+                "ClientHello CLC/RTS")
+        p.patch(labels["tls_recv_server_hello"], bytes([0x18, 0x60]),
+                "ServerHello CLC/RTS")
+        p.patch(labels["tls_transcript_hash"], bytes([0x60]),
+                "transcript hash RTS")
+        # HTTPS_PIN_SPKI builds call cert_pin_hs_keys in its place.
+        for name in ("tls_derive_handshake_keys", "cert_pin_hs_keys"):
+            if labels.address(name) is not None:
+                p.patch(labels[name], bytes([0x18, 0x60]), f"{name} CLC/RTS")
+        p.patch(labels["tls_hs_read_key"], key, "tls_hs_read_key")
+        p.patch(labels["tls_hs_read_iv"], iv, "tls_hs_read_iv")
+        p.patch(DRIVER_ADDR, build_driver(labels["tls_connect"]), "driver")
+        p.patch(LATCH_ADDR, bytes([POISON]), "carry latch")
+        p.patch(COUNTER_ADDR, bytes(3), "poll counter")
+        p.patch(labels["tls_rec_len"], bytes(2), "tls_rec_len")
+        p.patch(labels["tcp_recv_buf"], records, "tcp_recv_buf")
+        p.patch(labels["tcp_recv_head"], bytes(2), "tcp_recv_head")
+        p.patch(labels["tcp_recv_tail"], bytes(2), "tcp_recv_tail")
+        timed_out = False
+        try:
+            jsr(transport, DRIVER_ADDR, timeout=JSR_TIMEOUT,
+                recover_on_timeout=True)
+        except Exception as e:  # noqa: BLE001
+            timed_out = True
+            print(f"        JSR did not return within {JSR_TIMEOUT:.0f} s: {e}")
+        c = read_bytes(transport, COUNTER_ADDR, 3)
+        return {
+            "timed_out": timed_out,
+            "carry": read_bytes(transport, LATCH_ADDR, 1)[0],
+            "polls": c[0] | (c[1] << 8) | (c[2] << 16),
+            "tls_state": read_bytes(transport, labels["tls_state"], 1)[0],
+            "last_state": read_bytes(transport, labels["tls_last_state"], 1)[0],
+            "read_seq": int.from_bytes(
+                read_bytes(transport, labels["tls_read_seq"], 8), "big"),
+            "write_seq": int.from_bytes(
+                read_bytes(transport, labels["tls_write_seq"], 8), "big"),
+            "overflow": read_bytes(transport, labels["tcp_recv_overflow"],
+                                   1)[0],
+        }
+    finally:
+        p.restore()
+
+
+def run_rx_reset_dirty(transport, labels) -> dict:
+    """JSR tls_rx_reset with every field it owns dirtied."""
+    p = Patcher(transport)
+    try:
+        p.patch(DRIVER_ADDR, build_driver(labels["tls_rx_reset"]), "driver")
+        p.patch(labels["tls_read_seq"], bytes([0x5A] * 8), "tls_read_seq")
+        p.patch(labels["tls_write_seq"], bytes([0xA5] * 8), "tls_write_seq")
+        p.patch(labels["tcp_recv_overflow"], bytes([1]), "tcp_recv_overflow")
+        p.patch(labels["tls_last_state"], bytes([TLS_STATE_ENCRYPTED_EXT]),
+                "tls_last_state")
+        p.patch(labels["tcp_recv_head"], bytes([0x10, 0x00]), "tcp_recv_head")
+        p.patch(labels["tcp_recv_tail"], bytes([0x34, 0x02]), "tcp_recv_tail")
+        p.patch(labels["tls_recv_state"], bytes([1]), "tls_recv_state")
+        p.patch(labels["tls_recv_count"], bytes([3, 1]), "tls_recv_count")
+        jsr(transport, DRIVER_ADDR, timeout=30.0)
+        return {
+            "read_seq": read_bytes(transport, labels["tls_read_seq"], 8).hex(),
+            "write_seq": read_bytes(transport, labels["tls_write_seq"],
+                                    8).hex(),
+            "overflow": read_bytes(transport, labels["tcp_recv_overflow"],
+                                   1)[0],
+            "last_state": read_bytes(transport, labels["tls_last_state"], 1)[0],
+            "head": read_bytes(transport, labels["tcp_recv_head"], 2).hex(),
+            "tail": read_bytes(transport, labels["tcp_recv_tail"], 2).hex(),
+            "recv_state": read_bytes(transport, labels["tls_recv_state"],
+                                     1)[0],
+            "recv_count": read_bytes(transport, labels["tls_recv_count"],
+                                     2).hex(),
+        }
+    finally:
+        p.restore()
+
+
+IP65_BASE = 0x2000            # src/net/ip65/ip65_symbols.inc
+IP65_TCP_CONNECT = IP65_BASE + 12
+IP65_SET_TCP_CB = IP65_BASE + 27
+IP65_SET_TCP_DEST = IP65_BASE + 30
+APPEND_FLAG_ADDR = 0x03B8
+APPEND_STUB_ADDR = 0x03C0     # <= 32 B
+HOST_STR_ADDR = 0x03E8        # "h", then "/"
+STATUS_POISON = (200).to_bytes(2, "little")
+
+
+def build_append_once(labels, n: int) -> bytes:
+    """net_poll replacement: on the first call only, tail += n (the
+    server's response arrives after whatever the ring already holds)."""
+    f_lo, f_hi = _lohi(APPEND_FLAG_ADDR)
+    t_lo, t_hi = _lohi(labels["tcp_recv_tail"])
+    t1_lo, t1_hi = _lohi(labels["tcp_recv_tail"] + 1)
+    code = bytes([
+        0xAD, f_lo, f_hi,       # LDA flag
+        0xD0, 0x14,             # BNE done (+20: to the RTS)
+        0xEE, f_lo, f_hi,       # INC flag
+        0x18,                   # CLC
+        0xAD, t_lo, t_hi,       # LDA tail
+        0x69, n & 0xFF,         # ADC #<n
+        0x8D, t_lo, t_hi,       # STA tail
+        0xAD, t1_lo, t1_hi,     # LDA tail+1
+        0x69, n >> 8,           # ADC #>n
+        0x8D, t1_lo, t1_hi,     # STA tail+1
+        0x60,                   # done: RTS
+    ])
+    assert len(code) == 26 and code[5 + code[4]] == 0x60, "BNE offset"
+    return code
+
+
+def _set_target(p, labels) -> None:
+    p.patch(HOST_STR_ADDR, b"h/", "host/path strings")
+    p.patch(labels["http_host_ptr"], bytes(_lohi(HOST_STR_ADDR)),
+            "http_host_ptr")
+    p.patch(labels["http_host_len"], bytes([1]), "http_host_len")
+    p.patch(labels["http_path_ptr"], bytes(_lohi(HOST_STR_ADDR + 1)),
+            "http_path_ptr")
+    p.patch(labels["http_path_len"], bytes([1]), "http_path_len")
+    p.patch(labels["http_port"], bytes([80, 0]), "http_port")
+
+
+def run_request_dns_fail(transport, labels, target: str) -> dict:
+    """*target* (http_get / http_get_plain) with the DNS step failing, after
+    a previous fetch left http_status = 200 and a body behind."""
+    p = Patcher(transport)
+    try:
+        _set_target(p, labels)
+        p.patch(labels["net_dns_resolve"], bytes([0x38, 0x60]), "DNS SEC/RTS")
+        p.patch(labels["http_status"], STATUS_POISON, "http_status")
+        p.patch(labels["http_parse_state"], bytes([2]), "http_parse_state")
+        p.patch(labels["http_body_total"], bytes([0x34, 0x12, 0]),
+                "http_body_total")
+        p.patch(labels["http_cl_valid"], bytes([1]), "http_cl_valid")
+        p.patch(DRIVER_ADDR, build_driver(labels[target]), "driver")
+        p.patch(LATCH_ADDR, bytes([POISON]), "carry latch")
+        jsr(transport, DRIVER_ADDR, timeout=30.0)
+        return {
+            "carry": read_bytes(transport, LATCH_ADDR, 1)[0],
+            "http_status": int.from_bytes(
+                read_bytes(transport, labels["http_status"], 2), "little"),
+            "parse_state": read_bytes(transport, labels["http_parse_state"],
+                                      1)[0],
+            "body_total": int.from_bytes(
+                read_bytes(transport, labels["http_body_total"], 3), "little"),
+            "cl_valid": read_bytes(transport, labels["http_cl_valid"], 1)[0],
+        }
+    finally:
+        p.restore()
+
+
+def run_plain_after_https(transport, labels, *, stale: bytes,
+                          response: bytes) -> dict:
+    """ip65: http_get_plain with an HTTPS fetch's unread ciphertext still
+    in the ring (head = $0800, *stale* up to tail). The ip65 connect, the
+    send and the close are stubbed; net_tcp_connect's own code runs. The
+    response is placed both at ring offset 0 and right after *stale*, and
+    becomes visible (tail += len) on the first poll — so it is read
+    correctly exactly when the ring was emptied at connect."""
+    base = 0x0800
+    n = len(response)
+    p = Patcher(transport)
+    try:
+        _set_target(p, labels)
+        p.patch(labels["net_dns_resolve"], bytes([0x18, 0x60]), "DNS CLC/RTS")
+        for addr, what in ((IP65_SET_TCP_DEST, "ip65_set_tcp_dest"),
+                           (IP65_SET_TCP_CB, "ip65_set_tcp_cb"),
+                           (IP65_TCP_CONNECT, "ip65_tcp_connect")):
+            p.patch(addr, bytes([0x18, 0x60]), f"{what} CLC/RTS")
+        p.patch(labels["net_tcp_send"], bytes([0x18, 0x60]), "send CLC/RTS")
+        p.patch(labels["net_tcp_close"], bytes([0x60]), "close RTS")
+        p.patch(APPEND_STUB_ADDR, build_append_once(labels, n), "append stub")
+        p.patch(APPEND_FLAG_ADDR, bytes(1), "append flag")
+        p.patch(labels["net_poll"], bytes([0x4C, *_lohi(APPEND_STUB_ADDR)]),
+                "net_poll JMP")
+        p.patch(labels["http_body_sink"], bytes(1), "http_body_sink")
+        p.patch(labels["http_status"], STATUS_POISON, "http_status")
+        p.patch(labels["net_last_error"], bytes([0x47]), "net_last_error")
+        p.patch(labels["tcp_recv_overflow"], bytes([1]), "tcp_recv_overflow")
+        buf = labels["tcp_recv_buf"]
+        p.patch(buf, response, "response @0")
+        p.patch(buf + base, stale + response, "stale + response")
+        p.patch(labels["tcp_recv_head"], bytes(_lohi(base)), "tcp_recv_head")
+        p.patch(labels["tcp_recv_tail"], bytes(_lohi(base + len(stale))),
+                "tcp_recv_tail")
+        p.patch(DRIVER_ADDR, build_driver(labels["http_get_plain"]), "driver")
+        p.patch(LATCH_ADDR, bytes([POISON]), "carry latch")
+        timed_out = False
+        try:
+            jsr(transport, DRIVER_ADDR, timeout=JSR_TIMEOUT,
+                recover_on_timeout=True)
+        except Exception as e:  # noqa: BLE001
+            timed_out = True
+            print(f"        JSR did not return within {JSR_TIMEOUT:.0f} s: {e}")
+        rlen = int.from_bytes(read_bytes(transport, labels["http_resp_len"],
+                                         2), "little")
+        return {
+            "timed_out": timed_out,
+            "carry": read_bytes(transport, LATCH_ADDR, 1)[0],
+            "http_status": int.from_bytes(
+                read_bytes(transport, labels["http_status"], 2), "little"),
+            "resp_len": rlen,
+            "body": bytes(read_bytes(transport, labels["http_resp_buf"],
+                                     min(rlen, 32))),
+            "overflow": read_bytes(transport, labels["tcp_recv_overflow"],
+                                   1)[0],
+            "net_last_error": read_bytes(transport, labels["net_last_error"],
+                                         1)[0],
+        }
+    finally:
+        p.restore()
+
+
+def run_uci_connect_reset(transport, labels) -> dict:
+    """UCI: net_tcp_connect with uci_wait_idle failing at once (SEC/RTS),
+    which is after the reset, from a dirtied ring/error state."""
+    p = Patcher(transport)
+    try:
+        p.patch(labels["uci_wait_idle"], bytes([0x38, 0x60]),
+                "uci_wait_idle SEC/RTS")
+        p.patch(labels["tcp_recv_head"], bytes([0x10, 0x01]), "tcp_recv_head")
+        p.patch(labels["tcp_recv_tail"], bytes([0x50, 0x02]), "tcp_recv_tail")
+        p.patch(labels["tcp_recv_overflow"], bytes([1]), "tcp_recv_overflow")
+        p.patch(labels["net_last_error"], bytes([0x86]), "net_last_error")
+        p.patch(DRIVER_ADDR, build_driver(labels["net_tcp_connect"]), "driver")
+        p.patch(LATCH_ADDR, bytes([POISON]), "carry latch")
+        jsr(transport, DRIVER_ADDR, timeout=JSR_TIMEOUT)
+        return {
+            "carry": read_bytes(transport, LATCH_ADDR, 1)[0],
+            "head": read_bytes(transport, labels["tcp_recv_head"], 2).hex(),
+            "tail": read_bytes(transport, labels["tcp_recv_tail"], 2).hex(),
+            "overflow": read_bytes(transport, labels["tcp_recv_overflow"],
+                                   1)[0],
+            "net_last_error": read_bytes(transport, labels["net_last_error"],
+                                         1)[0],
+        }
+    finally:
+        p.restore()
+
+
 def run_connect_error_exit(transport, labels, entry_state: int,
                            recorded: int) -> dict:
     """JSR tls_connect's error exit with tls_state/tls_last_state preset."""
@@ -597,8 +903,8 @@ def run_tests(transport, labels) -> tuple[int, int]:
         "was: counted as an idle tick, 65,536 of them (~87 min on UCI) with "
         "tls_state still CONNECTED",
         r, _fail_closed_checks(r, live_state=TLS_STATE_CONNECTED, seq_after=0)
-        + [("http_status untouched (nothing parsed)",
-            r["status"] == (POISON << 8) | POISON)]))
+        + [("nothing parsed: http_status = 0 (reset at entry by "
+            "http_resp_init, never written)", r["status"] == 0)]))
 
     # --- C: one byte dropped from the stream (the #230(b) shape) ---------
     head = b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\n" + b"A" * 10
@@ -923,6 +1229,108 @@ def run_tests(transport, labels) -> tuple[int, int]:
              r["rec_type"] == TLS_CT_HANDSHAKE and r["progress"] == 4),
             (f"at once (polls <= {MAX_POLLS_AFTER_FAIL})",
              r["polls"] <= MAX_POLLS_AFTER_FAIL)]))
+
+    # --- R: a second connection in one boot inherits nothing -------------
+    # EE (type 8, empty extensions) at seq 0, then a record that fails its
+    # tag at seq 1: a connection that decrypts EE ends at $04, one that
+    # cannot ends at $03 — the hardware symptom.
+    ee = seal(hs_key, hs_iv, 0, TLS_CT_HANDSHAKE, bytes([8, 0, 0, 2, 0, 0]))
+    flight = ee + flip_tag_bit(seal(hs_key, hs_iv, 1, TLS_CT_HANDSHAKE,
+                                    b"z" * 24))
+    # Boot zeroes BSS; start the pair from that state.
+    write_bytes(transport, labels["tls_read_seq"], bytes(8))
+    write_bytes(transport, labels["tls_write_seq"], bytes(8))
+    write_bytes(transport, labels["tcp_recv_overflow"], bytes(1))
+    r = run_connect_ee(transport, labels, records=flight, key=hs_key, iv=hs_iv)
+    tally(_report(
+        "first tls_connect of a boot: EncryptedExtensions decrypts "
+        "(control, green both ways)",
+        "zeroed counters, as boot leaves them; the run ends on the "
+        "tag-flipped second record",
+        r, [("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=1", r["carry"] == 1),
+            ("EE decrypted: failure hit CERTIFICATE (tls_last_state = $04)",
+             r["last_state"] == TLS_STATE_CERTIFICATE),
+            ("tls_read_seq = 1", r["read_seq"] == 1)]))
+    # The previous connection also sent records and lost ring bytes.
+    write_bytes(transport, labels["tls_write_seq"], (5).to_bytes(8, "big"))
+    write_bytes(transport, labels["tcp_recv_overflow"], bytes([1]))
+    r = run_connect_ee(transport, labels, records=flight, key=hs_key, iv=hs_iv)
+    tally(_report(
+        "second tls_connect in the same boot: EncryptedExtensions decrypts",
+        "was: the counters were zeroed only at the traffic-key switch, so "
+        "EE was decrypted at the previous connection's read count and "
+        "failed its tag at $03 (every handshake after the first per boot)",
+        r, [("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=1", r["carry"] == 1),
+            ("EE decrypted: failure hit CERTIFICATE (tls_last_state = $04, "
+             "not $03)", r["last_state"] == TLS_STATE_CERTIFICATE),
+            ("tls_read_seq = 1 (restarted from 0)", r["read_seq"] == 1),
+            ("tls_write_seq = 0 (restarted)", r["write_seq"] == 0),
+            ("tcp_recv_overflow cleared", r["overflow"] == 0)]))
+
+    r = run_rx_reset_dirty(transport, labels)
+    tally(_report(
+        "tls_rx_reset from a fully dirtied state",
+        "the single per-connection reset tls_connect runs first",
+        r, [("tls_read_seq = 0", r["read_seq"] == "00" * 8),
+            ("tls_write_seq = 0", r["write_seq"] == "00" * 8),
+            ("tcp_recv_overflow = 0", r["overflow"] == 0),
+            ("tls_last_state = 0", r["last_state"] == 0),
+            ("ring emptied (head = tail)", r["head"] == r["tail"] == "3402"),
+            ("record reader at a boundary",
+             r["recv_state"] == 0 and r["recv_count"] == "0000")]))
+
+    head = read_bytes(transport, labels["tls_connect"], 3)
+    tally(_report(
+        "tls_connect's first instruction is JSR tls_rx_reset",
+        "nothing a connection reads may run before the reset",
+        {"bytes": head.hex()},
+        [("JSR tls_rx_reset",
+          head == bytes([0x20, *_lohi(labels["tls_rx_reset"])]))]))
+
+    # --- R (HTTP): a new request starts from no response state ------------
+    for target in ("http_get", "http_get_plain"):
+        r = run_request_dns_fail(transport, labels, target)
+        tally(_report(
+            f"{target} failing at DNS after a 200: http_status reset",
+            "was: http_status was written only when a status line parsed, "
+            "so a fetch that never got one left the last fetch's 200",
+            r, [("carry C=1", r["carry"] == 1),
+                ("http_status = 0", r["http_status"] == 0),
+                ("http_parse_state = 0", r["parse_state"] == 0),
+                ("http_body_total = 0", r["body_total"] == 0),
+                ("http_cl_valid = 0", r["cl_valid"] == 0)]))
+
+    # --- R (transport): net_tcp_connect empties the ring ------------------
+    if labels.address("uci_wait_idle") is None:
+        body = b"PLAIN-OK"
+        response = (b"HTTP/1.1 203 OK\r\nContent-Length: "
+                    + str(len(body)).encode() + b"\r\n\r\n" + body)
+        stale = bytes((b % 0x5F) + 0x20 for b in secrets.token_bytes(64))
+        r = run_plain_after_https(transport, labels, stale=stale,
+                                  response=response)
+        tally(_report(
+            "plain HTTP after an HTTPS fetch left ciphertext in the ring",
+            "was: neither net_tcp_connect nor http_get_plain emptied the "
+            "ring, so the plain parser read the old bytes as its response",
+            r, [("returned (no harness timeout)", not r["timed_out"]),
+                ("carry C=0", r["carry"] == 0),
+                ("http_status = 203 (this response's)",
+                 r["http_status"] == 203),
+                ("body = PLAIN-OK", r["body"] == body),
+                ("tcp_recv_overflow cleared", r["overflow"] == 0),
+                ("net_last_error cleared", r["net_last_error"] == 0)]))
+    else:
+        r = run_uci_connect_reset(transport, labels)
+        tally(_report(
+            "UCI net_tcp_connect empties the ring before anything else",
+            "uci_wait_idle stubbed to fail at once, after the reset",
+            r, [("carry C=1 (the stubbed failure)", r["carry"] == 1),
+                ("head = tail = 0", r["head"] == r["tail"] == "0000"),
+                ("tcp_recv_overflow = 0", r["overflow"] == 0),
+                ("net_last_error is not the previous connection's $86",
+                 r["net_last_error"] != 0x86)]))
 
     # --- E: tls_connect's error exit keeps the record layer's verdict -----
     r = run_connect_error_exit(transport, labels, TLS_STATE_ERROR,

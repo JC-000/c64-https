@@ -634,6 +634,16 @@ net_dhcp_acquire:
 net_tcp_connect:
         sta uci_connect_port_lo
         stx uci_connect_port_hi
+        ; New connection: empty rx ring, no error. What the last socket left
+        ; unread must not become this one's first bytes (http_get_plain
+        ; parses the ring directly); net_poll is the only writer.
+        lda #0
+        sta tcp_recv_head
+        sta tcp_recv_head+1
+        sta tcp_recv_tail
+        sta tcp_recv_tail+1
+        sta tcp_recv_overflow
+        sta net_last_error
 
         jsr uci_wait_idle
         ; Not idle within 5 s — someone left a transaction open. Surface

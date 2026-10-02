@@ -65,6 +65,7 @@
 .import tls_record_send_encrypted
 .import tls_record_recv_and_decrypt
 .import tls_rx_reset
+.import tls_seq_reset
 
 ; --- ClientHello / ServerHello builders & parsers (tls_handshake) ---
 .import tls_build_client_hello
@@ -93,8 +94,6 @@
 ; --- AEAD sequence counters (data.asm). Reset at every key-epoch change
 ;     per RFC 8446 §5.3: the sequence number MUST be zero at the beginning
 ;     of a connection and whenever the key is changed. ---
-.import tls_write_seq
-.import tls_read_seq
 
 ; --- Encrypted handshake sub-handlers (tls_cert.s) ---
 .import tls_handle_certificate
@@ -138,8 +137,8 @@
 ; Output: C=0 success (CONNECTED state), C=1 failure
 ; =============================================================================
 tls_connect:
-        jsr tls_rx_reset        ; #239: drop an earlier connection's unread
-                                ;  ring bytes + reset the record reader
+        jsr tls_rx_reset        ; per-connection reset: ring bytes (#239),
+                                ;  AEAD seq counters, record reader
         ; init state
         lda #TLS_STATE_IDLE
         sta tls_state
@@ -311,13 +310,8 @@ tls_connect:
         ; start from seq=0.  Leaving either non-zero desynchronises the
         ; AEAD nonce with the peer and the server returns record-layer
         ; failure on the first application record we send.
-        ldx #7
-@seq_reset:
-        lda #0
-        sta tls_write_seq,x
-        sta tls_read_seq,x
-        dex
-        bpl @seq_reset
+        ; (tls_rx_reset zeroes them again at the next connection's entry.)
+        jsr tls_seq_reset
 
         ; connected!
         lda #TLS_STATE_CONNECTED

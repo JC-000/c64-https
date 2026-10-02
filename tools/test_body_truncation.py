@@ -543,10 +543,13 @@ def run_tests(transport, labels) -> tuple[int, int]:
                            r["parse_state"] < 2))
             checks.append(("reached the unframed arm (no framing seen)",
                            r["cl_valid"] == 0 and r["chunked"] == 0))
-            # Outputs still poisoned: nothing wrote them, so the C=1 came
-            # from the parse-state guard and from nothing else.
-            checks.append(("outputs untouched (body_total, Content-Length)",
-                           r["body_total"] == 0xA5A5A5
+            # http_resp_init zeroes body_total at entry and nothing counts
+            # a byte after it; Content-Length keeps its poison (never
+            # parsed). So the C=1 came from the parse-state guard and from
+            # nothing else.
+            checks.append(("outputs untouched (body_total reset to 0, "
+                           "Content-Length still poisoned)",
+                           r["body_total"] == 0
                            and r["content_length"] == 0xA5A5A5))
         elif chunked:
             checks.append(("status parsed as 200", r["status"] == 200))
@@ -563,11 +566,12 @@ def run_tests(transport, labels) -> tuple[int, int]:
         want = "C=1 (short/failed)" if expect_carry else "C=0 (complete)"
         checks.append((f"carry {want}", r["carry"] == expect_carry))
         if name.startswith("nothing"):
-            # http_status keeps its poison: the parser never wrote it, so
-            # nothing was parsed at all. (Pre-guard this case returned C=0
-            # with a status the caller had no reason to trust.)
-            checks.append(("http_status untouched (nothing was parsed)",
-                           r["status"] == (POISON << 8) | POISON))
+            # http_status stays at the 0 http_resp_init wrote at entry: the
+            # parser never wrote it, so nothing was parsed at all. (Pre-guard
+            # this case returned C=0 with a status the caller had no reason
+            # to trust.)
+            checks.append(("http_status = 0 (reset at entry, nothing parsed)",
+                           r["status"] == 0))
 
         ok = all(good for _, good in checks)
         print(f"\n  [{'+' if ok else '-'}] {name}")
