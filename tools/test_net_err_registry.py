@@ -103,7 +103,7 @@ ASSERTS_TU = REPO / "src" / "net_err_registry_asserts.s"
 IP65_FAMILY = (0x40, 0x7F)
 UCI_FAMILY = (0x80, 0xBF)
 
-TOTAL_CHECKS = 12
+TOTAL_CHECKS = 13
 CERTIFIES = ("agreement between this repo's net_last_error allocations and "
              "c64-wireguard's canonical registry")
 
@@ -539,6 +539,25 @@ def test_our_rows_carry_our_names():
     assert not wrong, ("rows the canonical registry gives to c64-https carry "
                        "a different name than ours: " + "; ".join(wrong)
                        + f". Registry: {root}/src/net_abi.inc (#184).")
+
+
+def test_rows_of_our_codes_name_a_known_owner():
+    """Fail closed on ownership. For every code our headers define, the
+    registry row at that value must name its owner as exactly c64-https or
+    c64-wireguard (its leading token). A row whose owner field is missing or
+    unparseable reads as "other", and the name and ownership checks above
+    would skip it silently."""
+    root = _require_peer()
+    registry = _peer_registry(root)
+    bad = []
+    for name, (value, _p, _f) in sorted(_our_codes().items()):
+        row = registry.get(value)
+        if row is not None and row[1] not in ("c64-https", "c64-wireguard"):
+            bad.append(f"${value:02X} {row[0]} (ours: {name}): owner field "
+                       f"does not parse to c64-https or c64-wireguard")
+    assert not bad, ("registry rows of our codes with no recognisable owner: "
+                     + "; ".join(bad)
+                     + f". Registry: {root}/src/net_abi.inc (#184).")
 
 
 def test_mirrors_match_the_peer_registry():
