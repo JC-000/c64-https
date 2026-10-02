@@ -5,7 +5,8 @@
 ; upstream to copy from: this file is the normative source for c64-https and
 ; the original text resolves at tag `v0.17.1`, in a c64-lib-contract
 ; checkout. The values MUST NOT change — c64-wireguard holds an independent
-; copy of the same bits and nothing checks the two agree. Allocating a NEW
+; copy of the same bits, and tools/test_net_families_drift.py checks the two
+; agree (names and values, both directions). Allocating a NEW
 ; bit is a cross-repo agreement, not a local edit: do it with the wireguard
 ; lane, whose `src/net_abi.inc` is the fleet registry for the neighbouring
 ; net_last_error ranges and the obvious home for these too (#184).
