@@ -103,7 +103,7 @@ ASSERTS_TU = REPO / "src" / "net_err_registry_asserts.s"
 IP65_FAMILY = (0x40, 0x7F)
 UCI_FAMILY = (0x80, 0xBF)
 
-TOTAL_CHECKS = 13
+TOTAL_CHECKS = 14
 CERTIFIES = ("agreement between this repo's net_last_error allocations and "
              "c64-wireguard's canonical registry")
 
@@ -178,6 +178,10 @@ _PEER_RE = re.compile(r"^\s*(NET_ERR_PEER_[A-Za-z0-9_]+)\s*=\s*\$([0-9A-Fa-f]{2}
 
 # A registry row in c64-wireguard/src/net_abi.inc:
 #   ;   $8E   UCI_ERR_CMD_UNKNOWN         OURS, minted here (PR #112)
+# Anything that LOOKS like a registry row: "; $hh NAME ...". Every such line
+# must also match _PEER_ROW_RE, or the row is silently dropped (e.g. one
+# space after a long name); test_every_registry_row_parses holds them equal.
+_PEER_ROW_CANDIDATE_RE = re.compile(r"^;\s+\$[0-9A-Fa-f]{2}\s+[A-Z][A-Za-z0-9_]*\b")
 _PEER_ROW_RE = re.compile(r"^;\s+\$([0-9A-Fa-f]{2})\s+([A-Z][A-Za-z0-9_]*)\s{2,}(.+?)\s*$")
 
 # A comment row in one of our headers listing a peer allocation:
@@ -312,7 +316,7 @@ def _row_owner(origin):
     token = m.group(1).lower() if m else ""
     if token == "c64-https":
         return "c64-https"
-    if token == "ours":
+    if token in ("ours", "c64-wireguard"):
         return "c64-wireguard"
     return "other"
 
@@ -539,6 +543,19 @@ def test_our_rows_carry_our_names():
     assert not wrong, ("rows the canonical registry gives to c64-https carry "
                        "a different name than ours: " + "; ".join(wrong)
                        + f". Registry: {root}/src/net_abi.inc (#184).")
+
+
+def test_every_registry_row_parses():
+    """Every line that looks like a registry row ("; $hh NAME ...") must be
+    parsed as one; a row the parser drops is a code no check can see."""
+    root = _require_peer()
+    lines = _read(root / "src" / "net_abi.inc")
+    dropped = [l.strip() for l in lines
+               if _PEER_ROW_CANDIDATE_RE.match(l) and not _PEER_ROW_RE.match(l)]
+    assert not dropped, ("registry rows the parser cannot read (it needs two "
+                         "or more spaces between NAME and its origin): "
+                         + "; ".join(dropped)
+                         + f". Registry: {root}/src/net_abi.inc (#184).")
 
 
 def test_rows_of_our_codes_name_a_known_owner():

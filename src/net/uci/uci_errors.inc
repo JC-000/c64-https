@@ -159,8 +159,8 @@ UCI_ERR_SHORT_READ     = $8F    ; a READ reply's block ended short of the
 ; OURS, minted in c64-wireguard/src/net_abi.inc (the canonical registry)
 ; for BACKEND=uci-m3, the only emitter: a READ found the established stream
 ; unusable — the firmware ended it with an error ($0000 + any status but
-; 01/05, i.e. 12/14/16/17 per S 1.6: the session is dead but the handle is
-; still ours) or the handle is no longer
+; 01/05, seen: 12/14/16/17: the session is dead but the handle is still
+; ours) or the handle is no longer
 ; ours ($FFFF + anything but "02,NO DATA: 11"). The status line says which.
 ; Deliberately NOT $86, which means only "our push was rejected".
 UCI_ERR_STREAM_LOST    = $90
