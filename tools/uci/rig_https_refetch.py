@@ -22,7 +22,9 @@ Per fetch it records, from memory, after the fetch has finished:
 tls_reached_connected, tls_last_state, tls_state, http_status,
 net_last_error, and tls_read_seq / tls_write_seq as they stood before 'G'
 (what the next connection would inherit if tls_connect did not reset them).
-A fetch passes when tls_reached_connected = CONNECTED and http_status = 200.
+http_status is poisoned ($BEEF) before each 'G', so a 200 read afterwards
+was written by that fetch. A fetch passes when tls_reached_connected =
+CONNECTED and http_status = 200.
 
 Env: U64_HOST, PRG (default build/c64-https.prg; labels.txt beside it),
 FETCHES (default 3), TURBO_MHZ (default 48), FETCH_TIMEOUT (s per fetch,
@@ -77,6 +79,7 @@ DEBUG_BASE_DIR = Path(os.environ.get("UCI_DEBUG_DIR", "/tmp/uci_https_debug"))
 
 TLS_STATE_CONNECTED = 0x07
 NET_TCP_CONNECTED = 0x01
+HTTP_STATUS_POISON = bytes([0xEF, 0xBE])     # $BEEF, little-endian
 #: The last line do_https_get prints on each of its exits.
 TERMINAL = ("CONNECTION CLOSED", "TLS HANDSHAKE FAILED", "TCP CONNECT FAILED",
             "DNS RESOLVE FAILED", "INVALID TARGET", "COLD BANK FAIL")
@@ -227,6 +230,14 @@ def main() -> int:
                         + client.read_mem(labels["tls_read_seq"], 8))
             print(f"\n=== fetch {n}/{FETCHES}: before 'G' write_seq="
                   f"{seq[:8].hex()} read_seq={seq[8:].hex()}")
+            # Poison http_status: a 200 read afterwards was written by THIS
+            # fetch, not left over from the last one (adv-270).
+            client.write_mem(labels["http_status"], HTTP_STATUS_POISON)
+            if bytes(client.read_mem(labels["http_status"], 2)) \
+                    != HTTP_STATUS_POISON:
+                print("[fatal] http_status poison did not stick",
+                      file=sys.stderr)
+                return 2
             started = time.monotonic()
             fetch_in_flight = True
             client.send_text("G", finish_with_return=False)
@@ -245,6 +256,9 @@ def main() -> int:
                 b = bytes(client.read_mem(labels[name], width))
                 row[name] = int.from_bytes(b, "little")
             fetch_in_flight = row["net_tcp_state"] == NET_TCP_CONNECTED or not ok
+            row["http_status_rewritten"] = (
+                row["http_status"]
+                != int.from_bytes(HTTP_STATUS_POISON, "little"))
             row["pass"] = (ok
                            and row["tls_reached_connected"]
                            == TLS_STATE_CONNECTED
@@ -254,7 +268,8 @@ def main() -> int:
                   f"last={line!r} reached=${row['tls_reached_connected']:02X}"
                   f" last_state=${row['tls_last_state']:02X} "
                   f"tls_state=${row['tls_state']:02X} "
-                  f"http_status={row['http_status']} "
+                  f"http_status={row['http_status']}"
+                  f"{'' if row['http_status_rewritten'] else ' (POISON: stale)'} "
                   f"net_last_error=${row['net_last_error']:02X} "
                   f"net_tcp_state=${row['net_tcp_state']:02X}")
             if not ok:

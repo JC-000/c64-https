@@ -173,9 +173,21 @@ net_dns_resolve:
 ; The destination IP is taken from ip65_dns_ip_addr (populated by the most
 ; recent net_dns_resolve). Callers do not have to set the dest IP explicitly.
 ; Output: C=0 success, C=1 failure
+; A new connection starts with an empty rx ring and no error: whatever the
+; last connection left unread (an HTTPS fetch's trailing ciphertext) must
+; not become this one's first bytes — http_get_plain parses the ring
+; directly. ip65 delivers only from inside ip65_process (net_poll and the
+; connect's own wait), so nothing is lost by emptying it here, first.
 ; =============================================================================
 net_tcp_connect:
         pha
+        lda #0
+        sta tcp_recv_head
+        sta tcp_recv_head+1
+        sta tcp_recv_tail
+        sta tcp_recv_tail+1
+        sta tcp_recv_overflow
+        sta net_last_error
         txa
         pha
         jsr net_save_zp

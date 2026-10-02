@@ -15,6 +15,7 @@
         .export http_recv_body
         .export http_recv_response
         .export http_get_plain
+        .export http_resp_init
         .export http_get_verb
         .export http_version
         .export http_host_hdr
@@ -97,6 +98,8 @@
         .segment "CODE"
 
 http_get:
+        jsr http_resp_init      ; a failure below must not leave the last
+                                ;  fetch's http_status behind
         ; --- 1. DNS resolve hostname ---
         lda http_host_ptr
         ldx http_host_ptr+1
@@ -221,14 +224,7 @@ http_get:
 ; Clobbers: A, X, Y, zp_ptr
 ; =============================================================================
 http_recv_body:
-        ; Initialise parser state. http_content_length / _known are reset
-        ; at the status-line -> headers transition (see @parse_status_line).
-        lda #0
-        sta http_parse_state
-        sta http_line_idx
-        sta http_hdr_match
-        sta http_resp_len
-        sta http_resp_len+1
+        jsr http_resp_init      ; no state from an earlier response
 
         ; Poll + receive loop
         lda #0
@@ -407,6 +403,32 @@ http_recv_tick:
         rts
 
 http_recv_ticks: .word 0        ; consecutive no-data ticks (was @recv_timeout)
+
+; -----------------------------------------------------------------------------
+; http_resp_init - forget the previous response. The one reset of per-response
+;   state, run at the start of every request (http_get, http_get_plain,
+;   boot.s do_https_get) — before DNS, so a fetch that fails anywhere, or
+;   never parses a status line, cannot leave the last fetch's http_status
+;   (or body count, framing flags, parser state) for a reader to find — and
+;   again by http_recv_body for callers that drive it directly.
+;   Under ip65 in CRYPTO_CODE (CRYPTO_RESIDENT): CODE is the LOADER and
+;   TLS_CODE's CRYPTO_OVERLAY has single-digit bytes free.
+;   Clobbers: A
+; -----------------------------------------------------------------------------
+.ifdef BACKEND_UCI
+        .segment "TLS_CODE"
+.else
+        .segment "CRYPTO_CODE"
+.endif
+http_resp_init:
+        lda #0
+        sta http_status
+        sta http_status+1
+        sta http_parse_state
+        sta http_line_idx
+        sta http_hdr_match
+        jsr http_hdr_init       ; framing: Content-Length / chunked
+        jmp http_body_begin     ; body: resp_len, 24-bit total, sink state
         .segment "CODE"
 
 ; =============================================================================
@@ -1445,6 +1467,7 @@ http_body_finish:
 ; =============================================================================
         .segment "CODE"
 http_get_plain:
+        jsr http_resp_init      ; see http_get
         ; --- 1. DNS resolve hostname ---
         lda http_host_ptr
         ldx http_host_ptr+1
@@ -1470,15 +1493,8 @@ http_get_plain:
         jsr net_tcp_send
         bcs @plain_close_err
 
-        ; --- 6. Initialise response parser ---
-        ; (Content-Length state is reset at the status-line -> headers
-        ; transition — see @parse_status_line.)
+        ; --- 6. Response parser: reset by http_resp_init at entry ---
         lda #0
-        sta http_parse_state
-        sta http_line_idx
-        sta http_hdr_match
-        sta http_resp_len
-        sta http_resp_len+1
         sta http_in_mode        ; input mode 0: parser reads the TCP ring
                                 ; (plain HTTP — ring holds plaintext)
 
