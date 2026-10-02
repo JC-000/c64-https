@@ -239,6 +239,10 @@ MUTANTS = [
      "        lda m3_rd_count\n        bne @tc_malformed\n        lda m3_code\n        bne @tc_refused             ; always\n",
      "        lda m3_code\n        jmp @tc_refused\n",
      ["test_refusal_with_data_is_released"]),
+    ("held-session-code-0", "$84 on an Open refused over a held session", NET,
+     "        lda #M3_HINT_HELD\n        sta m3_open_hint\n        lda #UCI_ERR_CONNECT_FAIL",
+     "        lda #M3_HINT_HELD\n        sta m3_open_hint\n        lda #0",
+     ["test_held_session_message"]),
     ("tls12-offered", "S 1.1/1.7 flags: TLS 1.3 only by default", NET,
      "M3_FLAGS = M3_FLAG_TLS13_ONLY", "M3_FLAGS = 0", ["test_open_layout"]),
 ]

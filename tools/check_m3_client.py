@@ -1344,6 +1344,7 @@ def test_held_session_message(prg=None, labels=None):
            "open' message:\n" + text)
     _check("00,OK" not in text and "TLS HANDSHAKE FAILED" not in text,
            "a stale status was printed:\n" + text)
+    _code(m, ERR_CONNECT_FAIL, "an Open refused over a held session")
 
 
 TESTS = (
