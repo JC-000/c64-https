@@ -103,17 +103,17 @@ ASSERTS_TU = REPO / "src" / "net_err_registry_asserts.s"
 IP65_FAMILY = (0x40, 0x7F)
 UCI_FAMILY = (0x80, 0xBF)
 
-TOTAL_CHECKS = 11
+TOTAL_CHECKS = 14
 CERTIFIES = ("agreement between this repo's net_last_error allocations and "
              "c64-wireguard's canonical registry")
 
 # The codes we define that are c64-wireguard allocations, mirrored here with
-# their names, values and meanings: $8A reserved and never emitted; $8D and
-# $8E emitted by BACKEND=uci-m3 only. They are checked in the opposite
+# their names, values and meanings: $8A reserved and never emitted; $8D,
+# $8E and $8F emitted by BACKEND=uci-m3 only. They are checked in the opposite
 # direction from every other code (each must EQUAL theirs, name and value),
 # and are excluded from the collision sweep by name, never by value.
 MIRRORED = frozenset({"UCI_ERR_LONG_READ", "UCI_ERR_OPEN_REFUSED",
-                      "UCI_ERR_CMD_UNKNOWN"})
+                      "UCI_ERR_CMD_UNKNOWN", "UCI_ERR_SHORT_READ"})
 
 # The env var that opts out of the cross-repo checks. DELIBERATELY NOT the
 # repo-wide C64_ALLOW_SKIP: that one also gates test_build_flags_stamp.py's
@@ -178,6 +178,10 @@ _PEER_RE = re.compile(r"^\s*(NET_ERR_PEER_[A-Za-z0-9_]+)\s*=\s*\$([0-9A-Fa-f]{2}
 
 # A registry row in c64-wireguard/src/net_abi.inc:
 #   ;   $8E   UCI_ERR_CMD_UNKNOWN         OURS, minted here (PR #112)
+# Anything that LOOKS like a registry row: "; $hh NAME ...". Every such line
+# must also match _PEER_ROW_RE, or the row is silently dropped (e.g. one
+# space after a long name); test_every_registry_row_parses holds them equal.
+_PEER_ROW_CANDIDATE_RE = re.compile(r"^;\s+\$[0-9A-Fa-f]{2}\s+[A-Z][A-Za-z0-9_]*\b")
 _PEER_ROW_RE = re.compile(r"^;\s+\$([0-9A-Fa-f]{2})\s+([A-Z][A-Za-z0-9_]*)\s{2,}(.+?)\s*$")
 
 # A comment row in one of our headers listing a peer allocation:
@@ -293,15 +297,28 @@ def _peer_registry(root):
         value = int(m.group(1), 16)
         if not (_in(value, IP65_FAMILY) or _in(value, UCI_FAMILY)):
             continue
-        origin = m.group(3)
-        if "c64-https" in origin:
-            owner = "c64-https"
-        elif re.search(r"\bours\b", origin, re.IGNORECASE):
-            owner = "c64-wireguard"
-        else:
-            owner = "other"
-        rows[value] = (m.group(2), owner)
+        rows[value] = (m.group(2), _row_owner(m.group(3)))
     return rows
+
+
+def _row_owner(origin):
+    """The owner named by the LEADING token of a row's origin field.
+
+    The field reads "[retired table, ]<owner>[, ...][; notes]", e.g.
+    "retired table, c64-https (grandfathered)", "OURS, minted here (issue
+    #130)", "c64-https, minted here (c64-https#276)". Only the leading
+    token decides: a later note such as "; c64-https emits too" on one of
+    THEIR rows names a co-emitter, not the owner, and a substring search
+    used to flip such a row to c64-https.
+    """
+    field = re.sub(r"^\s*retired table,\s*", "", origin, flags=re.IGNORECASE)
+    m = re.match(r"([A-Za-z0-9-]+)", field)
+    token = m.group(1).lower() if m else ""
+    if token == "c64-https":
+        return "c64-https"
+    if token in ("ours", "c64-wireguard"):
+        return "c64-wireguard"
+    return "other"
 
 
 # --------------------------------------------------------------------------
@@ -506,6 +523,58 @@ def test_every_code_of_ours_appears_in_the_peer_registry():
         f"{unlisted}. Allocate them in {root}/src/net_abi.inc — a code that "
         f"is not in the registry is a code the next lane will mint over "
         f"(#184).")
+
+
+def test_our_rows_carry_our_names():
+    """For every row the canonical registry gives to c64-https, the NAME
+    there must be the name our header defines at that value. A value-only
+    check passes a peer row renamed to anything at all."""
+    root = _require_peer()
+    registry = _peer_registry(root)
+    by_value = {v: n for n, (v, _p, _f) in _our_codes().items()}
+    wrong = []
+    for value, (name, owner) in sorted(registry.items()):
+        if owner != "c64-https":
+            continue
+        ours = by_value.get(value)
+        if ours != name:
+            wrong.append(f"${value:02X}: the registry says {name}, our "
+                         f"headers say {ours}")
+    assert not wrong, ("rows the canonical registry gives to c64-https carry "
+                       "a different name than ours: " + "; ".join(wrong)
+                       + f". Registry: {root}/src/net_abi.inc (#184).")
+
+
+def test_every_registry_row_parses():
+    """Every line that looks like a registry row ("; $hh NAME ...") must be
+    parsed as one; a row the parser drops is a code no check can see."""
+    root = _require_peer()
+    lines = _read(root / "src" / "net_abi.inc")
+    dropped = [l.strip() for l in lines
+               if _PEER_ROW_CANDIDATE_RE.match(l) and not _PEER_ROW_RE.match(l)]
+    assert not dropped, ("registry rows the parser cannot read (it needs two "
+                         "or more spaces between NAME and its origin): "
+                         + "; ".join(dropped)
+                         + f". Registry: {root}/src/net_abi.inc (#184).")
+
+
+def test_rows_of_our_codes_name_a_known_owner():
+    """Fail closed on ownership. For every code our headers define, the
+    registry row at that value must name its owner as exactly c64-https or
+    c64-wireguard (its leading token). A row whose owner field is missing or
+    unparseable reads as "other", and the name and ownership checks above
+    would skip it silently."""
+    root = _require_peer()
+    registry = _peer_registry(root)
+    bad = []
+    for name, (value, _p, _f) in sorted(_our_codes().items()):
+        row = registry.get(value)
+        if row is not None and row[1] not in ("c64-https", "c64-wireguard"):
+            bad.append(f"${value:02X} {row[0]} (ours: {name}): owner field "
+                       f"does not parse to c64-https or c64-wireguard")
+    assert not bad, ("registry rows of our codes with no recognisable owner: "
+                     + "; ".join(bad)
+                     + f". Registry: {root}/src/net_abi.inc (#184).")
 
 
 def test_mirrors_match_the_peer_registry():

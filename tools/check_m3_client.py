@@ -84,6 +84,12 @@ NET_TCP_CLOSED, NET_TCP_CONNECTED = 0x00, 0x01
 NET_TCP_ERROR, NET_TCP_CONNECT_FAIL = 0x02, 0x03
 ERR_NOT_PRESENT, ERR_CONNECT_FAIL, ERR_WAIT_TIMEOUT = 0x81, 0x84, 0x89
 ERR_OPEN_REFUSED, ERR_CMD_UNKNOWN = 0x8D, 0x8E   # c64-wireguard's, mirrored
+ERR_BAD_READ_HDR, ERR_SHORT_READ, ERR_STREAM_LOST = 0x8B, 0x8F, 0x90
+
+
+def _code(m, want, what):
+    _check(m.peek("net_last_error") == want, "%s: net_last_error $%02X, "
+           "expected $%02X" % (what, m.peek("net_last_error"), want))
 
 STEPS_PER_UNIT = 200            # interpreted instructions per 10 ms unit
 SECOND = 100                    # units
@@ -143,6 +149,7 @@ class M3Device:
         self.forced_blocks = None       # READ: override the reply blocks
         self.next_handle = 5
         self.release_delays = []        # per-`03 25` delays, then FAST
+        self.abort_never = False        # an ABORT that is never serviced
         # observation
         self.log = []                   # (units, command bytes)
         self.ctrl_writes = []           # (units, value)
@@ -168,7 +175,7 @@ class M3Device:
             self.sp = 0
             self._load_block()
         if (self.abort_pending and self.done_at is None
-                and self.pending is None):
+                and self.pending is None and not self.abort_never):
             if self.abort_due is None:
                 self.abort_due = now + 1
             elif now >= self.abort_due:
@@ -344,6 +351,22 @@ class M3Device:
             d = self.open_delay if op not in self.never else NEVER
             if kind == "refuse":
                 return [], arg, d
+            if kind == "oklong":                # 00,OK and `arg` bytes (> 8)
+                h = self.next_handle
+                self.sessions[h] = {"rx": [], "claimed": False}
+                return [bytes([h, 4, 3, 1, 0x13, 0x1D, 0, 0]) + bytes(arg - 8)], OK, d
+            if kind == "refusedata":            # a refusal WITH reply bytes
+                h = self.next_handle
+                self.sessions[h] = {"rx": [], "claimed": False}
+                return [bytes([h, 4, 3, 1, 0x13, 0x1D, 0, 0])], arg, d
+            if kind == "okshort":               # 00,OK and only `arg` bytes
+                h = self.next_handle
+                self.sessions[h] = {"rx": [], "claimed": False}
+                return [bytes([h, 4, 3, 1, 0x13, 0x1D, 0, 0])[:arg]], OK, d
+            if kind == "okversion":             # 00,OK with version `arg`
+                h = self.next_handle
+                self.sessions[h] = {"rx": [], "claimed": False}
+                return [bytes([h, arg & 0xFF, arg >> 8, 1, 0x13, 0x1D, 0, 0])], OK, d
             if kind == "okempty":               # 00,OK and no handle byte
                 h = self.next_handle
                 self.sessions[h] = {"rx": [], "claimed": False}
@@ -764,6 +787,7 @@ def test_read_end_14_is_closed(prg=None, labels=None):
     m.call("net_poll")
     _check(m.peek("net_tcp_state") == NET_TCP_ERROR,
            "net_tcp_state $%02X after 14, expected ERROR" % m.peek("net_tcp_state"))
+    _code(m, ERR_STREAM_LOST, "$0000 + 14")
     m.call("net_tcp_close")
     _check(m.dev.commands()[-1] == b"\x03\x09\x05", "no CLOSE after a sticky "
            "14: the entry stays in the table (91 after two)")
@@ -778,6 +802,7 @@ def test_read_not_ours_stops(prg=None, labels=None):
     m.call("net_poll")
     _check(m.peek("net_tcp_state") != NET_TCP_CONNECTED,
            "still CONNECTED after `02,NO DATA: 9`: it would poll forever")
+    _code(m, ERR_STREAM_LOST, "$FFFF + `: 9`")
     n = len(m.dev.log)
     m.call("net_poll")
     m.call("net_tcp_close")
@@ -804,6 +829,7 @@ def test_empty_read_reply_is_not_eof(prg=None, labels=None):
     m.call("net_poll")
     _check(m.peek("net_tcp_state") != NET_TCP_CLOSED,
            "an empty READ reply was taken as the end of the stream (ER-12)")
+    _code(m, ERR_BAD_READ_HDR, "an empty READ reply")
     m.call("net_tcp_close")
     _check(m.dev.commands()[-1] == b"\x03\x09\x05",
            "the handle was not CLOSEd after an empty READ reply")
@@ -986,7 +1012,7 @@ def test_read_end_05_is_gone(prg=None, labels=None):
     m.no_violations()
 
 
-def _block_case(blocks, req_note):
+def _block_case(blocks, req_note, want_code=ERR_BAD_READ_HDR):
     def run(prg, labels):
         m = _connected(Machine(prg, labels))
         m.dev.forced_blocks = (blocks, OK)
@@ -994,6 +1020,7 @@ def _block_case(blocks, req_note):
         _check(m.peek("net_tcp_state") == NET_TCP_ERROR, "%s: net_tcp_state "
                "$%02X, expected ERROR (ER-5: a hole in the stream)"
                % (req_note, m.peek("net_tcp_state")))
+        _code(m, want_code, req_note)
         m.call("net_tcp_close")
         _check(m.dev.commands()[-1] == b"\x03\x09\x05",
                "%s: the handle was not CLOSEd" % req_note)
@@ -1003,7 +1030,7 @@ def _block_case(blocks, req_note):
 
 def test_short_block_is_dead(prg=None, labels=None):
     """ER-5: the header says 10, the (last) block holds 3: a hole."""
-    _block_case([b"\x0a\x00abc"], "short block")(prg, labels)
+    _block_case([b"\x0a\x00abc"], "short block", ERR_SHORT_READ)(prg, labels)
 
 
 def test_block_tail_is_dead(prg=None, labels=None):
@@ -1121,6 +1148,205 @@ def test_release_is_retried_once(prg=None, labels=None):
     m.no_violations()
 
 
+def _reject_ops(m, op, times):
+    """Make the FPGA refuse the next `times` PUSHes of command `op`."""
+    real, left = m.dev._push, [times]
+    def push(cmd, now):
+        if len(cmd) > 1 and cmd[1] == op and left[0] > 0:
+            left[0] -= 1
+            m.dev.error_busy = True
+            m.dev.pushes_rejected += 1
+            m.dev.state = ST_IDLE
+            return
+        real(cmd, now)
+    m.dev._push = push
+
+
+def test_rejected_close_is_retried(prg=None, labels=None):
+    """A CLOSE whose push was refused never ran: it is pushed again, and the
+    session is closed."""
+    m = _connected(Machine(prg, labels))
+    _reject_ops(m, 0x09, 1)
+    _check(m.call("net_tcp_close") is False, "net_tcp_close C=1 after a retry "
+           "that should have closed")
+    _check(not m.dev.sessions, "the session survived a rejected-then-retried "
+           "CLOSE")
+    _check(m.peek("m3_owned") == 0, "still owned after the CLOSE ran")
+    m.no_violations()
+
+
+def test_unclosed_handle_stays_owned(prg=None, labels=None):
+    """Refused twice, the CLOSE never ran: the handle stays m3_owned (C=1),
+    a new Open is refused rather than losing it, and the next close frees
+    the session."""
+    m = _connected(Machine(prg, labels))
+    _reject_ops(m, 0x09, 2)
+    _check(m.call("net_tcp_close") is True, "net_tcp_close C=0 though no "
+           "CLOSE ran")
+    _check(m.peek("m3_owned") == 1, "ownership dropped although the session "
+           "is still open on the ESP32")
+    _check(5 in m.dev.sessions, "model: the session should still be open")
+    # A new Open must not stomp it: refused while the old CLOSE still fails...
+    _reject_ops(m, 0x09, 2)
+    opens = m.dev.ops().count(0x21)
+    _check(m.connect() is True and m.dev.ops().count(0x21) == opens,
+           "an Open went out over a handle that could not be closed")
+    _check(m.peek("m3_owned") == 1, "ownership lost on the refused Open")
+    # ...and once a CLOSE gets through, the old session is freed first.
+    m.dev.open_result = ("ok", 6)
+    _check(m.connect() is False, "connect failed once the CLOSE worked")
+    _check(5 not in m.dev.sessions and 6 in m.dev.sessions,
+           "sessions %r: the old one was not freed" % sorted(m.dev.sessions))
+    m.no_violations()
+
+
+def test_short_open_reply_is_released(prg=None, labels=None):
+    """S 1.1: success is exactly 8 bytes. A 3-byte 00,OK reply is not
+    trusted: `03 25` next, C=1, $88."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("okshort", 3)
+    _check(m.init() is False, "net_init failed")
+    _check(m.connect() is True, "a 3-byte Open reply was accepted")
+    ops = m.dev.ops()
+    _check(ops[ops.index(0x21) + 1] == 0x25, "no `03 25` after a short reply")
+    _check(not m.dev.sessions and m.peek("m3_owned") == 0,
+           "the session of a short reply was kept")
+    _check(m.peek("net_last_error") == 0x88, "net_last_error $%02X, "
+           "expected $88" % m.peek("net_last_error"))
+    m.no_violations()
+
+
+def test_non_tls13_session_is_refused(prg=None, labels=None):
+    """REQUIRE_TLS13 was asked for: a session reporting 1.2 (03 03) is
+    refused and released (defence in depth)."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("okversion", 0x0303)
+    _check(m.init() is False, "net_init failed")
+    _check(m.connect() is True, "a TLS 1.2 session was accepted under "
+           "REQUIRE_TLS13")
+    _check(not m.dev.sessions, "the 1.2 session was not released")
+    _check(m.peek("m3_open_hint") == 2, "m3_open_hint %d, expected 2"
+           % m.peek("m3_open_hint"))
+    _code(m, ERR_CONNECT_FAIL, "a non-1.3 session")
+    m.no_violations()
+
+
+def test_alert14_reads_as_no_tls13(prg=None, labels=None):
+    """Firmware rule: under REQUIRE_TLS13 ANY 14 during the Open (40 here,
+    not only 70) means the server will not do TLS 1.3; the user is told."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("refuse", b"14,TLS ALERT RECEIVED: 40")
+    m.call("do_net_init")
+    m.mem.screen.clear()
+    m.mem.keys.extend(b"\r\r")
+    m.call("do_https_get")
+    text = m.screen_text()
+    _check("14,TLS ALERT RECEIVED: 40" in text, "the firmware line is missing:"
+           "\n" + text)
+    _check("DOES NOT DO TLS 1.3" in text, "alert 40 was not read as 'no TLS "
+           "1.3':\n" + text)
+    m.no_violations()
+
+
+def _ui_open(m, open_result):
+    """'I' then 'G' with the defaults, the Open answered by `open_result`."""
+    m.dev.open_result = open_result
+    m.call("do_net_init")
+    m.mem.screen.clear()
+    m.mem.keys.extend(b"\r\r")
+    m.call("do_https_get")
+    return m.screen_text()
+
+
+def test_hint_texts_reach_the_user(prg=None, labels=None):
+    """The client's own reasons are printed, each its own text: not TLS 1.3
+    (hint 2), malformed reply (hint 3). The `03 25` status is not shown."""
+    for result, want in ((("okversion", 0x0303), "SESSION IS NOT TLS 1.3"),
+                         (("okshort", 3), "MALFORMED OPEN REPLY")):
+        m = Machine(prg, labels)
+        text = _ui_open(m, result)
+        _check(want in text, "%r not on screen for %r:\n%s" % (want, result, text))
+        _check("00,OK" not in text, "the release's 00,OK was printed as the "
+               "reason:\n" + text)
+        m.no_violations()
+
+
+def test_long_open_reply_is_released(prg=None, labels=None):
+    """S 1.1: a 10-byte 00,OK reply is not 8 bytes either: released."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("oklong", 10)
+    _check(m.init() is False, "net_init failed")
+    _check(m.connect() is True, "a 10-byte Open reply was accepted")
+    _check(not m.dev.sessions, "the session of a long reply was kept")
+    m.no_violations()
+
+
+def test_reply_version_major_checked(prg=None, labels=None):
+    """Both version bytes count: 04 04 is not TLS 1.3 either."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("okversion", 0x0404)
+    _check(m.init() is False, "net_init failed")
+    _check(m.connect() is True, "version 0x0404 was accepted as TLS 1.3")
+    _check(not m.dev.sessions, "the session was kept")
+    m.no_violations()
+
+
+def test_refusal_with_data_is_released(prg=None, labels=None):
+    """A refusal has an empty reply. One WITH bytes cannot be trusted, and
+    the session it may have opened is released (`03 25`)."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("refusedata", b"14,TLS ALERT RECEIVED: 40")
+    _check(m.init() is False, "net_init failed")
+    _check(m.connect() is True, "a refusal returned C=0")
+    ops = m.dev.ops()
+    _check(ops[ops.index(0x21) + 1:ops.index(0x21) + 2] == [0x25], "no `03 25` "
+           "after a refusal that carried reply bytes")
+    _check(not m.dev.sessions, "the session leaked")
+    m.no_violations()
+
+
+def test_only_version_alerts_read_as_no_tls13(prg=None, labels=None):
+    """40, 70 and 71 mean "no TLS 1.3"; any other alert (112
+    unrecognized_name here) is shown as the alert it is, with no hint."""
+    for n, want in ((40, True), (70, True), (71, True), (112, False), (4, False)):
+        m = Machine(prg, labels)
+        line = b"14,TLS ALERT RECEIVED: %d" % n
+        text = _ui_open(m, ("refuse", line))
+        _check(line.decode() in text, "alert %d: status line missing" % n)
+        _check(("DOES NOT DO TLS 1.3" in text) is want, "alert %d: 'no TLS "
+               "1.3' shown=%s, expected %s" % (n, not want, want))
+
+
+def test_data_more_wedge_keeps_89(prg=None, labels=None):
+    """A Data More block whose ABORT never lands is a wedge: $89 stays, it
+    is not overwritten by the block's own reason."""
+    m = _connected(Machine(prg, labels))
+    m.dev.forced_blocks = ([b"\x0a\x00abc", b"defghij"], OK)
+    m.dev.abort_never = True
+    m.call("net_poll", budget=80_000_000)
+    _code(m, ERR_WAIT_TIMEOUT, "a wedged Data More ABORT")
+    _check(m.peek("m3_wedged") & 0x80, "m3_wedged not set")
+
+
+def test_held_session_message(prg=None, labels=None):
+    """When an earlier session could not be CLOSEd, 'G' says so (and to
+    press I) instead of a stale TLS HANDSHAKE FAILED / 00,OK."""
+    m = Machine(prg, labels)
+    m.call("do_net_init")
+    _check(m.connect() is False, "connect failed")
+    _reject_ops(m, 0x09, 4)                     # this close and the next
+    m.call("net_tcp_close")
+    m.mem.screen.clear()
+    m.mem.keys.extend(b"\r\r")
+    m.call("do_https_get")
+    text = m.screen_text()
+    _check("STILL OPEN" in text and "PRESS I" in text, "no 'session still "
+           "open' message:\n" + text)
+    _check("00,OK" not in text and "TLS HANDSHAKE FAILED" not in text,
+           "a stale status was printed:\n" + text)
+    _code(m, ERR_CONNECT_FAIL, "an Open refused over a held session")
+
+
 TESTS = (
     test_startup_sequence,
     test_no_uci_writes_nothing,
@@ -1158,6 +1384,18 @@ TESTS = (
     test_wedge_halts_the_ui,
     test_sweep_stops_at_a_wedge,
     test_release_is_retried_once,
+    test_rejected_close_is_retried,
+    test_unclosed_handle_stays_owned,
+    test_short_open_reply_is_released,
+    test_non_tls13_session_is_refused,
+    test_alert14_reads_as_no_tls13,
+    test_hint_texts_reach_the_user,
+    test_long_open_reply_is_released,
+    test_reply_version_major_checked,
+    test_refusal_with_data_is_released,
+    test_only_version_alerts_read_as_no_tls13,
+    test_data_more_wedge_keeps_89,
+    test_held_session_message,
 )
 
 
@@ -1170,7 +1408,7 @@ def run(prg=None, labels=None, only=None, quiet=False):
         try:
             fn(prg, labels)
             results[fn.__name__] = None
-        except (AssertionError, CPUError) as exc:
+        except Exception as exc:        # noqa: BLE001 — a crash is a red
             results[fn.__name__] = "%s: %s" % (type(exc).__name__, exc)
         if not quiet:
             err = results[fn.__name__]

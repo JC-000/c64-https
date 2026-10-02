@@ -29,7 +29,8 @@
 ;                               ~4 h BEFORE §13 was retired — outside the
 ;                               table while the table was still the rule.
 ;                               MIRRORED below (BACKEND=uci-m3 emits it)
-;   $8F  UCI_ERR_SHORT_READ     theirs, minted after the retirement (wg#130)
+;   $8F  UCI_ERR_SHORT_READ     theirs, minted after the retirement (wg#130).
+;                               MIRRORED below (BACKEND=uci-m3 emits it)
 ;
 ; $8C/$8D were allocated in the retired table and this file never recorded
 ; them. Comments only, deliberately — an equate here would imply we emit
@@ -138,9 +139,12 @@ UCI_ERR_BAD_READ_HDR   = $8B    ; Stream family: SOCKET_READ header exceeded
                                 ; net_last_error for post-mortems. Allocated in
                                 ; SPEC §13.2's table first (c64-lib-contract#139)
                                 ; — the last code allocated that way before
-                                ; §13 was retired.
+                                ; §13 was retired. uci-m3 also uses it for a
+                                ; READ reply in no documented shape: no
+                                ; header (81/82), a 1-byte header, bytes past
+                                ; the header, a Data More block.
 
-; MIRRORS of two c64-wireguard allocations, same names, same values, same
+; MIRRORS of three c64-wireguard allocations, same names, same values, same
 ; meanings (their src/net_abi.inc is canonical for this range). Emitted ONLY
 ; by the BACKEND=uci-m3 adapter (src/net/uci-m3/net.s); the plain UCI and
 ; ip65 adapters never emit them. Registered as mirrors, like $8A, in
@@ -149,6 +153,17 @@ UCI_ERR_OPEN_REFUSED   = $8D    ; the firmware refused the open; the
                                 ; status line ($DF1F) names the refusal
 UCI_ERR_CMD_UNKNOWN    = $8E    ; "21,UNKNOWN COMMAND": the firmware lacks the
                                 ; command (uci-m3: no M3 TLS firmware)
+UCI_ERR_SHORT_READ     = $8F    ; a READ reply's block ended short of the
+                                ; total its header announced (uci-m3)
+
+; OURS, minted in c64-wireguard/src/net_abi.inc (the canonical registry)
+; for BACKEND=uci-m3, the only emitter: a READ found the established stream
+; unusable — the firmware ended it with an error ($0000 + any status but
+; 01/05, seen: 12/14/16/17: the session is dead but the handle is still
+; ours) or the handle is no longer
+; ours ($FFFF + anything but "02,NO DATA: 11"). The status line says which.
+; Deliberately NOT $86, which means only "our push was rejected".
+UCI_ERR_STREAM_LOST    = $90
 
 ; TCP state values stored in net_tcp_state. The NET_TCP_* spellings in
 ; net_states.inc are the contract's (§13.1); these aliases keep the

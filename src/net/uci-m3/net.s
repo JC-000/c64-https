@@ -53,6 +53,7 @@
 .export m3_poll_result
 .export m3_open_reply
 .export m3_info
+.export m3_open_hint
 ; The typed-target prompt (src/boot.s) writes the host here, as on the 6510
 ; TLS build, where src/tls_handshake.s owns it (it is the SNI buffer there).
 .export tls_hostname
@@ -429,9 +430,21 @@ net_dns_resolve:
 net_tcp_connect:
         sta m3_port
         stx m3_port+1
+        lda #M3_HINT_NONE
+        sta m3_open_hint
         lda m3_owned
         beq :+
         jsr net_tcp_close           ; one session at a time
+        lda m3_owned
+        beq :+
+        ; The old handle could not be closed. Opening over it would lose
+        ; the number and leave its session in the table (91 after two);
+        ; refuse instead. 'I' re-runs the startup sweep, which frees it.
+        lda #M3_HINT_HELD
+        sta m3_open_hint
+        lda #UCI_ERR_CONNECT_FAIL
+        sta net_last_error
+        jmp @tc_fail
 :
         ; New session: empty rx ring, no error. The ring holds plaintext
         ; here and http_recv_body parses it directly, so what the last
@@ -490,14 +503,15 @@ net_tcp_connect:
         bne @tc_not_rejected
         lda #UCI_ERR_CONNECT_FAIL   ; push rejected: the Open never ran
         sta net_last_error
-        bne @tc_fail                ; always
+        bne @tc_fail_j              ; always
 @tc_not_rejected:
         cmp #M3_EXEC_ABORTED
-        bne @tc_fail                ; wedged: write nothing more
+        bne @tc_fail_j              ; wedged: write nothing more
         jsr m3_release              ; ABORTed Open: `03 25` next
         lda #UCI_ERR_WAIT_TIMEOUT
         sta net_last_error
-        bne @tc_fail                ; always
+@tc_fail_j:
+        jmp @tc_fail
 @tc_reply:
         lda #<m3_open_reply
         sta m3_rd_dst
@@ -508,9 +522,32 @@ net_tcp_connect:
         jsr m3_read_data
         jsr m3_finish
         lda m3_code
-        bne @tc_refused
+        beq :+
+        ; A refusal has an EMPTY reply (S 1.1). Bytes with a non-00 status
+        ; are a reply we cannot trust: release defensively, as below.
         lda m3_rd_count
-        beq @tc_no_handle
+        bne @tc_malformed
+        lda m3_code
+        bne @tc_refused             ; always
+:
+        ; S 1.1: success is EXACTLY 8 bytes. Fewer (or more, dropped by the
+        ; discard) is a reply we cannot trust any byte of, the handle
+        ; included: release the session it may have opened.
+        lda m3_rd_count
+        cmp #M3_OPEN_REPLY_LEN
+        bne @tc_malformed
+        lda m3_discarded
+        bne @tc_malformed
+.ifndef M3_ALLOW_TLS12
+        ; Defence in depth: REQUIRE_TLS13 was asked for, so a session that
+        ; reports any other version is refused here (reply [1..2], LE).
+        lda m3_open_reply+1
+        cmp #$04
+        bne @tc_not_tls13
+        lda m3_open_reply+2
+        cmp #$03
+        bne @tc_not_tls13
+.endif
         lda m3_open_reply+0
         sta m3_handle
         lda #1
@@ -527,20 +564,110 @@ net_tcp_connect:
         sta net_tcp_state
         clc
         rts
-@tc_no_handle:
-        ; A session exists that we have no handle for: release it now,
-        ; while `03 25` is still the next command (S 1.1, "Never assume").
+@tc_malformed:
+        ; A session exists that we hold no trustworthy handle for: release
+        ; it now, while `03 25` is still the next command (S 1.1, "Never
+        ; assume"). $88: the open yielded no usable socket id.
+        lda #M3_HINT_MALFORMED
+        sta m3_open_hint
         jsr m3_release
         lda #UCI_ERR_NO_SOCKET
         sta net_last_error
         bne @tc_fail                ; always
+.ifndef M3_ALLOW_TLS12
+@tc_not_tls13:
+        lda #M3_HINT_NOT_TLS13
+        sta m3_open_hint
+        jsr m3_release              ; nothing has claimed it: `03 25` closes it
+        lda #UCI_ERR_CONNECT_FAIL   ; the client refused the session
+        sta net_last_error
+        bne @tc_fail                ; always
+.endif
 @tc_refused:
+.ifndef M3_ALLOW_TLS12
+        ; With REQUIRE_TLS13, a 14 whose alert says "no version or suite we
+        ; share" means the server will not do TLS 1.3: 40 handshake_failure
+        ; (what a 1.2-only server sends, measured: badssl.com), 70
+        ; protocol_version (S 1.7) and 71 insufficient_security. Any other
+        ; alert (e.g. 112 unrecognized_name) is just that alert: the status
+        ; line, "14,TLS ALERT RECEIVED: N", says so, with no hint.
+        cmp #14
+        bne @tc_refused_code
+        jsr m3_status_number        ; A = N, $FF if none
+        cmp #40
+        beq @tc_no13
+        cmp #70
+        beq @tc_no13
+        cmp #71
+        bne @tc_refused_code
+@tc_no13:
+        lda #M3_HINT_NO_TLS13
+        sta m3_open_hint
+@tc_refused_code:
+.endif
         lda #UCI_ERR_OPEN_REFUSED   ; named in m3_status (e.g. 94,...)
         sta net_last_error
 @tc_fail:
         lda #NET_TCP_CONNECT_FAIL
         sta net_tcp_state
         sec
+        rts
+
+; =============================================================================
+; m3_status_number — A = the decimal number after the first ':' in m3_status
+; (up to 3 digits, leading space skipped), $FF if there is none or it is
+; over 255. Used for "14,TLS ALERT RECEIVED: N". Clobbers: A, X, Y.
+; =============================================================================
+m3_status_number:
+        ldy #0
+@sn_colon:
+        cpy m3_status_len
+        bcs @sn_none
+        lda m3_status,y
+        iny
+        cmp #':'
+        bne @sn_colon
+        cpy m3_status_len
+        bcs @sn_none
+        lda m3_status,y
+        cmp #' '
+        bne :+
+        iny
+:       ldx #0                      ; X = digits taken
+        lda #0
+        sta m3_num
+@sn_digit:
+        cpy m3_status_len
+        bcs @sn_end
+        lda m3_status,y
+        sec
+        sbc #'0'
+        cmp #10
+        bcs @sn_end
+        sta m3_num+1
+        lda m3_num                  ; num = num * 10 + digit, 8-bit checked
+        cmp #26
+        bcs @sn_none                ; num*10 would pass 255
+        asl
+        sta m3_num
+        asl
+        asl
+        adc m3_num                  ; x8 + x2 (C clear: <= 250)
+        adc m3_num+1
+        bcs @sn_none
+        sta m3_num
+        iny
+        inx
+        cpx #4
+        bcc @sn_digit
+        bcs @sn_none                ; a 4th digit: not an alert number
+@sn_end:
+        txa
+        beq @sn_none
+        lda m3_num
+        rts
+@sn_none:
+        lda #$FF
         rts
 
 ; =============================================================================
@@ -560,7 +687,10 @@ net_tcp_connect:
 ;   $0000 + 01 / 05          the stream ended, everything delivered; the
 ;                            handle is GONE: do NOT CLOSE it. CLOSED, not
 ;                            owned; m3_eof_code = 1 or 5.
-;   $0000 + 12/14/16/17      the session is dead but ours: ERROR, owned.
+;   $0000 + any other status the session is dead but ours: ERROR, owned.
+;                            (S 1.6 names 12/14/16/17; anything else that
+;                            ends the stream is taken the same way, so an
+;                            unexpected status fails closed.)
 ; A READ with no reply by PUSH + 12 s is ABORTed; its data is lost, so the
 ; handle is CLOSEd by the caller (ERROR, owned).
 ; Clobbers: A, X, Y
@@ -622,13 +752,15 @@ net_poll:
 :       jmp @p_dead_owned           ; ABORTed READ: data lost, CLOSE it
 
 @p_reply:
+        lda #0
+        sta m3_bad                  ; 0, or the code a bad block earns
         ; ER-12: test bit 7 before the header. No data = an empty reply.
         lda UCI_STATUS
         jsr m3_settle
         and #UCI_STAT_DATA_AV
         bne :+
         jsr m3_finish
-        jmp @p_dead_owned
+        jmp @p_dead_hdr             ; no header at all (81/82)
 :
         lda #<m3_hdr
         sta m3_rd_dst
@@ -641,7 +773,7 @@ net_poll:
         cmp #2
         beq :+
         jsr m3_finish               ; a 1-byte reply: no protocol has it
-        jmp @p_dead_owned
+        jmp @p_dead_hdr
 :
         lda m3_hdr+0
         and m3_hdr+1
@@ -655,8 +787,6 @@ net_poll:
         jmp @p_0000
 :
         ; --- data: n = header, capped at the request ---------------------
-        lda #0
-        sta m3_bad
         lda m3_req
         cmp m3_hdr+0
         lda m3_req+1
@@ -664,7 +794,7 @@ net_poll:
         bcs @p_copy_init
         lda #UCI_ERR_BAD_READ_HDR   ; over-claim that is not $FFFF
         sta net_last_error
-        inc m3_bad
+        sta m3_bad
         lda m3_req
         sta m3_hdr+0
         lda m3_req+1
@@ -678,7 +808,8 @@ net_poll:
         uci_fence
         and #UCI_STAT_DATA_AV
         bne :+
-        inc m3_bad                  ; the block ended short of its header
+        lda #UCI_ERR_SHORT_READ     ; the block ended short of its header
+        sta m3_bad
         jmp @p_copied
 :
         clc
@@ -709,7 +840,10 @@ net_poll:
         jsr m3_discard_data
         lda m3_discarded
         beq :+
-        inc m3_bad
+        lda m3_bad
+        bne :+                      ; keep the first reason
+        lda #UCI_ERR_BAD_READ_HDR   ; bytes past the header: dropped
+        sta m3_bad
 :
         lda UCI_STATUS
         jsr m3_settle
@@ -721,12 +855,14 @@ net_poll:
         lda #<M3_B_POST_ABORT
         ldx #>M3_B_POST_ABORT
         jsr m3_abort_wait
-        jmp @p_dead_owned
+        bcc :+
+        jmp @p_dead_owned           ; wedged: keep the abort's $89
+:       jmp @p_dead_hdr
 @p_last:
         jsr m3_read_status
         jsr m3_accept
         lda m3_bad
-        bne @p_dead_owned
+        bne @p_dead_code
         lda #M3_POLL_DATA
         sta m3_poll_result
         rts
@@ -752,7 +888,10 @@ net_poll:
 @p_not_ours:
         ; "02,NO DATA: 9": the number is no longer ours. Any other $FFFF
         ; status means it now names a socket opened later (ER-7). Either
-        ; way: stop, and do not CLOSE it.
+        ; way: stop, and do not CLOSE it. $90: the stream is lost; the
+        ; status line says how.
+        lda #UCI_ERR_STREAM_LOST
+        sta net_last_error
         lda #0
         sta m3_owned
         lda #NET_TCP_ERROR
@@ -765,7 +904,7 @@ net_poll:
         cmp #1
         beq @p_gone
         cmp #5
-        bne @p_dead_owned           ; 12/14/16/17: dead, still ours
+        bne @p_dead_read            ; any status but 1/5 (seen: 12/14/16/17): dead, still ours
 @p_gone:
         sta m3_eof_code
         lda #0
@@ -774,6 +913,25 @@ net_poll:
         sta net_tcp_state
         rts
 
+; The session is dead but the handle is still ours (the caller CLOSEs).
+; The status line keeps the firmware's reason. net_last_error, for a READ
+; reply the client could not use (finding 7 of the uci-m3 code review):
+;   $8F UCI_ERR_SHORT_READ    the block ended short of its header
+;                             (c64-wireguard's code, mirrored)
+;   $8B UCI_ERR_BAD_READ_HDR  any other shape: no header (81/82), a 1-byte
+;                             header, bytes past the header, Data More
+;   $90 UCI_ERR_STREAM_LOST   a dead session ($0000 + any status but 1/5,
+;                             seen 12/14/16/17; @p_dead_read); the status
+;                             line says which
+@p_dead_hdr:
+        lda m3_bad
+        bne @p_dead_code            ; the reason the block was refused
+        lda #UCI_ERR_BAD_READ_HDR
+        bne @p_dead_code            ; always
+@p_dead_read:
+        lda #UCI_ERR_STREAM_LOST
+@p_dead_code:
+        sta net_last_error
 @p_dead_owned:
         lda #NET_TCP_ERROR
         sta net_tcp_state
@@ -928,32 +1086,51 @@ net_tcp_send:
 ; =============================================================================
 ; net_tcp_close — CLOSE the handle while it is still ours (m3_owned).
 ; A handle seen GONE (01/05, "02,NO DATA: 9") is never CLOSEd: the number
-; may already belong to another socket (S 1.6 M10, ER-7). An ABORTed CLOSE
-; completed (S 1.1). Always leaves NET_TCP_CLOSED and m3_owned = 0.
-; Out: C=0 closed or nothing to close; C=1 the CLOSE could not be sent or
-;      answered ($89, or m3_wedged). Clobbers: A, X, Y
+; may already belong to another socket (S 1.6 M10, ER-7).
+; Ownership ends only when the CLOSE RAN: a reply, or an ABORTed CLOSE
+; (which completed, S 1.1). A REJECTED push never reached the Nios, so it
+; is pushed once more; rejected twice, or a wedge, and the handle stays
+; m3_owned, so the next close (net_tcp_connect tries one) or the startup
+; sweep can still free its session.
+; Out: NET_TCP_CLOSED always. C=0 closed or nothing to close; C=1 not
+;      closed (m3_owned still 1 unless the CLOSE was ABORTed).
+; Clobbers: A, X, Y
 ; =============================================================================
 net_tcp_close:
         lda m3_owned
         beq @c_ok
+        lda #2
+        sta m3_tries
+@c_again:
         lda #M3_CMD_CLOSE
         jsr m3_begin
-        bcs @c_fail
+        bcs @c_fail                 ; wedged: nothing written, still owned
         lda m3_handle
         jsr m3_put
         lda #<M3_B_TLS
         ldx #>M3_B_TLS
         jsr m3_exec
-        bcs @c_fail
+        bcc @c_reply
+        cmp #M3_EXEC_ABORTED
+        beq @c_gone_fail            ; an ABORTed CLOSE completed
+        cmp #M3_EXEC_REJECTED
+        bne @c_fail                 ; wedged
+        dec m3_tries
+        bne @c_again
+        beq @c_fail                 ; rejected twice: still owned
+@c_reply:
         jsr m3_finish
+        lda #0
+        sta m3_owned
 @c_ok:
         clc
         bcc @c_out
+@c_gone_fail:
+        lda #0
+        sta m3_owned
 @c_fail:
         sec
 @c_out:
-        lda #0
-        sta m3_owned
         lda #NET_TCP_CLOSED
         sta net_tcp_state           ; A store: the carry survives
         rts
@@ -962,37 +1139,7 @@ net_tcp_close:
 ; net_recv_byte — pop one byte from the rx ring (same as src/net/uci/net.s).
 ; Out: A = byte, C=0; C=1 the ring is empty.
 ; =============================================================================
-net_recv_byte:
-        lda tcp_recv_head+0
-        cmp tcp_recv_tail+0
-        bne @nrb_not_empty
-        lda tcp_recv_head+1
-        cmp tcp_recv_tail+1
-        beq @nrb_empty
-@nrb_not_empty:
-        clc
-        lda tcp_recv_head+0
-        adc #<tcp_recv_buf
-        sta @nrb_ld+1
-        lda tcp_recv_head+1
-        adc #>tcp_recv_buf
-        sta @nrb_ld+2
-@nrb_ld:
-        lda $FFFF                   ; SMC: patched above
-        pha
-        inc tcp_recv_head+0
-        bne @nrb_mask
-        inc tcp_recv_head+1
-@nrb_mask:
-        lda tcp_recv_head+1
-        and #>TCP_RECV_MASK
-        sta tcp_recv_head+1
-        pla
-        clc
-        rts
-@nrb_empty:
-        sec
-        rts
+        .include "net_recv_byte.inc"    ; src/net/, shared with uci
 
 .segment "RODATA"
 
@@ -1017,6 +1164,8 @@ m3_owned:           .res 1      ; 1 while the handle is ours to CLOSE
 m3_eof_code:        .res 1      ; 1 or 5 once READ ended the stream
 m3_poll_result:     .res 1      ; M3_POLL_*
 m3_open_reply:      .res M3_OPEN_REPLY_LEN
+m3_open_hint:       .res 1      ; M3_HINT_*: why the last Open was refused
+m3_num:             .res 2      ; m3_status_number scratch
 m3_info:            .res M3_INFO_LEN
 m3_ipaddr:          .res 12
 m3_host_buf:        .res M3_HOST_MAX + 1
