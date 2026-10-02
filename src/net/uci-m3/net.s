@@ -677,7 +677,10 @@ m3_status_number:
 ;   $0000 + 01 / 05          the stream ended, everything delivered; the
 ;                            handle is GONE: do NOT CLOSE it. CLOSED, not
 ;                            owned; m3_eof_code = 1 or 5.
-;   $0000 + 12/14/16/17      the session is dead but ours: ERROR, owned.
+;   $0000 + any other status the session is dead but ours: ERROR, owned.
+;                            (S 1.6 names 12/14/16/17; anything else that
+;                            ends the stream is taken the same way, so an
+;                            unexpected status fails closed.)
 ; A READ with no reply by PUSH + 12 s is ABORTed; its data is lost, so the
 ; handle is CLOSEd by the caller (ERROR, owned).
 ; Clobbers: A, X, Y
@@ -891,7 +894,7 @@ net_poll:
         cmp #1
         beq @p_gone
         cmp #5
-        bne @p_dead_read            ; 12/14/16/17: dead, still ours
+        bne @p_dead_read            ; any status but 1/5 (seen: 12/14/16/17): dead, still ours
 @p_gone:
         sta m3_eof_code
         lda #0
@@ -907,8 +910,9 @@ net_poll:
 ;                             (c64-wireguard's code, mirrored)
 ;   $8B UCI_ERR_BAD_READ_HDR  any other shape: no header (81/82), a 1-byte
 ;                             header, bytes past the header, Data More
-;   $90 UCI_ERR_STREAM_LOST   a dead session ($0000 + 12/14/16/17,
-;                             @p_dead_read); the status line says which
+;   $90 UCI_ERR_STREAM_LOST   a dead session ($0000 + any status but 1/5,
+;                             seen 12/14/16/17; @p_dead_read); the status
+;                             line says which
 @p_dead_hdr:
         lda m3_bad
         bne @p_dead_code            ; the reason the block was refused

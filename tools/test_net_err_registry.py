@@ -103,7 +103,7 @@ ASSERTS_TU = REPO / "src" / "net_err_registry_asserts.s"
 IP65_FAMILY = (0x40, 0x7F)
 UCI_FAMILY = (0x80, 0xBF)
 
-TOTAL_CHECKS = 11
+TOTAL_CHECKS = 12
 CERTIFIES = ("agreement between this repo's net_last_error allocations and "
              "c64-wireguard's canonical registry")
 
@@ -293,15 +293,28 @@ def _peer_registry(root):
         value = int(m.group(1), 16)
         if not (_in(value, IP65_FAMILY) or _in(value, UCI_FAMILY)):
             continue
-        origin = m.group(3)
-        if "c64-https" in origin:
-            owner = "c64-https"
-        elif re.search(r"\bours\b", origin, re.IGNORECASE):
-            owner = "c64-wireguard"
-        else:
-            owner = "other"
-        rows[value] = (m.group(2), owner)
+        rows[value] = (m.group(2), _row_owner(m.group(3)))
     return rows
+
+
+def _row_owner(origin):
+    """The owner named by the LEADING token of a row's origin field.
+
+    The field reads "[retired table, ]<owner>[, ...][; notes]", e.g.
+    "retired table, c64-https (grandfathered)", "OURS, minted here (issue
+    #130)", "c64-https, minted here (c64-https#276)". Only the leading
+    token decides: a later note such as "; c64-https emits too" on one of
+    THEIR rows names a co-emitter, not the owner, and a substring search
+    used to flip such a row to c64-https.
+    """
+    field = re.sub(r"^\s*retired table,\s*", "", origin, flags=re.IGNORECASE)
+    m = re.match(r"([A-Za-z0-9-]+)", field)
+    token = m.group(1).lower() if m else ""
+    if token == "c64-https":
+        return "c64-https"
+    if token == "ours":
+        return "c64-wireguard"
+    return "other"
 
 
 # --------------------------------------------------------------------------
@@ -506,6 +519,26 @@ def test_every_code_of_ours_appears_in_the_peer_registry():
         f"{unlisted}. Allocate them in {root}/src/net_abi.inc — a code that "
         f"is not in the registry is a code the next lane will mint over "
         f"(#184).")
+
+
+def test_our_rows_carry_our_names():
+    """For every row the canonical registry gives to c64-https, the NAME
+    there must be the name our header defines at that value. A value-only
+    check passes a peer row renamed to anything at all."""
+    root = _require_peer()
+    registry = _peer_registry(root)
+    by_value = {v: n for n, (v, _p, _f) in _our_codes().items()}
+    wrong = []
+    for value, (name, owner) in sorted(registry.items()):
+        if owner != "c64-https":
+            continue
+        ours = by_value.get(value)
+        if ours != name:
+            wrong.append(f"${value:02X}: the registry says {name}, our "
+                         f"headers say {ours}")
+    assert not wrong, ("rows the canonical registry gives to c64-https carry "
+                       "a different name than ours: " + "; ".join(wrong)
+                       + f". Registry: {root}/src/net_abi.inc (#184).")
 
 
 def test_mirrors_match_the_peer_registry():

@@ -86,7 +86,7 @@ MUTANTS = [
      "net_tcp_close:\n        lda m3_owned\n        beq @c_ok\n", "net_tcp_close:\n",
      ["test_read_end_01_is_gone"]),
     ("sticky-as-gone", "S 1.6: 12/14/16/17 are still ours, CLOSE", NET,
-     "        cmp #5\n        bne @p_dead_read            ; 12/14/16/17: dead, still ours\n",
+     "        cmp #5\n        bne @p_dead_read            ; any status but 1/5 (seen: 12/14/16/17): dead, still ours\n",
      "        cmp #5\n", ["test_read_end_14_is_closed"]),
     ("ffff-9-as-idle", "ER-7 `02,NO DATA: 9` = stop", NET,
      "        lda #0\n        sta m3_owned\n        lda #NET_TCP_ERROR\n        sta net_tcp_state\n        rts\n\n@p_0000:",
