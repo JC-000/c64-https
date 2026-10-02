@@ -223,8 +223,12 @@ def _peer_revision(root):
     # overrides -C and would report the CALLER's repository as the peer's.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
+    # --no-optional-locks: a plain `git status` takes index.lock and
+    # rewrites a stale index, which can fail a concurrent git command in
+    # another session sharing this checkout. This probe must only read.
     def git(*args):
-        return subprocess.run(["git", "-C", str(root), *args], env=env,
+        return subprocess.run(["git", "--no-optional-locks", "-C", str(root),
+                               *args], env=env,
                               capture_output=True, text=True, timeout=10)
     try:
         head = git("rev-parse", "--short", "HEAD")
