@@ -449,41 +449,37 @@ tls_record_decrypt:
         cmp #0
         bne @auth_fail
 
-        ; --- 7. Extract inner content type (last byte of decrypted plaintext) ---
-        ; Inner type is at tls_rec_buf[ciphertext_len - 1]
-        ; tls_enc_aead_len still has ciphertext_len (not clobbered by AEAD)
-        ; Compute index = ciphertext_len - 1
-        sec
+        ; --- 7. Inner content type = the last NON-ZERO plaintext byte ---
+        ; RFC 8446 5.4: TLSInnerPlaintext is content || type || zeros, so
+        ; scan back over the padding; its index is the content length. A
+        ; record that is zeros throughout has no type: fatal (C=1, as a tag
+        ; failure). tls_enc_aead_len counts down from ciphertext_len (not
+        ; clobbered by AEAD); a 16-bit pointer reaches every page of the
+        ; 548 B buffer.
+@inner_scan:
         lda tls_enc_aead_len
-        sbc #1
-        tay                     ; Y = (ciphertext_len - 1) low byte
-        lda tls_enc_aead_len+1
-        sbc #0
-        beq @inner_page0        ; index $0000-$00FF
-        cmp #2
-        beq @inner_page2        ; index $0200-$02FF: 512-content records —
-                                ; the max_fragment_length=512 real-server
-                                ; shape (content 512 + type = index 512).
-                                ; The old two-page dispatch read
-                                ; tls_rec_buf+256 here and got a mid-DER
-                                ; byte; found live against github.com.
-        lda tls_rec_buf+256,y   ; index $0100-$01FF
-        jmp @got_inner_type
-@inner_page2:
-        lda tls_rec_buf+512,y
-        jmp @got_inner_type
-@inner_page0:
-        lda tls_rec_buf,y
-@got_inner_type:
+        ora tls_enc_aead_len+1
+        beq @auth_fail          ; all padding: no content type
+        lda tls_enc_aead_len
+        bne :+
+        dec tls_enc_aead_len+1
+:       dec tls_enc_aead_len
+        clc
+        lda #<tls_rec_buf
+        adc tls_enc_aead_len
+        sta zp_ptr
+        lda #>tls_rec_buf
+        adc tls_enc_aead_len+1
+        sta zp_ptr+1
+        ldy #0
+        lda (zp_ptr),y
+        beq @inner_scan         ; padding
         sta tls_rec_type
 
-        ; --- 8. Update tls_rec_len = ciphertext_len - 1 ---
-        sec
+        ; --- 8. tls_rec_len = the content length (the type's index) ---
         lda tls_enc_aead_len
-        sbc #1
         sta tls_rec_len
         lda tls_enc_aead_len+1
-        sbc #0
         sta tls_rec_len+1
 
         ; --- 9. Increment read sequence number ---

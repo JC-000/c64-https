@@ -33,6 +33,27 @@ Two neighbours of the same conflation are pinned here too:
     tick. It is an orderly close, so ``tls_state`` is NOT latched. Any
     OTHER alert (AlertDescription != 0), or an alert that is not exactly
     2 B, returns C=1 at once.
+  * close_notify is the ONLY end of an unframed body: the same body
+    followed by silence (a stall, or a FIN without close_notify, which the
+    TLS receive path cannot tell apart) or by half a record reaches the
+    tick budget and is C=1, where it used to be C=0. Those two cases assert
+    the budget was actually reached (polls >= 65,536), so a C=1 from some
+    abort arm cannot pass them.
+
+Added after adversarial review of PR #277 (adv-277):
+
+  * an injected plaintext alert HEADER (``15 03 03 00 02``, with 0 or 1
+    payload bytes) after a body record whose byte 1 is 0 is not a
+    close_notify: the tick reads ``tls_rx_inner`` (set only by a record
+    that was received and authenticated), not ``tls_rec_type`` (set from
+    any header). A complete record with an outer type other than 23 after
+    the keys is fatal ($0C) before the decrypt, short or long; so is a
+    ChangeCipherSpec once CONNECTED;
+  * RFC 8446 5.4 padding: the inner type is the last non-zero byte, so a
+    padded close_notify ends a body and a padded application record keeps
+    its length; a record that is padding throughout is fatal;
+  * an unframed body past the 512 B buffer is not complete when the
+    buffer fills; it is consumed to the close_notify.
 
 Added after adversarial review of PR #240:
 
@@ -246,14 +267,17 @@ def _lohi(addr: int) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 def seal(key: bytes, iv: bytes, seq: int, inner_type: int,
-         plaintext: bytes) -> bytes:
-    """One TLSCiphertext: header || AEAD(plaintext || inner_type)."""
+         plaintext: bytes, pad: int = 0) -> bytes:
+    """One TLSCiphertext: header || AEAD(plaintext || inner_type || 0*pad).
+
+    ``inner_type=0`` with no plaintext gives a record that is padding
+    throughout (RFC 8446 5.4: no content type, unexpected_message)."""
     seq_be = seq.to_bytes(8, "big")
     nonce = iv[:4] + bytes(a ^ b for a, b in zip(iv[4:], seq_be))
-    length = len(plaintext) + 1 + 16
+    length = len(plaintext) + 1 + pad + 16
     header = bytes([0x17, 0x03, 0x03, length >> 8, length & 0xFF])
     return header + ChaCha20Poly1305(key).encrypt(
-        nonce, plaintext + bytes([inner_type]), header)
+        nonce, plaintext + bytes([inner_type]) + bytes(pad), header)
 
 
 def flip_tag_bit(record: bytes) -> bytes:
@@ -996,6 +1020,178 @@ def run_tests(transport, labels) -> tuple[int, int]:
              r["polls"] <= MAX_POLLS_AFTER_FAIL),
         ]))
 
+    # --- R: an unframed body that just stops (no close_notify) ----------
+    # The idle budget expiring is not an end: an unframed body ends ONLY on
+    # close_notify (H). A peer FIN without one is this same case on ip65
+    # and uci: nothing on the TLS receive path reads net_tcp_state (only
+    # net_poll does, and it is stubbed), so a FIN changes what a tick
+    # costs, never the verdict -- RFC 8446 S6.1's truncation rule.
+    r = run_receive(transport, labels, stream=unframed,
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "unframed body, then silence (stall / FIN without close_notify)",
+        "was: C=0 when the tick budget expired -- a stalled Connection: "
+        "close body read as a complete fetch",
+        r, [
+            ("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=1 (incomplete)", r["carry"] == 1),
+            ("HTTP 200 parsed", r["status"] == 200),
+            ("body consumed == 5", r["body_total"] == 5),
+            ("tls_state still CONNECTED", r["tls_state"] == TLS_STATE_CONNECTED),
+            # The verdict came from the budget, not from an abort arm.
+            ("reached via the tick budget (polls >= 65,536)",
+             r["polls"] >= 0x10000),
+        ]))
+
+    # --- S: an unframed body, then a record cut mid-way ------------------
+    rec2 = seal(app_key, app_iv, 1, TLS_CT_APPLICATION, b" world")
+    r = run_receive(transport, labels,
+                    stream=unframed + rec2[:len(rec2) // 2],
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "unframed body, then half a record and silence",
+        "a connection cut mid-record is a truncation, never an end",
+        r, [
+            ("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=1 (incomplete)", r["carry"] == 1),
+            ("body consumed == 5", r["body_total"] == 5),
+            ("only record 1 authenticated (tls_read_seq = 1)",
+             r["read_seq"] == 1),
+            ("reached via the tick budget (polls >= 65,536)",
+             r["polls"] >= 0x10000),
+        ]))
+
+    # --- T: an injected plaintext alert HEADER is not a close_notify -------
+    # adv-277: tls_recv_record sets tls_rec_type/tls_rec_len from the
+    # 5-byte header before any payload arrives. After a body record whose
+    # plaintext byte 1 is 0, an attacker's `15 03 03 00 02` (with 0 or 1
+    # payload bytes) made the tick see "alert, 2 B, description 0" and
+    # declare the unframed body complete: a truncation attack.
+    hdrs = seal(app_key, app_iv, 0, TLS_CT_APPLICATION,
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello")
+    zero1 = seal(app_key, app_iv, 1, TLS_CT_APPLICATION, b"x\x00yz")
+    for tail, tag in ((b"", "header only"), (b"\x01", "header + 1 B")):
+        r = run_receive(transport, labels,
+                        stream=hdrs + zero1 + bytes([0x15, 3, 3, 0, 2]) + tail,
+                        state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                        iv=app_iv, target="http_recv_body")
+        tally(_report(
+            f"injected plaintext alert header ({tag}) after an unframed body",
+            "nothing was authenticated, so it ends nothing: the body is "
+            "short when the budget expires; was: C=0 at once",
+            r, [
+                ("returned (no harness timeout)", not r["timed_out"]),
+                ("carry C=1 (incomplete)", r["carry"] == 1),
+                ("both real records authenticated (tls_read_seq = 2)",
+                 r["read_seq"] == 2),
+                ("body consumed == 9", r["body_total"] == 9),
+                ("reached via the tick budget (polls >= 65,536)",
+                 r["polls"] >= 0x10000),
+            ]))
+
+    # --- T2: a COMPLETE plaintext alert after the keys is fatal ------------
+    r = run_receive(transport, labels,
+                    stream=hdrs + zero1 + bytes([0x15, 3, 3, 0, 2, 1, 0]),
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "complete plaintext close_notify (outer type 21) after the keys",
+        "RFC 8446 5.2: a protected record's outer type is always 23; any "
+        "other is fatal before the decrypt, never inspected",
+        r, _fail_closed_checks(r, live_state=TLS_STATE_CONNECTED, seq_after=2,
+                               sub=SUB_PROGRESS_FRAME_FAIL)))
+
+    # --- T3: same rule for a record long enough to reach the decrypt -----
+    # Without the outer-type check this one is rejected too, but by its tag
+    # ($0B: the AAD carries the outer type), after decrypting attacker
+    # bytes. The check refuses it first ($0C); that difference is what
+    # catches the check being removed.
+    retyped = bytes([0x16]) + seal(app_key, app_iv, 2, TLS_CT_ALERT,
+                                   bytes([1, 0]))[1:]
+    r = run_receive(transport, labels, stream=hdrs + zero1 + retyped,
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "19-byte record with outer type 22 after the keys",
+        "refused on its outer type before the decrypt, not by its tag",
+        r, _fail_closed_checks(r, live_state=TLS_STATE_CONNECTED, seq_after=2,
+                               sub=SUB_PROGRESS_FRAME_FAIL)))
+
+    # --- V: a padded close_notify still ends an unframed body ------------
+    r = run_receive(transport, labels,
+                    stream=unframed + seal(app_key, app_iv, 1, TLS_CT_ALERT,
+                                           bytes([1, 0]), pad=10),
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "close_notify with 10 B of record padding",
+        "RFC 8446 5.4: the inner type is the last NON-zero byte; was: the "
+        "last byte (0), so the close was an unknown record and ignored",
+        r, [
+            ("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=0 (complete)", r["carry"] == 0),
+            ("body consumed == 5", r["body_total"] == 5),
+            ("tls_state still CONNECTED", r["tls_state"] == TLS_STATE_CONNECTED),
+            (f"at once (polls <= {MAX_POLLS_AFTER_FAIL})",
+             r["polls"] <= MAX_POLLS_AFTER_FAIL),
+        ]))
+
+    # --- W: a padded application record keeps its true length ------------
+    r = run_receive(transport, labels,
+                    stream=seal(app_key, app_iv, 0, TLS_CT_APPLICATION, full,
+                                pad=7),
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "application record with 7 B of record padding",
+        "content length excludes the type and the padding; was: type read "
+        "as 0, the record dropped, the fetch never parsed",
+        r, [
+            ("returned (no harness timeout)", not r["timed_out"]),
+            ("carry C=0 (complete)", r["carry"] == 0),
+            ("HTTP 200 parsed", r["status"] == 200),
+            ("body consumed == 5 (no padding counted)", r["body_total"] == 5),
+            ("tls_read_seq = 1", r["read_seq"] == 1),
+        ]))
+
+    # --- X: a record that is padding throughout is fatal -----------------
+    r = run_receive(transport, labels,
+                    stream=seal(app_key, app_iv, 0, 0, b"", pad=4),
+                    state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                    iv=app_iv, target="http_recv_body")
+    tally(_report(
+        "authenticated record with no non-zero byte (no content type)",
+        "RFC 8446 5.4: unexpected_message; the scan must stop at the start "
+        "of the buffer, not run below it",
+        r, _fail_closed_checks(r, live_state=TLS_STATE_CONNECTED, seq_after=0)))
+
+    # --- Y: an unframed body past the 512 B buffer -----------------------
+    big = [seal(app_key, app_iv, 0, TLS_CT_APPLICATION,
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"),
+           seal(app_key, app_iv, 1, TLS_CT_APPLICATION, b"A" * 400),
+           seal(app_key, app_iv, 2, TLS_CT_APPLICATION, b"B" * 400)]
+    close3 = seal(app_key, app_iv, 3, TLS_CT_ALERT, bytes([1, 0]))
+    for tail, want, why in (
+            (b"", 1, "a full buffer is not the end of the body; was: C=0 the "
+                     "moment 512 B were stored"),
+            (close3, 0, "control: the close_notify behind it ends it, with "
+                        "every byte counted past the 512 B cap")):
+        r = run_receive(transport, labels, stream=b"".join(big) + tail,
+                        state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
+                        iv=app_iv, target="http_recv_body")
+        tally(_report(
+            f"unframed 800 B body (buffer 512 B), "
+            f"{'then silence' if not tail else 'then close_notify'}",
+            why, r, [
+                ("returned (no harness timeout)", not r["timed_out"]),
+                (f"carry C={want}", r["carry"] == want),
+                ("all 800 B consumed", r["body_total"] == 800),
+                (f"tls_read_seq = {3 + bool(tail)}",
+                 r["read_seq"] == 3 + bool(tail)),
+            ]))
+
     # --- I: control — a bad byte BEFORE the keys still just resyncs -------
     sh = bytes([0x16, 0x03, 0x03, 0x00, 0x04, 2, 0, 0, 0])
     r = run_receive(transport, labels, stream=b"\x00" + sh,
@@ -1103,11 +1299,11 @@ def run_tests(transport, labels) -> tuple[int, int]:
                     state=TLS_STATE_CONNECTED, keys=app_keys, key=app_key,
                     iv=app_iv, target="http_recv_body")
     tally(_report(
-        "control: CCS then application data (green both ways)",
-        "same, on the application path",
-        r, [("carry C=0", r["carry"] == 0),
-            ("HTTP 200 parsed", r["status"] == 200),
-            ("tls_state still CONNECTED", r["tls_state"] == TLS_STATE_CONNECTED)]))
+        "CCS after the handshake: fatal, not skipped",
+        "RFC 8446 5: a change_cipher_spec after the peer's Finished is an "
+        "unexpected record; was: skipped like the middlebox one",
+        r, _fail_closed_checks(r, live_state=TLS_STATE_CONNECTED, seq_after=0,
+                               sub=SUB_PROGRESS_FRAME_FAIL)))
 
     # --- M: a fatal alert (not close_notify) -----------------------------
     fatal = seal(app_key, app_iv, 1, TLS_CT_ALERT, bytes([2, 50]))  # decode_error

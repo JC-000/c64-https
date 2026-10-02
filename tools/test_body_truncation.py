@@ -132,6 +132,20 @@ REQUIRED_LABELS = [
     "http_get",
     "tls_close",
     "net_tcp_close",
+    # plain HTTP cases
+    "http_get_plain",
+    "net_dns_resolve",
+    "net_tcp_connect",
+    "net_tcp_send",
+    "tcp_recv_buf",
+    "tcp_recv_head",
+    "tcp_recv_tail",
+    "tcp_recv_overflow",
+    "http_resp_len",
+    "http_host_ptr",
+    "http_host_len",
+    "http_path_ptr",
+    "http_path_len",
 ]
 
 # src/net/net_states.inc — normative, defined there and nowhere else.
@@ -608,6 +622,118 @@ def run_tests(transport, labels) -> tuple[int, int]:
         print("        FAIL carry C=1 (http_recv_body reported failure)")
     passed, failed = (passed + 1, failed) if ok else (passed, failed + 1)
 
+    p_ok, p_bad = run_plain_tests(transport, labels)
+    return passed + p_ok, failed + p_bad
+
+
+# ---------------------------------------------------------------------------
+# Plain HTTP (http_get_plain, menu 'H'): no TLS, so no close_notify
+# ---------------------------------------------------------------------------
+PLAIN_COUNTER = 0x03B8    # 3 B  net_poll counter (24-bit)
+PLAIN_NAME = 0x03C0       # 1 B  "x": host and path for http_build_get
+NET_TCP_CLOSED = 0x00
+
+
+def run_plain_case(transport, labels, stream: bytes, tcp_state: int) -> dict:
+    """Put *stream* in the TCP ring, stub the transport, JSR http_get_plain.
+
+    net_poll counts its calls and returns; DNS/connect/send/close are
+    CLC/RTS, so ``net_tcp_state`` stays what the case sets: CONNECTED for
+    a peer holding the socket, CLOSED for one that sent its FIN.
+    """
+    p = Patcher(transport)
+    c0, c1, c2 = (_lohi(PLAIN_COUNTER + i) for i in range(3))
+    try:
+        p.patch(STUB_ADDR, bytes([0xEE, *c0, 0xD0, 0x08, 0xEE, *c1, 0xD0, 0x03,
+                                  0xEE, *c2, 0x60]), "net_poll counter")
+        p.patch(labels["net_poll"], bytes([0x4C, *_lohi(STUB_ADDR)]),
+                "net_poll JMP")
+        for name in ("net_dns_resolve", "net_tcp_connect", "net_tcp_send",
+                     "net_tcp_close"):
+            p.patch(labels[name], bytes([0x18, 0x60]), f"{name} CLC/RTS")
+        p.patch(PLAIN_COUNTER, bytes(3), "poll counter")
+        p.patch(PLAIN_NAME, b"x", "host/path")
+        for name in ("http_host_ptr", "http_path_ptr"):
+            p.patch(labels[name], bytes(_lohi(PLAIN_NAME)), name)
+        for name in ("http_host_len", "http_path_len"):
+            p.patch(labels[name], bytes([1]), name)
+        p.patch(labels["net_tcp_state"], bytes([tcp_state]), "net_tcp_state")
+        p.patch(labels["tcp_recv_buf"], stream, "tcp_recv_buf")
+        p.patch(labels["tcp_recv_head"], bytes(2), "tcp_recv_head")
+        p.patch(labels["tcp_recv_tail"],
+                bytes([len(stream) & 0xFF, len(stream) >> 8]), "tail")
+        p.patch(labels["tcp_recv_overflow"], bytes([0]), "overflow")
+        p.patch(labels["http_body_sink"], bytes([0]), "sink off")
+        p.patch(labels["http_cl_valid"], bytes([0]), "cl_valid")
+        p.patch(labels["http_chunked"], bytes([0]), "chunked")
+        p.patch(labels["http_body_total"], bytes([POISON] * 3), "body_total")
+        t_lo, t_hi = _lohi(labels["http_get_plain"])
+        r_lo, r_hi = _lohi(LATCH_ADDR)
+        p.patch(DRIVER_ADDR, bytes([0x20, t_lo, t_hi, 0xA9, 0x00, 0x2A,
+                                    0x8D, r_lo, r_hi, 0x60]), "driver")
+        p.patch(LATCH_ADDR, bytes([POISON]), "carry latch")
+        jsr(transport, DRIVER_ADDR, timeout=180.0)
+        c = read_bytes(transport, PLAIN_COUNTER, 3)
+        bt = read_bytes(transport, labels["http_body_total"], 3)
+        rl = read_bytes(transport, labels["http_resp_len"], 2)
+        st = read_bytes(transport, labels["http_status"], 2)
+        return {
+            "carry": read_bytes(transport, LATCH_ADDR, 1)[0],
+            "polls": c[0] | (c[1] << 8) | (c[2] << 16),
+            "body_total": bt[0] | (bt[1] << 8) | (bt[2] << 16),
+            "resp_len": rl[0] | (rl[1] << 8),
+            "status": st[0] | (st[1] << 8),
+        }
+    finally:
+        p.restore()
+
+
+def run_plain_tests(transport, labels) -> tuple[int, int]:
+    unframed = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
+    framed = b"HTTP/1.1 200 OK\r\nContent-Length: 200\r\n\r\n"
+    # (name, stream, tcp state, carry, at once?, body_total, why)
+    cases = [
+        ("plain, unframed 800 B, peer holds the socket",
+         unframed + b"A" * 800, NET_TCP_CONNECTED, 1, True, None,
+         "a full 512 B buffer is a truncation, not an end; was (17766fa): "
+         "C=0 after the whole 65,536-poll budget"),
+        ("plain, unframed 100 B, peer holds the socket",
+         unframed + b"A" * 100, NET_TCP_CONNECTED, 1, False, 100,
+         "the budget expiring is not an end; was: C=0"),
+        ("plain, unframed 100 B, then the peer's FIN",
+         unframed + b"A" * 100, NET_TCP_CLOSED, 0, True, 100,
+         "plain HTTP has no close_notify: the TCP close IS the end"),
+        ("plain, Content-Length 200, 100 B, then FIN",
+         framed + b"A" * 100, NET_TCP_CLOSED, 1, False, 100,
+         "a close short of Content-Length is not complete; was: C=0"),
+        ("plain, Content-Length 200, complete (control)",
+         framed + b"A" * 200, NET_TCP_CONNECTED, 0, True, 200,
+         "the framing ends it: green before and after"),
+    ]
+    passed = failed = 0
+    for name, stream, state, want, fast, total, why in cases:
+        r = run_plain_case(transport, labels, stream, state)
+        checks = [(f"carry C={want}", r["carry"] == want),
+                  ("HTTP 200 parsed", r["status"] == 200)]
+        if fast:
+            checks.append(("at once (polls <= 8)", r["polls"] <= 8))
+        else:
+            checks.append(("reached via the poll budget (polls >= 65,536)",
+                           r["polls"] >= 0x10000))
+        if total is not None:
+            checks.append((f"body consumed == {total}",
+                           r["body_total"] == total))
+        else:
+            checks.append(("first 512 B kept (resp_len = 512)",
+                           r["resp_len"] == 512))
+        ok = all(g for _, g in checks)
+        print(f"\n  [{'+' if ok else '-'}] {name}")
+        print(f"        {why}")
+        print("        " + " ".join(f"{k}={v}" for k, v in r.items()))
+        for label, good in checks:
+            if not good or VERBOSE:
+                print(f"        {'ok  ' if good else 'FAIL'} {label}")
+        passed, failed = (passed + 1, failed) if ok else (passed, failed + 1)
     return passed, failed
 
 

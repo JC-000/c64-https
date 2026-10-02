@@ -38,7 +38,7 @@ MATCH, AND THE OTHER TWO DIVERGE ON PURPOSE. An earlier draft of this file
 claimed the two "mirror branch for branch". They do not, and the claim was
 wrong in a way that reads as reassuring, so it is spelled out instead:
 
-  parse_state < 2   MATCHES. 6502: `cmp #2 / bcc @to_short` -> `sec`.
+  parse_state < 2   MATCHES. 6502: `and #2 / beq @to_short` -> `sec`.
   Content-Length    MATCHES, including the PRECEDENCE: both test
                     `http_cl_valid` before `http_chunked`, and both then
                     compare the 24-bit consumed count against the 24-bit
@@ -50,21 +50,24 @@ wrong in a way that reads as reassuring, so it is spelled out instead:
   chunked           DIVERGES. 6502: `lda http_chunked / bne @to_short` —
                     an UNCONDITIONAL reject that never reads
                     `http_chunk_state`. Correct there, because that code
-                    only runs when the tick budget expired, and a chunked
-                    response that reached the budget is short by
+                    only runs when the tick budget expired or the peer
+                    closed, and a chunked response that got there without
+                    the parser's own success exit is short by
                     construction. This module is read at an ARBITRARY
                     moment, including after the parser's own success exit,
                     so it needs a positive completeness signal rather than
                     the absence of one: `http_chunk_state == 4`.
-  neither framing   DIVERGES. 6502: `clc` — the PRG must return something
-                    and "accept whatever we have" is right for a
-                    Connection: close stream. A rig is under no such
-                    obligation, so this reports INCONCLUSIVE.
+  neither framing   DIVERGES. 6502: the carry the caller entered with —
+                    C=0 from `http_recv_close_verdict` (close_notify),
+                    C=1 from `http_recv_timeout_verdict` (a stall). The
+                    PRG must return something and knows how the stream
+                    ended; this module reads parser state only, which
+                    does not record that, so it reports INCONCLUSIVE.
 
 The two artefacts answer different questions at different moments: the
-6502 answers "the budget just expired — what carry do I hand my caller",
-this answers "looking at the machine now, is the body complete". Where
-that difference does not apply the answers must agree, and the
+6502 answers "the stream just ended or stalled — what carry do I hand my
+caller", this answers "looking at the machine now, is the body complete".
+Where that difference does not apply the answers must agree, and the
 Content-Length precedence is pinned so that it keeps agreeing.
 
 What this can and cannot support

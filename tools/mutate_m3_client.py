@@ -131,10 +131,11 @@ MUTANTS = [
      "m3_report_fail:\n        nop", ["test_refusal_reaches_the_user",
                                        "test_no_tls_firmware_reaches_the_user"]),
     # adv-271 round 1: the finding, and the mutants the suite could not see
+    # The stall arm now relies on the shared verdict's unframed arm (the
+    # 6510 TLS backends share it), so the mutant breaks that arm.
     ("stall-unframed-trusted", "an unframed body is whole only on 01", HTTP,
-     "        lda http_cl_valid       ; stalled: framed -> the framing decides,\n"
-     "        ora http_chunked        ;  unframed -> no close came: incomplete\n"
-     "        beq @m3_dead\n", "", ["test_http_unframed_stall_is_short"]),
+     "        rts                     ; unframed: complete only on a clean end\n",
+     "        clc\n        rts\n", ["test_http_unframed_stall_is_short"]),
     ("05-as-owned", "S 1.6: 05 is GONE, never CLOSEd", NET,
      "        cmp #5\n        bne @p_dead_owned", "        cmp #$FF\n        bne @p_dead_owned",
      ["test_read_end_05_is_gone"]),

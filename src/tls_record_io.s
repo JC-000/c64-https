@@ -352,9 +352,15 @@ tls_record_recv_and_decrypt:
 
         ; RFC 8446 Section 5: TLS 1.3 clients MUST ignore ChangeCipherSpec
         ; records sent during the handshake for middlebox compatibility.
+        ; After the server's Finished one is an unexpected record: fatal.
         lda tls_rec_type
         cmp #TLS_CT_CHANGE_CIPHER
-        beq @retry
+        bne @not_ccs
+        lda tls_state
+        cmp #TLS_STATE_CONNECTED
+        bcc @retry              ; handshake: skip it
+        bcs @frame_fail         ; CONNECTED: fatal ($0C)
+@not_ccs:
 
         ; Record received. Check if decryption is needed.
         ; After ServerHello (state >= TLS_STATE_ENCRYPTED_EXT), records are encrypted.
@@ -363,6 +369,13 @@ tls_record_recv_and_decrypt:
         lda tls_state
         cmp #TLS_STATE_ENCRYPTED_EXT
         bcc @plaintext          ; state < ENCRYPTED_EXT: no decryption
+
+        ; RFC 8446 5.2: every protected record's outer type is
+        ; application_data. Anything else here is plaintext the peer could
+        ; not have sent: fatal ($0C), never decrypted or inspected.
+        lda tls_rec_type
+        cmp #TLS_CT_APPLICATION
+        bne @frame_fail
 
         ; Decrypt the record in-place
         lda #$08
@@ -383,6 +396,8 @@ tls_record_recv_and_decrypt:
 
 @aead_fail:
         jmp tls_rec_auth_fail   ; far: TLS_CODE, off the ip65 LOADER
+@frame_fail:
+        jmp tls_rec_frame_fail
 
 ; =============================================================================
 ; Fail-closed record-layer helpers (issue #239). Never CODE: that lands in
