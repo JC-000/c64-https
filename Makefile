@@ -253,8 +253,17 @@ endif
 # public key and generation floor come from TRUST_BUNDLE_KEY_INC, a file
 # `tools/trust_bundle.py inc` writes. The tree's default is the TEST-ONLY
 # key, whose private half is committed: anyone can sign for it.
+# TRUST_RELEASE=1 marks a release build (tools/package/build_prgs.sh passes
+# it for every product) and refuses that key twice over: here, by its 64 key
+# bytes (so a hand-edited TRUST_BUNDLE_KEY_IS_TEST_ONLY = 0 does not get it
+# through), and in trust_bundle.s, by that flag.
 TRUST_BUNDLE ?=
 TRUST_BUNDLE_KEY_INC ?= tools/trust_bundle_TEST_ONLY_pubkey.inc
+TRUST_BUNDLE_TEST_KEY_INC := tools/trust_bundle_TEST_ONLY_pubkey.inc
+TRUST_RELEASE ?=
+ifneq ($(filter-out 0 1,$(TRUST_RELEASE)),)
+$(error TRUST_RELEASE must be 1 (a release build) or 0/unset)
+endif
 # The 64 key bytes of an .inc, as one word: what the guard compares.
 trust_key_bytes = $(shell sed -n '/^\.macro TRUST_BUNDLE_PUBKEY_BYTES/,/^\.endmacro/p' '$(1)' 2>/dev/null | grep -o '\$$[0-9A-Fa-f][0-9A-Fa-f]' | tr -d '\n$$' | tr a-f A-F)
 ifeq ($(TRUST_BUNDLE),1)
@@ -267,6 +276,12 @@ endif
 TRUST_BUNDLE_KEY_HEX := $(call trust_key_bytes,$(TRUST_BUNDLE_KEY_INC))
 ifneq ($(words $(TRUST_BUNDLE_KEY_HEX)) $(shell printf '%s' '$(TRUST_BUNDLE_KEY_HEX)' | wc -c | tr -d ' '),1 128)
 $(error TRUST_BUNDLE_KEY_INC=$(TRUST_BUNDLE_KEY_INC) has no 64-byte TRUST_BUNDLE_PUBKEY_BYTES macro)
+endif
+ifeq ($(TRUST_RELEASE),1)
+ifeq ($(TRUST_BUNDLE_KEY_HEX),$(call trust_key_bytes,$(TRUST_BUNDLE_TEST_KEY_INC)))
+$(error TRUST_RELEASE=1 with the TEST-ONLY trust-bundle key ($(TRUST_BUNDLE_KEY_INC)): its private half is in the repository, so anyone could sign a bundle this release accepts. Build with TRUST_BUNDLE_KEY_INC=<your production key's .inc>, or without TRUST_BUNDLE)
+endif
+CA65FLAGS += -D TRUST_RELEASE=1
 endif
 CA65FLAGS += -D TRUST_BUNDLE=1
 UCI_SRCS += src/net/uci/trust_bundle.s

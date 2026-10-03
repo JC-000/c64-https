@@ -5,8 +5,10 @@
 # Three variants, one per shipped product (PACKAGE_VARIANTS in _common.sh):
 #
 #   c64-https-ip65-onchip.prg  make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1
-#   c64-https-uci-onchip.prg   make BACKEND=uci  USE_NISTCURVES_ONCHIP=1
-#   c64-https-uci-comb.prg     make BACKEND=uci  USE_NISTCURVES_ONCHIP_COMB=1
+#   c64-https-uci-onchip.prg   make BACKEND=uci  USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1
+#   c64-https-uci-comb.prg     make BACKEND=uci  USE_NISTCURVES_ONCHIP_COMB=1 TRUST_STORE=1
+#
+# each with TRUST_RELEASE=1 appended (variant_make_args in _common.sh).
 #
 # The matrix itself lives in _common.sh; this script has no per-variant
 # knowledge and nothing version-specific, so it survives a library bump with
@@ -126,7 +128,7 @@ failed=0
 for line in "${PACKAGE_VARIANTS[@]}"; do
     key="$(variant_field "$line" 1)"
     prg="$(variant_field "$line" 2)"
-    args="$(variant_field "$line" 3)"
+    args="$(variant_make_args "$line")"
 
     echo "[package] === $key ==="
     echo "[package] make clean && make $args"
