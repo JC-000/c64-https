@@ -111,6 +111,13 @@ _ONCHIP_SYMBOLS = ("gen_mul_row", "fe_gen_mul_row", "sqtab_reserved")
 #: Manifest equate: REU banks the nistcurves archive claims. 0 == onchip.
 _BANKS_EQUATE = "LIB_NISTCURVES_REU_BANKS_USED"
 
+#: The BACKEND=uci-m3 adapter's handle flag. That build links no 6510 crypto
+#: (the Ultimate's ESP32 does the TLS), so it has neither marker above.
+_M3_SYMBOL = "m3_owned"
+
+#: Profiles that need no REU: the preflight has nothing to check for them.
+NO_REU_PROFILES = ("onchip", "none")
+
 SKIP_ENV = "C64_SKIP_REU_PREFLIGHT"
 
 #: Values that read as "off" for the three flags that share this parser:
@@ -173,12 +180,13 @@ def _parse_labels(labels_path: Path) -> dict[str, int]:
 
 
 def detect_crypto_profile(labels_path: Path | str) -> tuple[str, str]:
-    """Classify the linked build as ``"onchip"`` or ``"reu"``.
+    """Classify the linked build as ``"onchip"``, ``"none"`` or ``"reu"``.
 
     :param labels_path: path to ``build/labels.txt`` from the same link
         as the PRG about to be run.
-    :returns: ``(profile, reason)`` where *profile* is ``"onchip"`` or
-        ``"reu"`` and *reason* is a short human-readable justification
+    :returns: ``(profile, reason)`` where *profile* is ``"onchip"``,
+        ``"none"`` (BACKEND=uci-m3: no 6510 crypto at all) or ``"reu"``,
+        and *reason* is a short human-readable justification
         suitable for printing.
     """
     labels = _parse_labels(Path(labels_path))
@@ -209,6 +217,12 @@ def detect_crypto_profile(labels_path: Path | str) -> tuple[str, str]:
         if banks == 0:
             return ("onchip", f"{_BANKS_EQUATE}=0")
         return ("reu", f"{_BANKS_EQUATE}=${banks:02X} — claims REU bank(s)")
+
+    # No manifest equate and the M3 adapter: no 6510 crypto to need a REU.
+    # Recognised by a positive marker, so anything unrecognised still falls
+    # through to the fail-closed REU answer below.
+    if _M3_SYMBOL in labels:
+        return ("none", f"{_M3_SYMBOL}: BACKEND=uci-m3, no 6510 crypto")
 
     # No manifest equate: fall back to the symbol union. Union rather than
     # conjunction so renaming any single symbol upstream cannot silently
@@ -302,7 +316,7 @@ def preflight_reu(
     :param client: connected ``Ultimate64Client``.
     :param labels_path: ``build/labels.txt`` from the current link.
     :param stream: where to print progress (default ``sys.stdout``).
-    :returns: the detected profile, ``"onchip"`` or ``"reu"``.
+    :returns: the detected profile (see :func:`detect_crypto_profile`).
     :raises ReuPreflightError: on a REU-profile build, for any of three
         outcomes — the device reported the REU **Disabled**; the read
         **raised**; or the read returned nothing usable (an unrecognised
@@ -318,11 +332,11 @@ def preflight_reu(
         return "skipped"
 
     profile, reason = detect_crypto_profile(labels_path)
-    if profile == "onchip":
-        # No REST call: the onchip image needs no REU, so there is
+    if profile in NO_REU_PROFILES:
+        # No REST call: the image needs no REU, so there is
         # nothing to check and nothing to slow down.
         print(
-            f"REU preflight: build is the on-chip profile ({reason}) — "
+            f"REU preflight: build is the {profile} profile ({reason}) — "
             "no REU required, skipping device check",
             file=out,
             flush=True,

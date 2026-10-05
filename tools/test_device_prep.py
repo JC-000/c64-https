@@ -67,6 +67,7 @@ CAT_CART = dp.CAT_CART
 # on-chip row generator is the REU profile; the equate at 0 is on-chip.
 LABELS_REU = "al 006000 .ecdsa_verify_256\nal 00A000 .tls_rec_buf\n"
 LABELS_ONCHIP = "al 000000 .LIB_NISTCURVES_REU_BANKS_USED\nal 006000 .gen_mul_row\n"
+LABELS_M3 = "al 00AF9F .m3_owned\nal 00BC00 .sqtab_lo\n"
 
 #: A device at the factory default: 1 MHz, turbo off, no REU. This is the
 #: ordinary state of a freshly power-cycled U64E, not a broken one — which is
@@ -360,6 +361,36 @@ def test_onchip_build_never_writes_the_reu() -> None:
     assert writers.reu == [], f"on-chip build had the REU configured:\n{out}"
     assert report["profile"] == "onchip"
     assert "no REU configuration needed" in out
+
+
+def test_m3_build_switches_the_reu_off() -> None:
+    """uci-m3 needs no REU, and its runs prove it: the REU is turned OFF."""
+    report, writers, out = _run(FakeClient([READY_STATE, DEFAULT_STATE]),
+                                labels=LABELS_M3)
+    assert report["profile"] == "none", out
+    assert writers.reu == [(False, None)], f"REU not switched off:\n{out}"
+    assert report["wanted"]["reu"] == "Disabled"
+    assert report["after"][f"{CAT_CART}/RAM Expansion Unit"] == "Disabled"
+
+
+def test_m3_build_with_the_reu_off_writes_nothing() -> None:
+    report, writers, out = _run(FakeClient([DEFAULT_STATE]), labels=LABELS_M3)
+    assert writers.reu == [], f"redundant REU write:\n{out}"
+    assert "reu" in report["skipped_write"]
+
+
+def test_m3_build_unreadable_reu_is_switched_off_anyway() -> None:
+    """Disabling is the safe direction, so an unreadable state writes."""
+    blind = dict(READY_STATE)
+    blind[f"{CAT_CART}/RAM Expansion Unit"] = _HarnessError("read refused")
+    report, writers, out = _run(FakeClient([blind]), labels=LABELS_M3)
+    assert writers.reu == [(False, None)], out
+
+
+def test_m3_build_refused_disable_is_exit_4() -> None:
+    exc = _assert_raises_prep(FakeClient([READY_STATE]), "refused disable",
+                              labels=LABELS_M3, reu_raises=_HarnessError("400"))
+    assert "Disabled" in str(exc)
 
 
 # --------------------------------------------- the REU write can itself fail
