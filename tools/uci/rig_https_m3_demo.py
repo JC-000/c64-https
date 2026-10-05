@@ -19,11 +19,12 @@ reads the PRG back out of the .d64 with c1541 and refuses to run if it
 differs from build/c64-https.prg (run it right after `make
 package-m3-demo`, which leaves that build in build/).
 
-Drive A's state is read first and restored at the end: our image removed
-(and its /Temp upload deleted), the old image re-mounted by path when it had
-one, the drive switched back off when it was off, and the result compared
-with what was read. Device prep, the REU preflight, the DeviceLock, the
-init wait and the refusal verdict are rig_https_m3.py's.
+Drive A's state is read first and restored at the end: our image removed,
+the old image re-mounted by path when it had one, the drive switched back
+off when it was off, and the result compared with what was read. (The
+upload lands at /Temp/cache/upload/image.d64, overwritten per mount.)
+Device prep, the REU preflight, the DeviceLock, the init wait and the
+refusal verdict are rig_https_m3.py's.
 
     U64_HOST=10.43.23.81 tools/uci/rig_https_m3_demo.py [path/to.d64]
 
@@ -38,7 +39,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from ftplib import FTP, error_perm
 from pathlib import Path
 
 from c64_test_harness.backends.device_lock import DeviceLock, DeviceLockTimeout
@@ -100,28 +100,12 @@ def drive_a(client) -> dict:
     return {}
 
 
-def delete_temp_upload(ours: dict, before: dict) -> None:
-    """Delete the /Temp file our mount uploaded, unless it was there before."""
-    path, name = ours.get("image_path", ""), ours.get("image_file", "")
-    if not name or path.rstrip("/") != "/Temp" or (
-            before.get("image_path"), before.get("image_file")) == (path, name):
-        return
-    try:
-        with FTP(HOST, timeout=10.0) as ftp:
-            ftp.login()
-            ftp.cwd("/Temp")
-            ftp.delete(name)
-        print(f"  deleted /Temp/{name}")
-    except (OSError, error_perm) as exc:
-        print(f"WARNING: /Temp/{name} not deleted: {exc}")
-
-
-def restore_drive_a(client, before: dict, ours: dict) -> None:
+def restore_drive_a(client, before: dict) -> None:
     client.unmount_disk("a")
-    delete_temp_upload(ours, before)
+    # fw 3.15 reports the whole path in image_file and image_path empty.
     path, file = before.get("image_path"), before.get("image_file")
-    if path and file:
-        client.mount_disk_path("a", f"{path.rstrip('/')}/{file}")
+    if file:
+        client.mount_disk_path("a", f"{path.rstrip('/')}/{file}" if path else file)
     if not before.get("enabled", True):
         client.drive_off("a")
     after = drive_a(client)
@@ -165,7 +149,6 @@ def main() -> int:
     client = None
     fetch_in_flight = False
     before = {}
-    ours = {}
     mounted = False
     try:
         client = Ultimate64Client(host=HOST, timeout=30.0)
@@ -197,8 +180,7 @@ def main() -> int:
             client.drive_on("a")
         client.mount_disk("a", d64.read_bytes(), "d64", mode="readonly")
         mounted = True
-        ours = drive_a(client)
-        print(f"drive A now: {ours}")
+        print(f"drive A now: {drive_a(client)}")
 
         try:
             client.reset()
@@ -303,7 +285,7 @@ def main() -> int:
         if client is not None:
             if mounted:
                 try:
-                    restore_drive_a(client, before, ours)
+                    restore_drive_a(client, before)
                 except Exception as exc:        # noqa: BLE001
                     print(f"WARNING: drive A not restored: {exc}")
             try:
