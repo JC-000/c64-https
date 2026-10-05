@@ -502,10 +502,10 @@ main_loop:
 ; from $0803, strings down from $A000, and LOAD writes over it. SYS
 ; re-entry into the image is valid only before BASIC allocates anything,
 ; and a re-entry that runs crypto clobbers BASIC's ZP again exactly as
-; before 'Q'. The tools/uci rigs only type SYS after 'Q', so they are fine, and
-; session_scrub re-seeds the DRBG for exactly them. (Capping MEMSIZ was
-; tried and dropped: every quoted string, LOAD included, became ?OUT OF
-; MEMORY, and OPEN on the RS-232 device resets MEMSIZ from MEMTOP anyway.)
+; before 'Q': BASIC is unusable after such a SYS returns. The tools/uci rigs
+; park the CPU (JMP *) or type only further SYS lines, so they are fine, and
+; session_scrub re-seeds the DRBG for exactly them. Do not cap MEMSIZ to
+; protect the image -- see engineering-notes, Known issues.
 ;
 ; The BASIC init routines sit in the KERNAL ROM's BASIC tail and are not
 ; vectored; $E37B-$E45E is byte-identical in every C64 KERNAL VICE ships

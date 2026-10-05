@@ -35,6 +35,9 @@ What this suite does, all hardware-free in VICE:
      string, and ``LOAD"P",8`` of a one-line program from a d64 (minted here
      with c1541) loads and RUNs.
 
+A missing c1541 is two counted FAILs by design (skip policy): a box without
+VICE's c1541 is red, not quietly green.
+
 Every step after 'Q' is tallied, never raised: a build that leaves the
 6510 jammed fails the remaining checks by name instead of crashing.
 
