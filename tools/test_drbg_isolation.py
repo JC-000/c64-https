@@ -45,10 +45,13 @@ Cases:
                       ClientHello.random seen on the wire -- does NOT give
                       the second session's ECDHE private key.
   tls_connect reseeds the real tls_connect, with every callee after the
-                      draws stubbed, mixes fresh entropy before drawing:
-                      its client_random is not the output of the DRBG
-                      state it started from (defence in depth; the
-                      separation above is the fix).
+                      draws stubbed: its client_random is
+                      generate(update(K, V, seed)) for the drbg_seed it
+                      collected (a model check of the update-with-seed
+                      path), not generate(K, V); and re-entered from the
+                      same K, V it collects a different seed and draws a
+                      different client_random. Defence in depth; the
+                      separation above is the fix.
 
 Usage:
     python3 tools/test_drbg_isolation.py [--verbose]
@@ -108,6 +111,7 @@ REQUIRED_LABELS = [
     "tls_connect",
     "tls_ecdh_generate_keypair",
     "tls_send_client_hello",
+    "drbg_seed",
 ] + HMAC_USERS + KS_INPUTS
 
 # Cassette buffer. Harness jsr() trampoline $0334, run_all_tests.py's loop
@@ -132,6 +136,15 @@ def drbg_generate(k: bytes, v: bytes) -> tuple[bytes, bytes, bytes]:
     k = H(k, v + b"\x00")
     v = H(k, v)
     return out, k, v
+
+
+def drbg_update(k: bytes, v: bytes, seed: bytes = b"") -> tuple[bytes, bytes]:
+    k = H(k, v + b"\x00" + seed)
+    v = H(k, v)
+    if seed:
+        k = H(k, v + b"\x01" + seed)
+        v = H(k, v)
+    return k, v
 
 
 def predict_from_k(k: bytes, client_random: bytes) -> bytes:
@@ -306,12 +319,23 @@ def run_tests(transport, labels) -> tuple[int, int]:
 
     # --- tls_connect mixes fresh entropy before it draws ------------------
     k, v, r = run_tls_connect_draws(transport, labels)
+    seed1 = read_bytes(transport, labels["drbg_seed"], 32)
     out1, _, _ = drbg_generate(k, v)
+    k1, v1 = drbg_update(k, v, seed1)
+    want, _, _ = drbg_generate(k1, v1)
+    # same entry state again: only the collected seed may differ
+    write_bytes(transport, labels[k_label(labels)], k)
+    write_bytes(transport, labels["hmac_val"], v)
+    _, _, r2 = run_tls_connect_draws(transport, labels)
+    seed2 = read_bytes(transport, labels["drbg_seed"], 32)
     report("tls_connect reseeds before drawing",
-           "client_random must not be the next output of the state "
-           "tls_connect was entered with (defence in depth)",
-           [("client_random != generate(K, V)", r != out1)],
-           f"client_random {r.hex()[:16]}..")
+           "client_random must be generate(update(K, V, seed)) for the seed "
+           "it collected, and that seed must be fresh (defence in depth)",
+           [("client_random != generate(K, V)", r != out1),
+            ("client_random == generate(update(K, V, seed))", r == want),
+            ("a second entry from the same K,V collects a different seed",
+             seed1 != seed2 and r != r2)],
+           f"client_random {r.hex()[:16]}..  seed {seed1.hex()[:16]}..")
 
     return passed, failed
 

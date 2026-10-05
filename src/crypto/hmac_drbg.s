@@ -581,9 +581,14 @@ drbg_init_entropy:
 	jmp drbg_mark_empty
 
 ; =============================================================================
-; drbg_reseed - mix 32 fresh SID+CIA bytes into the running DRBG
+; drbg_reseed - mix a fresh drbg_collect_seed sample into the running DRBG
 ; update(seed) keeps K and V, so whatever entropy the state already holds
-; survives; tls_connect calls it before every handshake's draws.
+; survives; tls_connect calls it before every handshake's draws. The 32
+; bytes are NOT 32 bytes of entropy: CIA1 timer A decrements at a fixed
+; rate between reads and osc3 moves slowly, so a sample carries roughly the
+; entropy of the instant it started (how long the user took to press 'G').
+; That entropy is unmeasured. Defence in depth only; the fix for a key
+; schedule reaching the DRBG is that drbg_k is private.
 ; Clobbers: A, X, Y
 ; =============================================================================
 drbg_reseed:

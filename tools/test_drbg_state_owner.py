@@ -17,6 +17,9 @@ no build. ``tools/test_drbg_isolation.py`` is the behavioural check (VICE):
    to ``hmac_key``. Every DRBG HMAC goes through ``drbg_hmac``, which loads
    K first.
 3. ``hmac_val`` (V) is stored to only by hmac_drbg.s.
+4. ``drbg_hmac`` is exactly the drbg_k -> hmac_key copy and falls into
+   ``hmac_sha256``: a copy the other way round would make K whatever HKDF
+   left in hmac_key, and every check above would still hold.
 
 Runs under pytest, and standalone::
 
@@ -102,6 +105,27 @@ def test_hmac_val_is_stored_only_by_the_drbg():
               if p != DRBG and any(pat.search(l) for l in _code(p))]
     assert not others, (
         f"{others} store to hmac_val, the DRBG's V. Only hmac_drbg.s may.")
+
+
+DRBG_HMAC_BODY = [
+    "ldx #31",
+    "@load_k:",
+    "lda drbg_k,x",
+    "sta hmac_key,x",
+    "dex",
+    "bpl @load_k",
+    "hmac_sha256:",
+]
+
+
+def test_drbg_hmac_is_exactly_the_k_load():
+    code = [" ".join(l.split()) for l in _code(DRBG) if l.strip()]
+    start = next((i for i, l in enumerate(code) if l == "drbg_hmac:"), None)
+    assert start is not None, "drbg_hmac: not found in hmac_drbg.s"
+    body = code[start + 1:start + 1 + len(DRBG_HMAC_BODY)]
+    assert body == DRBG_HMAC_BODY, (
+        f"drbg_hmac must be exactly {DRBG_HMAC_BODY} (load K from drbg_k, "
+        f"fall into hmac_sha256); found {body}")
 
 
 def main() -> int:
