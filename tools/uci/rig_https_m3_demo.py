@@ -20,8 +20,7 @@ differs from build/c64-https.prg (run it right after `make
 package-m3-demo`, which leaves that build in build/).
 
 Drive A's state is read first and restored at the end: our image removed,
-the old image re-mounted by path when it had one (an earlier upload
-cannot be: drive A is left empty, with a warning), the drive switched back
+the old image re-mounted by path when it had one, the drive switched back
 off when it was off, and the result compared with what was read. The
 upload (/Temp/cache/upload/image[_N].d64: the U64E numbers a repeat rather
 than overwrite it) is deleted over FTP once unmounted.
@@ -41,7 +40,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from ftplib import FTP, error_perm
+import ftplib
+from ftplib import FTP
 from pathlib import Path
 
 from c64_test_harness.backends.device_lock import DeviceLock, DeviceLockTimeout
@@ -105,8 +105,13 @@ def drive_a(client) -> dict:
 
 
 def delete_upload(ours: dict, before: dict) -> None:
-    """FTP-delete the /Temp file our mount created (never one found mounted)."""
+    """FTP-delete the /Temp file our mount created (never one found mounted).
+    Never raises: it is the last step of the restore, and best-effort."""
     name = ours.get("image_file", "")
+    if not name:
+        print("WARNING: our mount reported no image_file; its /Temp upload "
+              "(if any) is not deleted")
+        return
     if not name.startswith("/Temp/") or name == before.get("image_file"):
         return
     try:
@@ -114,28 +119,24 @@ def delete_upload(ours: dict, before: dict) -> None:
             ftp.login()
             ftp.delete(name)
         print(f"  deleted {name}")
-    except (OSError, error_perm) as exc:
+    except ftplib.all_errors as exc:
         print(f"WARNING: {name} not deleted: {exc}")
 
 
 def restore_drive_a(client, before: dict, ours: dict, mounted: bool) -> None:
     """Put drive A back. `mounted` is False when our mount itself failed:
-    whatever the drive held is still there, so only the power is undone."""
+    whatever the drive held is still there, so only the power is undone.
+    The upload is deleted last, so nothing it does can skip the rest."""
     # fw 3.15 reports the whole path in image_file and image_path empty.
     path, file = before.get("image_path"), before.get("image_file")
-    full = f"{path.rstrip('/')}/{file}" if path and file else file
     if mounted:
         client.unmount_disk("a")
-        delete_upload(ours, before)
-        if full and full.startswith("/Temp/"):
-            # An earlier upload: ours may have been written over it (the
-            # C64U overwrites image.d64), so mounting it by name could mount
-            # OUR disk. Leave the drive empty and say so.
-            print(f"WARNING: drive A held an upload ({full}); it cannot be "
-                  "restored, drive A left empty")
-            before = dict(before, image_file="", image_path="")
-        elif full:
-            client.mount_disk_path("a", full)
+        if file:
+            client.mount_disk_path(
+                "a", f"{path.rstrip('/')}/{file}" if path else file)
+    else:
+        print("WARNING: our mount failed; drive A's power is put back, "
+              "its disk was not touched")
     if not before.get("enabled", True):
         client.drive_off("a")
     after = drive_a(client)
@@ -145,6 +146,8 @@ def restore_drive_a(client, before: dict, ours: dict, mounted: bool) -> None:
         print(f"WARNING: drive A not as found (before, after): {diff}")
     else:
         print(f"drive A restored: {after}")
+    if mounted:
+        delete_upload(ours, before)
 
 
 def main() -> int:
