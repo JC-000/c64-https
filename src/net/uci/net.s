@@ -67,7 +67,6 @@
 .import uci_drain_resp
 .import uci_drain_status
 .import uci_ack
-.import uci_settle
 .import uci_resp_dst
 .import uci_resp_max
 .import uci_resp_count
@@ -512,11 +511,13 @@ net_poll:
 ; it with an EMPTY reply and "82,PARAMETER(S) OUT OF RANGE" on the status
 ; channel, and the $DF1C ERROR bit stays clear (its only setter is a PUSH
 ; while not idle). So the reply is checked by length: only a full 12-byte
-; record is a lease. An empty reply skips uci_read_resp_bytes altogether —
-; its per-byte spin is iteration-counted (~7.5 s at 48 MHz, ~6 min at
-; 1 MHz) — and anything short of 12 bytes reads as "no lease here"
-; without touching net_local_ip, so a buffer left over from an earlier
-; call can never be reported as this call's lease.
+; record is a lease. Anything shorter (uci_resp_count != 12, an empty
+; reply included) reads as "no lease here" without touching net_local_ip,
+; so a buffer left over from an earlier call can never be reported as this
+; call's lease. net_local_ip is also zeroed on entry. net_init already
+; does that on the menu path; it is kept for a caller that skips net_init
+; (none in tree today), per net_abi.inc's "zero until net_dhcp_acquire
+; succeeds".
 ;
 ; The 12-byte response layout is IP(4) + Netmask(4) + Gateway(4). We copy
 ; the first 4 bytes into net_local_ip. If all probed interfaces yield no
@@ -560,9 +561,10 @@ net_dhcp_acquire:
         jsr uci_check_err
         bcc @no_err
 
-        ; Command failed for this interface (e.g. an index past the
-        ; last registered interface). Clean up response/status state so
-        ; the next probe starts from idle, then advance.
+        ; The push was rejected (the interface was not idle). Clean up
+        ; response/status state so the next probe starts from idle, then
+        ; advance. An out-of-range index does NOT land here — see the
+        ; header.
         lda #UCI_ERR_CMD_FAILED
         sta net_last_error
         jsr uci_drain_resp
@@ -579,14 +581,8 @@ net_dhcp_acquire:
 @iface_idx: .byte 0
 
 @no_err:
-        ; Read the 12-byte response into uci_ipaddr_resp. The reply is
-        ; already VALID (uci_push_wait), so DATA_AV low means it is empty.
-        lda #$00
-        sta uci_resp_count
-        lda UCI_STATUS
-        jsr uci_settle
-        and #UCI_STAT_DATA_AV
-        beq @drain
+        ; Read the 12-byte response into uci_ipaddr_resp. An empty reply
+        ; returns at once with uci_resp_count = 0 (the read does not wait).
         lda #<uci_ipaddr_resp
         sta uci_resp_dst
         lda #>uci_ipaddr_resp
@@ -598,7 +594,6 @@ net_dhcp_acquire:
         ; Drain anything we didn't consume (should be zero for 12 bytes,
         ; but this is cheap insurance against firmware revisions that
         ; return a longer record).
-@drain:
         jsr uci_drain_resp
         bcs @dhcp_wait_to           ; drain wedged — surface as DHCP fail
         jsr uci_drain_status

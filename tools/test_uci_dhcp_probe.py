@@ -5,23 +5,18 @@ WHAT THIS TESTS
 
 ``net_dhcp_acquire`` (src/net/uci/net.s) probes UCI interface indices 0..3
 with GET_IPADDR and takes the first non-zero address.  The firmware
-(``network_target.cc``, unchanged from GideonZ/1541ultimate 915cfbe7 in
-2015 through 3a1ff9ff) answers an index at or past
+(``network_target.cc``; the indexed GET_IPADDR handler dates from
+GideonZ/1541ultimate b4046f34, 2018, and is byte-identical through
+3a1ff9ff) answers an index at or past
 ``getNumberOfInterfaces()`` with ``c_message_empty`` and the status line
 ``"82,PARAMETER(S) OUT OF RANGE"``.  That is an ordinary, VALID reply: the
 ``$DF1C`` ERROR bit has one setter, a PUSH while not idle
 (``command_protocol.vhd``), so ``uci_check_err`` returns C=0 and the old
-code went on to read 12 bytes that were never sent.  Two consequences:
+code went on to copy 12 bytes that were never sent: whatever
+``uci_ipaddr_resp`` already held went to ``net_local_ip`` and, if
+non-zero, was returned as a lease with C=0.
 
-  * ``uci_read_resp_bytes`` waits out its 65,536 fenced spins for the
-    first missing byte.  That spin is iteration-counted, not TOD-bounded:
-    ~5,490 cycles per spin, so ~7.5 s per out-of-range probe at 48 MHz,
-    ~5.6 s at 64 MHz and ~6 min at 1 MHz.  It is reached only when no
-    in-range interface has a lease (the loop stops at the first one).
-  * whatever ``uci_ipaddr_resp`` already held is copied to
-    ``net_local_ip`` and, if non-zero, returned as a lease with C=0.
-
-The second one needs a probe that returns fewer than 12 bytes with no full
+That needs a probe that returns fewer than 12 bytes with no full
 reply before it in the same call.  On firmware every in-range index
 returns 12 bytes and in-range indices are probed first, so on a box with
 at least one interface (every U64E and C64U: Ethernet registers as index
@@ -38,10 +33,9 @@ addresses) runs on ``test_uci_data_acc.py``'s 6502 interpreter against
 ``test_uci_timeout_recovery.py``'s register-file model, extended with a
 firmware that answers GET_IPADDR from the command bytes actually written
 to ``$DF1D``.  The ``uci_fence`` delay loops are shortened in the loaded
-image (inner count 217 -> 1): they are timing, not logic, and at full
-length one out-of-range probe is ~140 M interpreted instructions.  Wasted
-waiting is measured in ``$DF1C`` reads per probe, which the fence does not
-change.
+image (inner count 217 -> 1): they are timing, not logic.  Each probe's
+``$DF1C`` reads are also counted and bounded, so a wait re-introduced on
+the empty-reply path fails here rather than only being slow.
 
 Runs standalone or under pytest (exit codes as its siblings: 0 pass,
 1 fail, 2 cannot run; ``C64_UCI_TESTS_OPTIONAL=1`` opts out)::
@@ -79,8 +73,7 @@ FENCE = bytes([0xA2, 0x05, 0xA9, 0xD9, 0xE9, 0x01, 0xD0, 0xFC, 0xCA, 0xD0,
                0xF7])
 INNER_OFFSET = 3
 
-# $DF1C reads a probe may spend.  A full reply costs a few dozen; the old
-# read of an empty reply costs 65,536 on its own.
+# $DF1C reads a probe may spend.  A full reply costs a few dozen.
 PROBE_READ_CEILING = 1000
 
 LEASE_A = bytes([10, 43, 23, 83])
@@ -197,11 +190,19 @@ def _err(mem, labels):
 def _probe_costs_bounded(fw):
     worst = max(fw.reads_per_probe)
     base._check(worst < PROBE_READ_CEILING, (
-        "a probe spent %d $DF1C reads (per probe, indices %s: %s). An empty "
-        "GET_IPADDR reply is being read as if 12 bytes were coming: "
-        "uci_read_resp_bytes spins 65,536 fenced iterations for the first "
-        "missing byte, ~7.5 s per probe at 48 MHz and ~6 min at 1 MHz"
+        "a probe spent %d $DF1C reads (per probe, indices %s: %s): an "
+        "empty GET_IPADDR reply is being waited on as if 12 bytes were "
+        "coming"
         % (worst, fw.probes, fw.reads_per_probe)))
+
+
+def _ip_cleared(mem, labels, when):
+    """A failed acquire must leave net_local_ip at 0.0.0.0, not at the
+    address a previous call (or anything else) left there."""
+    base._check(_ip(mem, labels) == bytes(4), (
+        "%s: net_local_ip reads %s after a FAILED acquire; a caller that "
+        "does not check carry, or a rig reading it, sees a stale address"
+        % (when, list(_ip(mem, labels)))))
 
 
 def test_lease_on_index_zero():
@@ -237,6 +238,7 @@ def test_no_lease_does_not_wait_out_the_empty_probes():
     base._check(fw.idle and fw.pushes_rejected == 0,
                 "interface left %s, %d push(es) rejected"
                 % (fw.describe(), fw.pushes_rejected))
+    _ip_cleared(mem, labels, "no lease")
     _probe_costs_bounded(fw)
 
 
@@ -257,19 +259,26 @@ def test_reinit_does_not_return_the_previous_lease():
         % (list(_ip(mem, labels)), len(fw.probes))))
     base._check(_err(mem, labels) == UCI_ERR_NO_IP,
                 "net_last_error=$%02X, expected $83" % _err(mem, labels))
+    _ip_cleared(mem, labels, "re-init")
     _probe_costs_bounded(fw)
 
 
-def test_uninitialised_buffer_is_not_a_lease():
-    """First call, zero interfaces, uci_ipaddr_resp holding whatever RAM
-    held (UCI_BSS is not zeroed at boot)."""
+def test_leftover_state_on_direct_entry_is_not_a_lease():
+    """Direct entry (a rig trampoline, which skips net_init) with state
+    left over in the same RAM lifetime: uci_ipaddr_resp and net_local_ip
+    hold another address, and every probe is out of range. NOT a fresh
+    PRG load: uci_ipaddr_resp is file-backed in CRYPTO_HOT and loads as
+    12 zero bytes, so this needs earlier code to have run."""
     cpu, mem, fw, labels = _require([])
-    for i, b in enumerate(b"\xde\xad\xbe\xef" + bytes(8)):
+    for i, b in enumerate(LEASE_B + bytes(8)):
         mem.write(labels["uci_ipaddr_resp"] + i, b)
+    for i, b in enumerate(LEASE_B):
+        mem.write(labels["net_local_ip"] + i, b)
     carry = _acquire(cpu, labels)
     base._check(carry is True and _err(mem, labels) == UCI_ERR_NO_IP, (
         "C=%d ip=%s err=$%02X: leftover buffer bytes were reported as a "
         "lease" % (carry, list(_ip(mem, labels)), _err(mem, labels))))
+    _ip_cleared(mem, labels, "direct entry")
 
 
 def test_short_reply_is_not_a_lease():
@@ -283,6 +292,7 @@ def test_short_reply_is_not_a_lease():
     base._check(carry is True, (
         "a 4-byte reply was accepted as a lease (ip=%s)"
         % list(_ip(mem, labels))))
+    _ip_cleared(mem, labels, "short reply")
 
 
 TESTS = (
@@ -290,7 +300,7 @@ TESTS = (
     test_lease_on_wifi_index_one,
     test_no_lease_does_not_wait_out_the_empty_probes,
     test_reinit_does_not_return_the_previous_lease,
-    test_uninitialised_buffer_is_not_a_lease,
+    test_leftover_state_on_direct_entry_is_not_a_lease,
     test_short_reply_is_not_a_lease,
 )
 
