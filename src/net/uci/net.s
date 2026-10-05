@@ -793,7 +793,8 @@ net_tcp_connect:
 ; Response: 2 bytes = written_lo/hi (LE). If written != requested we set
 ; UCI_ERR_SHORT_WRITE but still return C=0 so the caller can continue
 ; (mirrors ip65 behaviour that treats short writes as best-effort). A
-; written count of $FFFF (lwip_send's -1) is a failed send: C=1, $87.
+; written count of $FFFF (lwip_send's -1), or a reply that is not exactly
+; the 2-byte count, is a failed send: C=1, $87.
 ; =============================================================================
 net_tcp_send:
         sta uci_send_ptr_lo
@@ -939,8 +940,17 @@ net_tcp_send:
         ; and GREW uci_send_rem by one per round trip, so the loop ran
         ; ~65k SOCKET_WRITEs (~45 min) before rem wrapped to zero and it
         ; returned C=0. A chunk is at most 800 B, so bit 15 is never a count.
+        ;
+        ; A reply that is not exactly 2 bytes carries no count at all, and
+        ; uci_write_resp would still hold the PREVIOUS chunk's: the #230(a)
+        ; mis-parse ("21,UNKNOWN COMMAND", empty reply) is that shape. Same
+        ; verdict as uci-m3's send: $87, C=1.
+        lda uci_resp_count
+        cmp #2
+        bne @sb_no_count
         lda uci_write_resp+1
         bpl @sb_counted
+@sb_no_count:
         lda #UCI_ERR_SHORT_WRITE
         sta net_last_error
         sec
