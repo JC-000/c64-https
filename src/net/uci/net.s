@@ -67,6 +67,7 @@
 .import uci_drain_resp
 .import uci_drain_status
 .import uci_ack
+.import uci_settle
 .import uci_resp_dst
 .import uci_resp_max
 .import uci_resp_count
@@ -505,13 +506,22 @@ net_poll:
 ; Ethernet registers as index 0 whether or not a cable is in, and WiFi as
 ; index 1 (rmii_interface.cc / wifi.cc init order), so a box on WiFi returns
 ; 0.0.0.0 for index 0. We probe indices 0..NET_DHCP_MAX_IFACE-1 and take the first
-; one with a non-zero lease. A CMD_FAILED on an out-of-range index is
-; cleaned up (drain + ack) and treated like "no lease on this interface".
+; one with a non-zero lease.
+;
+; An out-of-range index is NOT a command failure: network_target.cc answers
+; it with an EMPTY reply and "82,PARAMETER(S) OUT OF RANGE" on the status
+; channel, and the $DF1C ERROR bit stays clear (its only setter is a PUSH
+; while not idle). So the reply is checked by length: only a full 12-byte
+; record is a lease. An empty reply skips uci_read_resp_bytes altogether —
+; its per-byte spin is iteration-counted (~7.5 s at 48 MHz, ~6 min at
+; 1 MHz) — and anything short of 12 bytes reads as "no lease here"
+; without touching net_local_ip, so a buffer left over from an earlier
+; call can never be reported as this call's lease.
 ;
 ; The 12-byte response layout is IP(4) + Netmask(4) + Gateway(4). We copy
-; the first 4 bytes into net_local_ip. If all probed interfaces yield a
-; zero IP we return C=1 with net_last_error = UCI_ERR_NO_IP (or
-; UCI_ERR_CMD_FAILED if the last probe failed at the command layer).
+; the first 4 bytes into net_local_ip. If all probed interfaces yield no
+; lease we return C=1 with net_last_error = UCI_ERR_NO_IP (or
+; UCI_ERR_CMD_FAILED if the last push was rejected).
 ;
 ; Clobbers: A, X, Y
 ; Output:   C=0 on success (net_local_ip populated), C=1 on failure
@@ -522,6 +532,11 @@ NET_DHCP_MAX_IFACE = 4          ; probe interface indices 0..3
 net_dhcp_acquire:
         lda #$00
         sta @iface_idx          ; SMC-style local, no-ZP file convention
+        ldx #3                  ; no lease until a probe returns one: a
+@clear_ip:                      ; failed call reads 0.0.0.0, never the last
+        sta net_local_ip,x      ; call's address
+        dex
+        bpl @clear_ip
 
 @next_iface:
         jsr uci_wait_idle
@@ -564,7 +579,14 @@ net_dhcp_acquire:
 @iface_idx: .byte 0
 
 @no_err:
-        ; Read the 12-byte response into uci_ipaddr_resp.
+        ; Read the 12-byte response into uci_ipaddr_resp. The reply is
+        ; already VALID (uci_push_wait), so DATA_AV low means it is empty.
+        lda #$00
+        sta uci_resp_count
+        lda UCI_STATUS
+        jsr uci_settle
+        and #UCI_STAT_DATA_AV
+        beq @drain
         lda #<uci_ipaddr_resp
         sta uci_resp_dst
         lda #>uci_ipaddr_resp
@@ -576,11 +598,17 @@ net_dhcp_acquire:
         ; Drain anything we didn't consume (should be zero for 12 bytes,
         ; but this is cheap insurance against firmware revisions that
         ; return a longer record).
+@drain:
         jsr uci_drain_resp
         bcs @dhcp_wait_to           ; drain wedged — surface as DHCP fail
         jsr uci_drain_status
         bcs @dhcp_wait_to
         jsr uci_ack
+
+        ; Anything but the full record is "no lease on this interface".
+        lda uci_resp_count
+        cmp #12
+        bne @no_ip
 
         ; Copy the first 4 bytes (IP) into net_local_ip.
         ldx #3
@@ -598,6 +626,7 @@ net_dhcp_acquire:
         ora net_local_ip+3
         bne @have_ip
 
+@no_ip:
         lda #UCI_ERR_NO_IP
         sta net_last_error
 
@@ -605,8 +634,9 @@ net_dhcp_acquire:
         inc @iface_idx
         lda @iface_idx
         cmp #NET_DHCP_MAX_IFACE
-        bcc @next_iface
-        sec                     ; every interface probed, none had a lease
+        bcs @probed_all         ; C=1: every interface probed, none leased
+        jmp @next_iface         ; long branch: out of BCC range
+@probed_all:
         rts
 
 @have_ip:
