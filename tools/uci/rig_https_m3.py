@@ -48,7 +48,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _device_lock_helper import LockTimeoutConfigError, acquire_device_lock  # noqa: E402
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _prg_load import PrgLoadError, load_verified_and_run  # noqa: E402
-from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
+from _reu_preflight import (  # noqa: E402
+    ReuPreflightError, detect_crypto_profile, preflight_reu)
 from boot_check import decode_screen, screen_text  # noqa: E402
 from _petscii_keys import push_keys, target_keys  # noqa: E402
 from _rig_lifecycle import guard_socket_teardown  # noqa: E402
@@ -248,6 +249,14 @@ def main(argv) -> int:
         host, path = argv[2], argv[3]
         runs = [("A (uci-m3)", PRG_A, LABELS_A),
                 ("B (6510 TLS)", Path(argv[4]), Path(argv[5]))]
+        # The device is prepared for A, which needs no REU (prep turns it
+        # off), so B must need none either: a REU-profile or comb B would
+        # spin. Refused rather than prepared twice.
+        b_profile, why = detect_crypto_profile(argv[5])
+        if b_profile != "onchip":
+            print(f"[fatal] B must be an on-chip build (no REU); {argv[5]} "
+                  f"is {b_profile!r} ({why})", file=sys.stderr)
+            return 2
     lock = DeviceLock(HOST)
     try:
         acquire_device_lock(lock)
