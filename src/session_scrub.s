@@ -26,6 +26,10 @@
 ;                                         asserted in src/crypto/x25519_tables.s
 ;   zp_save_buf                           ip65's copy of crypto ZP $02-$1B
 ;   poly_prod_lo/hi                       last 8x8 product (Poly1305: key r)
+;   mul_dma_lo/hi                         last multiply row: a*b for every b,
+;                                         i.e. one operand byte (X25519's on
+;                                         a handshake that stopped before
+;                                         CertificateVerify)
 ;
 ; The multi-buffer spans zero whatever their module declares between the
 ; two ends, so each length is asserted exactly: a field added inside a span
@@ -40,12 +44,17 @@
 ; re-seeds from SID/CIA entropy instead, exactly as boot does: the state left
 ; behind is fresh, and no longer a function of the session.
 ;
-; Not scrubbed, because none of it is secret: certificates (cert_buf),
-; signature-verify scratch (LIB_NISTCURVES_P256_BSS: every input is
-; public), the transcript hash, randoms, public keys, generated tables, the
-; TCP ring (ciphertext) and http_resp_buf (the plaintext the screen shows).
-; mul_dma_lo/hi keep the last multiply row, i.e. one byte of an operand; on
-; any handshake that reached CertificateVerify that is a public ECDSA value.
+; Not scrubbed, because none of it is key material: certificates
+; (cert_buf), signature-verify scratch (LIB_NISTCURVES_P256_BSS: every input
+; is public), the transcript hash, randoms, public keys, generated tables,
+; the TCP ring (ciphertext), and the application data -- http_req_buf (the
+; request, with the typed path), http_resp_buf (the response the screen
+; shows, and possibly the typed path, which the prompt stages there) and, under
+; HTTPS_BODY_TO_REU, the body in REU bank $10.
+;
+; A secret buffer added OUTSIDE every span below is left unscrubbed, and
+; nothing fails: add a SPAN for it (tools/test_quit_basic_exit.py's ZEROED
+; list is the test side).
 ;
 ; In:  BASIC ROM banked OUT -- the zeroing would reach RAM either way, but
 ;      the re-seed reads its state back through $A000-$BFFF.
@@ -68,6 +77,7 @@
         .import tls_rec_buf
         .import zp_save_buf
         .import poly_prod_lo, poly_prod_hi
+        .import mul_dma_lo, mul_dma_hi
         .import drbg_init_entropy
 
 ; SPAN first, end, len: zero [first, end), which must be len bytes long.
@@ -125,4 +135,5 @@ scrub_spans:
         SPAN tls_rec_buf,       tls_rec_buf + 548,      548
         SPAN zp_save_buf,       zp_save_buf + 26,       26
         SPAN poly_prod_lo,      poly_prod_hi + 1,       2
+        SPAN mul_dma_lo,        mul_dma_hi + 256,       512
 scrub_spans_end:

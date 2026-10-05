@@ -431,13 +431,6 @@ takes page 3 (`build_policy_and_low_ram_arbiter`, $0334-$03FF, 204 B),
 plus $02A7-$02FF with `page2=True`, which no link moves; none carves a
 linked-region tail (`tools/test_rig_scratch.py`, all five UCI profiles).
 
-'Q' (the rigs' exit to BASIC before SYSing back in) zeroes the session
-secrets (`src/session_scrub.s`), ZP $02-$7F/$FB-$FF and the stack page,
-re-seeds the DRBG, NEWs the program and enters READY through ROM init. SYS
-re-entry keeps working (tables and net state survive); a new key buffer
-inside a scrub span fails the link by name. Test:
-`tools/test_quit_basic_exit.py`.
-
 **The acquire budget is `C64_DEVICE_LOCK_TIMEOUT`, default 1800 s**, and
 it is one number: every rig here and `tests/rig_ip65_rrnet_hw.py` takes
 the lock through `acquire_device_lock()` in `_device_lock_helper.py`, and
@@ -696,6 +689,8 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     profiles, each table stamped with its PRG sha256; it exits 1 on a failed
     link (ld65 still writes the map). Margins are per
     profile — never carry a figure from one to another.
+  - 'Q' zeroes only the spans in `src/session_scrub.s`: a new secret buffer outside every span is silently left in RAM (add a SPAN).
+    After 'Q', BASIC is capped at an empty program (any allocation is ?OUT OF MEMORY), so only SYS re-enters the image intact.
   - `net_tcp_set_recv_cb` is an RTS stub. Boot banner: `rr-net` under ip65,
     `UCI NETWORKING` under UCI — `boot_check.py` asserts both.
 

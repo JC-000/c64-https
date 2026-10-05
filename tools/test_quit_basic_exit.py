@@ -23,8 +23,11 @@ What this suite does, all hardware-free in VICE:
      mapped back in -- it reads ZP $02-$7F and $FB-$FF, the stack page and
      every planted buffer: all zero, the DRBG re-seeded rather than zeroed.
   4. At READY.: no error on screen, the menu still on screen, CHRGET equal
-     to the ROM's copy, TXTTAB/MEMSIZ/FRETOP sane, the program NEWed, and
-     BASIC actually evaluating ``PRINT 6*7`` and ``A=5:PRINT A*9``.
+     to the ROM's copy, the program NEWed, BASIC capped at the empty
+     program (MEMSIZ = FRETOP = VARTAB) and actually evaluating
+     ``PRINT 6*7``. A variable, a DIM, a string concatenation and a typed
+     program line each give ?OUT OF MEMORY, and $0803-$9FFF -- the image
+     the rigs SYS back into -- is byte-identical afterwards.
   5. Re-enters the image the way the tools/uci rigs do after 'Q' (bank
      BASIC out, call in): X25519 and ECDSA verify both still give the right
      answers, so the scrub broke nothing the rigs rely on.
@@ -95,11 +98,17 @@ ZEROED = [
     ("tls_rec_buf", 548),
     ("x25_scalar", 32), ("x25_result", 32),
     ("zp_save_buf", 26),
+    ("poly_prod_lo", 2),          # poly_prod_hi follows (asserted in the span)
+    ("mul_dma_lo", 256), ("mul_dma_hi", 256),
 ]
 # The DRBG state: re-seeded on quit, not left zero (a zero K/V would hand a
 # rig that SYSes back in all-zero "random" bytes). Must hold neither the
 # planted pattern nor all zeros.
 RESEEDED = [("hmac_key", 32), ("hmac_val", 32)]
+
+# The image BASIC must not be able to allocate over once 'Q' NEWs it.
+IMAGE_LO = 0x0803
+IMAGE_HI = 0xA000
 
 VERBOSE = False
 
@@ -163,6 +172,14 @@ def _run_crypto(transport, labels, t, tag):
             f"({time.monotonic() - t0:.0f} s)")
 
 
+def typed(transport, cmd, needle, timeout=15.0):
+    """Clear the screen, type *cmd* at READY., wait for *needle*."""
+    send_key(transport, 0x93)
+    send_text(transport, cmd + "\r")
+    return wait_for_text(transport, needle, timeout=timeout,
+                         verbose=False) is not None
+
+
 def run_tests(transport, labels, seed=None):
     t = Tally()
 
@@ -188,6 +205,9 @@ def run_tests(transport, labels, seed=None):
     for i, (name, size) in enumerate(ZEROED + RESEEDED):
         if name.startswith("x25_"):
             write_bytes(transport, labels[name], pattern(i, size))
+    # A session leaves drbg_buf_idx < 32 most of the time; only the re-seed
+    # puts it back to 32, so start it at 0 or the check below is vacuous.
+    write_bytes(transport, labels["drbg_buf_idx"], b"\x00")
 
     print("\n[3] 'Q': state at quit_scrubbed, before BASIC ROM returns")
     scrub_pc = labels.address("quit_scrubbed")
@@ -240,20 +260,26 @@ def run_tests(transport, labels, seed=None):
     t.check(ok, "CHRGET $73-$79/$7C-$8A equal ROM $E3A2", hx(zp[0x73:0x8B]))
     word = lambda a: zp[a] | (zp[a + 1] << 8)  # noqa: E731
     t.check(word(0x2B) == 0x0801, "TXTTAB = $0801", f"${word(0x2B):04X}")
-    t.check(word(0x37) == 0xA000, "MEMSIZ = $A000", f"${word(0x37):04X}")
     t.check(word(0x2D) == 0x0803, "VARTAB = $0803 (program NEWed)",
             f"${word(0x2D):04X}")
+    t.check(word(0x37) == 0x0803 and word(0x33) == 0x0803,
+            "MEMSIZ = FRETOP = $0803 (BASIC capped below the image)",
+            f"MEMSIZ=${word(0x37):04X} FRETOP=${word(0x33):04X}")
     link = read_bytes(transport, 0x0801, 2)
     t.check(link == b"\x00\x00", "program link at $0801 = 0 (NEW)", hx(link))
     t.check(zp[0x01] & 0x07 == 0x07, "$01 has BASIC ROM back in",
             f"${zp[0x01]:02X}")
 
-    send_text(transport, "print 6*7\r")
-    t.check(wait_for_text(transport, " 42", timeout=15.0, verbose=False)
-            is not None, "PRINT 6*7 -> 42")
-    send_text(transport, "a=5:print a*9\r")
-    t.check(wait_for_text(transport, " 45", timeout=15.0, verbose=False)
-            is not None, "A=5:PRINT A*9 -> 45 (a variable stored and read)")
+    image = read_bytes(transport, IMAGE_LO, IMAGE_HI - IMAGE_LO)
+    t.check(typed(transport, "print 6*7", " 42"), "PRINT 6*7 -> 42")
+    for cmd in ("a=1:b=2:c=3", "dim x(600)", 'print "ab"+"cd"',
+                "10 print"):
+        t.check(typed(transport, cmd, "OUT OF MEMORY"),
+                f"{cmd.upper()} -> ?OUT OF MEMORY")
+    after = read_bytes(transport, IMAGE_LO, IMAGE_HI - IMAGE_LO)
+    diff = [IMAGE_LO + i for i, (a, b) in enumerate(zip(image, after)) if a != b]
+    t.check(not diff, "image $0803-$9FFF unchanged by those commands",
+            f"{len(diff)} bytes, first ${diff[0]:04X}" if diff else "")
 
     print("\n[5] re-entry after 'Q', as the tools/uci rigs do it")
     write_bytes(transport, STUB_BANK_OUT, bytes([0xA5, 0x01, 0x29, 0xFE, 0x85, 0x01, 0x60]))
