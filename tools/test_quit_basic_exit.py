@@ -103,8 +103,14 @@ ZEROED = [
 ]
 # The DRBG state: re-seeded on quit, not left zero (a zero K/V would hand a
 # rig that SYSes back in all-zero "random" bytes). Must hold neither the
-# planted pattern nor all zeros.
-RESEEDED = [("hmac_key", 32), ("hmac_val", 32)]
+# planted pattern nor a bare instantiate value (K = 00.., V = 01..).
+# drbg_k (K) is private to hmac_drbg.s and in no scrub span: only the
+# re-seed tail call clears it, which is exactly what this proves. Its
+# address comes from labels.txt; a build without it (K still aliased to
+# hmac_key, i.e. before the DRBG got its own K) fails that check.
+RESEEDED = [("drbg_k", 32), ("hmac_val", 32), ("hmac_key", 32)]
+OPTIONAL = {"drbg_k"}
+INSTANTIATE_ONLY = (bytes(32), b"\x01" * 32)
 
 # The image BASIC must not be able to allocate over once 'Q' NEWs it.
 IMAGE_LO = 0x0803
@@ -199,7 +205,8 @@ def run_tests(transport, labels, seed=None):
 
     print("\n[2] plant a pattern in every session-secret buffer")
     for i, (name, size) in enumerate(ZEROED + RESEEDED):
-        write_bytes(transport, labels[name], pattern(i, size))
+        if labels.address(name) is not None:
+            write_bytes(transport, labels[name], pattern(i, size))
     # tls_rec_buf's pattern overwrote x25_scalar/x25_result (the cfg
     # overlays the X25519 scratch on it); re-plant them distinctly.
     for i, (name, size) in enumerate(ZEROED + RESEEDED):
@@ -231,10 +238,13 @@ def run_tests(transport, labels, seed=None):
             got = read_bytes(transport, labels[name], size)
             t.check(not any(got), f"{name} zero", hx(got[:16]))
         for i, (name, size) in enumerate(RESEEDED, start=len(ZEROED)):
+            if not t.check(labels.address(name) is not None,
+                           f"{name} exists", "not in labels.txt"):
+                continue
             got = read_bytes(transport, labels[name], size)
-            t.check(any(got) and got != pattern(i, size),
-                    f"{name} re-seeded (neither zero nor the session's)",
-                    hx(got[:16]))
+            t.check(got != pattern(i, size) and got not in INSTANTIATE_ONLY,
+                    f"{name} re-seeded (not the session's, not a bare "
+                    f"instantiate value)", hx(got[:16]))
         idx = read_bytes(transport, labels["drbg_buf_idx"], 1)[0]
         t.check(idx == 32, "drbg_buf_idx = 32 (next byte forces a generate)",
                 f"${idx:02X}")
@@ -317,7 +327,7 @@ def main():
     labels = Labels.from_file(LABELS_PATH)
     required = (["tls_ecdh_compute_shared", "tls_server_pubkey",
                  "ecdsa_verify", "drbg_buf_idx"]
-                + [n for n, _ in ZEROED + RESEEDED])
+                + [n for n, _ in ZEROED + RESEEDED if n not in OPTIONAL])
     missing = [n for n in required if labels.address(n) is None]
     if missing:
         # uci-m3 links no 6510 crypto; this suite has nothing to run there.

@@ -15,7 +15,9 @@
 ;   tls_early_secret..tls_master_secret   key-schedule secrets
 ;   tls_c_hs_secret..tls_finished_key     traffic secrets, finished key
 ;   sha256_h0..mul_src2_buf               SHA-256 state and schedule (keyed
-;                                         by HMAC), HMAC/DRBG state, ChaCha20
+;                                         by HMAC), the HMAC key input (HKDF
+;                                         and the Finished MAC key it), DRBG
+;                                         V and output, ChaCha20
 ;                                         key + keystream, Poly1305 r/s,
 ;                                         AEAD key, last multiply operand
 ;   tls_rec_buf                           last decrypted record, and the
@@ -36,13 +38,15 @@
 ; fails the link here, and whoever added it decides whether it is session
 ; state or must survive 'Q'.
 ;
-; The HMAC_DRBG state is in the sha256_h0 span, and HKDF borrows hmac_key
-; as its key buffer, so after a handshake K is a key-schedule secret. The
-; span leaves K = V = 0 and drbg_output zero with drbg_buf_idx < 32, so a
-; caller that SYSes back into the image after 'Q' (every tools/uci rig that
-; drives http_get does) would draw all-zero "random" bytes. The tail call
-; re-seeds from SID/CIA entropy instead, exactly as boot does: the state left
-; behind is fresh, and no longer a function of the session.
+; The DRBG's K is not in any span: it is private to src/crypto/hmac_drbg.s
+; (tools/test_drbg_state_owner.py forbids naming it elsewhere). The tail
+; call to drbg_init_entropy is what scrubs it -- instantiate sets K = 0,
+; V = 1, then updates both from fresh SID/CIA entropy, exactly as boot does
+; -- so it is not redundant with the spans. It is also what keeps a caller
+; that SYSes back in after 'Q' (every tools/uci rig that drives http_get)
+; from drawing all-zero "random" bytes out of the zeroed V and drbg_output:
+; it sets drbg_buf_idx = 32. The state left behind is fresh, and no longer
+; a function of the session.
 ;
 ; Not scrubbed, because none of it is key material: certificates
 ; (cert_buf), signature-verify scratch (LIB_NISTCURVES_P256_BSS: every input
@@ -122,7 +126,10 @@ session_scrub:
         inx
         cpx #scrub_spans_end - scrub_spans
         bne @span
-        jmp drbg_init_entropy   ; tail call: fresh K/V, drbg_buf_idx = 32
+        ; NOT redundant: this is the ONLY scrub of the DRBG's K (drbg_k,
+        ; private to hmac_drbg.s, in no span). Re-instantiates K/V from
+        ; fresh entropy and sets drbg_buf_idx = 32. See the header.
+        jmp drbg_init_entropy
 
 scrub_spans:
         SPAN tls_ecdhe_privkey, tls_shared_secret + 32, 128
