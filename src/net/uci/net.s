@@ -501,9 +501,10 @@ net_poll:
 ;   -> push_wait -> check_err -> read 12 bytes -> drain resp
 ;   -> drain status -> ack
 ;
-; Interface fallback: the U64E has a single interface (index 0), but the
-; C64 Ultimate has Ethernet AND WiFi — a box on WiFi returns 0.0.0.0 for
-; index 0. We probe indices 0..NET_DHCP_MAX_IFACE-1 and take the first
+; Interface fallback: on both the U64E (fw 3a1ff9ff) and the C64 Ultimate,
+; Ethernet registers as index 0 whether or not a cable is in, and WiFi as
+; index 1 (rmii_interface.cc / wifi.cc init order), so a box on WiFi returns
+; 0.0.0.0 for index 0. We probe indices 0..NET_DHCP_MAX_IFACE-1 and take the first
 ; one with a non-zero lease. A CMD_FAILED on an out-of-range index is
 ; cleaned up (drain + ack) and treated like "no lease on this interface".
 ;
@@ -532,8 +533,8 @@ net_dhcp_acquire:
         lda #UCI_CMD_GET_IPADDR
         jsr uci_put_byte
 
-        ; Interface index — 0 first (only iface on U64E; Ethernet on the
-        ; C64 Ultimate), then 1.. (C64U WiFi) until one has a lease.
+        ; Interface index — 0 first (Ethernet), then 1.. (WiFi is 1)
+        ; until one has a lease.
         lda @iface_idx
         jsr uci_put_byte
 
@@ -544,8 +545,8 @@ net_dhcp_acquire:
         jsr uci_check_err
         bcc @no_err
 
-        ; Command failed for this interface (e.g. index out of range on
-        ; single-interface firmware). Clean up response/status state so
+        ; Command failed for this interface (e.g. an index past the
+        ; last registered interface). Clean up response/status state so
         ; the next probe starts from idle, then advance.
         lda #UCI_ERR_CMD_FAILED
         sta net_last_error
