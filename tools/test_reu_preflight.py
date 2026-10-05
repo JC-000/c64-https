@@ -303,6 +303,14 @@ def test_m3_build_needs_no_reu_and_makes_no_device_call() -> None:
     assert client.calls == [], f"uci-m3 build touched the device: {client.calls!r}"
 
 
+def test_an_m3_build_with_the_reu_body_sink_needs_the_reu() -> None:
+    """HTTPS_BODY_TO_REU=1 links the viewer: the REU is needed after all."""
+    with tempfile.TemporaryDirectory() as tmp:
+        labels = Path(tmp) / "labels.txt"
+        labels.write_text(LABELS_M3 + "al 00243A .viewer_enter\n")
+        assert pf.detect_crypto_profile(labels)[0] == "reu"
+
+
 def test_the_m3_marker_does_not_outvote_the_manifest_equate() -> None:
     """The equate stays authoritative: a REU-claiming build is still REU."""
     with tempfile.TemporaryDirectory() as tmp:

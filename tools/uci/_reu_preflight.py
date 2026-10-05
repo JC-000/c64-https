@@ -115,6 +115,10 @@ _BANKS_EQUATE = "LIB_NISTCURVES_REU_BANKS_USED"
 #: (the Ultimate's ESP32 does the TLS), so it has neither marker above.
 _M3_SYMBOL = "m3_owned"
 
+#: The REU viewer, linked by HTTPS_BODY_TO_REU=1: an M3 build carrying it
+#: streams the body into the REU, so it is NOT the no-REU case.
+_REU_SINK_SYMBOL = "viewer_enter"
+
 #: Profiles that need no REU: the preflight has nothing to check for them.
 NO_REU_PROFILES = ("onchip", "none")
 
@@ -218,10 +222,11 @@ def detect_crypto_profile(labels_path: Path | str) -> tuple[str, str]:
             return ("onchip", f"{_BANKS_EQUATE}=0")
         return ("reu", f"{_BANKS_EQUATE}=${banks:02X} — claims REU bank(s)")
 
-    # No manifest equate and the M3 adapter: no 6510 crypto to need a REU.
-    # Recognised by a positive marker, so anything unrecognised still falls
-    # through to the fail-closed REU answer below.
-    if _M3_SYMBOL in labels:
+    # No manifest equate and the M3 adapter: no 6510 crypto to need a REU,
+    # unless the body sink is linked. Recognised by a positive marker, so
+    # anything unrecognised still falls through to the fail-closed REU
+    # answer below.
+    if _M3_SYMBOL in labels and _REU_SINK_SYMBOL not in labels:
         return ("none", f"{_M3_SYMBOL}: BACKEND=uci-m3, no 6510 crypto")
 
     # No manifest equate: fall back to the symbol union. Union rather than
