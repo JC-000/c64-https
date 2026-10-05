@@ -951,6 +951,33 @@ def test_http_05_unframed_is_short(prg=None, labels=None):
         m.no_violations()
 
 
+def test_http_sink_refusal_stops(prg=None, labels=None):
+    """HTTPS_BODY_TO_REU: a body the REU sink refuses (here: no REU size
+    established, so the region is empty and every blit is refused) is C=1.
+    A 2,000 B body is refused at its first 512 B blit, mid-stream: the loop
+    stops there instead of reading on to the framing's end. A 100 B body is
+    refused at the final flush, after the framing completed."""
+    for size in (2000, 100):
+        m = _connected(Machine(prg, labels))
+        m.poke("http_body_sink", 1)
+        m.poke("http_reu_body_base", 0x00)
+        m.poke("http_reu_body_base", 0x00, 1)
+        m.poke("http_reu_body_base", 0x03, 2)  # bank 3: above the floor
+        body = bytes((i * 7) & 0x7F | 0x20 for i in range(size))
+        resp = (b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % size) + body
+        events = [("data", resp[i:i + 600]) for i in range(0, len(resp), 600)]
+        carry, _, total = _http_fetch(m, events + [("end", CLOSED_BY_HOST)])
+        _check(m.peek("http_sink_full") == 1,
+               "%d B: the sink never refused a blit" % size)
+        _check(carry is True, "%d B: a body the sink refused was reported "
+               "complete" % size)
+        if size > 512:
+            _check(total < size, "read on to the framing's end (%d B) after "
+                   "the sink refused" % total)
+        m.call("net_tcp_close")
+        m.no_violations()
+
+
 def test_refusal_reaches_the_user(prg=None, labels=None):
     """The menu path: 'G' with the default target, the Open refused with 94.
     The user must see TLS HANDSHAKE FAILED and the WHOLE status line, and
@@ -1370,6 +1397,7 @@ TESTS = (
     test_long_write_is_split_at_892,
     test_http_content_length_end_to_end,
     test_http_05_unframed_is_short,
+    test_http_sink_refusal_stops,
     test_refusal_reaches_the_user,
     test_no_tls_firmware_reaches_the_user,
     test_http_unframed_stall_is_short,

@@ -118,6 +118,16 @@ MUTANTS = [
     ("05-unframed-trusted", "S 1.6 05: trust only framed data", HTTP,
      "        lda m3_eof_code\n        cmp #5\n        bne @m3_framed",
      "        jmp @m3_framed", ["test_http_05_unframed_is_short"]),
+    ("sink-refusal-ignored", "a body the REU sink refused stops, C=1", HTTP,
+     "        lda http_sink_full      ; the body outgrew its REU region: stop\n"
+     "        bne @m3_dead            ;  now, C=1\n", "",
+     ["test_http_sink_refusal_stops"]),
+    ("sink-refusal-complete", "a body the REU sink refused is never C=0", HTTP,
+     "@m3_complete:\n        jsr http_body_finish\n"
+     "        lda http_sink_full      ; C=1 iff the sink refused a write\n"
+     "        cmp #1\n",
+     "@m3_complete:\n        jsr http_body_finish\n        clc\n",
+     ["test_http_sink_refusal_stops"]),
     ("refused-not-8d", "$8D UCI_ERR_OPEN_REFUSED on a named refusal", NET,
      "        lda #UCI_ERR_OPEN_REFUSED   ; named in m3_status (e.g. 94,...)",
      "        lda #UCI_ERR_CONNECT_FAIL", ["test_refusal_line_is_kept_whole",
