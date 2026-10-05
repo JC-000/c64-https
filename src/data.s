@@ -401,7 +401,7 @@ sha256_len:     .res 2          ; message length in bits
 .export drbg_seed
 .export drbg_seed_len
 .export drbg_output
-hmac_key:       .res 32         ; HMAC key / DRBG K state
+hmac_key:       .res 32         ; HMAC key input (the DRBG K is drbg_k)
 hmac_val:       .res 32         ; DRBG V state
 hmac_opad_block: .res 64        ; Scratch: K XOR opad
 hmac_data_buf:  .res 97         ; V(32) + 0x00/0x01(1) + seed(64)
