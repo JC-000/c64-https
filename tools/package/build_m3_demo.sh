@@ -102,6 +102,10 @@ echo "[m3-demo] building: make ${MAKE_ARGS[*]}"
 build_once
 cp build/c64-https.prg "$OUT/$NAME.prg"
 flags_line="$(grep '^CA65FLAGS=' build/flags.stamp | sed 's/--bin-include-dir [^ ]*//g; s/  */ /g')"
+# Path and sha256 of each tool make linked, from the stamp: a ca65 that is
+# not cc65's shows here, since nothing else in this script can tell.
+toolchain="$(grep '^TOOLCHAIN=' build/flags.stamp | sed 's/^TOOLCHAIN=//' \
+    | awk '{ for (i = 1; i + 2 <= NF; i += 3) print "    " $i, $(i+1), $(i+2) }')"
 
 echo "[m3-demo] rebuilding from clean to prove the PRG is reproducible"
 build_once
@@ -147,6 +151,8 @@ Built from
   commit  $commit
   make    ${MAKE_ARGS[*]}
   $flags_line
+  toolchain (path, sha256):
+$toolchain
   The PRG is deterministic: \`make clean && make ${MAKE_ARGS[*]}\` at that
   commit reproduces the sha256 above (this script checked it twice).
 
