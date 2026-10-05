@@ -375,12 +375,9 @@ uci_push_wait:
 ; the command pointer mid-command, so the firmware parses a later byte
 ; as the target — e.g. TCP_CONNECT's port_lo, which is $BB for port 443.
 ; Then this wait runs out its budget: 5 s and $89 UCI_ERR_WAIT_TIMEOUT.
-; The old CMD_BUSY wait was not faster: it went on to
-; uci_read_resp_bytes' 65,536 fenced spins (~7.5 s at 48 MHz) before
-; reporting $88. In this no-reply case the command is lost either way and
-; only the error code differs. (The observed "21,UNKNOWN COMMAND" outcome
-; of the same race is an empty but VALID reply: it still ends this wait
-; at once, then pays the ~7.5 s spin and reports $88.) #230(a)'s fix
+; In this no-reply case the command is lost either way. (The observed
+; "21,UNKNOWN COMMAND" outcome of the same race is an empty but VALID
+; reply: it ends this wait at once and reports $88.) #230(a)'s fix
 ; (wait out the ABORT before the next command) closes both.
 ;
 ; Same CIA1 TOD budget and error code as uci_wait_idle (the template).
@@ -505,18 +502,32 @@ uci_ack:
 ; Reads while DATA_AV is set AND count < max, storing each byte via a
 ; self-modified `STA uci_resp_dst,Y`. The FIFO auto-advances on read, so
 ; nothing is written to UCI_CONTROL here.
-; If DATA_AV clears before max is reached, returns early. If max is reached
-; while DATA_AV is still set, the excess is left for uci_drain_resp.
+; If DATA_AV is clear before max is reached, returns early. If max is
+; reached while DATA_AV is still set, the excess is left for uci_drain_resp.
+;
+; NO WAIT. DATA_AV is tested once per byte, as net_poll's header read does.
+; This used to wait out 65,536 fenced spins for the first missing byte (~7.5 s
+; at 48 MHz, derived), an iteration-counted wait that every reply shorter
+; than uci_resp_max paid: an empty GET_IPADDR or TCP_CONNECT reply. It was
+; unreachable as a wait. Every caller gets here after uci_push_wait saw
+; STATE bit 5 (VALIDATE) and uci_check_err saw ERROR clear. The firmware
+; writes the response length BEFORE VALIDATE (command_intf.cc copy_result),
+; and command_protocol.vhd derives DATA_AV from pointer < length and
+; state(1) and no abort. Within one reply only a $DF1E read, our
+; DATA_ACC/ABORT, or a firmware handshake write moves those terms, and the
+; firmware writes only in answer to a C64 action. So a low DATA_AV stays
+; low until we ACK. (DATA_AV is registered one FPGA clock behind state(1).
+; Two fenced $DF1C reads separate the VALID read from the first test here.)
+; Scope: that is the public U64E VHDL; that the bitstream implements it is
+; inferred. The C64U's FPGA source is unpublished and this was not run on
+; one (its command task, 7b628eb1, matches in every write used above).
+; If the settle ever proved wrong, a GOOD TCP_CONNECT would read as $88
+; with the firmware socket left open.
 ;
 ; Clobbers: A, Y. X preserved.
 ; =============================================================================
 uci_read_resp_bytes:
         ; Patch the dst pointer into the STA abs,Y instruction below.
-        ; Every caller reaches this after uci_push_wait, which now returns
-        ; only once the reply is VALID (#230 b), so DATA_AV is already
-        ; final here; the 16-bit per-byte spin below predates that and is
-        ; now only a long wait (~7.5 s at 48 MHz: 65,536 fenced spins) on
-        ; a reply shorter than uci_resp_max.
         lda uci_resp_dst
         sta @rd_store+1
         lda uci_resp_dst+1
@@ -524,34 +535,11 @@ uci_read_resp_bytes:
         ldy #$00
 @rd_loop:
         cpy uci_resp_max
-        bcc @rd_not_max
-        jmp @rd_done
-@rd_not_max:
-        ; 16-bit spin-wait for DATA_AV. ~65536 iterations; at 48 MHz
-        ; each iteration is ~110 cycles → total ≈ 150 ms, enough for
-        ; TCP handshakes over a LAN. X is preserved across the wait.
-        stx @rd_save_x
-        lda #$00
-        sta @rd_ctr_hi
-        ldx #$00
-@rd_wait:
+        bcs @rd_done
         lda UCI_STATUS
         uci_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
-        bne @rd_have
-        dex
-        beq @rd_xzero
-        jmp @rd_wait                ; long branch: fence too wide for BNE
-@rd_xzero:
-        dec @rd_ctr_hi
-        beq @rd_timeout
-        jmp @rd_wait                ; long branch: fence too wide for BNE
-@rd_timeout:
-        ; Timeout: DATA_AV never appeared — bail with partial read.
-        ldx @rd_save_x
-        jmp @rd_done
-@rd_have:
-        ldx @rd_save_x
+        beq @rd_done                ; reply shorter than max: it is final
         lda UCI_RESP_DATA
         uci_fence                   ; settle before storing/looping
 @rd_store:
@@ -561,8 +549,6 @@ uci_read_resp_bytes:
 @rd_done:
         sty uci_resp_count
         rts
-@rd_save_x: .byte 0
-@rd_ctr_hi: .byte 0
 
 ; =============================================================================
 ; uci_drain_resp — read remaining response bytes until DATA_AV is clear.
