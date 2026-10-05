@@ -17,6 +17,15 @@
 # 6510 crypto is the product), so it is not in PACKAGE_VARIANTS, and nothing
 # here reads or writes that matrix or the shipped products in dist/.
 #
+# It refuses a working tree with any change, untracked files included: the
+# README names a commit, and the PRG must be what that commit builds.
+#
+# make runs in a scrubbed environment (PATH, HOME, TMPDIR only), so neither
+# an exported knob (HTTPS_SNI=..., VIC_BLANK=0) nor one given on the
+# `make package-m3-demo` command line (it reaches here through MAKEFLAGS)
+# can leak into the demo build. build/flags.stamp is then checked to hold
+# the uci-m3 cfg and no -D beyond the backend's own.
+#
 # It proves its own output before writing the README:
 #   - a second clean build reproduces the PRG byte for byte;
 #   - c1541 reads the PRG back out of the .d64, byte for byte.
@@ -54,15 +63,39 @@ sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 command -v "$C1541" >/dev/null 2>&1 \
     || die "c1541 not found in PATH (it ships with VICE). Set C1541=... to override."
 
+[ -z "$(git status --porcelain --untracked-files=all)" ] \
+    || { git status --short --untracked-files=all >&2
+         die "the working tree is not clean (untracked files count): commit or remove the changes above"; }
+
 rm -rf "$OUT"
 mkdir -p "$OUT"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+scrubbed_make() {
+    env -i PATH="$PATH" HOME="$HOME" ${TMPDIR:+TMPDIR="$TMPDIR"} make "$@"
+}
+
+# The demo is the bare backend: its -D set, its cfg, the default target.
+check_stamp() {
+    local stamp=build/flags.stamp defines
+    grep -qx 'BACKEND=uci-m3' "$stamp" || die "$stamp: BACKEND is not uci-m3"
+    grep -q '^LD65FLAGS=-C cfg/c64-https-uci-m3.cfg ' "$stamp" \
+        || die "$stamp: not linked with cfg/c64-https-uci-m3.cfg"
+    defines="$(grep '^CA65FLAGS=' "$stamp" | grep -o -- '-D [^ ]*' | tr '\n' ' ')"
+    [ "$defines" = "-D BACKEND_UCI=1 -D BACKEND_UCI_M3=1 " ] \
+        || die "$stamp: unexpected defines: $defines"
+    grep -qx ".define HTTPS_HOST_STR \"$DEMO_HOST\"" build/https_host.inc \
+        && grep -qx ".define HTTPS_PATH_STR \"$DEMO_PATH\"" build/https_host.inc \
+        && grep -qx '.define HTTPS_SNI_STR ""' build/https_host.inc \
+        || die "build/https_host.inc does not hold the demo target"
+}
+
 build_once() {
-    make clean >/dev/null
-    make "${MAKE_ARGS[@]}" >"$tmp/build.log" 2>&1 \
+    scrubbed_make clean >/dev/null
+    scrubbed_make "${MAKE_ARGS[@]}" >"$tmp/build.log" 2>&1 \
         || { tail -20 "$tmp/build.log" >&2; die "build failed: make ${MAKE_ARGS[*]}"; }
+    check_stamp
 }
 
 echo "[m3-demo] building: make ${MAKE_ARGS[*]}"
@@ -85,8 +118,6 @@ listing="$("$C1541" -attach "$OUT/$NAME.d64" -list \
     | grep -Ev '^(OPENCBM:|D64 disk image |Unit [0-9]+ drive )')"
 
 commit="$(git rev-parse HEAD)"
-dirty=""
-git diff --quiet HEAD -- . ':!dist' 2>/dev/null || dirty=" (WORKING TREE MODIFIED: not a clean commit build)"
 prg_sha="$(sha "$OUT/$NAME.prg")"
 d64_sha="$(sha "$OUT/$NAME.d64")"
 prg_bytes="$(wc -c < "$OUT/$NAME.prg" | tr -d ' ')"
@@ -113,7 +144,7 @@ $(printf '%s\n' "$listing" | sed 's/^/  /')
 
 Built from
 ----------
-  commit  $commit$dirty
+  commit  $commit
   make    ${MAKE_ARGS[*]}
   $flags_line
   The PRG is deterministic: \`make clean && make ${MAKE_ARGS[*]}\` at that
