@@ -52,6 +52,7 @@ from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
 from boot_check import decode_screen, screen_text  # noqa: E402
 from _petscii_keys import push_keys, target_keys  # noqa: E402
 from _rig_lifecycle import guard_socket_teardown  # noqa: E402
+from rig_https_local import _create_run_dir  # noqa: E402
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 REPO = Path(__file__).resolve().parents[2]
@@ -99,13 +100,14 @@ def wait_for(client, markers, budget: float):
 
 def wait_after(client, anchor, markers, budget: float):
     """Like wait_for, but only counts text after the LAST `anchor` on the
-    screen, or the whole screen once `anchor` has scrolled off: an earlier
-    step's lines (CONNECTION CLOSED, DHCP OK) are still there. `markers`
-    are regular expressions; the one that matched is returned."""
+    screen: an earlier step's lines (CONNECTION CLOSED, DHCP OK) are still
+    there. Nothing counts until `anchor` is on screen, so the caller must
+    know it will be (or wait_for it first). `markers` are regular
+    expressions; the one that matched is returned."""
     end = time.monotonic() + budget
     while True:
         lines, text = screen(client)
-        tail = text[text.rfind(anchor):] if anchor in text else text
+        tail = text[text.rfind(anchor):] if anchor in text else ""
         for m in markers:
             if re.search(m, tail):
                 return m, lines
@@ -124,14 +126,26 @@ def press_init(client) -> None:
     The boot runs the same init before it prints the menu, so "DHCP OK" is
     already on screen when 'I' is pressed; waiting for it returned at once
     and let 'G' land while the re-init was still running. Only text after
-    the menu line belongs to this 'I' (if the menu has scrolled off, so has
-    the boot's init).
+    the menu line belongs to this 'I'. The menu is on screen when 'I' is
+    pressed (the caller waited for it), with a blank row under it, so at
+    row 22 at the lowest; a successful re-init prints four rows, so the
+    menu is still there when DHCP OK is. (A failure long enough to scroll
+    it off ends in a timeout: still a FAIL.) The address is matched while
+    it may still be printing, so the screen must then read the same twice.
     """
     client.send_text("I", finish_with_return=False)
     m, lines = wait_after(client, "Q=QUIT", [DHCP_DONE, "FAILED"], 120)
     if m != DHCP_DONE:
         dump(lines, "init")
         raise Fail("network init: %s" % m)
+    for _ in range(10):
+        time.sleep(1.0)
+        again, _text = screen(client)
+        if again == lines:
+            return
+        lines = again
+    dump(lines, "init")
+    raise Fail("the screen kept changing after DHCP OK")
 
 
 def dump(lines, title):
@@ -252,10 +266,11 @@ def main(argv) -> int:
         print(f"device: {info.get('product')} fw {info.get('firmware_version')} "
               f"git {info.get('git_commit_hash')} core {info.get('core_version')}")
         enable_uci(client)
-        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        run_dir = _create_run_dir(RUN_DIR)
+        print(f"run dir: {run_dir} (device_state.json)")
         try:
             prepare_device(client, LABELS_A, turbo_mhz=TURBO_MHZ,
-                           artifact_dir=RUN_DIR)
+                           artifact_dir=run_dir)
         except DevicePrepError as exc:
             print(str(exc), file=sys.stderr)
             return 4

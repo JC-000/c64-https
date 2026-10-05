@@ -20,7 +20,8 @@ differs from build/c64-https.prg (run it right after `make
 package-m3-demo`, which leaves that build in build/).
 
 Drive A's state is read first and restored at the end: our image removed,
-the old image re-mounted by path when it had one, the drive switched back
+the old image re-mounted by path when it had one (an earlier upload
+cannot be: drive A is left empty, with a warning), the drive switched back
 off when it was off, and the result compared with what was read. The
 upload (/Temp/cache/upload/image[_N].d64: the U64E numbers a repeat rather
 than overwrite it) is deleted over FTP once unmounted.
@@ -56,6 +57,7 @@ from _rig_lifecycle import guard_socket_teardown  # noqa: E402
 from _petscii_keys import push_keys, target_keys  # noqa: E402
 from http_body_checks import (  # noqa: E402
     SYMBOLS, check_body_complete, check_http_status, decode_body_state)
+from rig_https_local import _create_run_dir  # noqa: E402
 from rig_https_m3 import (  # noqa: E402
     SETTLED, Fail, dump, labels, press_init, screen, verdict_refuse,
     wait_after, wait_for)
@@ -116,13 +118,24 @@ def delete_upload(ours: dict, before: dict) -> None:
         print(f"WARNING: {name} not deleted: {exc}")
 
 
-def restore_drive_a(client, before: dict, ours: dict) -> None:
-    client.unmount_disk("a")
-    delete_upload(ours, before)
+def restore_drive_a(client, before: dict, ours: dict, mounted: bool) -> None:
+    """Put drive A back. `mounted` is False when our mount itself failed:
+    whatever the drive held is still there, so only the power is undone."""
     # fw 3.15 reports the whole path in image_file and image_path empty.
     path, file = before.get("image_path"), before.get("image_file")
-    if file:
-        client.mount_disk_path("a", f"{path.rstrip('/')}/{file}" if path else file)
+    full = f"{path.rstrip('/')}/{file}" if path and file else file
+    if mounted:
+        client.unmount_disk("a")
+        delete_upload(ours, before)
+        if full and full.startswith("/Temp/"):
+            # An earlier upload: ours may have been written over it (the
+            # C64U overwrites image.d64), so mounting it by name could mount
+            # OUR disk. Leave the drive empty and say so.
+            print(f"WARNING: drive A held an upload ({full}); it cannot be "
+                  "restored, drive A left empty")
+            before = dict(before, image_file="", image_path="")
+        elif full:
+            client.mount_disk_path("a", full)
     if not before.get("enabled", True):
         client.drive_off("a")
     after = drive_a(client)
@@ -167,17 +180,18 @@ def main() -> int:
     fetch_in_flight = False
     before = {}
     ours = {}
-    mounted = False
+    touched = mounted = False
     try:
         client = Ultimate64Client(host=HOST, timeout=30.0)
         info = client.get_info()
         print(f"device: {info.get('product')} fw {info.get('firmware_version')} "
               f"git {info.get('git_commit_hash')} core {info.get('core_version')}")
         enable_uci(client)
-        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        run_dir = _create_run_dir(RUN_DIR)
+        print(f"run dir: {run_dir} (device_state.json)")
         try:
             prepare_device(client, LABELS, turbo_mhz=TURBO_MHZ,
-                           artifact_dir=RUN_DIR)
+                           artifact_dir=run_dir)
         except DevicePrepError as exc:
             print(str(exc), file=sys.stderr)
             return 4
@@ -194,6 +208,7 @@ def main() -> int:
 
         before = drive_a(client)
         print(f"drive A before: {before}")
+        touched = True                  # from here drive A needs restoring
         if not before.get("enabled", True):
             client.drive_on("a")
         client.mount_disk("a", d64.read_bytes(), "d64", mode="readonly")
@@ -259,7 +274,12 @@ def main() -> int:
             fetch_in_flight = True
             client.send_text("G", finish_with_return=False)
             push_keys(client, target_keys(f"{SECOND_HOST}\r{SECOND_PATH}\r"))
-            m, lines = wait_after(client, "HTTPS GET " + SECOND_HOST.upper(),
+            # The default fetch's CONNECTION CLOSED is still on screen: judge
+            # only what follows this fetch's own banner, once it is printed.
+            banner = "HTTPS GET " + SECOND_HOST.upper()
+            if wait_for(client, [banner], 60)[0] is None:
+                raise Fail(f"no {banner!r} banner")
+            m, lines = wait_after(client, banner,
                                   ["CONNECTION CLOSED", "TLS HANDSHAKE FAILED",
                                    "NOT RESPONDING"], FETCH_TIMEOUT)
             took = time.monotonic() - t0
@@ -280,6 +300,8 @@ def main() -> int:
             client.send_text("G", finish_with_return=False)
             push_keys(client, target_keys(f"{NEGATIVE_HOST}\r/\r"))
             banner = "HTTPS GET " + NEGATIVE_HOST.upper()
+            if wait_for(client, [banner], 60)[0] is None:
+                raise Fail(f"no {banner!r} banner")
             m, lines = wait_after(client, banner,
                                   ["TLS HANDSHAKE FAILED", "CONNECTION CLOSED",
                                    "NOT RESPONDING"], 300)
@@ -302,9 +324,9 @@ def main() -> int:
         if fetch_in_flight and client is not None:
             guard_socket_teardown(client.read_mem, lab.get("net_tcp_state"))
         if client is not None:
-            if mounted:
+            if touched:
                 try:
-                    restore_drive_a(client, before, ours)
+                    restore_drive_a(client, before, ours, mounted)
                 except Exception as exc:        # noqa: BLE001
                     print(f"WARNING: drive A not restored: {exc}")
             try:
