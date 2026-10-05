@@ -33,6 +33,7 @@ Exit: 0 pass, 1 fail, 2 fatal, 3 DeviceLock timeout, 4 device prep / load.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import zlib
@@ -96,6 +97,43 @@ def wait_for(client, markers, budget: float):
         time.sleep(1.0)
 
 
+def wait_after(client, anchor, markers, budget: float):
+    """Like wait_for, but only counts text after the LAST `anchor` on the
+    screen, or the whole screen once `anchor` has scrolled off: an earlier
+    step's lines (CONNECTION CLOSED, DHCP OK) are still there. `markers`
+    are regular expressions; the one that matched is returned."""
+    end = time.monotonic() + budget
+    while True:
+        lines, text = screen(client)
+        tail = text[text.rfind(anchor):] if anchor in text else text
+        for m in markers:
+            if re.search(m, tail):
+                return m, lines
+        if time.monotonic() > end:
+            return None, lines
+        time.sleep(1.0)
+
+
+#: The end of do_net_init: the whole address is printed (then CR, RTS).
+DHCP_DONE = r"DHCP OK - IP: \d+\.\d+\.\d+\.\d+"
+
+
+def press_init(client) -> None:
+    """'I', then wait for THAT init's verdict.
+
+    The boot runs the same init before it prints the menu, so "DHCP OK" is
+    already on screen when 'I' is pressed; waiting for it returned at once
+    and let 'G' land while the re-init was still running. Only text after
+    the menu line belongs to this 'I' (if the menu has scrolled off, so has
+    the boot's init).
+    """
+    client.send_text("I", finish_with_return=False)
+    m, lines = wait_after(client, "Q=QUIT", [DHCP_DONE, "FAILED"], 120)
+    if m != DHCP_DONE:
+        dump(lines, "init")
+        raise Fail("network init: %s" % m)
+
+
 def dump(lines, title):
     print(f"--- {title} ---")
     for i, line in enumerate(lines):
@@ -120,11 +158,7 @@ def run_fetch(client, prg_path: Path, host: str, path: str):
     if not m:
         dump(lines, "boot")
         raise Fail("menu never appeared")
-    client.send_text("I", finish_with_return=False)
-    m, lines = wait_for(client, ["DHCP OK", "FAILED"], 120)
-    if m != "DHCP OK":
-        dump(lines, "init")
-        raise Fail("network init: %s" % m)
+    press_init(client)
     client.send_text("G", finish_with_return=False)
     push_keys(client, target_keys(f"{host}\r{path}\r"))
     m, lines = wait_for(client, ENDS, FETCH_TIMEOUT)

@@ -19,11 +19,15 @@ reads the PRG back out of the .d64 with c1541 and refuses to run if it
 differs from build/c64-https.prg (run it right after `make
 package-m3-demo`, which leaves that build in build/).
 
-Drive A's state is read first and restored at the end (its image re-mounted
-by path when it had one). Device prep, the REU preflight, the DeviceLock and
-the #234 socket guard are the same as every other fetch rig's.
+Drive A's state is read first and restored at the end: our image removed
+(and its /Temp upload deleted), the old image re-mounted by path when it had
+one, the drive switched back off when it was off, and the result compared
+with what was read. Device prep, the REU preflight, the DeviceLock, the
+init wait and the refusal verdict are rig_https_m3.py's.
 
     U64_HOST=10.43.23.81 tools/uci/rig_https_m3_demo.py [path/to.d64]
+
+C1541 overrides the c1541 binary, as in `make package-m3-demo`.
 
 Exit: 0 pass, 1 fail, 2 fatal, 3 DeviceLock timeout, 4 device prep.
 """
@@ -34,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from ftplib import FTP, error_perm
 from pathlib import Path
 
 from c64_test_harness.backends.device_lock import DeviceLock, DeviceLockTimeout
@@ -47,9 +52,11 @@ from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
 from _rig_lifecycle import guard_socket_teardown  # noqa: E402
 from _petscii_keys import push_keys, target_keys  # noqa: E402
-from boot_check import decode_screen, screen_text  # noqa: E402
 from http_body_checks import (  # noqa: E402
     SYMBOLS, check_body_complete, check_http_status, decode_body_state)
+from rig_https_m3 import (  # noqa: E402
+    SETTLED, Fail, dump, labels, press_init, screen, verdict_refuse,
+    wait_after, wait_for)
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 REPO = Path(__file__).resolve().parents[2]
@@ -62,68 +69,22 @@ NEGATIVE_HOST = os.environ.get("NEGATIVE_HOST", "208-80-153-224.nip.io")
 TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
 FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "900"))
 RUN_DIR = Path(os.environ.get("UCI_DEBUG_DIR", "/tmp/uci_https_debug"))
-UCI_ERR_OPEN_REFUSED = 0x8D
-
-
-class Fail(Exception):
-    pass
-
-
-def labels() -> dict[str, int]:
-    out = {}
-    for line in LABELS.read_text().splitlines():
-        p = line.split()
-        if len(p) >= 3 and p[0] == "al" and p[2].startswith("."):
-            out[p[2][1:]] = int(p[1].split(":")[-1], 16)
-    return out
+C1541 = os.environ.get("C1541", "c1541")
+DRIVE_FIELDS = ("enabled", "image_path", "image_file")
 
 
 def disk_prg(d64: Path) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "prg"
-        subprocess.run(["c1541", "-attach", str(d64), "-read", DISK_FILE,
+        subprocess.run([C1541, "-attach", str(d64), "-read", DISK_FILE,
                         str(out)], check=True, capture_output=True)
         return out.read_bytes()
 
 
-def screen(client):
-    lines = decode_screen(bytes(client.read_mem(0x0400, 1000)))
-    return lines, screen_text(lines)
-
-
-def wait_for(client, markers, budget):
-    end = time.monotonic() + budget
-    while True:
-        lines, text = screen(client)
-        for m in markers:
-            if m in text:
-                return m, lines
-        if time.monotonic() > end:
-            return None, lines
-        time.sleep(1.0)
-
-
-def wait_after(client, anchor, markers, budget):
-    """Like wait_for, but only counts text after the LAST `anchor` on the
-    screen: the earlier fetch's lines (CONNECTION CLOSED) are still there."""
-    end = time.monotonic() + budget
-    while True:
-        lines, text = screen(client)
-        tail = text[text.rfind(anchor):] if anchor in text else ""
-        for m in markers:
-            if m in tail:
-                return m, lines
-        if time.monotonic() > end:
-            return None, lines
-        time.sleep(1.0)
-
-
-def dump(lines, title):
-    print(f"--- {title} ---")
-    for i, line in enumerate(lines):
-        if line.strip():
-            print(f"{i:02d}: {line}")
-    print("--- end ---")
+def since(lines, anchor):
+    """The rows from the last one holding `anchor` on (all rows if none)."""
+    rows = [i for i, ln in enumerate(lines) if anchor in ln.upper()]
+    return lines[rows[-1]:] if rows else lines
 
 
 def body_state(client, lab):
@@ -137,6 +98,39 @@ def drive_a(client) -> dict:
         if "a" in d:
             return d["a"]
     return {}
+
+
+def delete_temp_upload(ours: dict, before: dict) -> None:
+    """Delete the /Temp file our mount uploaded, unless it was there before."""
+    path, name = ours.get("image_path", ""), ours.get("image_file", "")
+    if not name or path.rstrip("/") != "/Temp" or (
+            before.get("image_path"), before.get("image_file")) == (path, name):
+        return
+    try:
+        with FTP(HOST, timeout=10.0) as ftp:
+            ftp.login()
+            ftp.cwd("/Temp")
+            ftp.delete(name)
+        print(f"  deleted /Temp/{name}")
+    except (OSError, error_perm) as exc:
+        print(f"WARNING: /Temp/{name} not deleted: {exc}")
+
+
+def restore_drive_a(client, before: dict, ours: dict) -> None:
+    client.unmount_disk("a")
+    delete_temp_upload(ours, before)
+    path, file = before.get("image_path"), before.get("image_file")
+    if path and file:
+        client.mount_disk_path("a", f"{path.rstrip('/')}/{file}")
+    if not before.get("enabled", True):
+        client.drive_off("a")
+    after = drive_a(client)
+    diff = {k: (before.get(k), after.get(k)) for k in DRIVE_FIELDS
+            if before.get(k) != after.get(k)}
+    if diff:
+        print(f"WARNING: drive A not as found (before, after): {diff}")
+    else:
+        print(f"drive A restored: {after}")
 
 
 def main() -> int:
@@ -154,7 +148,7 @@ def main() -> int:
         print("[fatal] the PRG on the disk is not build/c64-https.prg, so "
               "build/labels.txt does not describe it", file=sys.stderr)
         return 2
-    lab = labels()
+    lab = labels(LABELS)
     if "m3_wedged" not in lab:
         print("[fatal] build/ is not a BACKEND=uci-m3 build", file=sys.stderr)
         return 2
@@ -171,6 +165,7 @@ def main() -> int:
     client = None
     fetch_in_flight = False
     before = {}
+    ours = {}
     mounted = False
     try:
         client = Ultimate64Client(host=HOST, timeout=30.0)
@@ -202,7 +197,8 @@ def main() -> int:
             client.drive_on("a")
         client.mount_disk("a", d64.read_bytes(), "d64", mode="readonly")
         mounted = True
-        print(f"drive A now: {drive_a(client)}")
+        ours = drive_a(client)
+        print(f"drive A now: {ours}")
 
         try:
             client.reset()
@@ -232,11 +228,7 @@ def main() -> int:
             if not m:
                 dump(lines, "run")
                 raise Fail("the menu never appeared after RUN")
-            client.send_text("I", finish_with_return=False)
-            m, lines = wait_for(client, ["DHCP OK", "FAILED"], 120)
-            if m != "DHCP OK":
-                dump(lines, "init")
-                raise Fail(f"network init: {m}")
+            press_init(client)
 
             # --- 1. the default target ----------------------------------
             t0 = time.monotonic()
@@ -246,7 +238,7 @@ def main() -> int:
             m, lines = wait_for(client, ["CONNECTION CLOSED", "TLS HANDSHAKE FAILED",
                                          "NOT RESPONDING"], FETCH_TIMEOUT)
             took = time.monotonic() - t0
-            if m == "CONNECTION CLOSED":
+            if m in SETTLED:
                 fetch_in_flight = False
             dump(lines, "default fetch")
             if m != "CONNECTION CLOSED":
@@ -270,7 +262,7 @@ def main() -> int:
                                   ["CONNECTION CLOSED", "TLS HANDSHAKE FAILED",
                                    "NOT RESPONDING"], FETCH_TIMEOUT)
             took = time.monotonic() - t0
-            if m == "CONNECTION CLOSED":
+            if m in SETTLED:
                 fetch_in_flight = False
             if m != "CONNECTION CLOSED":
                 dump(lines, "second fetch")
@@ -286,23 +278,18 @@ def main() -> int:
             fetch_in_flight = True
             client.send_text("G", finish_with_return=False)
             push_keys(client, target_keys(f"{NEGATIVE_HOST}\r/\r"))
-            m, lines = wait_after(client, "HTTPS GET " + NEGATIVE_HOST.upper(),
-                                  ["94,CERTIFICATE", "CONNECTION CLOSED",
+            banner = "HTTPS GET " + NEGATIVE_HOST.upper()
+            m, lines = wait_after(client, banner,
+                                  ["TLS HANDSHAKE FAILED", "CONNECTION CLOSED",
                                    "NOT RESPONDING"], 300)
-            time.sleep(1.0)                 # let the status line finish
+            if m in SETTLED:
+                fetch_in_flight = False
+            time.sleep(2.0)                 # let the status line print
             lines, _ = screen(client)
-            if m in ("94,CERTIFICATE", "CONNECTION CLOSED"):
-                fetch_in_flight = False     # refused: nothing was opened
-            dump(lines, "negative")
-            n = bytes(client.read_mem(lab["m3_status_len"], 1))[0]
-            line = bytes(client.read_mem(lab["m3_status"], n)).decode("ascii", "replace")
-            err = bytes(client.read_mem(lab["net_last_error"], 1))[0]
-            owned = bytes(client.read_mem(lab["m3_owned"], 1))[0]
-            print(f"  status line {line!r}, net_last_error ${err:02X}, m3_owned={owned}")
-            if m != "94,CERTIFICATE" or "TLS HANDSHAKE FAILED" not in screen_text(lines):
-                raise Fail(f"the negative was not refused with 94 on screen ({m!r})")
-            if err != UCI_ERR_OPEN_REFUSED or owned:
-                raise Fail("the refusal did not leave $8D and no handle")
+            # Only this fetch's rows: the default fetch's REQUEST SENT is
+            # still on screen, and verdict_refuse rejects one.
+            verdict_refuse(client, lab, NEGATIVE_HOST, "94", m,
+                           since(lines, banner))
             client.send_text("Q", finish_with_return=False)
             print("PASS: the demo disk LOADs from drive 8, fetches the default "
                   "target complete, and shows the name-mismatch refusal")
@@ -316,12 +303,7 @@ def main() -> int:
         if client is not None:
             if mounted:
                 try:
-                    client.unmount_disk("a")
-                    path = before.get("image_path") or before.get("path")
-                    file = before.get("image_file")
-                    if path and file:
-                        client.mount_disk_path("a", f"{path.rstrip('/')}/{file}")
-                    print(f"drive A restored: {drive_a(client)}")
+                    restore_drive_a(client, before, ours)
                 except Exception as exc:        # noqa: BLE001
                     print(f"WARNING: drive A not restored: {exc}")
             try:

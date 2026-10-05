@@ -558,6 +558,16 @@ def test_skipping_prep_warns_that_the_clock_is_unmanaged() -> None:
 #: changes.
 KNOWN_UNPREPPED: dict[str, str] = {}
 
+#: Rigs the discovery rule below cannot see that still depend on the clock
+#: the prep sets: the uci-m3 build has no comb profile, and the demo rig
+#: boots from the drive (LOAD"*",8,1), not by DMA. Registered by name.
+REGISTERED_RIGS = ("rig_https_m3.py", "rig_https_m3_demo.py")
+
+
+def _covered_rigs():
+    """What the contract covers: the discovered rigs plus the registered."""
+    return sorted(set(_crypto_path_rigs()) | {UCI / n for n in REGISTERED_RIGS})
+
 
 def _crypto_path_rigs():
     """Discover the rigs this contract covers, rather than listing them.
@@ -618,6 +628,14 @@ def test_the_discovery_rule_finds_the_known_rigs() -> None:
     )
 
 
+def test_registered_rigs_exist_and_are_not_discovered() -> None:
+    """A registration is for a rig the rule misses; one it finds is noise."""
+    for name in REGISTERED_RIGS:
+        assert (UCI / name).is_file(), f"REGISTERED_RIGS names a missing file: {name}"
+    found = {p.name for p in _crypto_path_rigs()} & set(REGISTERED_RIGS)
+    assert not found, f"{sorted(found)} are discovered now: drop the registration"
+
+
 def _call_lines(tree, name):
     """Line numbers of every ``name(...)`` call in *tree*."""
     return sorted(
@@ -635,7 +653,7 @@ def test_every_crypto_rig_prepares_before_it_checks() -> None:
     a convention, not a fix, and #197's defect was exactly four rigs holding
     a guard with no setup behind it.
     """
-    for path in _crypto_path_rigs():
+    for path in _covered_rigs():
         tree = ast.parse(path.read_text(), filename=str(path))
         prep = _call_lines(tree, "prepare_device")
         flight = _call_lines(tree, "preflight_reu")
@@ -680,7 +698,7 @@ def test_every_prepping_rig_hands_over_its_run_artifact_dir() -> None:
     supplies its own Python-level default) it would write nothing at all.
     So every call site passes `artifact_dir` explicitly.
     """
-    for path in _crypto_path_rigs():
+    for path in _covered_rigs():
         if path.name in KNOWN_UNPREPPED:
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
