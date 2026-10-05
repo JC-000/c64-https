@@ -590,9 +590,9 @@ def test_skipping_prep_warns_that_the_clock_is_unmanaged() -> None:
 KNOWN_UNPREPPED: dict[str, str] = {}
 
 #: Rigs the discovery rule below cannot see that still depend on the clock
-#: the prep sets: the uci-m3 build has no comb profile, and the demo rig
-#: boots from the drive (LOAD"*",8,1), not by DMA. Registered by name.
-REGISTERED_RIGS = ("rig_https_m3.py", "rig_https_m3_demo.py")
+#: and REU state the prep sets: the demo rig boots from the drive
+#: (LOAD"*",8,1), not by DMA. Registered by name.
+REGISTERED_RIGS = ("rig_https_m3_demo.py",)
 
 
 def _covered_rigs():
@@ -650,7 +650,7 @@ def test_the_discovery_rule_finds_the_known_rigs() -> None:
                 "rig_https_live.py", "rig_https_local.py",
                 "rig_https_wiki.py", "rig_https_banner.py",
                 "rig_close_retry.py", "rig_https_refetch.py",
-                "rig_trust_policy.py"}
+                "rig_trust_policy.py", "rig_https_m3.py"}
     assert names == expected, (
         f"the discovery rule now selects {sorted(names)}, not "
         f"{sorted(expected)}. If a rig was added or renamed that is fine — "
