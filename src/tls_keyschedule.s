@@ -19,6 +19,7 @@
 .export tls_verify_finished
 .export tls_verify_data
 .export tls_c_hs_secret
+.export tls_finished_key       ; end of the session_scrub span
 
 ; HKDF primitives (hkdf.s)
 .import hkdf_extract

@@ -431,6 +431,13 @@ takes page 3 (`build_policy_and_low_ram_arbiter`, $0334-$03FF, 204 B),
 plus $02A7-$02FF with `page2=True`, which no link moves; none carves a
 linked-region tail (`tools/test_rig_scratch.py`, all five UCI profiles).
 
+'Q' (the rigs' exit to BASIC before SYSing back in) zeroes the session
+secrets (`src/session_scrub.s`), ZP $02-$7F/$FB-$FF and the stack page,
+re-seeds the DRBG, NEWs the program and enters READY through ROM init. SYS
+re-entry keeps working (tables and net state survive); a new key buffer
+inside a scrub span fails the link by name. Test:
+`tools/test_quit_basic_exit.py`.
+
 **The acquire budget is `C64_DEVICE_LOCK_TIMEOUT`, default 1800 s**, and
 it is one number: every rig here and `tests/rig_ip65_rrnet_hw.py` takes
 the lock through `acquire_device_lock()` in `_device_lock_helper.py`, and
