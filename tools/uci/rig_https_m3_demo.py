@@ -21,8 +21,9 @@ package-m3-demo`, which leaves that build in build/).
 
 Drive A's state is read first and restored at the end: our image removed,
 the old image re-mounted by path when it had one, the drive switched back
-off when it was off, and the result compared with what was read. (The
-upload lands at /Temp/cache/upload/image.d64, overwritten per mount.)
+off when it was off, and the result compared with what was read. The
+upload (/Temp/cache/upload/image[_N].d64: the U64E numbers a repeat rather
+than overwrite it) is deleted over FTP once unmounted.
 Device prep, the REU preflight, the DeviceLock, the init wait and the
 refusal verdict are rig_https_m3.py's.
 
@@ -39,6 +40,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from ftplib import FTP, error_perm
 from pathlib import Path
 
 from c64_test_harness.backends.device_lock import DeviceLock, DeviceLockTimeout
@@ -100,8 +102,23 @@ def drive_a(client) -> dict:
     return {}
 
 
-def restore_drive_a(client, before: dict) -> None:
+def delete_upload(ours: dict, before: dict) -> None:
+    """FTP-delete the /Temp file our mount created (never one found mounted)."""
+    name = ours.get("image_file", "")
+    if not name.startswith("/Temp/") or name == before.get("image_file"):
+        return
+    try:
+        with FTP(HOST, timeout=10.0) as ftp:
+            ftp.login()
+            ftp.delete(name)
+        print(f"  deleted {name}")
+    except (OSError, error_perm) as exc:
+        print(f"WARNING: {name} not deleted: {exc}")
+
+
+def restore_drive_a(client, before: dict, ours: dict) -> None:
     client.unmount_disk("a")
+    delete_upload(ours, before)
     # fw 3.15 reports the whole path in image_file and image_path empty.
     path, file = before.get("image_path"), before.get("image_file")
     if file:
@@ -149,6 +166,7 @@ def main() -> int:
     client = None
     fetch_in_flight = False
     before = {}
+    ours = {}
     mounted = False
     try:
         client = Ultimate64Client(host=HOST, timeout=30.0)
@@ -180,7 +198,8 @@ def main() -> int:
             client.drive_on("a")
         client.mount_disk("a", d64.read_bytes(), "d64", mode="readonly")
         mounted = True
-        print(f"drive A now: {drive_a(client)}")
+        ours = drive_a(client)
+        print(f"drive A now: {ours}")
 
         try:
             client.reset()
@@ -285,7 +304,7 @@ def main() -> int:
         if client is not None:
             if mounted:
                 try:
-                    restore_drive_a(client, before)
+                    restore_drive_a(client, before, ours)
                 except Exception as exc:        # noqa: BLE001
                     print(f"WARNING: drive A not restored: {exc}")
             try:
