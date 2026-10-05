@@ -690,7 +690,7 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     link (ld65 still writes the map). Margins are per
     profile — never carry a figure from one to another.
   - 'Q' zeroes only the spans in `src/session_scrub.s`: a new secret buffer outside every span is silently left in RAM (add a SPAN).
-    After 'Q', BASIC is capped at an empty program (any allocation is ?OUT OF MEMORY), so only SYS re-enters the image intact.
+    After 'Q' BASIC owns $0801-$9FFF (the image): SYS re-entry is valid only before BASIC allocates anything (variables, strings, LOAD); rigs only type SYS.
   - `net_tcp_set_recv_cb` is an RTS stub. Boot banner: `rr-net` under ip65,
     `UCI NETWORKING` under UCI — `boot_check.py` asserts both.
 

@@ -23,14 +23,20 @@ What this suite does, all hardware-free in VICE:
      mapped back in -- it reads ZP $02-$7F and $FB-$FF, the stack page and
      every planted buffer: all zero, the DRBG re-seeded rather than zeroed.
   4. At READY.: no error on screen, the menu still on screen, CHRGET equal
-     to the ROM's copy, the program NEWed, BASIC capped at the empty
-     program (MEMSIZ = FRETOP = VARTAB) and actually evaluating
-     ``PRINT 6*7``. A variable, a DIM, a string concatenation and a typed
-     program line each give ?OUT OF MEMORY, and $0803-$9FFF -- the image
-     the rigs SYS back into -- is byte-identical afterwards.
-  5. Re-enters the image the way the tools/uci rigs do after 'Q' (bank
-     BASIC out, call in): X25519 and ECDSA verify both still give the right
+     to the ROM's copy, the program NEWed, MEMSIZ = $A000, and BASIC
+     actually evaluating ``PRINT 6*7``.
+  5. Re-enters the image the way the tools/uci rigs do after 'Q', before
+     BASIC allocates anything: a typed SYS leaves $0803-$9FFF (the image)
+     byte-identical, and X25519 and ECDSA verify both still give the right
      answers, so the scrub broke nothing the rigs rely on.
+  6. On a second, fresh boot (the re-entered crypto of step 5 clobbers
+     BASIC's ZP again, as it would for a rig): 'Q', then BASIC is a normal
+     BASIC -- it owns $0801-$9FFF now. ``PRINT "AB"+"CD"`` allocates a
+     string, and ``LOAD"P",8`` of a one-line program from a d64 (minted here
+     with c1541) loads and RUNs.
+
+Every step after 'Q' is tallied, never raised: a build that leaves the
+6510 jammed fails the remaining checks by name instead of crashing.
 
 On the old quit path step 3 fails by name (no ``quit_scrubbed`` label) and
 step 4 fails on the syntax error and the clobbered CHRGET.
@@ -46,8 +52,10 @@ test_x25519.py; C64_SKIP_BUILD=1 reuses build/. ~3-4 min under VICE warp.
 """
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 from c64_test_harness import (
@@ -105,16 +113,23 @@ ZEROED = [
 # rig that SYSes back in all-zero "random" bytes). Must hold neither the
 # planted pattern nor a bare instantiate value (K = 00.., V = 01..).
 # drbg_k (K) is private to hmac_drbg.s and in no scrub span: only the
-# re-seed tail call clears it, which is exactly what this proves. Its
+# re-seed tail call replaces it. The check proves K was replaced by a one-way
+# HMAC update at quit (not which DRBG entry point did it). Its
 # address comes from labels.txt; a build without it (K still aliased to
 # hmac_key, i.e. before the DRBG got its own K) fails that check.
 RESEEDED = [("drbg_k", 32), ("hmac_val", 32), ("hmac_key", 32)]
 OPTIONAL = {"drbg_k"}
 INSTANTIATE_ONLY = (bytes(32), b"\x01" * 32)
 
-# The image BASIC must not be able to allocate over once 'Q' NEWs it.
+# The image a SYS-only re-entry must leave untouched.
 IMAGE_LO = 0x0803
 IMAGE_HI = 0xA000
+# Typed-SYS probe: INC a flag, RTS. Page 3, past the bank stubs.
+STUB_SYS = 0x0350               # 848
+SYS_FLAG = 0x0358
+# "10 A=1:PRINT A" at $0801, as a PRG: LOADed from a d64 after 'Q'.
+TEST_PRG = bytes([0x01, 0x08, 0x0C, 0x08, 0x0A, 0x00,
+                  0x41, 0xB2, 0x31, 0x3A, 0x99, 0x41, 0x00, 0x00, 0x00])
 
 VERBOSE = False
 
@@ -149,12 +164,22 @@ X25519_BUDGET = 600.0
 ECDSA_BUDGET = 1200.0
 
 
-def run_crypto(transport, labels, t, tag):
-    """X25519 via the handshake's own entry point, then one P-256 verify."""
+def attempt(t, what, fn):
+    """Run *fn*; an exception (a jammed or hung 6510) is a FAIL, not a crash.
+    Returns True when the machine is still usable."""
     try:
-        _run_crypto(transport, labels, t, tag)
-    except Exception as e:  # a hung routine is a result here, not a crash
-        t.check(False, f"{tag}: crypto returned", f"{type(e).__name__}: {e}")
+        fn()
+        return True
+    except Exception as e:
+        t.check(False, what, f"{type(e).__name__}: {e}")
+        return False
+
+
+def run_crypto(transport, labels, t, tag):
+    """X25519 via the handshake's own entry point, then one P-256 verify.
+    Returns False if the machine jammed or hung on the way."""
+    return attempt(t, f"{tag}: crypto returned",
+                   lambda: _run_crypto(transport, labels, t, tag))
 
 
 def _run_crypto(transport, labels, t, tag):
@@ -243,8 +268,8 @@ def run_tests(transport, labels, seed=None):
                 continue
             got = read_bytes(transport, labels[name], size)
             t.check(got != pattern(i, size) and got not in INSTANTIATE_ONLY,
-                    f"{name} re-seeded (not the session's, not a bare "
-                    f"instantiate value)", hx(got[:16]))
+                    f"{name} replaced by a one-way update (not the session's,"
+                    f" not a bare instantiate value)", hx(got[:16]))
         idx = read_bytes(transport, labels["drbg_buf_idx"], 1)[0]
         t.check(idx == 32, "drbg_buf_idx = 32 (next byte forces a generate)",
                 f"${idx:02X}")
@@ -272,35 +297,92 @@ def run_tests(transport, labels, seed=None):
     t.check(word(0x2B) == 0x0801, "TXTTAB = $0801", f"${word(0x2B):04X}")
     t.check(word(0x2D) == 0x0803, "VARTAB = $0803 (program NEWed)",
             f"${word(0x2D):04X}")
-    t.check(word(0x37) == 0x0803 and word(0x33) == 0x0803,
-            "MEMSIZ = FRETOP = $0803 (BASIC capped below the image)",
-            f"MEMSIZ=${word(0x37):04X} FRETOP=${word(0x33):04X}")
+    t.check(word(0x37) == 0xA000, "MEMSIZ = $A000", f"${word(0x37):04X}")
     link = read_bytes(transport, 0x0801, 2)
     t.check(link == b"\x00\x00", "program link at $0801 = 0 (NEW)", hx(link))
     t.check(zp[0x01] & 0x07 == 0x07, "$01 has BASIC ROM back in",
             f"${zp[0x01]:02X}")
-
-    image = read_bytes(transport, IMAGE_LO, IMAGE_HI - IMAGE_LO)
     t.check(typed(transport, "print 6*7", " 42"), "PRINT 6*7 -> 42")
-    for cmd in ("a=1:b=2:c=3", "dim x(600)", 'print "ab"+"cd"',
-                "10 print"):
-        t.check(typed(transport, cmd, "OUT OF MEMORY"),
-                f"{cmd.upper()} -> ?OUT OF MEMORY")
-    after = read_bytes(transport, IMAGE_LO, IMAGE_HI - IMAGE_LO)
-    diff = [IMAGE_LO + i for i, (a, b) in enumerate(zip(image, after)) if a != b]
-    t.check(not diff, "image $0803-$9FFF unchanged by those commands",
-            f"{len(diff)} bytes, first ${diff[0]:04X}" if diff else "")
 
-    print("\n[5] re-entry after 'Q', as the tools/uci rigs do it")
+    print("\n[5] SYS-only re-entry after 'Q', as the tools/uci rigs do it")
+    write_bytes(transport, STUB_SYS,
+                bytes([0xEE, SYS_FLAG & 0xFF, SYS_FLAG >> 8, 0x60]))
+    write_bytes(transport, SYS_FLAG, b"\x00")
+    image = read_bytes(transport, IMAGE_LO, IMAGE_HI - IMAGE_LO)
+    typed(transport, f"sys{STUB_SYS}", "READY.")
+    t.check(read_bytes(transport, SYS_FLAG, 1) == b"\x01",
+            f"typed SYS{STUB_SYS} ran")
+    after = read_bytes(transport, IMAGE_LO, IMAGE_HI - IMAGE_LO)
+    diff = [IMAGE_LO + i for i, (x, y) in enumerate(zip(image, after)) if x != y]
+    t.check(not diff, "image $0803-$9FFF unchanged by a typed SYS",
+            f"{len(diff)} bytes, first ${diff[0]:04X}" if diff else "")
     write_bytes(transport, STUB_BANK_OUT, bytes([0xA5, 0x01, 0x29, 0xFE, 0x85, 0x01, 0x60]))
     write_bytes(transport, STUB_BANK_IN, bytes([0xA5, 0x01, 0x09, 0x01, 0x85, 0x01, 0x60]))
-    jsr(transport, STUB_BANK_OUT)
-    try:
-        run_crypto(transport, labels, t, "after Q")
-    finally:
-        jsr(transport, STUB_BANK_IN)
+    alive = attempt(t, "BASIC ROM banked out for the re-entry",
+                    lambda: jsr(transport, STUB_BANK_OUT))
+    alive = alive and run_crypto(transport, labels, t, "after Q")
+    if alive:
+        alive = attempt(t, "BASIC ROM banked back in",
+                        lambda: jsr(transport, STUB_BANK_IN))
 
+    if alive:
+        # The re-entered crypto time-shares BASIC's ZP again, exactly as it
+        # did before 'Q': after a rig's SYS re-entry BASIC is not usable,
+        # which is why [6] runs on a fresh boot.
+        zp = read_bytes(transport, 0, 256)
+        print(f"      after re-entry CHRGET $73-$8A: {hx(zp[0x73:0x8B])}")
     return t.passed, t.failed
+
+
+D64_PATH = None
+D64_ERROR = ""
+
+
+def mint_d64(tmp):
+    """A d64 holding TEST_PRG as "P", built with VICE's c1541.
+    Returns (path, "") or (None, why)."""
+    c1541 = shutil.which("c1541") or next(
+        (p for p in ("/opt/homebrew/bin/c1541", "/usr/local/bin/c1541",
+                     os.path.expanduser("~/opt/vice-eth/bin/c1541"))
+         if os.path.exists(p)), None)
+    if c1541 is None:
+        return None, "c1541 not found (VICE's disk tool); cannot mint the d64"
+    prg = os.path.join(tmp, "p.prg")
+    d64 = os.path.join(tmp, "t.d64")
+    with open(prg, "wb") as f:
+        f.write(TEST_PRG)
+    r = subprocess.run([c1541, "-format", "quit,01", "d64", d64,
+                        "-write", prg, "p"], capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(d64):
+        return None, f"c1541 failed: {r.stdout[-300:]}{r.stderr[-300:]}"
+    return d64, ""
+
+
+def run_basic_after_quit(transport, t):
+    """[6] on a fresh boot: 'Q', then BASIC allocates and LOADs normally."""
+    print("\n[6] a normal BASIC after 'Q' (fresh boot; BASIC owns the image)")
+    send_key(transport, "Q")
+    transport.resume()
+    if not t.check(wait_for_text(transport, "READY.", timeout=30.0,
+                                 verbose=False) is not None, "READY. on screen"):
+        return
+    t.check(typed(transport, 'print "ab"+"cd"', "ABCD"),
+            'PRINT "AB"+"CD" -> ABCD (a string allocated)')
+    if D64_PATH is None:
+        t.check(False, 'LOAD"P",8', D64_ERROR)
+        t.check(False, "RUN", D64_ERROR)
+        return
+    ok = typed(transport, 'load"p",8', "READY.", timeout=60.0)
+    body = ScreenGrid.from_transport(transport).text().upper()
+    t.check(ok and "?" not in body, 'LOAD"P",8 from the d64 (no error)',
+            " | ".join(ln.strip() for ln in body.splitlines() if ln.strip()))
+    # The screen is cleared first, so a line reading exactly "1" can only be
+    # the loaded program's output (" 1" alone would match "TLS 1.3").
+    typed(transport, "run", "READY.")
+    rows = [ln.strip() for ln in
+            ScreenGrid.from_transport(transport).text().splitlines()]
+    t.check("1" in rows, "RUN -> 1 (the loaded program)",
+            " | ".join(r for r in rows if r))
 
 
 def main():
@@ -334,8 +416,13 @@ def main():
         sys.exit(cannot_run(f"labels missing from {LABELS_PATH}: "
                             + ", ".join(missing)))
 
+    global D64_PATH, D64_ERROR
+    tmp = tempfile.mkdtemp(prefix="quit_exit_")
+    D64_PATH, D64_ERROR = mint_d64(tmp)
+    extra = (["-8", D64_PATH, "-trapdevice8", "+drive8truedrive"]
+             if D64_PATH else [])
     config = default_vice_config(prg_path=PRG_PATH, warp=True, ntsc=True,
-                                 sound=False)
+                                 sound=False, extra_args=extra)
     with ViceInstanceManager(config=config) as mgr:
         inst = mgr.acquire()
         transport = inst.transport
@@ -345,6 +432,18 @@ def main():
             sys.exit(1)
         passed, failed = run_tests(transport, labels)
         mgr.release(inst)
+    t = Tally()
+    with ViceInstanceManager(config=config) as mgr:
+        inst = mgr.acquire()
+        transport = inst.transport
+        if wait_for_text(transport, "Q=QUIT", timeout=menu_wait(60),
+                         verbose=False) is None:
+            t.check(False, "second boot reached the menu")
+        else:
+            run_basic_after_quit(transport, t)
+        mgr.release(inst)
+    passed += t.passed
+    failed += t.failed
 
     total = passed + failed
     print(f"\n{'=' * 60}\nRESULTS: {passed}/{total} passed, "

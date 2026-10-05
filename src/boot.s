@@ -498,14 +498,14 @@ main_loop:
 ;
 ; NEW is deliberate: the image is not re-entrant from RUN (start does not
 ; reset the BSS outside $A000-$BFFF), so it is not left looking runnable.
-; But after NEW BASIC would own $0803-$9FFF, which IS the image: a variable,
-; a string or a DIM writes over code (A=1:B=2:C=3 hit $080D on a U64E). So
-; MEMSIZ and FRETOP are capped at VARTAB, just past the empty program, and
-; any allocation, or a typed program line, is ?OUT OF MEMORY instead. The
-; cap survives CLR/RUN/NEW (they rebuild from MEMSIZ); a reset clears it.
-; Direct-mode PRINT of numbers and SYS still work -- SYS is how the
-; tools/uci rigs drive http_get after 'Q', and session_scrub re-seeds the
-; DRBG for exactly them.
+; After 'Q' BASIC owns $0801-$9FFF, which is the image: variables grow up
+; from $0803, strings down from $A000, and LOAD writes over it. SYS
+; re-entry into the image is valid only before BASIC allocates anything,
+; and a re-entry that runs crypto clobbers BASIC's ZP again exactly as
+; before 'Q'. The tools/uci rigs only type SYS after 'Q', so they are fine, and
+; session_scrub re-seeds the DRBG for exactly them. (Capping MEMSIZ was
+; tried and dropped: every quoted string, LOAD included, became ?OUT OF
+; MEMORY, and OPEN on the RS-232 device resets MEMSIZ from MEMTOP anyway.)
 ;
 ; The BASIC init routines sit in the KERNAL ROM's BASIC tail and are not
 ; vectored; $E37B-$E45E is byte-identical in every C64 KERNAL VICE ships
@@ -514,9 +514,6 @@ main_loop:
 BASIC_INITCZ    = $E3BF         ; CHRGET/RND seed, TXTTAB, MEMSIZ, FRETOP
 BASIC_SCRTCH    = $A644         ; NEW: empty program, then CLR
 BASIC_WARM_VEC  = $A002         ; -> $E37B: CLRCHN, STKINI, CLI, READY.
-BASIC_VARTAB    = $2D           ; start of variables (= end of program)
-BASIC_FRETOP    = $33           ; bottom of string space
-BASIC_MEMSIZ    = $37           ; top of BASIC memory
 
 quit_to_basic:
         sei                     ; the stack page is about to be zeroed
@@ -547,12 +544,6 @@ quit_scrubbed:                  ; tools/test_quit_basic_exit.py stops here
         sta $01
         jsr BASIC_INITCZ
         jsr BASIC_SCRTCH
-        lda BASIC_VARTAB        ; cap BASIC at the end of the (empty) program
-        ldy BASIC_VARTAB+1
-        sta BASIC_MEMSIZ
-        sty BASIC_MEMSIZ+1
-        sta BASIC_FRETOP
-        sty BASIC_FRETOP+1
         jmp (BASIC_WARM_VEC)
 
 ; =============================================================================
