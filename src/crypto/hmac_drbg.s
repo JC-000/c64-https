@@ -11,6 +11,7 @@
 ;   hmac_drbg_instantiate - Initialize DRBG from drbg_seed[drbg_seed_len]
 ;   hmac_drbg_generate   - Generate 32 bytes into drbg_output
 ;   drbg_init_entropy    - Collect 32B SID+CIA entropy, instantiate DRBG
+;   drbg_reseed          - Collect 32B SID+CIA entropy, mix it into K/V
 ;   drbg_random_byte     - Return 1 buffered random byte in A (preserves X,Y)
 ;   drbg_fill_bytes      - Fill buffer: zp_ptr=dest, A=count
 ;
@@ -41,6 +42,7 @@
 .export extra_sid_lo
 .export extra_sid_hi
 .export drbg_init_entropy
+.export drbg_reseed
 .export drbg_random_byte
 .export drbg_fill_bytes
 
@@ -574,6 +576,30 @@ extra_sid_hi:
 ; Clobbers: A, X, Y
 ; =============================================================================
 drbg_init_entropy:
+	jsr drbg_collect_seed
+	jsr hmac_drbg_instantiate
+	jmp drbg_mark_empty
+
+; =============================================================================
+; drbg_reseed - mix 32 fresh SID+CIA bytes into the running DRBG
+; update(seed) keeps K and V, so whatever entropy the state already holds
+; survives; tls_connect calls it before every handshake's draws.
+; Clobbers: A, X, Y
+; =============================================================================
+drbg_reseed:
+	jsr drbg_collect_seed
+	jsr hmac_drbg_update
+drbg_mark_empty:
+	; Force a fresh generate on the next drbg_random_byte call
+	lda #32
+	sta drbg_buf_idx
+	rts
+
+; =============================================================================
+; drbg_collect_seed - drbg_seed[0..31] = SID osc3 XOR CIA1 timer A, len = 32
+; Clobbers: A, X, Y
+; =============================================================================
+drbg_collect_seed:
 	ldx #0
 @collect:
 	; Read SID oscillator 3 XOR CIA timer A low
@@ -618,15 +644,8 @@ drbg_init_entropy:
 	cpx #32
 	bne @collect
 
-	; Set seed length and instantiate DRBG
 	lda #32
 	sta drbg_seed_len
-	jsr hmac_drbg_instantiate
-
-	; Force fresh generate on first drbg_random_byte call
-	lda #32
-	sta drbg_buf_idx
-
 	rts
 
 ; =============================================================================

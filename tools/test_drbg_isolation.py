@@ -44,6 +44,11 @@ Cases:
                       K := hmac_key as the key schedule left it, plus the
                       ClientHello.random seen on the wire -- does NOT give
                       the second session's ECDHE private key.
+  tls_connect reseeds the real tls_connect, with every callee after the
+                      draws stubbed, mixes fresh entropy before drawing:
+                      its client_random is not the output of the DRBG
+                      state it started from (defence in depth; the
+                      separation above is the fix).
 
 Usage:
     python3 tools/test_drbg_isolation.py [--verbose]
@@ -100,6 +105,9 @@ REQUIRED_LABELS = [
     "drbg_buf_idx",
     "tls_client_random",
     "tls_ecdhe_privkey",
+    "tls_connect",
+    "tls_ecdh_generate_keypair",
+    "tls_send_client_hello",
 ] + HMAC_USERS + KS_INPUTS
 
 # Cassette buffer. Harness jsr() trampoline $0334, run_all_tests.py's loop
@@ -108,6 +116,9 @@ REQUIRED_LABELS = [
 # test_tls_connected_latch.py $03C0-$03CB, run_subroutine's flags
 # $03F0/$03F1. $03D0-$03EA collides with none of them.
 DRAW_STUB_ADDR = 0x03D0   # 27 B -> $03EA
+
+CLC_RTS = bytes([0x18, 0x60])
+SEC_RTS = bytes([0x38, 0x60])
 
 
 def H(key: bytes, msg: bytes) -> bytes:
@@ -215,6 +226,25 @@ def two_draws(transport, labels) -> tuple[bytes, bytes, bytes, bytes]:
     return (k, v, read_bytes(transport, cr, 32), read_bytes(transport, pk, 32))
 
 
+def run_tls_connect_draws(transport, labels) -> tuple[bytes, bytes, bytes]:
+    """Real tls_connect up to the ClientHello send, which fails.
+
+    Returns (K, V) before the call and the client_random it drew.
+    """
+    p = Patcher(transport)
+    try:
+        p.patch(labels["tls_ecdh_generate_keypair"], CLC_RTS,
+                "tls_ecdh_generate_keypair stub")
+        p.patch(labels["tls_send_client_hello"], SEC_RTS,
+                "tls_send_client_hello stub (stop after the draws)")
+        write_bytes(transport, labels["drbg_buf_idx"], bytes([32]))
+        k, v = drbg_state(transport, labels)
+        jsr(transport, labels["tls_connect"], timeout=120.0)
+    finally:
+        p.restore()
+    return k, v, read_bytes(transport, labels["tls_client_random"], 32)
+
+
 def run_tests(transport, labels) -> tuple[int, int]:
     passed = failed = 0
 
@@ -273,6 +303,15 @@ def run_tests(transport, labels) -> tuple[int, int]:
                [("prediction != ECDHE privkey", pred != priv2),
                 ("DRBG K != key-schedule residue", k != kx)],
                f"privkey {priv2.hex()[:16]}..  predicted {pred.hex()[:16]}..")
+
+    # --- tls_connect mixes fresh entropy before it draws ------------------
+    k, v, r = run_tls_connect_draws(transport, labels)
+    out1, _, _ = drbg_generate(k, v)
+    report("tls_connect reseeds before drawing",
+           "client_random must not be the next output of the state "
+           "tls_connect was entered with (defence in depth)",
+           [("client_random != generate(K, V)", r != out1)],
+           f"client_random {r.hex()[:16]}..")
 
     return passed, failed
 
