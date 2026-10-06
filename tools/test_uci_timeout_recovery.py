@@ -90,6 +90,13 @@ paths need three things it does not have:
     expire on purpose.  (``test_uci_data_acc.py`` freezes the TOD for the
     opposite reason: there, a timeout would be the bug.)
 
+ALSO: THE WRITE REPLY'S LENGTH
+
+The last two checks pin net_tcp_send's handling of a SOCKET_WRITE reply
+that is not the 2-byte written count (empty or 1 byte). uci_read_resp_bytes
+stores only what arrived, so without a length check uci_write_resp keeps
+the previous chunk's count and the send "succeeds" on it.
+
 Runs standalone or under pytest::
 
     python3 tools/test_uci_timeout_recovery.py
@@ -109,7 +116,7 @@ from test_uci_data_acc import CPU, CPUError          # noqa: E402  (the interpre
 from _skip_policy import VoluntarySkip, cannot_run, require, verdict  # noqa: E402
 
 OPT_OUT_ENV = "C64_UCI_TESTS_OPTIONAL"
-CERTIFIES = "net_tcp_send's timeout exits (#194)"
+CERTIFIES = "net_tcp_send's timeout exits (#194) and its reply-length check"
 
 # --- register bits (uci_regs.inc) ------------------------------------------
 UCI_STAT_DATA_AV = 0x80
@@ -133,6 +140,7 @@ NET_TCP_CONNECTED = 0x01
 
 # uci_errors.inc
 UCI_ERR_READ_FAIL = 0x86
+UCI_ERR_SHORT_WRITE = 0x87
 UCI_ERR_WAIT_TIMEOUT = 0x89
 
 # How many $DF1C reads the modelled firmware takes to answer a command or to
@@ -560,6 +568,48 @@ def test_a_clean_send_neither_aborts_nor_leaves_the_phase_open():
            "a clean send had %d push(es) rejected" % uci.pushes_rejected)
 
 
+def _send_again(cpu, mem, labels):
+    """A second net_tcp_send of the same payload, error byte cleared."""
+    mem.write(labels["net_last_error"], 0)
+    cpu.a = SEND_SRC & 0xFF
+    cpu.x = SEND_SRC >> 8
+    return _send(cpu, labels)
+
+
+def _assert_failed_send(carry, mem, uci, labels, what):
+    err = mem.read(labels["net_last_error"])
+    _check(carry is True, (
+        "net_tcp_send returned C=0 after %s: SOCKET_WRITE's reply carried "
+        "no 2-byte written count, so the send was reported done on a count "
+        "nobody sent (net_last_error $%02X)" % (what, err)))
+    _check(err == UCI_ERR_SHORT_WRITE,
+           "net_last_error is $%02X after %s, expected $87 "
+           "UCI_ERR_SHORT_WRITE" % (err, what))
+    _check(uci.idle and uci.pushes_rejected == 0,
+           "interface left in state %s after %s"
+           % (_leftover_state(uci), what))
+
+
+def test_a_countless_write_reply_does_not_reuse_the_previous_count():
+    """Stale count: a good send fills uci_write_resp with 4; the next
+    SOCKET_WRITE comes back empty (the #230(a) mis-parse answers
+    "21,UNKNOWN COMMAND" with no data). Reading 0 bytes leaves the 4 in
+    place, and without a reply-length check the send succeeds on it."""
+    cpu, mem, uci, labels = _require(
+        _machine, [(b"\x04\x00", b"00,OK"), (b"", b"21,UNKNOWN COMMAND")])
+    _check(_send(cpu, labels) is False, "the first (good) send failed")
+    _assert_failed_send(_send_again(cpu, mem, labels), mem, uci, labels,
+                        "an empty reply following a good send")
+
+
+def test_a_short_write_reply_is_a_failed_send():
+    """0- and 1-byte replies on a first send: not a written count either."""
+    for reply in (b"", b"\x04"):
+        cpu, mem, uci, labels = _require(_machine, [(reply, b"00,OK")])
+        _assert_failed_send(_send(cpu, labels), mem, uci, labels,
+                            "a %d-byte reply" % len(reply))
+
+
 # ---------------------------------------------------------------------------
 # Dual-mode runner (same conventions as tools/test_uci_data_acc.py)
 # ---------------------------------------------------------------------------
@@ -569,6 +619,8 @@ TESTS = (
     test_push_wait_timeout_leaves_the_interface_idle,
     test_a_send_timeout_does_not_get_the_next_poll_rejected,
     test_a_clean_send_neither_aborts_nor_leaves_the_phase_open,
+    test_a_countless_write_reply_does_not_reuse_the_previous_count,
+    test_a_short_write_reply_is_a_failed_send,
 )
 
 EXIT_OK, EXIT_FAILED, EXIT_CANNOT_RUN = 0, 1, 2

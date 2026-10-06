@@ -305,7 +305,9 @@ m3_release:
 
 ; =============================================================================
 ; net_dhcp_acquire — the firmware's lease via GET_IPADDR, interfaces 0..3,
-; first non-zero address wins (same contract as src/net/uci/net.s).
+; first non-zero address wins. Same loop as src/net/uci/net.s, but NOT the
+; same reply rule: this one takes any reply of >= 4 bytes, where that one
+; requires the full 12-byte record.
 ; Out: C=0 net_local_ip set; C=1 $83 no lease, or $82/$89.
 ; Clobbers: A, X, Y
 ; =============================================================================
