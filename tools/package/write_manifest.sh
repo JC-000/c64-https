@@ -53,7 +53,7 @@ grep '^failreason=' "$BUILD_INFO" | cut -d= -f2- | while read -r key reason; do
         [ "$(variant_field "$line" 1)" = "$key" ] || continue
         prg="$(variant_field "$line" 2)"
         echo "     $prg"
-        echo "       make $(variant_field "$line" 3)"
+        echo "       make $(variant_make_args "$line")"
     done
     [ -n "$prg" ] || echo "     $key"
     echo "       $reason"

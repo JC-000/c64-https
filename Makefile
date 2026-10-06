@@ -281,8 +281,20 @@ endif
 # public key and generation floor come from TRUST_BUNDLE_KEY_INC, a file
 # `tools/trust_bundle.py inc` writes. The tree's default is the TEST-ONLY
 # key, whose private half is committed: anyone can sign for it.
+# TRUST_RELEASE=1 marks a release build (tools/package/build_prgs.sh passes
+# it for every product) and refuses that key three times over: here at parse
+# time, by the .inc's 64 `$$XX` tokens (fast, but textual); in trust_bundle.s,
+# by its TRUST_BUNDLE_KEY_IS_TEST_ONLY flag; and after the link, by the
+# ASSEMBLED bytes (tools/check_release_key.py searches the PRG for the test
+# key derived from its PEM, and the PRG is deleted on a hit), which no
+# spelling of the .inc gets past.
 TRUST_BUNDLE ?=
 TRUST_BUNDLE_KEY_INC ?= tools/trust_bundle_TEST_ONLY_pubkey.inc
+TRUST_BUNDLE_TEST_KEY_INC := tools/trust_bundle_TEST_ONLY_pubkey.inc
+TRUST_RELEASE ?=
+ifneq ($(filter-out 0 1,$(TRUST_RELEASE)),)
+$(error TRUST_RELEASE must be 1 (a release build) or 0/unset)
+endif
 # The 64 key bytes of an .inc, as one word: what the guard compares.
 trust_key_bytes = $(shell sed -n '/^\.macro TRUST_BUNDLE_PUBKEY_BYTES/,/^\.endmacro/p' '$(1)' 2>/dev/null | grep -o '\$$[0-9A-Fa-f][0-9A-Fa-f]' | tr -d '\n$$' | tr a-f A-F)
 ifeq ($(TRUST_BUNDLE),1)
@@ -295,6 +307,12 @@ endif
 TRUST_BUNDLE_KEY_HEX := $(call trust_key_bytes,$(TRUST_BUNDLE_KEY_INC))
 ifneq ($(words $(TRUST_BUNDLE_KEY_HEX)) $(shell printf '%s' '$(TRUST_BUNDLE_KEY_HEX)' | wc -c | tr -d ' '),1 128)
 $(error TRUST_BUNDLE_KEY_INC=$(TRUST_BUNDLE_KEY_INC) has no 64-byte TRUST_BUNDLE_PUBKEY_BYTES macro)
+endif
+ifeq ($(TRUST_RELEASE),1)
+ifeq ($(TRUST_BUNDLE_KEY_HEX),$(call trust_key_bytes,$(TRUST_BUNDLE_TEST_KEY_INC)))
+$(error TRUST_RELEASE=1 with the TEST-ONLY trust-bundle key ($(TRUST_BUNDLE_KEY_INC)): its private half is in the repository, so anyone could sign a bundle this release accepts. Build with TRUST_BUNDLE_KEY_INC=<your production key's .inc>, or without TRUST_BUNDLE)
+endif
+CA65FLAGS += -D TRUST_RELEASE=1
 endif
 CA65FLAGS += -D TRUST_BUNDLE=1
 UCI_SRCS += src/net/uci/trust_bundle.s
@@ -660,6 +678,9 @@ $(PRG): $(PRG_DEPS)
 	@grep -q '^al C:BC00 \.sqtab_lo' $(LABELS) || \
 		{ echo 'ERROR: sqtab_lo is not at $$BC00 — TABLES_BSS layout drifted; realign LIB_SHARED_SQTAB_BASE in tools/integration/build_x25519.sh and build_nistcurves_p256.sh'; \
 		  grep ' \.sqtab_lo$$' $(LABELS); exit 1; }
+ifeq ($(TRUST_RELEASE)$(TRUST_BUNDLE),11)
+	@python3 tools/check_release_key.py $@ || { rm -f $@; exit 1; }
+endif
 
 # Phase 5 Fix D: $(LABELS) is normally a side-effect of the $(PRG)
 # link recipe; we don't add an explicit rule.  The overlay-bin rule
@@ -1062,6 +1083,12 @@ endif
 # pair, whichever of them grows a direct dependency next.
 build/boot.o build/http.o build/cert_pin.o: build/https_host.inc
 build/net/uci/trust_store.o: build/https_host.inc
+# Only reached when the parse-time write above did not run (a -n/-q/-t dry
+# run on a tree that has never built): the same write, as a recipe, so a
+# dry run of a fresh checkout answers instead of dying "No rule to make".
+build/https_host.inc:
+	@mkdir -p build
+	$(HTTPS_TARGET_INC_BODY) > $@
 
 # The trust-bundle key (#155 phase 2, L3) gets the same content-compared
 # copy, build/trust_key.inc: a different key or floor rebuilds exactly

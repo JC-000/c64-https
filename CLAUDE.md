@@ -888,8 +888,8 @@ TABLES_BSS.
 between each, matrix in `tools/package/_common.sh`:
 
   c64-https-ip65-onchip.prg   stock C64 + RR-Net, no REU, no turbo
-  c64-https-uci-onchip.prg    turbo, no REU
-  c64-https-uci-comb.prg      turbo + REU, fastest (needs bank 2 + boot precompute)
+  c64-https-uci-onchip.prg    turbo, no REU                          (TRUST_STORE=1)
+  c64-https-uci-comb.prg      turbo + REU, fastest (needs bank 2 + boot precompute; TRUST_STORE=1)
 
 REU-profile images were retired (curation: still fastest below ~18 MHz,
 one line in `PACKAGE_VARIANTS` to restore). **That line is a

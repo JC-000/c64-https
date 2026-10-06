@@ -23,7 +23,8 @@ Environment:
   SKIP_REBUILD=1   skip check 1 (it costs four full builds)
   SKIP_VICE=1      skip the VICE boots (keeps the c1541 byte-compare)
   SKIP_LISTENER=1  skip check 3
-  VICE_BOOT_TIMEOUT  seconds to wait for the menu (default 180)
+  VICE_BOOT_TIMEOUT  seconds to wait for the banner (default 600: a loaded
+                     host took 90 s for ip65-onchip and up to 150 s for uci)
 """
 from __future__ import annotations
 
@@ -225,7 +226,7 @@ def check_d64_boots(variants: list[dict]) -> None:
     except Exception as exc:                                # noqa: BLE001
         record("c64_test_harness importable", False, f"{type(exc).__name__}: {exc}")
         return
-    timeout = float(os.environ.get("VICE_BOOT_TIMEOUT", "240"))
+    timeout = float(os.environ.get("VICE_BOOT_TIMEOUT", "600"))
     import time
     expected = expected_d64_images(variants)
     present = set(d64_images())
@@ -288,6 +289,8 @@ def check_d64_boots(variants: list[dict]) -> None:
             detail = f"nothing recognisable on screen within {timeout:.0f}s"
         if foreign:
             detail += f"; UNEXPECTED foreign banner {foreign}"
+        if not ok:
+            detail += f" (boot budget {timeout:.0f}s; VICE_BOOT_TIMEOUT to change)"
         record(f"{image.name} boots to the banner", ok, detail)
 
 
