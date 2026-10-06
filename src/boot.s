@@ -124,6 +124,11 @@
         ; ---- exports: local BSS ----
         .export net_initialized
 
+        ; ---- imports: 'Q' secret scrub (src/session_scrub.s) ----
+        .ifndef BACKEND_UCI_M3
+        .import session_scrub
+        .endif
+
         ; ---- imports: entropy / DRBG / sqtab / crypto init ----
         .import entropy_init
         .import drbg_init_entropy
@@ -471,12 +476,75 @@ main_loop:
         ; 'Q' = quit
         cmp #$51
         bne main_loop
+        ; falls through
 
-        ; re-enable BASIC ROM
+; =============================================================================
+; quit_to_basic - 'Q': scrub the session, then rebuild BASIC and enter READY.
+;
+; Not an RTS into the SYS that started us. BASIC resumes by running CHRGET
+; ($73-$8A) off TXTPTR ($7A/$7B), and trusts CURLIN ($39/$3A) and its
+; pointers ($2B-$38) -- ZP the crypto uses as scratch: X25519's fe_wide is
+; $40-$7F, nistcurves' fp_mul_i/j are $39/$3A, the TLS/ECDSA slots $02-$3F.
+; After a handshake that RTS executed a field element as CHRGET and printed
+; "?SYNTAX ERROR IN <garbage>".
+;
+; Instead: zero the secrets while $A000-$BFFF is still RAM, zero every ZP
+; byte we use and the stack page (pushed operands), then run the cold
+; start's own BASIC init minus its banner -- INITCZ (CHRGET from ROM,
+; TXTTAB/MEMSIZ/FRETOP) and NEW -- and enter READY via the BASIC warm-start
+; vector. The screen is kept, so a fetched body stays readable. INITV is
+; left out: the $0300 vectors are not ours, and resetting them would unhook
+; a cartridge or DOS wedge.
+;
+; NEW is deliberate: the image is not re-entrant from RUN (start does not
+; reset the BSS outside $A000-$BFFF), so it is not left looking runnable.
+; After 'Q' BASIC owns $0801-$9FFF, which is the image: variables grow up
+; from $0803, strings down from $A000, and LOAD writes over it. SYS
+; re-entry into the image is valid only before BASIC allocates anything,
+; and a re-entry that runs crypto clobbers BASIC's ZP again exactly as
+; before 'Q': BASIC is unusable after such a SYS returns. The tools/uci rigs
+; park the CPU (JMP *) or type only further SYS lines, so they are fine, and
+; session_scrub re-seeds the DRBG for exactly them. Do not cap MEMSIZ to
+; protect the image -- see engineering-notes, Known issues.
+;
+; The BASIC init routines sit in the KERNAL ROM's BASIC tail and are not
+; vectored; $E37B-$E45E is byte-identical in every C64 KERNAL VICE ships
+; (901227-01/-02/-03, SX-64, 4064).
+; =============================================================================
+BASIC_INITCZ    = $E3BF         ; CHRGET/RND seed, TXTTAB, MEMSIZ, FRETOP
+BASIC_SCRTCH    = $A644         ; NEW: empty program, then CLR
+BASIC_WARM_VEC  = $A002         ; -> $E37B: CLRCHN, STKINI, CLI, READY.
+
+quit_to_basic:
+        sei                     ; the stack page is about to be zeroed
+.ifndef BACKEND_UCI_M3          ; (uci-m3: the keys live on the ESP32)
+        jsr session_scrub
+.endif
+        lda #0
+        ldx #$7F - $02
+@zp:
+        sta $02,x               ; $02-$7F: every TLS/crypto/X25519 slot
+        dex
+        bpl @zp
+        ldx #$FF - zp_ptr
+@zp_hi:
+        sta zp_ptr,x            ; $FB-$FF: zp_ptr, zp_temp, zp_count
+        dex
+        bpl @zp_hi
+        inx                     ; X = 0
+@stack:
+        sta $0100,x             ; nothing below here is ever returned to
+        inx
+        bne @stack
+quit_scrubbed:                  ; tools/test_quit_basic_exit.py stops here
+        ldx #$FB                ; the cold start's stack pointer
+        txs
         lda $01
-        ora #%00000001
+        ora #%00000001          ; BASIC ROM back in
         sta $01
-        rts
+        jsr BASIC_INITCZ
+        jsr BASIC_SCRTCH
+        jmp (BASIC_WARM_VEC)
 
 ; =============================================================================
 ; do_net_init - initialize network (menu-driven)

@@ -1863,6 +1863,15 @@ Five latent bugs and three new ones were cleared to get here:
     runnable test — see the packaging validation record for the exact
     invocation. Never set it for a REU-profile build: that is precisely
     the silent-garbage case above.
+  - **Do not cap BASIC's MEMSIZ on 'Q' to protect the image.** After
+    'Q' BASIC owns $0801-$9FFF, and a cap (MEMSIZ = FRETOP = VARTAB, so
+    any allocation is ?OUT OF MEMORY) was tried and dropped in review:
+    every quoted string in direct mode, `LOAD"name",8` and `OPEN` with a
+    filename included, became ?OUT OF MEMORY, so nothing could be loaded
+    without a reset; and it did not hold anyway -- `OPEN 2,2` (RS-232)
+    copies KERNAL MEMTOP to MEMSIZ via $E0F9, after which `DIM` overwrote
+    2,819 B of the image. The rule is instead: SYS re-entry is valid only
+    before BASIC allocates anything.
 
 ### VIC-II blanking — worth 6.3%, not the fleet's "20-25%"
 
