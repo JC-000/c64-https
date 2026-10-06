@@ -105,13 +105,23 @@ def screen_text(t) -> str:
 
 
 def call(t, target: int, timeout: float = 30.0) -> int:
-    """JSR *target* through a carry-latching driver; return C."""
+    """JSR *target* through a carry-latching driver; return C.
+
+    The call hijacks main_loop wherever the monitor halted it, and jsr()
+    puts back PC/SP/FL but not A/X/Y. Put those back too: halted on
+    net_poll's `cmp #NET_TCP_CONNECTED` with this driver's A = C = 1, the
+    next resume polls a socket that does not exist, net_poll latches
+    net_tcp_state = ERROR, and every later prompt is COLD BANK FAIL
+    (cold_call's busy guard) -- one random halt point, so a random case.
+    """
     lo, hi = lohi(target)
     clo, chi = lohi(CARRY)
     write_bytes(t, DRIVER, bytes([0x20, lo, hi, 0xA9, 0x00, 0x2A,
                                   0x8D, clo, chi, 0x60]))
     write_bytes(t, CARRY, bytes([POISON]))
+    saved = t.read_registers()
     jsr(t, DRIVER, timeout=timeout)
+    t.set_registers({k: saved[k] for k in ("A", "X", "Y")})
     c = read_bytes(t, CARRY, 1)[0]
     if c not in (0, 1):
         raise RuntimeError(f"driver never returned (carry byte ${c:02X})")
