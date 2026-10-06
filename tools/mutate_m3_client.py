@@ -290,6 +290,11 @@ def _stamp():
         raise SystemExit("build/ is not a BACKEND=uci-m3 build (flags.stamp "
                          "says %r): run `make BACKEND=uci-m3` first"
                          % vals.get("BACKEND"))
+    if "-D HTTPS_BODY_TO_REU" in vals.get("CA65FLAGS", ""):
+        # boot-probe-ungated is equivalent there (that image probes anyway),
+        # and the rules here are the plain image's.
+        raise SystemExit("build/ is an HTTPS_BODY_TO_REU image: the mutants "
+                         "are written against plain `make BACKEND=uci-m3`")
     return vals
 
 
@@ -310,6 +315,8 @@ def build(workdir: Path, mutate=None) -> Path:
     shutil.copytree(REPO / "cfg", workdir / "cfg")
     (workdir / "build").mkdir()
     shutil.copy(REPO / "build" / "https_host.inc", workdir / "build")
+    shutil.copy(REPO / "build" / "flags.stamp", workdir / "build")  # the
+    # same flags; check_m3_client reads the image's kind off it
     if mutate:
         path, old, new = mutate
         f = workdir / path

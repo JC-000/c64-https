@@ -506,6 +506,20 @@ def _check(cond, msg):
         raise AssertionError(msg)
 
 
+def _body_to_reu(labels=None):
+    """True for an HTTPS_BODY_TO_REU image, read off the CA65FLAGS in the
+    flags.stamp beside its labels. Not `viewer_enter in labels`: KEEP_VIEWER
+    and VIEWER_TEST_HELPERS link the viewer without the sink."""
+    stamp = Path(labels or LABELS).parent / "flags.stamp"
+    if not stamp.is_file():
+        raise Unavailable("%s is missing: cannot tell whether the image "
+                          "streams the body to the REU" % stamp)
+    for line in stamp.read_text().splitlines():
+        if line.startswith("CA65FLAGS="):
+            return "-D HTTPS_BODY_TO_REU" in line
+    raise Unavailable("%s has no CA65FLAGS line" % stamp)
+
+
 def _labels(path=None):
     path = Path(path or LABELS)
     if not path.is_file():
@@ -1043,7 +1057,7 @@ def test_boot_reu_dma_only_for_the_sink(prg=None, labels=None):
         pass                            # the menu waits for a key
     _check("I=INIT" in m.screen_text(), "boot never reached the menu:\n"
            + m.screen_text())
-    if "viewer_enter" in m.L:
+    if _body_to_reu(labels):
         _check(hits, "an HTTPS_BODY_TO_REU image did not probe the REU")
     else:
         _check(not hits, "a plain uci-m3 boot wrote the REU registers %d "
@@ -1499,7 +1513,7 @@ TESTS = (
     test_boot_reu_dma_only_for_the_sink,
 )
 
-# Need `make BACKEND=uci-m3 HTTPS_BODY_TO_REU=1` (viewer_enter linked); main
+# Need `make BACKEND=uci-m3 HTTPS_BODY_TO_REU=1` (flags.stamp says so); main
 # runs them on such an image and says so when they are not run.
 VIEWER_TESTS = (
     test_refused_body_skips_the_viewer,
@@ -1509,7 +1523,7 @@ VIEWER_TESTS = (
 def run(prg=None, labels=None, only=None, quiet=False):
     """Run TESTS (or `only`, names) on one image. Returns {name: error|None}."""
     results = {}
-    tests = TESTS + (VIEWER_TESTS if "viewer_enter" in _labels(labels) else ())
+    tests = TESTS + (VIEWER_TESTS if _body_to_reu(labels) else ())
     for fn in tests:
         if only and fn.__name__ not in only:
             continue
@@ -1534,7 +1548,7 @@ def main():
         return cannot_run(str(exc), executed=0, total=len(TESTS),
                           certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV)
     results = run()
-    if "viewer_enter" not in _labels():
+    if not _body_to_reu():
         print("NOT RUN (%d): %s -- they need make BACKEND=uci-m3 "
               "HTTPS_BODY_TO_REU=1" % (len(VIEWER_TESTS), ", ".join(
                   f.__name__ for f in VIEWER_TESTS)))
