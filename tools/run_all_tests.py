@@ -89,6 +89,14 @@ UNDISPATCHED_SUITES = {
         "python3 tools/test_ecdsa_kat_oracle.py (see C64_MAKE_ARGS in "
         "its docstring to point it at a shipped profile)"
     ),
+    "test_quit_basic_exit": (
+        "ends the program: it presses 'Q', which zeroes the session "
+        "secrets and ZP, NEWs the BASIC program and banks BASIC ROM back "
+        "over $A000-$BFFF. Every suite after it in this runner's shared "
+        "VICE instance would read ROM where its buffers are. It also runs "
+        "two X25519 and two P-256 verifies (~3-4 min). Run it directly: "
+        "python3 tools/test_quit_basic_exit.py"
+    ),
 }
 
 
