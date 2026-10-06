@@ -11,40 +11,29 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
 > handshakes and HTTP GETs against real public servers on the open internet —
 > **github.com, browserleaks.com and lwn.net** all return HTTP 200. It also
 > streams the **Wikipedia article about the Commodore 64** over TLS into a
-> 16 MB REU and scrolls it on the C64's own screen — but **that body is not
-> verified**: `http_get` intermittently reports success on a truncated body
-> (issue #211), so treat the large-body demo as a demo. The handshake result
-> is unaffected. Requires the UCI backend at turbo (comb profile). See the
+> 16 MB REU and scrolls it on the C64's own screen. Requires the UCI backend
+> at turbo (comb profile). See the
 > Project Status section and the "End-to-end HTTPS status" notes in
 > `CLAUDE.md`.
 
 ## I just want to run it
 
 Grab a release — latest is
-[**v0.4.3**](https://github.com/JC-000/c64-https/releases/tag/v0.4.3), a
-**security release**.
-**If you have any earlier release, replace it.** v0.4.3 carries two
-client-side TLS fixes that v0.4.2 and everything before it lack: the X25519
-shared secret is now rejected when it comes out all zero (issue #153 — without
-that check, a passive observer who merely recorded the session could derive
-the traffic keys), and the handshake message sequence is now enforced (issue
-#152 — without that, four handshake messages of one harmless type satisfied
-the whole flight, so the client could report success having verified no
-signature at all). v0.4.0 additionally had a P-384 certificate hang, fixed in
-v0.4.1; no real server triggered that one.
+[**v0.5.0**](https://github.com/JC-000/c64-https/releases/tag/v0.5.0).
+It replaces every earlier release; see its release notes for what changed.
 Every build is prebuilt, as a `.prg` and as a bootable `.d64`.
-No assembler, no cc65, no Python packages, no build step. **Three products,
-one disk each** — the label is the whole contents, and `MANIFEST.txt` in the
-release walks you through the choice:
+No assembler, no cc65, no Python packages, no build step. `MANIFEST.txt` in
+the release walks you through the choice:
 
 | image | for | note |
 |---|---|---|
 | `c64-https-ip65-onchip` | bone-stock C64 + RR-Net cartridge | maximum compatibility: no REU, no turbo, nothing optional. If you are not sure what you have, this is the one that runs. ~36 min per handshake at 1 MHz. |
 | `c64-https-uci-onchip` | Ultimate 64 / C64 Ultimate at turbo, REU off | boots straight to the menu |
 | `c64-https-uci-comb` | Ultimate 64 / C64 Ultimate at turbo, REU **on** | fastest — 1.73x quicker verify (16.4 s vs 28.4 s, U64E at 48 MHz). Builds a 16 KB table into REU bank 2 at each boot first: ~34 s at 64 MHz, ~45 s at 48 MHz. |
+| `c64-https-uci-m3-demo` | Ultimate 64 with the M3 (ESP32 TLS) firmware | a secondary variant: TLS runs on the Ultimate's ESP32, not the 6510; needs M3 firmware. Its own README is in the release. |
 
 Every image carries **one** default host, baked in at build time (`make
-HTTPS_HOST=...`). On the two **UCI** images, `G` first asks for a host and a
+HTTPS_HOST=...`). On the **UCI** images, `G` first asks for a host and a
 path (`HOST [default]:`, `PATH [default]:`); RETURN on an empty field keeps
 the default, a typed host is lowercased and gets the same name check, and an
 entry the prompt cannot take whole (over 63 / 100 characters, a character
@@ -64,12 +53,12 @@ built — and **that default changed between v0.4.2 and v0.4.3**:
   `cdf02b4`, and v0.4.3 is the first release to carry it.
 
 Either way, point the name at the bundled test listener via your local DNS, or
-rebuild with your own `HTTPS_HOST=`. New in v0.4.2: the two **UCI** images
+rebuild with your own `HTTPS_HOST=`. New in v0.4.2: the **UCI** images
 check the server's certificate actually names the host they asked for.
 `ip65-onchip` does not — the check is 491 B and no free block in that layout
 comes close (issue #135). Read ["What this client does NOT
 authenticate"](#what-this-client-does-not-authenticate) before relying on
-either: there is still no certificate chain validation on any image, so this
+either: there is still no certificate chain validation, so this
 is not server authentication.
 
 The screen blanks during the slow crypto on every image — that is deliberate,
