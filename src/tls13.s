@@ -58,6 +58,7 @@
 
 ; --- Crypto / DRBG / ECDH helpers ---
 .import drbg_fill_bytes
+.import drbg_reseed
 .import tls_ecdh_generate_keypair
 .import tls_ecdh_compute_shared
 
@@ -144,6 +145,9 @@ tls_connect:
         lda #TLS_STATE_IDLE
         sta tls_state
         sta tls_reached_connected ; #204: this attempt has not connected yet
+
+        ; fresh SID/CIA entropy into the DRBG before this handshake draws
+        jsr drbg_reseed
 
         ; generate client random (32 bytes)
         lda #<tls_client_random

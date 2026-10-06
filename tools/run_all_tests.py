@@ -62,6 +62,7 @@ SUITE_ORDER = (
     "body_truncation",
     "aead_fail_closed",
     "tls_connected_latch",
+    "drbg_isolation",
 )
 
 # Suites that define run_tests() but are deliberately NOT dispatched here,
@@ -223,6 +224,13 @@ def run_test_suite(name, transport, labels, seed):
             # in RAM and restores them, so no transport is in the loop.
             from test_tls_connected_latch import run_tests as latch_run
             passed, failed = latch_run(transport, labels)
+
+        elif name == "drbg_isolation":
+            # The DRBG's K is drbg_k, not hmac_key: the key schedule must not
+            # reach the next tls_connect's draws. Backend-agnostic, no
+            # transport; patches it makes are restored.
+            from test_drbg_isolation import run_tests as drbg_iso_run
+            passed, failed = drbg_iso_run(transport, labels)
 
         elif name == "reu_row_abi":
             from test_reu_row_abi import run_tests as reu_row_abi_run

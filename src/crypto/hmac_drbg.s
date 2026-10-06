@@ -7,9 +7,11 @@
 ;
 ; Routines:
 ;   hmac_sha256          - HMAC-SHA256(hmac_key, hmac_data_buf[hmac_data_len])
+;   drbg_hmac            - hmac_sha256 keyed with the DRBG's private K (drbg_k)
 ;   hmac_drbg_instantiate - Initialize DRBG from drbg_seed[drbg_seed_len]
 ;   hmac_drbg_generate   - Generate 32 bytes into drbg_output
 ;   drbg_init_entropy    - Collect 32B SID+CIA entropy, instantiate DRBG
+;   drbg_reseed          - Collect 32B SID+CIA entropy, mix it into K/V
 ;   drbg_random_byte     - Return 1 buffered random byte in A (preserves X,Y)
 ;   drbg_fill_bytes      - Fill buffer: zp_ptr=dest, A=count
 ;
@@ -19,6 +21,15 @@
 ; Data labels (hmac_key, hmac_val, hmac_opad_block, hmac_data_buf,
 ;              hmac_data_len, hmac_result, drbg_seed, drbg_seed_len,
 ;              drbg_output, drbg_buf_idx, sha256_block, sha256_hash) in data.asm
+;
+; The DRBG's K is drbg_k, below, and is NOT exported. hmac_key is only the
+; key INPUT of hmac_sha256, and HKDF and the Finished MAC write it, so it
+; ends every handshake holding a key-schedule secret the peer knows. K used
+; to BE hmac_key, which made the next connection's client_random and ECDHE
+; private key a function of the last connection's key schedule. drbg_hmac
+; copies K into hmac_key on every DRBG call, and only this file can name
+; drbg_k, so no other HMAC user can write it: a module that tries fails the
+; link. tools/test_drbg_isolation.py is the runtime check.
 ; =============================================================================
 
 .include "constants.inc"
@@ -31,6 +42,7 @@
 .export extra_sid_lo
 .export extra_sid_hi
 .export drbg_init_entropy
+.export drbg_reseed
 .export drbg_random_byte
 .export drbg_fill_bytes
 
@@ -53,11 +65,26 @@
 .import sha256_block
 .import sha256_hash
 
+.segment "BSS"
+drbg_k:         .res 32         ; DRBG K. Private: see the header.
+
 ; Phase C.4 fit: hmac_drbg occupies a separate aux-code segment so the
 ; ip65 cfg can route it to NET_CODE tail while sha256 (larger) rides
 ; NET_BSS_TAIL alongside TLS_CODE.  Under UCI both segments flow into
 ; NET_CODE via identical cfg rules, preserving Phase C.2's behavior.
 .segment "CRYPTO_AUX_CODE2"
+
+; =============================================================================
+; drbg_hmac - HMAC-SHA256(drbg_k, hmac_data_buf[hmac_data_len])
+; Every HMAC the DRBG computes goes through here. Falls into hmac_sha256.
+; =============================================================================
+drbg_hmac:
+	ldx #31
+@load_k:
+	lda drbg_k,x
+	sta hmac_key,x
+	dex
+	bpl @load_k
 
 ; =============================================================================
 ; hmac_sha256 - compute HMAC-SHA256
@@ -329,7 +356,7 @@ hmac_sha256:
 ; =============================================================================
 ; hmac_drbg_update - HMAC-DRBG update(provided_data)
 ; Input: drbg_seed (provided_data), drbg_seed_len (0 if no provided_data)
-; Uses/updates: hmac_key (K), hmac_val (V)
+; Uses/updates: drbg_k (K), hmac_val (V)
 ; =============================================================================
 hmac_drbg_update:
 	; --- Step 1: K = HMAC(K, V || 0x00 || provided_data) ---
@@ -369,13 +396,13 @@ hmac_drbg_update:
 	sta hmac_data_len
 
 @do_hmac1:
-	jsr hmac_sha256
+	jsr drbg_hmac
 
 	; K = hmac_result
 	ldx #0
 @update_k1:
 	lda hmac_result,x
-	sta hmac_key,x
+	sta drbg_k,x
 	inx
 	cpx #32
 	bne @update_k1
@@ -391,7 +418,7 @@ hmac_drbg_update:
 	lda #32
 	sta hmac_data_len
 
-	jsr hmac_sha256
+	jsr drbg_hmac
 
 	; V = hmac_result
 	ldx #0
@@ -432,13 +459,13 @@ hmac_drbg_update:
 	adc #33
 	sta hmac_data_len
 
-	jsr hmac_sha256
+	jsr drbg_hmac
 
 	; K = hmac_result
 	ldx #0
 @update_k2:
 	lda hmac_result,x
-	sta hmac_key,x
+	sta drbg_k,x
 	inx
 	cpx #32
 	bne @update_k2
@@ -454,7 +481,7 @@ hmac_drbg_update:
 	lda #32
 	sta hmac_data_len
 
-	jsr hmac_sha256
+	jsr drbg_hmac
 
 	; V = hmac_result
 	ldx #0
@@ -471,14 +498,14 @@ hmac_drbg_update:
 ; =============================================================================
 ; hmac_drbg_instantiate - initialize DRBG state from seed
 ; Input: drbg_seed (seed material), drbg_seed_len (length, typically 64)
-; Output: hmac_key and hmac_val initialized
+; Output: drbg_k and hmac_val initialized
 ; =============================================================================
 hmac_drbg_instantiate:
 	; K = 0x00 * 32
 	ldx #0
 	lda #$00
 @init_k:
-	sta hmac_key,x
+	sta drbg_k,x
 	inx
 	cpx #32
 	bne @init_k
@@ -498,7 +525,7 @@ hmac_drbg_instantiate:
 
 ; =============================================================================
 ; hmac_drbg_generate - generate 32 bytes of output
-; Input: DRBG state (hmac_key, hmac_val) must be instantiated
+; Input: DRBG state (drbg_k, hmac_val) must be instantiated
 ; Output: drbg_output (32 bytes)
 ; =============================================================================
 hmac_drbg_generate:
@@ -513,7 +540,7 @@ hmac_drbg_generate:
 	lda #32
 	sta hmac_data_len
 
-	jsr hmac_sha256
+	jsr drbg_hmac
 
 	; V = hmac_result, also copy to output
 	ldx #0
@@ -549,6 +576,35 @@ extra_sid_hi:
 ; Clobbers: A, X, Y
 ; =============================================================================
 drbg_init_entropy:
+	jsr drbg_collect_seed
+	jsr hmac_drbg_instantiate
+	jmp drbg_mark_empty
+
+; =============================================================================
+; drbg_reseed - mix a fresh drbg_collect_seed sample into the running DRBG
+; update(seed) keeps K and V, so whatever entropy the state already holds
+; survives; tls_connect calls it before every handshake's draws. The 32
+; bytes are NOT 32 bytes of entropy: CIA1 timer A decrements at a fixed
+; rate between reads and osc3 moves slowly, so a sample carries roughly the
+; entropy of the instant it started (how long the user took to press 'G').
+; That entropy is unmeasured. Defence in depth only; the fix for a key
+; schedule reaching the DRBG is that drbg_k is private.
+; Clobbers: A, X, Y
+; =============================================================================
+drbg_reseed:
+	jsr drbg_collect_seed
+	jsr hmac_drbg_update
+drbg_mark_empty:
+	; Force a fresh generate on the next drbg_random_byte call
+	lda #32
+	sta drbg_buf_idx
+	rts
+
+; =============================================================================
+; drbg_collect_seed - drbg_seed[0..31] = SID osc3 XOR CIA1 timer A, len = 32
+; Clobbers: A, X, Y
+; =============================================================================
+drbg_collect_seed:
 	ldx #0
 @collect:
 	; Read SID oscillator 3 XOR CIA timer A low
@@ -593,15 +649,8 @@ drbg_init_entropy:
 	cpx #32
 	bne @collect
 
-	; Set seed length and instantiate DRBG
 	lda #32
 	sta drbg_seed_len
-	jsr hmac_drbg_instantiate
-
-	; Force fresh generate on first drbg_random_byte call
-	lda #32
-	sta drbg_buf_idx
-
 	rts
 
 ; =============================================================================
