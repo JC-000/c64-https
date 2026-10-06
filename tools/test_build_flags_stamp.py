@@ -67,6 +67,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -797,6 +798,83 @@ def test_unchanged_flags_rebuild_nothing():
         assert "ca65 " not in proc.stdout and "ld65 " not in proc.stdout, (
             "a no-op rebuild ran the toolchain:\n" + proc.stdout
         )
+
+
+class SrcFarm(Farm):
+    """A Farm whose src/ is a private COPY, so a test may edit an .inc."""
+
+    def __init__(self):
+        super().__init__()
+        os.unlink(self.dir / "src")
+        shutil.copytree(REPO / "src", self.dir / "src")
+
+    def edit_inc(self, rel, old, new):
+        """Edit one .inc at least a second after the last build.
+
+        GNU Make 3.81 (macOS) compares mtimes to the second, so an edit, or
+        the objects it rebuilds, in the same second as the previous build
+        and link would read as not newer. A person's edit lands later; the
+        wait says so. Same-second edits are make's caveat, not this fix's.
+        """
+        time.sleep(1.1)
+        inc = self.path(rel)
+        text = inc.read_text()
+        assert text.count(old) == 1, f"{old!r} not found once in {rel}"
+        inc.write_text(text.replace(old, new))
+
+    def includers(self, name):
+        """Objects built here whose source names *name* in an .include."""
+        out = set()
+        for obj in self.mtimes():
+            src = (self.path("src") / Path(obj).relative_to("build")).with_suffix(".s")
+            if not src.exists():
+                continue                # an archive's staging object
+            for line in src.read_text().splitlines():
+                code = line.split(";", 1)[0]
+                if ".include" in code and f'"{name}"' in code:
+                    out.add(obj)
+        return out
+
+
+def test_inc_edit_rebuilds_its_includers_and_matches_a_clean_build():
+    """An .inc edit must reach the PRG without `make clean`.
+
+    build/%.o used to depend on its .s alone, so editing an .inc left every
+    object that includes it stale and `make` relinked nothing: a plausible
+    PRG, exit 0, the OLD constant inside. ca65's --create-dep files
+    (build/%.d, -included by the Makefile) are what carry the edge now.
+    Pinned at the grain too: exactly the includers rebuild, nothing else.
+    """
+    _require_toolchain()
+    inc = "src/net/uci/uci_regs.inc"
+    old, new = "UCI_FENCE_INNER = 217", "UCI_FENCE_INNER = 216"
+    with SrcFarm() as farm:
+        farm.edit_inc(inc, old, new)
+        farm.make(*UCI)
+        oracle = farm.sha()
+    with SrcFarm() as farm:
+        farm.make(*UCI)
+        before_sha = farm.sha()
+        before = farm.mtimes()
+        expect = farm.includers("uci_regs.inc")
+        farm.edit_inc(inc, old, new)
+        proc = farm.make(*UCI)
+        after = farm.mtimes()
+        after_sha = farm.sha()
+
+    rebuilt = {k for k in after if after[k] != before.get(k)}
+    assert before_sha != oracle, (
+        "the uci_regs.inc edit does not change the PRG even from a clean "
+        "tree -- this test's oracle is vacuous; re-aim the edit")
+    assert expect, "no object includes uci_regs.inc -- re-aim the edit"
+    assert rebuilt == expect, (
+        f"editing {inc} rebuilt {sorted(rebuilt)}, expected exactly its "
+        f"includers {sorted(expect)}:\n{proc.stdout}")
+    assert after_sha == oracle, (
+        f"STALE OBJECTS: after editing {inc}, `make` produced\n  {after_sha}"
+        f"\nbut a clean build of the edited tree produces\n  {oracle}\n"
+        + ("i.e. nothing was rebuilt. " if after_sha == before_sha else "")
+        + "build/%.d should name the .inc as a prerequisite.")
 
 
 def test_https_host_change_is_still_incremental():

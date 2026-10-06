@@ -653,18 +653,27 @@ $(PRG): $(PRG_DEPS)
 
 link: $(PRG)
 
+# Each object also writes build/%.d: ca65's own list of every .include and
+# .incbin it read, plus an empty rule per file so a deleted .inc does not
+# fail the build. Included at the end of this file (after `all`, which must
+# stay the default goal), so an edit to any .inc rebuilds the objects
+# that read it. --create-dep is not in CA65FLAGS: it changes no
+# object byte. flags.stamp carries a DEPFILES line instead, so a tree built
+# before this rule (objects, no .d) is rebuilt once rather than trusted.
 build/%.o: src/%.s
 	@mkdir -p $(dir $@)
-	$(CA65) $(CA65FLAGS) -o $@ $<
+	$(CA65) $(CA65FLAGS) --create-dep $(@:.o=.d) -o $@ $<
 
 # src/net/ip65/ip65_blob.s pulls the prebuilt ip65 image in with a ca65
-# `.incbin`, which make's dependency graph cannot see. Without this edge
+# `.incbin`, which make cannot see until ip65_blob.d exists. Without this edge
 # make is free to assemble ip65_blob.s before the $(IP65_BIN) rule has
 # run, and from a clean build/ it does exactly that — failing with
 # "Cannot open include file '../../../ip65-build/ip65-c64.bin'" even
 # though the very same `make` invocation builds the blob a few targets
 # later. That is the fresh-clone failure in issue #89. Stating the edge
-# explicitly forces the correct order; it changes no output bytes.
+# explicitly forces the correct order; it changes no output bytes. Keep it
+# even with ip65_blob.d: the .d names the blob by absolute path, so it never
+# matches this relative target.
 # (Only meaningful under BACKEND=ip65 — the UCI build never assembles
 # this object, and never requests $(IP65_BIN).)
 build/net/ip65/ip65_blob.o: $(IP65_BIN)
@@ -857,7 +866,8 @@ FLAGS_STAMP_BODY := printf '%s\n' \
     'SIBLING_LIB_ARCHIVES=$(SIBLING_LIB_ARCHIVES)' \
     'X25519_SEG_FE25519=$(X25519_SEG_FE25519)' \
     'X25519_SEG_LADDER=$(X25519_SEG_LADDER)' \
-    'X25519_SEG_REU=$(X25519_SEG_REU)'
+    'X25519_SEG_REU=$(X25519_SEG_REU)' \
+    'DEPFILES=ca65 --create-dep'
 
 ifeq ($(STAMP_SKIP),)
 ifeq ($(MAKE_DRY_RUN),)
@@ -1218,3 +1228,6 @@ package:
 package-verify:
 	$(PACKAGE_PYTHON) tools/test_package_verify.py
 	$(PACKAGE_PYTHON) tools/package/verify_release.py
+
+# The per-object dependency files written by the build/%.o rule above.
+-include $(ALL_OBJS:.o=.d)
