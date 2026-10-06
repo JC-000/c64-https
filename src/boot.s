@@ -25,7 +25,9 @@
 .if .defined(HTTPS_PIN_SPKI) .and (.not .defined(BACKEND_UCI_M3))
         .import cert_pin_banner
 .endif
-.ifdef BACKEND_UCI
+; uci-m3 fills the sink only under HTTPS_BODY_TO_REU: otherwise no REU DMA
+.if .defined(BACKEND_UCI) .and ((.not .defined(BACKEND_UCI_M3)) .or .defined(HTTPS_BODY_TO_REU))
+SINK_PROBE = 1
         .import reu_probe_size
 .endif
 .ifdef COLD_BANK
@@ -281,7 +283,7 @@ start:
         inc @zbss_store+2
         dex
         bne @zbss_page
-.ifdef BACKEND_UCI
+.ifdef SINK_PROBE
         ; The REU's size bounds the HTTP body sink's region (src/http.s).
         ; Probed before anything else writes the REU: it writes offset 0
         ; of banks 0, 1, 2, 4 ... 128, which boot rewrites afterwards.

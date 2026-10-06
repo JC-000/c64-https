@@ -1022,6 +1022,34 @@ def test_refused_body_skips_the_viewer(prg=None, labels=None):
     m.no_violations()
 
 
+def test_boot_reu_dma_only_for_the_sink(prg=None, labels=None):
+    """Boot (`start`, to the menu) touches the REU registers ($DF00-$DF0A)
+    only on an HTTPS_BODY_TO_REU image, whose sink needs the REU's size
+    (reu_probe_size). A plain uci-m3 image does no REU DMA, as before the
+    sink bound: with the REU disabled the probe spins ~3 s at 1 MHz (adv-273
+    F3)."""
+    m = Machine(prg, labels)
+    hits = []
+    write = m.mem.write
+
+    def spy(addr, value):
+        if 0xDF00 <= (addr & 0xFFFF) <= 0xDF0A:
+            hits.append(addr & 0xFFFF)
+        write(addr, value)
+    m.mem.write = spy
+    try:
+        m.call("start", budget=20_000_000)
+    except CPUError:
+        pass                            # the menu waits for a key
+    _check("I=INIT" in m.screen_text(), "boot never reached the menu:\n"
+           + m.screen_text())
+    if "viewer_enter" in m.L:
+        _check(hits, "an HTTPS_BODY_TO_REU image did not probe the REU")
+    else:
+        _check(not hits, "a plain uci-m3 boot wrote the REU registers %d "
+               "times" % len(hits))
+
+
 def test_refusal_reaches_the_user(prg=None, labels=None):
     """The menu path: 'G' with the default target, the Open refused with 94.
     The user must see TLS HANDSHAKE FAILED and the WHOLE status line, and
@@ -1468,6 +1496,7 @@ TESTS = (
     test_only_version_alerts_read_as_no_tls13,
     test_data_more_wedge_keeps_89,
     test_held_session_message,
+    test_boot_reu_dma_only_for_the_sink,
 )
 
 # Need `make BACKEND=uci-m3 HTTPS_BODY_TO_REU=1` (viewer_enter linked); main

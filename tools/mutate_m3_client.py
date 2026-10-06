@@ -32,6 +32,7 @@ NET = "src/net/uci-m3/net.s"
 CMD = "src/net/uci-m3/m3_cmd.s"
 INC = "src/net/uci-m3/m3.inc"
 HTTP = "src/http.s"
+BOOT = "src/boot.s"
 UI = "src/net/uci-m3/m3_https_get.inc"
 
 # (name, rule, file, old, new, tests that must go red)
@@ -144,6 +145,9 @@ MUTANTS = [
      "        jsr http_body_finish    ; idempotent — http_sink_flushed latch\n"
      "        plp\n",
      ["test_http_sink_refusal_stops"]),
+    ("boot-probe-ungated", "plain uci-m3 boot does no REU DMA", BOOT,
+     ".if .defined(BACKEND_UCI) .and ((.not .defined(BACKEND_UCI_M3)) .or .defined(HTTPS_BODY_TO_REU))",
+     ".ifdef BACKEND_UCI", ["test_boot_reu_dma_only_for_the_sink"]),
     ("refused-not-8d", "$8D UCI_ERR_OPEN_REFUSED on a named refusal", NET,
      "        lda #UCI_ERR_OPEN_REFUSED   ; named in m3_status (e.g. 94,...)",
      "        lda #UCI_ERR_CONNECT_FAIL", ["test_refusal_line_is_kept_whole",
