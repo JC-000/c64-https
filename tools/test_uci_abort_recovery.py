@@ -58,9 +58,9 @@ Model time advances on ``$DF1C`` reads (as in the sibling models) and, here,
 on ``$DF1D`` command writes too, so an abort can land mid-command.
 
 The interpreter skips each inline ``uci_fence`` in one step (its only
-effects are a delay and C=1/V=0/NZ-from-A), because the unfixed code's
-65,536-iteration DATA_AV spin in ``uci_read_resp_bytes`` is otherwise too
-slow to interpret.  The fence reads no register, so no model tick is lost.
+effects are a delay and C=1/V=0/NZ-from-A).  It was added because
+``uci_read_resp_bytes`` then had a 65,536-iteration DATA_AV spin (since
+removed) that was too slow to interpret; it still keeps runs fast.  The fence reads no register, so no model tick is lost.
 
 WHAT IT DOES NOT PROVE
 
