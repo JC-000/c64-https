@@ -311,6 +311,11 @@ class Rig:
         if self.nested(L["cert_pin_hs_keys"]):
             return self._tls_fail()
         ram[L["tls_state"]] = TLS_CERT
+        # A real flight fills all of cert_buf, which on comb is where the
+        # cold groups run: no group copy survives a handshake, so a resident
+        # call into one runs $02 (JAM) here, as garbage would on hardware.
+        cb = L["cert_buf"]
+        ram[cb:cb + 2048] = bytes([0x02]) * 2048
         if self.server_key is not None:
             win = L["cert_buf"] + 0x100       # where a leaf would sit
             ram[win:win + 91] = spki_der(self.server_key)
