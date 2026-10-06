@@ -128,6 +128,22 @@ MUTANTS = [
      "        cmp #1\n",
      "@m3_complete:\n        jsr http_body_finish\n        clc\n",
      ["test_http_sink_refusal_stops"]),
+    ("sink-check-before-flush", "the verdict reads the latch after its own flush", HTTP,
+     "        php                     ; http_body_finish clobbers C\n"
+     "        jsr http_body_finish    ; idempotent — http_sink_flushed latch\n"
+     "        plp                     ; C = 1 iff no clean end (kept: LDA/AND\n"
+     ".ifdef BACKEND_UCI              ;  below leave C alone, unlike CMP)\n"
+     "        lda http_sink_full      ; a body the sink refused is never complete\n"
+     "        bne @to_short\n"
+     ".endif\n",
+     ".ifdef BACKEND_UCI\n"
+     "        lda http_sink_full\n"
+     "        bne @to_short\n"
+     ".endif\n"
+     "        php                     ; http_body_finish clobbers C\n"
+     "        jsr http_body_finish    ; idempotent — http_sink_flushed latch\n"
+     "        plp\n",
+     ["test_http_sink_refusal_stops"]),
     ("refused-not-8d", "$8D UCI_ERR_OPEN_REFUSED on a named refusal", NET,
      "        lda #UCI_ERR_OPEN_REFUSED   ; named in m3_status (e.g. 94,...)",
      "        lda #UCI_ERR_CONNECT_FAIL", ["test_refusal_line_is_kept_whole",

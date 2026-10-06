@@ -976,6 +976,22 @@ def test_http_sink_refusal_stops(prg=None, labels=None):
                    "the sink refused" % total)
         m.call("net_tcp_close")
         m.no_violations()
+    # Unframed (Connection: close), clean 01 end: the refusal first happens
+    # in http_recv_close_verdict's own final flush (adv-273 F1).
+    m = _connected(Machine(prg, labels))
+    m.poke("http_body_sink", 1)
+    m.poke("http_reu_body_base", 0x00)
+    m.poke("http_reu_body_base", 0x00, 1)
+    m.poke("http_reu_body_base", 0x03, 2)
+    body = bytes((i * 7) & 0x7F | 0x20 for i in range(100))
+    resp = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + body
+    carry, _, _ = _http_fetch(m, [("data", resp), ("end", CLOSED_BY_HOST)])
+    _check(m.peek("http_sink_full") == 1,
+           "unframed: the verdict's final flush was not refused")
+    _check(carry is True, "unframed + 01: a body whose final flush the sink "
+           "refused was reported complete")
+    m.call("net_tcp_close")
+    m.no_violations()
 
 
 def test_refusal_reaches_the_user(prg=None, labels=None):

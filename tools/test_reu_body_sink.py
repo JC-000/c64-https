@@ -211,6 +211,31 @@ def case_verdict(env):
     check(not c, "control: C=1 for a complete Content-Length body")
 
 
+def case_verdict_flush(env):
+    """A refusal that first happens in the verdict's OWN final flush: every
+    full bounce fit, the last partial one crosses the region's end. Both
+    verdicts must flush first and then read http_sink_full (adv-273 F1)."""
+    L = env.labels
+    for entry, framed in (("http_recv_close_verdict", False),
+                          ("http_recv_timeout_verdict", True)):
+        b = Box(env, size=512 * KB)
+        check(b.body_begin(0x05F000) == 0x1000, f"{entry}: 4 KB region")
+        b.ram[L["http_body_sink"]] = 1
+        b.put24("http_reu_cursor", 0x1000)       # 8 bounces fill it exactly
+        tail = 100                               # so any tail crosses the end
+        b.ram[L["http_resp_len"]] = tail
+        b.ram[L["http_resp_len"] + 1] = 0
+        b.put24("http_body_total", 0x1000 + tail)
+        b.ram[L["http_parse_state"]] = 2
+        b.ram[L["http_chunked"]] = 0
+        b.ram[L["http_cl_valid"]] = int(framed)
+        if framed:                               # Content-Length satisfied
+            b.put24("http_content_length", 0x1000 + tail)
+        c = b.m.cpu.call(L[entry])
+        check(b.r8("http_sink_full") == 1, f"{entry}: the final flush was not refused")
+        check(c, f"{entry}: C=0 for a body whose final flush the sink refused")
+
+
 def case_benign_big_body(env):
     """No attacker needed: the 751 KB Wikipedia demo body on a small REU.
 
@@ -249,6 +274,7 @@ def case_benign_big_body(env):
 
 
 CASES = [case_probe, case_regions, case_bound, case_attack, case_verdict,
+         case_verdict_flush,
          case_benign_big_body]
 
 
