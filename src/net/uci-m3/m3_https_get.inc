@@ -92,8 +92,15 @@ do_https_get:
 .ifdef VIEWER_LINKED
         lda http_body_sink
         beq @print_body
+        lda http_sink_full      ; the body outgrew its REU region: the
+        bne @sink_full          ;  sink stopped it (as boot.s's arm)
         jsr viewer_enter
         jmp @verdict
+@sink_full:
+        lda #<sink_full_msg
+        ldy #>sink_full_msg
+        jsr print_string
+        jmp @close
 @print_body:
 .endif
         jsr print_resp_body

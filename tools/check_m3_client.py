@@ -144,6 +144,7 @@ class M3Device:
         self.open_delay = FAST
         self.read_delay = FAST
         self.write_result = None        # None = ok, else (hdr, status)
+        self.on_write = None            # events for the next Open's session
         self.never = set()              # command bytes that never complete
         self.slow = {}                  # command byte -> delay in units
         self.forced_blocks = None       # READ: override the reply blocks
@@ -373,6 +374,8 @@ class M3Device:
                 return [], OK, d
             h = arg
             self.sessions[h] = {"rx": [], "claimed": False}
+            if self.on_write is not None:   # the response, for a menu fetch
+                self.sessions[h]["on_write"] = self.on_write
             self.gone.discard(h)
             return [bytes([h, 4, 3, 1, 0x13, 0x1D, 0, 0])], OK, d
         if op == 0x10:                                  # READ
@@ -994,6 +997,31 @@ def test_http_sink_refusal_stops(prg=None, labels=None):
     m.no_violations()
 
 
+def test_refused_body_skips_the_viewer(prg=None, labels=None):
+    """HTTPS_BODY_TO_REU builds only (VIEWER_TESTS): the menu path with a
+    body the sink refuses (no REU size, so an empty region) prints BODY TOO
+    BIG FOR THE REU and never enters the viewer, as boot.s's TLS arm does;
+    the viewer would show REU bytes the body never wrote (adv-273 F2)."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("ok", 5)
+    m.call("do_net_init")
+    body = bytes((i * 7) & 0x7F | 0x20 for i in range(100))
+    resp = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" + body
+    m.dev.on_write = [("data", resp), ("end", CLOSED_BY_HOST)]
+    m.mem.screen.clear()
+    m.mem.keys.extend(b"\r\r")                  # RETURN, RETURN: the defaults
+    try:
+        m.call("do_https_get", budget=200_000_000)
+    except CPUError as exc:
+        raise AssertionError("do_https_get did not return (the viewer waits "
+                             "for keys): %s\n%s" % (exc, m.screen_text()))
+    text = m.screen_text()
+    _check(m.peek("http_sink_full") == 1, "the sink never refused:\n" + text)
+    _check("BODY TOO BIG FOR THE REU" in text, "no BODY TOO BIG FOR THE REU "
+           "on screen:\n" + text)
+    m.no_violations()
+
+
 def test_refusal_reaches_the_user(prg=None, labels=None):
     """The menu path: 'G' with the default target, the Open refused with 94.
     The user must see TLS HANDSHAKE FAILED and the WHOLE status line, and
@@ -1442,11 +1470,18 @@ TESTS = (
     test_held_session_message,
 )
 
+# Need `make BACKEND=uci-m3 HTTPS_BODY_TO_REU=1` (viewer_enter linked); main
+# runs them on such an image and says so when they are not run.
+VIEWER_TESTS = (
+    test_refused_body_skips_the_viewer,
+)
+
 
 def run(prg=None, labels=None, only=None, quiet=False):
     """Run TESTS (or `only`, names) on one image. Returns {name: error|None}."""
     results = {}
-    for fn in TESTS:
+    tests = TESTS + (VIEWER_TESTS if "viewer_enter" in _labels(labels) else ())
+    for fn in tests:
         if only and fn.__name__ not in only:
             continue
         try:
@@ -1470,6 +1505,10 @@ def main():
         return cannot_run(str(exc), executed=0, total=len(TESTS),
                           certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV)
     results = run()
+    if "viewer_enter" not in _labels():
+        print("NOT RUN (%d): %s -- they need make BACKEND=uci-m3 "
+              "HTTPS_BODY_TO_REU=1" % (len(VIEWER_TESTS), ", ".join(
+                  f.__name__ for f in VIEWER_TESTS)))
     failed = [n for n, e in results.items() if e]
     print("\n%d/%d passed, %d assertions" % (len(results) - len(failed),
                                              len(results), ASSERTIONS_RUN))
