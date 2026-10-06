@@ -96,7 +96,10 @@ MODE = os.environ.get("RIG_MODE", "local")
 TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
 SCALE = max(1.0, 48.0 / TURBO_MHZ)
 INIT_WAIT = float(os.environ.get("C64_INIT_WAIT", str(90 * SCALE)))
-FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", str(240 * SCALE)))
+# live streams the ~750 KB Wikipedia demo body: 240 s did not cover it at
+# 48 MHz (2026-10-06); 900 s is what rig_https_banner.py's runs of it use
+FETCH_TIMEOUT = float(os.environ.get(
+    "FETCH_TIMEOUT", str((900 if MODE == "live" else 240) * SCALE)))
 PRG_PATH = REPO / "build" / "c64-https.prg"
 LABELS_PATH = REPO / "build" / "labels.txt"
 A_PATH, B_PATH = f"{TEST_DIR}/TRUST.A", f"{TEST_DIR}/TRUST.B"
