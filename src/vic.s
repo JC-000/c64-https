@@ -119,7 +119,7 @@
 VIC_CTRL1       = $d011                 ; VIC-II control register 1
 VIC_DEN         = $10                   ; bit 4 — display enable
 
-        .segment "LOADER_OVERFLOW"
+        .include "loader_overflow.inc"
 
 .ifdef NO_VIC_BLANK
 

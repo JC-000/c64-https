@@ -1619,7 +1619,7 @@ reu_p384_overlay_init:
 ; the ip65 LOADER region is the tightest in the image and this was the
 ; one routine that could leave it.
 ; =============================================================================
-        .segment "LOADER_OVERFLOW"
+        .include "loader_overflow.inc"
 print_local_ip:
         lda net_local_ip+0
         jsr @print_byte

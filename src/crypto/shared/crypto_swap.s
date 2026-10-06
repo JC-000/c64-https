@@ -190,7 +190,7 @@ REU_CMD_REU_TO_C64 = $91
 ; here.  Today's TLS production path (no P-384) never triggers that
 ; sequence so the gap is benign.
 ; -----------------------------------------------------------------------------
-.segment "LOADER_OVERFLOW"
+.include "loader_overflow.inc"
 
 crypto_swap_to_x25519_sibling:
         lda #OV_X25519_SIBLING

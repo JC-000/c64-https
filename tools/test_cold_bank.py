@@ -126,9 +126,11 @@ CFG_EDITS = [
      "    TRUST_PROMPT_CODE: load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes;\n"
      "    COLD_TAIL_TRUST:  load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes, define = yes;\n"),
     ("    LOADER_OVERFLOW: load = NET_CODE,     type = ro,  optional = yes;\n",
-     "    # Cold bank: LOADER_OVERFLOW in CRYPTO_HOT, so the trust hook and its\n"
-     "    # state fit NET_CODE on the Wikipedia demo (TRUST_STORE=1).\n"
-     "    LOADER_OVERFLOW: load = CRYPTO_HOT,   type = ro,  optional = yes;\n"),
+     "    LOADER_OVERFLOW: load = NET_CODE,     type = ro,  optional = yes;\n"
+     "    # Cold bank: TRUST_STORE=1 renames it (src/loader_overflow.inc) and it\n"
+     "    # goes to CRYPTO_HOT, so the trust hook and its state fit NET_CODE on\n"
+     "    # the Wikipedia demo; images without the store keep it here.\n"
+     "    LOADER_OVERFLOW_TS: load = CRYPTO_HOT, type = ro, optional = yes;\n"),
     ("    TRUST_POLICY_BSS: load = CRYPTO_HOT,     type = bss, optional = yes;\n"
      "    # (L3) The policy's prompts touch no store: resident, so the TRUST\n"
      "    # group keeps its 2 KB for the store and the store-driving policy.\n"
