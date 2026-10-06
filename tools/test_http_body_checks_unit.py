@@ -86,6 +86,16 @@ def test_body_complete_red_green() -> None:
     v = hbc.check_body_complete(state(body_total=125_704))
     assert not v.ok and "OVER-READ" in v.reason, v.reason
 
+    # A body the REU sink refused past its region (adv-l5 on #266) fails
+    # even when its Content-Length framing is satisfied, and the field is
+    # optional: a build without it decodes as 0.
+    v = hbc.check_body_complete(state(sink_full=1))
+    assert not v.ok and "REFUSED" in v.reason, v.reason
+    raw = {n: bytes(w) for n, w in hbc.SYMBOLS.items()}
+    assert hbc.decode_body_state(raw).sink_full == 0
+    raw["http_sink_full"] = b"\x01"
+    assert hbc.decode_body_state(raw).sink_full == 1
+
     # --- chunked framing ---------------------------------------------------
     chunked = dict(cl_valid=0, content_length=0, chunked=1)
     v = hbc.check_body_complete(state(**chunked,
@@ -877,9 +887,10 @@ def test_the_6502_verdict_keeps_the_shape_this_mirrors() -> None:
     body = src[start:src.index('.segment "CODE"', start)]
     order = [ln.split()[1] for ln in body.splitlines()
              if ln.strip().startswith("lda http_")]
-    assert order[:3] == ["http_parse_state", "http_cl_valid", "http_chunked"], (
-        f"http_recv_timeout_verdict now tests {order[:3]}; this module "
-        "mirrors parse_state -> cl_valid -> chunked and its "
+    assert order[:4] == ["http_sink_full", "http_parse_state", "http_cl_valid",
+                         "http_chunked"], (
+        f"http_recv_timeout_verdict now tests {order[:4]}; this module "
+        "mirrors sink_full -> parse_state -> cl_valid -> chunked and its "
         "cl_valid-before-chunked precedence would no longer match the PRG")
     # And the documented divergence is still the divergence we documented:
     # the 6502 chunked arm rejects unconditionally and never reads

@@ -144,6 +144,7 @@ class M3Device:
         self.open_delay = FAST
         self.read_delay = FAST
         self.write_result = None        # None = ok, else (hdr, status)
+        self.on_write = None            # events for the next Open's session
         self.never = set()              # command bytes that never complete
         self.slow = {}                  # command byte -> delay in units
         self.forced_blocks = None       # READ: override the reply blocks
@@ -373,6 +374,8 @@ class M3Device:
                 return [], OK, d
             h = arg
             self.sessions[h] = {"rx": [], "claimed": False}
+            if self.on_write is not None:   # the response, for a menu fetch
+                self.sessions[h]["on_write"] = self.on_write
             self.gone.discard(h)
             return [bytes([h, 4, 3, 1, 0x13, 0x1D, 0, 0])], OK, d
         if op == 0x10:                                  # READ
@@ -501,6 +504,20 @@ def _check(cond, msg):
     ASSERTIONS_RUN += 1
     if not cond:
         raise AssertionError(msg)
+
+
+def _body_to_reu(labels=None):
+    """True for an HTTPS_BODY_TO_REU image, read off the CA65FLAGS in the
+    flags.stamp beside its labels. Not `viewer_enter in labels`: KEEP_VIEWER
+    and VIEWER_TEST_HELPERS link the viewer without the sink."""
+    stamp = Path(labels or LABELS).parent / "flags.stamp"
+    if not stamp.is_file():
+        raise Unavailable("%s is missing: cannot tell whether the image "
+                          "streams the body to the REU" % stamp)
+    for line in stamp.read_text().splitlines():
+        if line.startswith("CA65FLAGS="):
+            return "-D HTTPS_BODY_TO_REU" in line
+    raise Unavailable("%s has no CA65FLAGS line" % stamp)
 
 
 def _labels(path=None):
@@ -951,6 +968,102 @@ def test_http_05_unframed_is_short(prg=None, labels=None):
         m.no_violations()
 
 
+def test_http_sink_refusal_stops(prg=None, labels=None):
+    """HTTPS_BODY_TO_REU: a body the REU sink refuses (here: no REU size
+    established, so the region is empty and every blit is refused) is C=1.
+    A 2,000 B body is refused at its first 512 B blit, mid-stream: the loop
+    stops there instead of reading on to the framing's end. A 100 B body is
+    refused at the final flush, after the framing completed."""
+    for size in (2000, 100):
+        m = _connected(Machine(prg, labels))
+        m.poke("http_body_sink", 1)
+        m.poke("http_reu_body_base", 0x00)
+        m.poke("http_reu_body_base", 0x00, 1)
+        m.poke("http_reu_body_base", 0x03, 2)  # bank 3: above the floor
+        body = bytes((i * 7) & 0x7F | 0x20 for i in range(size))
+        resp = (b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % size) + body
+        events = [("data", resp[i:i + 600]) for i in range(0, len(resp), 600)]
+        carry, _, total = _http_fetch(m, events + [("end", CLOSED_BY_HOST)])
+        _check(m.peek("http_sink_full") == 1,
+               "%d B: the sink never refused a blit" % size)
+        _check(carry is True, "%d B: a body the sink refused was reported "
+               "complete" % size)
+        if size > 512:
+            _check(total < size, "read on to the framing's end (%d B) after "
+                   "the sink refused" % total)
+        m.call("net_tcp_close")
+        m.no_violations()
+    # Unframed (Connection: close), clean 01 end: the refusal first happens
+    # in http_recv_close_verdict's own final flush (adv-273 F1).
+    m = _connected(Machine(prg, labels))
+    m.poke("http_body_sink", 1)
+    m.poke("http_reu_body_base", 0x00)
+    m.poke("http_reu_body_base", 0x00, 1)
+    m.poke("http_reu_body_base", 0x03, 2)
+    body = bytes((i * 7) & 0x7F | 0x20 for i in range(100))
+    resp = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + body
+    carry, _, _ = _http_fetch(m, [("data", resp), ("end", CLOSED_BY_HOST)])
+    _check(m.peek("http_sink_full") == 1,
+           "unframed: the verdict's final flush was not refused")
+    _check(carry is True, "unframed + 01: a body whose final flush the sink "
+           "refused was reported complete")
+    m.call("net_tcp_close")
+    m.no_violations()
+
+
+def test_refused_body_skips_the_viewer(prg=None, labels=None):
+    """HTTPS_BODY_TO_REU builds only (VIEWER_TESTS): the menu path with a
+    body the sink refuses (no REU size, so an empty region) prints BODY TOO
+    BIG FOR THE REU and never enters the viewer, as boot.s's TLS arm does;
+    the viewer would show REU bytes the body never wrote (adv-273 F2)."""
+    m = Machine(prg, labels)
+    m.dev.open_result = ("ok", 5)
+    m.call("do_net_init")
+    body = bytes((i * 7) & 0x7F | 0x20 for i in range(100))
+    resp = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" + body
+    m.dev.on_write = [("data", resp), ("end", CLOSED_BY_HOST)]
+    m.mem.screen.clear()
+    m.mem.keys.extend(b"\r\r")                  # RETURN, RETURN: the defaults
+    try:
+        m.call("do_https_get", budget=200_000_000)
+    except CPUError as exc:
+        raise AssertionError("do_https_get did not return (the viewer waits "
+                             "for keys): %s\n%s" % (exc, m.screen_text()))
+    text = m.screen_text()
+    _check(m.peek("http_sink_full") == 1, "the sink never refused:\n" + text)
+    _check("BODY TOO BIG FOR THE REU" in text, "no BODY TOO BIG FOR THE REU "
+           "on screen:\n" + text)
+    m.no_violations()
+
+
+def test_boot_reu_dma_only_for_the_sink(prg=None, labels=None):
+    """Boot (`start`, to the menu) touches the REU registers ($DF00-$DF0A)
+    only on an HTTPS_BODY_TO_REU image, whose sink needs the REU's size
+    (reu_probe_size). A plain uci-m3 image does no REU DMA, as before the
+    sink bound: with the REU disabled the probe spins ~3 s at 1 MHz (adv-273
+    F3)."""
+    m = Machine(prg, labels)
+    hits = []
+    write = m.mem.write
+
+    def spy(addr, value):
+        if 0xDF00 <= (addr & 0xFFFF) <= 0xDF0A:
+            hits.append(addr & 0xFFFF)
+        write(addr, value)
+    m.mem.write = spy
+    try:
+        m.call("start", budget=20_000_000)
+    except CPUError:
+        pass                            # the menu waits for a key
+    _check("I=INIT" in m.screen_text(), "boot never reached the menu:\n"
+           + m.screen_text())
+    if _body_to_reu(labels):
+        _check(hits, "an HTTPS_BODY_TO_REU image did not probe the REU")
+    else:
+        _check(not hits, "a plain uci-m3 boot wrote the REU registers %d "
+               "times" % len(hits))
+
+
 def test_refusal_reaches_the_user(prg=None, labels=None):
     """The menu path: 'G' with the default target, the Open refused with 94.
     The user must see TLS HANDSHAKE FAILED and the WHOLE status line, and
@@ -1370,6 +1483,7 @@ TESTS = (
     test_long_write_is_split_at_892,
     test_http_content_length_end_to_end,
     test_http_05_unframed_is_short,
+    test_http_sink_refusal_stops,
     test_refusal_reaches_the_user,
     test_no_tls_firmware_reaches_the_user,
     test_http_unframed_stall_is_short,
@@ -1396,13 +1510,21 @@ TESTS = (
     test_only_version_alerts_read_as_no_tls13,
     test_data_more_wedge_keeps_89,
     test_held_session_message,
+    test_boot_reu_dma_only_for_the_sink,
+)
+
+# Need `make BACKEND=uci-m3 HTTPS_BODY_TO_REU=1` (flags.stamp says so); main
+# runs them on such an image and says so when they are not run.
+VIEWER_TESTS = (
+    test_refused_body_skips_the_viewer,
 )
 
 
 def run(prg=None, labels=None, only=None, quiet=False):
     """Run TESTS (or `only`, names) on one image. Returns {name: error|None}."""
     results = {}
-    for fn in TESTS:
+    tests = TESTS + (VIEWER_TESTS if _body_to_reu(labels) else ())
+    for fn in tests:
         if only and fn.__name__ not in only:
             continue
         try:
@@ -1426,6 +1548,10 @@ def main():
         return cannot_run(str(exc), executed=0, total=len(TESTS),
                           certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV)
     results = run()
+    if not _body_to_reu():
+        print("NOT RUN (%d): %s -- they need make BACKEND=uci-m3 "
+              "HTTPS_BODY_TO_REU=1" % (len(VIEWER_TESTS), ", ".join(
+                  f.__name__ for f in VIEWER_TESTS)))
     failed = [n for n, e in results.items() if e]
     print("\n%d/%d passed, %d assertions" % (len(results) - len(failed),
                                              len(results), ASSERTIONS_RUN))

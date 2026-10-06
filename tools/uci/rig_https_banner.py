@@ -91,7 +91,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from http_body_checks import (  # noqa: E402
     EXIT_FAIL, EXIT_INCONCLUSIVE, EXIT_PASS, PARSE_STATE_BODY, STALL_ABORT,
     STALL_GRACE,
-    SYMBOLS, StallTracker, check_body_complete, check_fetch_settled,
+    OPTIONAL_SYMBOLS, SYMBOLS, StallTracker, check_body_complete, check_fetch_settled,
     check_http_status, close_confirmed, decide_exit, decode_body_state,
     early_stop_step, poll_until, stall_config_error,
 )
@@ -209,6 +209,15 @@ def main() -> int:
         prompt = True
     except KeyError:
         prompt = False
+    # OPTIONAL_SYMBOLS (UCI-only parser state, e.g. http_sink_full) are
+    # resolved here, before any socket opens, and read one by one: they are
+    # nowhere near the span read_state() takes in one DMA.
+    optional = {}
+    for name, width in OPTIONAL_SYMBOLS.items():
+        try:
+            optional[name] = (label_addr(name), width)
+        except KeyError:
+            pass                        # not in this build: decodes as 0
     if (TYPED_HOST or TYPED_PATH) and not prompt:
         print("[fatal] TYPED_HOST/TYPED_PATH set, but this PRG has no "
               "https_target_prompt (not a UCI build with #155 phase 2)",
@@ -394,6 +403,8 @@ def main() -> int:
             for name, width in SYMBOLS.items():
                 off = addrs[name] - span_lo
                 raw[name] = blob[off:off + width]
+            for name, (addr, width) in optional.items():
+                raw[name] = bytes(client.read_mem(addr, width))
             return decode_body_state(raw)
 
         # Everything above lives in CRYPTO_COLD_SHADOW, RAM under the BASIC

@@ -32,6 +32,7 @@ NET = "src/net/uci-m3/net.s"
 CMD = "src/net/uci-m3/m3_cmd.s"
 INC = "src/net/uci-m3/m3.inc"
 HTTP = "src/http.s"
+BOOT = "src/boot.s"
 UI = "src/net/uci-m3/m3_https_get.inc"
 
 # (name, rule, file, old, new, tests that must go red)
@@ -118,6 +119,35 @@ MUTANTS = [
     ("05-unframed-trusted", "S 1.6 05: trust only framed data", HTTP,
      "        lda m3_eof_code\n        cmp #5\n        bne @m3_framed",
      "        jmp @m3_framed", ["test_http_05_unframed_is_short"]),
+    ("sink-refusal-ignored", "a body the REU sink refused stops, C=1", HTTP,
+     "        lda http_sink_full      ; the body outgrew its REU region: stop\n"
+     "        bne @m3_dead            ;  now, C=1\n", "",
+     ["test_http_sink_refusal_stops"]),
+    ("sink-refusal-complete", "a body the REU sink refused is never C=0", HTTP,
+     "@m3_complete:\n        jsr http_body_finish\n"
+     "        lda http_sink_full      ; C=1 iff the sink refused a write\n"
+     "        cmp #1\n",
+     "@m3_complete:\n        jsr http_body_finish\n        clc\n",
+     ["test_http_sink_refusal_stops"]),
+    ("sink-check-before-flush", "the verdict reads the latch after its own flush", HTTP,
+     "        php                     ; http_body_finish clobbers C\n"
+     "        jsr http_body_finish    ; idempotent — http_sink_flushed latch\n"
+     "        plp                     ; C = 1 iff no clean end (kept: LDA/AND\n"
+     ".ifdef BACKEND_UCI              ;  below leave C alone, unlike CMP)\n"
+     "        lda http_sink_full      ; a body the sink refused is never complete\n"
+     "        bne @to_short\n"
+     ".endif\n",
+     ".ifdef BACKEND_UCI\n"
+     "        lda http_sink_full\n"
+     "        bne @to_short\n"
+     ".endif\n"
+     "        php                     ; http_body_finish clobbers C\n"
+     "        jsr http_body_finish    ; idempotent — http_sink_flushed latch\n"
+     "        plp\n",
+     ["test_http_sink_refusal_stops"]),
+    ("boot-probe-ungated", "plain uci-m3 boot does no REU DMA", BOOT,
+     ".if .defined(BACKEND_UCI) .and ((.not .defined(BACKEND_UCI_M3)) .or .defined(HTTPS_BODY_TO_REU))",
+     ".ifdef BACKEND_UCI", ["test_boot_reu_dma_only_for_the_sink"]),
     ("refused-not-8d", "$8D UCI_ERR_OPEN_REFUSED on a named refusal", NET,
      "        lda #UCI_ERR_OPEN_REFUSED   ; named in m3_status (e.g. 94,...)",
      "        lda #UCI_ERR_CONNECT_FAIL", ["test_refusal_line_is_kept_whole",
@@ -260,6 +290,11 @@ def _stamp():
         raise SystemExit("build/ is not a BACKEND=uci-m3 build (flags.stamp "
                          "says %r): run `make BACKEND=uci-m3` first"
                          % vals.get("BACKEND"))
+    if "-D HTTPS_BODY_TO_REU" in vals.get("CA65FLAGS", ""):
+        # boot-probe-ungated is equivalent there (that image probes anyway),
+        # and the rules here are the plain image's.
+        raise SystemExit("build/ is an HTTPS_BODY_TO_REU image: the mutants "
+                         "are written against plain `make BACKEND=uci-m3`")
     return vals
 
 
@@ -280,6 +315,8 @@ def build(workdir: Path, mutate=None) -> Path:
     shutil.copytree(REPO / "cfg", workdir / "cfg")
     (workdir / "build").mkdir()
     shutil.copy(REPO / "build" / "https_host.inc", workdir / "build")
+    shutil.copy(REPO / "build" / "flags.stamp", workdir / "build")  # the
+    # same flags; check_m3_client reads the image's kind off it
     if mutate:
         path, old, new = mutate
         f = workdir / path
