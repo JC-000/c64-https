@@ -49,11 +49,10 @@ MAKE_ARGS=(BACKEND=uci-m3 "HTTPS_HOST=$DEMO_HOST" "HTTPS_PATH=$DEMO_PATH")
 
 # What the firmware side published; quoted in the README, checked nowhere
 # here (the device is not involved in a build).
-# esp-tls/m3 f2e46946 is a LOCAL firmware branch, not fetchable upstream:
-# the requirement is the interface, and the commit is only where it was
+# The requirement is the interface; the build named is only where it was
 # validated. The upstream PR numbers are not known yet; the README carries a
 # marked slot for them (UPSTREAM_PRS overrides it once they exist).
-FIRMWARE="M3-SPEC v1 + errata v1.1/v1.2 firmware (validated on esp-tls/m3 f2e46946)"
+FIRMWARE="M3-SPEC v1 + errata v1.1/v1.2 firmware (validated on esp-tls/m3-master 3a1ff9ff: fw 3.15, FPGA 126, ESP 1.309)"
 UPSTREAM_PRS="${UPSTREAM_PRS:-[TO BE FILLED IN: 1541ultimate upstream PR number(s)]}"
 SPEC="M3-SPEC v1 (= r7.7), sha256 c265fdfcfdd08dee989a96eee25fae66fb6650ee4be8bb24f8dd791d9ee3db9f, with errata v1.1 (f9a39ff334b34cb0e1a63d5d508675de552ac8eacb23ccd6095a7f4c72788f9a) and v1.2 (a6802f40db3229d53591ef6e0773641d723186e779dd8726abff5915cbe551a4)"
 
@@ -196,11 +195,12 @@ Three URLs to try
      not name it.)
 
 Measured with THIS image (PRG sha256 above), validated on an Ultimate 64
-Elite (U64E), firmware 3.15 git f2e46946, 48 MHz, the .d64 mounted on drive
-8 and loaded with LOAD"*",8,1 (tools/uci/rig_https_m3_demo.py), 2026-10-01:
-  1. HTTP 200, 751,108 B consumed == Content-Length, 207 s from G to
+Elite (U64E), firmware 3.15 git 3a1ff9ff, 48 MHz, REU disabled, the .d64
+mounted on drive 8 and loaded with LOAD"*",8,1
+(tools/uci/rig_https_m3_demo.py), 2026-10-06:
+  1. HTTP 200, 751,848 B, complete by its chunked framing, 207 s from G to
      CONNECTION CLOSED (the page size changes as the article is edited).
-  2. HTTP 200, 14,181 B consumed == Content-Length, 7 s.
+  2. HTTP 200, 16,739 B consumed == Content-Length, 9 s.
   3. Refused: 94,CERTIFICATE NAME MISMATCH: 0x00000004.
   Other Ultimate models, and other clock speeds, have not been tested.
 
