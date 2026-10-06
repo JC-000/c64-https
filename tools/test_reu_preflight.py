@@ -74,6 +74,8 @@ REU_VALUES = ["Disabled", "Enabled", "GeoRAM Mode"]
 LABELS_REU = "al 006000 .ecdsa_verify_256\nal 00A000 .tls_rec_buf\n"
 # LIB_NISTCURVES_REU_BANKS_USED = 0 — the manifest equate saying "no REU".
 LABELS_ONCHIP = "al 000000 .LIB_NISTCURVES_REU_BANKS_USED\nal 006000 .gen_mul_row\n"
+#: BACKEND=uci-m3: the M3 adapter, no nistcurves equate, no row generator.
+LABELS_M3 = "al 00AF9F .m3_owned\nal 00BC00 .sqtab_lo\n"
 
 
 class _HarnessError(Exception):
@@ -290,6 +292,32 @@ def test_onchip_build_makes_no_device_call() -> None:
     assert result == "onchip", f"expected onchip, got {result!r}"
     assert client.calls == [], f"onchip build touched the device: {client.calls!r}"
     assert "no REU required" in out
+
+
+def test_m3_build_needs_no_reu_and_makes_no_device_call() -> None:
+    """uci-m3 links no 6510 crypto: it is not the fail-closed REU answer."""
+    client = FakeClient(item=AssertionError("no device call for a uci-m3 build"),
+                        value=AssertionError("no device call for a uci-m3 build"))
+    result, out = _run(client, LABELS_M3)
+    assert result == "none", f"expected none, got {result!r}\n{out}"
+    assert client.calls == [], f"uci-m3 build touched the device: {client.calls!r}"
+
+
+def test_an_m3_build_with_the_reu_body_sink_needs_the_reu() -> None:
+    """HTTPS_BODY_TO_REU=1 links the viewer: the REU is needed after all."""
+    with tempfile.TemporaryDirectory() as tmp:
+        labels = Path(tmp) / "labels.txt"
+        labels.write_text(LABELS_M3 + "al 00243A .viewer_enter\n")
+        assert pf.detect_crypto_profile(labels)[0] == "reu"
+
+
+def test_the_m3_marker_does_not_outvote_the_manifest_equate() -> None:
+    """The equate stays authoritative: a REU-claiming build is still REU."""
+    with tempfile.TemporaryDirectory() as tmp:
+        labels = Path(tmp) / "labels.txt"
+        labels.write_text("al 000004 .LIB_NISTCURVES_REU_BANKS_USED\n"
+                          "al 00AF9F .m3_owned\n")
+        assert pf.detect_crypto_profile(labels)[0] == "reu"
 
 
 def test_empty_current_is_unreadable_not_disabled() -> None:

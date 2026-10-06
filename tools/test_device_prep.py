@@ -67,6 +67,7 @@ CAT_CART = dp.CAT_CART
 # on-chip row generator is the REU profile; the equate at 0 is on-chip.
 LABELS_REU = "al 006000 .ecdsa_verify_256\nal 00A000 .tls_rec_buf\n"
 LABELS_ONCHIP = "al 000000 .LIB_NISTCURVES_REU_BANKS_USED\nal 006000 .gen_mul_row\n"
+LABELS_M3 = "al 00AF9F .m3_owned\nal 00BC00 .sqtab_lo\n"
 
 #: A device at the factory default: 1 MHz, turbo off, no REU. This is the
 #: ordinary state of a freshly power-cycled U64E, not a broken one — which is
@@ -362,6 +363,36 @@ def test_onchip_build_never_writes_the_reu() -> None:
     assert "no REU configuration needed" in out
 
 
+def test_m3_build_switches_the_reu_off() -> None:
+    """uci-m3 needs no REU, and its runs prove it: the REU is turned OFF."""
+    report, writers, out = _run(FakeClient([READY_STATE, DEFAULT_STATE]),
+                                labels=LABELS_M3)
+    assert report["profile"] == "none", out
+    assert writers.reu == [(False, None)], f"REU not switched off:\n{out}"
+    assert report["wanted"]["reu"] == "Disabled"
+    assert report["after"][f"{CAT_CART}/RAM Expansion Unit"] == "Disabled"
+
+
+def test_m3_build_with_the_reu_off_writes_nothing() -> None:
+    report, writers, out = _run(FakeClient([DEFAULT_STATE]), labels=LABELS_M3)
+    assert writers.reu == [], f"redundant REU write:\n{out}"
+    assert "reu" in report["skipped_write"]
+
+
+def test_m3_build_unreadable_reu_is_switched_off_anyway() -> None:
+    """Disabling is the safe direction, so an unreadable state writes."""
+    blind = dict(READY_STATE)
+    blind[f"{CAT_CART}/RAM Expansion Unit"] = _HarnessError("read refused")
+    report, writers, out = _run(FakeClient([blind]), labels=LABELS_M3)
+    assert writers.reu == [(False, None)], out
+
+
+def test_m3_build_refused_disable_is_exit_4() -> None:
+    exc = _assert_raises_prep(FakeClient([READY_STATE]), "refused disable",
+                              labels=LABELS_M3, reu_raises=_HarnessError("400"))
+    assert "Disabled" in str(exc)
+
+
 # --------------------------------------------- the REU write can itself fail
 
 def test_a_refused_reu_write_is_exit_4_with_a_ladder_not_a_traceback() -> None:
@@ -558,6 +589,16 @@ def test_skipping_prep_warns_that_the_clock_is_unmanaged() -> None:
 #: changes.
 KNOWN_UNPREPPED: dict[str, str] = {}
 
+#: Rigs the discovery rule below cannot see that still depend on the clock
+#: and REU state the prep sets: the demo rig boots from the drive
+#: (LOAD"*",8,1), not by DMA. Registered by name.
+REGISTERED_RIGS = ("rig_https_m3_demo.py",)
+
+
+def _covered_rigs():
+    """What the contract covers: the discovered rigs plus the registered."""
+    return sorted(set(_crypto_path_rigs()) | {UCI / n for n in REGISTERED_RIGS})
+
 
 def _crypto_path_rigs():
     """Discover the rigs this contract covers, rather than listing them.
@@ -609,13 +650,21 @@ def test_the_discovery_rule_finds_the_known_rigs() -> None:
                 "rig_https_live.py", "rig_https_local.py",
                 "rig_https_wiki.py", "rig_https_banner.py",
                 "rig_close_retry.py", "rig_https_refetch.py",
-                "rig_trust_policy.py"}
+                "rig_trust_policy.py", "rig_https_m3.py"}
     assert names == expected, (
         f"the discovery rule now selects {sorted(names)}, not "
         f"{sorted(expected)}. If a rig was added or renamed that is fine — "
         "update this list deliberately. If the rule stopped matching, the "
         "contract below silently covers less than it claims."
     )
+
+
+def test_registered_rigs_exist_and_are_not_discovered() -> None:
+    """A registration is for a rig the rule misses; one it finds is noise."""
+    for name in REGISTERED_RIGS:
+        assert (UCI / name).is_file(), f"REGISTERED_RIGS names a missing file: {name}"
+    found = {p.name for p in _crypto_path_rigs()} & set(REGISTERED_RIGS)
+    assert not found, f"{sorted(found)} are discovered now: drop the registration"
 
 
 def _call_lines(tree, name):
@@ -635,7 +684,7 @@ def test_every_crypto_rig_prepares_before_it_checks() -> None:
     a convention, not a fix, and #197's defect was exactly four rigs holding
     a guard with no setup behind it.
     """
-    for path in _crypto_path_rigs():
+    for path in _covered_rigs():
         tree = ast.parse(path.read_text(), filename=str(path))
         prep = _call_lines(tree, "prepare_device")
         flight = _call_lines(tree, "preflight_reu")
@@ -680,7 +729,7 @@ def test_every_prepping_rig_hands_over_its_run_artifact_dir() -> None:
     supplies its own Python-level default) it would write nothing at all.
     So every call site passes `artifact_dir` explicitly.
     """
-    for path in _crypto_path_rigs():
+    for path in _covered_rigs():
         if path.name in KNOWN_UNPREPPED:
             continue
         tree = ast.parse(path.read_text(), filename=str(path))

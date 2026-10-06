@@ -33,6 +33,7 @@ Exit: 0 pass, 1 fail, 2 fatal, 3 DeviceLock timeout, 4 device prep / load.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import zlib
@@ -47,10 +48,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _device_lock_helper import LockTimeoutConfigError, acquire_device_lock  # noqa: E402
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _prg_load import PrgLoadError, load_verified_and_run  # noqa: E402
-from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
+from _reu_preflight import (  # noqa: E402
+    ReuPreflightError, detect_crypto_profile, preflight_reu)
 from boot_check import decode_screen, screen_text  # noqa: E402
 from _petscii_keys import push_keys, target_keys  # noqa: E402
 from _rig_lifecycle import guard_socket_teardown  # noqa: E402
+from rig_https_local import _create_run_dir  # noqa: E402
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 REPO = Path(__file__).resolve().parents[2]
@@ -96,6 +99,56 @@ def wait_for(client, markers, budget: float):
         time.sleep(1.0)
 
 
+def wait_after(client, anchor, markers, budget: float):
+    """Like wait_for, but only counts text after the LAST `anchor` on the
+    screen: an earlier step's lines (CONNECTION CLOSED, DHCP OK) are still
+    there. Nothing counts until `anchor` is on screen, so the caller must
+    know it will be (or wait_for it first). `markers` are regular
+    expressions; the one that matched is returned."""
+    end = time.monotonic() + budget
+    while True:
+        lines, text = screen(client)
+        tail = text[text.rfind(anchor):] if anchor in text else ""
+        for m in markers:
+            if re.search(m, tail):
+                return m, lines
+        if time.monotonic() > end:
+            return None, lines
+        time.sleep(1.0)
+
+
+#: The end of do_net_init: the whole address is printed (then CR, RTS).
+DHCP_DONE = r"DHCP OK - IP: \d+\.\d+\.\d+\.\d+"
+
+
+def press_init(client) -> None:
+    """'I', then wait for THAT init's verdict.
+
+    The boot runs the same init before it prints the menu, so "DHCP OK" is
+    already on screen when 'I' is pressed; waiting for it returned at once
+    and let 'G' land while the re-init was still running. Only text after
+    the menu line belongs to this 'I'. The menu is on screen when 'I' is
+    pressed (the caller waited for it), with a blank row under it, so at
+    row 22 at the lowest; a successful re-init prints four rows, so the
+    menu is still there when DHCP OK is. (A failure long enough to scroll
+    it off ends in a timeout: still a FAIL.) The address is matched while
+    it may still be printing, so the screen must then read the same twice.
+    """
+    client.send_text("I", finish_with_return=False)
+    m, lines = wait_after(client, "Q=QUIT", [DHCP_DONE, "FAILED"], 120)
+    if m != DHCP_DONE:
+        dump(lines, "init")
+        raise Fail("network init: %s" % m)
+    for _ in range(10):
+        time.sleep(1.0)
+        again, _text = screen(client)
+        if again == lines:
+            return
+        lines = again
+    dump(lines, "init")
+    raise Fail("the screen kept changing after DHCP OK")
+
+
 def dump(lines, title):
     print(f"--- {title} ---")
     for i, line in enumerate(lines):
@@ -120,11 +173,7 @@ def run_fetch(client, prg_path: Path, host: str, path: str):
     if not m:
         dump(lines, "boot")
         raise Fail("menu never appeared")
-    client.send_text("I", finish_with_return=False)
-    m, lines = wait_for(client, ["DHCP OK", "FAILED"], 120)
-    if m != "DHCP OK":
-        dump(lines, "init")
-        raise Fail("network init: %s" % m)
+    press_init(client)
     client.send_text("G", finish_with_return=False)
     push_keys(client, target_keys(f"{host}\r{path}\r"))
     m, lines = wait_for(client, ENDS, FETCH_TIMEOUT)
@@ -200,6 +249,14 @@ def main(argv) -> int:
         host, path = argv[2], argv[3]
         runs = [("A (uci-m3)", PRG_A, LABELS_A),
                 ("B (6510 TLS)", Path(argv[4]), Path(argv[5]))]
+        # The device is prepared for A, which needs no REU (prep turns it
+        # off), so B must need none either: a REU-profile or comb B would
+        # spin. Refused rather than prepared twice.
+        b_profile, why = detect_crypto_profile(argv[5])
+        if b_profile != "onchip":
+            print(f"[fatal] B must be an on-chip build (no REU); {argv[5]} "
+                  f"is {b_profile!r} ({why})", file=sys.stderr)
+            return 2
     lock = DeviceLock(HOST)
     try:
         acquire_device_lock(lock)
@@ -218,10 +275,11 @@ def main(argv) -> int:
         print(f"device: {info.get('product')} fw {info.get('firmware_version')} "
               f"git {info.get('git_commit_hash')} core {info.get('core_version')}")
         enable_uci(client)
-        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        run_dir = _create_run_dir(RUN_DIR)
+        print(f"run dir: {run_dir} (device_state.json)")
         try:
             prepare_device(client, LABELS_A, turbo_mhz=TURBO_MHZ,
-                           artifact_dir=RUN_DIR)
+                           artifact_dir=run_dir)
         except DevicePrepError as exc:
             print(str(exc), file=sys.stderr)
             return 4

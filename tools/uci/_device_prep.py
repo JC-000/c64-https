@@ -398,7 +398,7 @@ def prepare_device(
         "profile_reason": reason,
         "wanted": {
             "turbo_mhz": turbo_mhz,
-            "reu": None if profile == "onchip" else reu_size,
+            "reu": {"onchip": None, "none": "Disabled"}.get(profile, reu_size),
         },
         "wrote": [],
         "skipped_write": [],
@@ -425,9 +425,32 @@ def prepare_device(
     # On-chip builds need no REU, so nothing is read, written or reported
     # about one. Anything else gets the configuration it needs, and an
     # unreadable probe degrades toward WRITING it (#197's asymmetry).
+    # A build with no 6510 crypto (uci-m3) is run with the REU switched
+    # OFF, so a "needs no REU" claim is measured, not inherited from the
+    # previous lane. Disabling is safe, so an unreadable state writes too.
     if profile == "onchip":
         print(f"device prep: on-chip profile ({reason}) — no REU "
               "configuration needed", file=out, flush=True)
+    elif profile == "none":
+        if before.get(f"{CAT_CART}/{ITEM_REU_ENABLED}") == "Disabled":
+            print(f"device prep: {reason} — REU already Disabled",
+                  file=out, flush=True)
+            report["skipped_write"].append("reu")
+        else:
+            print(f"device prep: {reason} — setting REU Disabled — "
+                  "runtime-only, REVERTS ON POWER CYCLE", file=out, flush=True)
+            writer = set_reu if set_reu is not None else _harness_set_reu()
+            try:
+                writer(client, False)
+            except Exception as exc:         # noqa: BLE001 — becomes exit 4
+                raise DevicePrepError(
+                    f"\nDEVICE PREP FAILED — the device refused 'RAM "
+                    f"Expansion Unit: Disabled' ({exc.__class__.__name__}: "
+                    f"{exc}). This build is run with the REU off; not "
+                    f"starting it with the REU in an unknown state.\n"
+                ) from exc
+            report["wrote"].append("reu")
+            time.sleep(float(os.environ.get("REU_SETTLE", "3.0")))
     else:
         match = _reu_matches(before, reu_size)
         if match is True:
