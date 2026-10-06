@@ -46,6 +46,7 @@ import time
 
 from c64_test_harness import (
     Labels, ViceInstanceManager, read_bytes, write_bytes, jsr, wait_for_text,
+    set_breakpoint, delete_breakpoint, wait_for_pc,
 )
 from c64_test_harness import TimeoutError as HarnessTimeout
 
@@ -128,6 +129,48 @@ def call(t, target: int, timeout: float = 30.0) -> int:
     return c
 
 
+# TRUST_STORE images: VICE has no UCI, so trust_pre's store read fails and
+# it asks "CONTINUE UNPINNED? Y/N" (DECISIONS 11, Q5) before the dial.
+# tp_getkey flushes the key buffer first, so the answer cannot be queued
+# ahead: run until do_https_get returns or parks on the question, then type.
+QUESTION = "UNPINNED? Y/N"
+KEY_Y, KEY_N = 0x59, 0x4E
+ASK_WAIT = 15.0          # warp: the question is up within a second
+LANDING = 0x0337         # jsr()'s trampoline: JSR at $0334, NOP here
+
+
+def call_answering(t, target: int, answer: int,
+                   timeout: float = 60.0) -> tuple[int, bool]:
+    """call() for a TRUST_STORE image. Returns (C, asked)."""
+    lo, hi = lohi(target)
+    clo, chi = lohi(CARRY)
+    write_bytes(t, DRIVER, bytes([0x20, lo, hi, 0xA9, 0x00, 0x2A,
+                                  0x8D, clo, chi, 0x60]))
+    write_bytes(t, CARRY, bytes([POISON]))
+    saved = t.read_registers()
+    asked = False
+    try:
+        jsr(t, DRIVER, timeout=ASK_WAIT, preserve_state=False)
+    except (HarnessTimeout, TimeoutError):
+        if QUESTION not in screen_text(t):
+            raise
+        asked = True
+        write_bytes(t, 0x0277, bytes([answer]))
+        write_bytes(t, 0x00C6, b"\x01")
+        bp = set_breakpoint(t, LANDING)
+        try:
+            t.resume()
+            wait_for_pc(t, LANDING, timeout=timeout)
+        finally:
+            delete_breakpoint(t, bp)
+    t.set_registers({k: saved[k] for k in ("PC", "SP", "FL", "A", "X", "Y")
+                     if k in saved})
+    c = read_bytes(t, CARRY, 1)[0]
+    if c not in (0, 1):
+        raise RuntimeError(f"driver never returned (carry byte ${c:02X})")
+    return c, asked
+
+
 class Suite:
     def __init__(self, t, labels):
         self.t = t
@@ -136,6 +179,9 @@ class Suite:
         self.failed = 0
         self.default_host = read_cstr(t, labels["http_host_target"])
         self.default_path = read_cstr(t, labels["https_path_target"])
+        self.trust = labels.address("trust_pre") is not None
+        self.answer = KEY_Y
+        self.asked = False
 
     # --- plumbing -----------------------------------------------------------
     def check(self, name: str, ok: bool, detail: str = "") -> None:
@@ -170,7 +216,10 @@ class Suite:
         else:
             for i in range(0, len(codes), 10):
                 t.inject_keys(codes[i:i + 10])
-        call(t, L["do_https_get"], timeout=60.0)
+        if self.trust:
+            _, self.asked = call_answering(t, L["do_https_get"], self.answer)
+        else:
+            call(t, L["do_https_get"], timeout=60.0)
 
     def host_state(self) -> dict:
         t, L = self.t, self.L
@@ -211,6 +260,10 @@ class Suite:
         print(f"\n  {title}")
         self.type_and_get(codes)
         s = self.host_state()
+        if self.trust:
+            self.check("trust store: asked CONTINUE UNPINNED? and took Y",
+                       self.asked, "no question: " + " ".join(
+                           screen_text(self.t).split())[:160])
         self.check("dialled (reached net_tcp_connect)", s["dialled"],
                    "the prompt refused or never returned")
         self.check(f"tls_hostname == {host.decode()!r}", s["tls_hostname"] == host,
@@ -239,11 +292,28 @@ class Suite:
         self.check(f"name check REJECTS a certificate naming only {other!r}",
                    self.name_check([other]) == 1, "C=0")
 
+    def declined(self) -> None:
+        """TRUST_STORE only: N to the question is NOT DIALLED."""
+        print("\n  trust store: N to CONTINUE UNPINNED? dials nothing")
+        self.answer = KEY_N
+        try:
+            self.type_and_get(keys("\r\r"))
+        finally:
+            self.answer = KEY_Y
+        s = self.host_state()
+        self.check("asked CONTINUE UNPINNED?", self.asked, "no question")
+        self.check("nothing dialled", not s["dialled"], "net_tcp_connect ran")
+        self.check("screen says NOT DIALLED", "NOT DIALLED" in screen_text(self.t),
+                   " ".join(screen_text(self.t).split())[:160])
+
     def refused(self, title: str, codes: list[int],
                 buffered: bool = False) -> None:
         print(f"\n  {title}")
         self.type_and_get(codes, buffered)
         s = self.host_state()
+        if self.trust:
+            self.check("trust store: a refused target is never asked about",
+                       not self.asked, "the trust question came up")
         self.check("nothing dialled", not s["dialled"], "net_tcp_connect ran")
         self.check("net_dns_resolve never ran (uci_host_buf untouched)",
                    read_bytes(self.t, self.L["uci_host_buf"], 1)[0] == POISON,
@@ -293,6 +363,8 @@ class Suite:
         self.accepted("63-char host and 100-char path are accepted whole",
                       keys(cap_host.decode() + "\r" + cap_path.decode() + "\r"),
                       cap_host, cap_path)
+        if self.trust:
+            self.declined()
 
         self.refused("64-char host refused at the 64th key, not truncated",
                      keys("h" * 64 + "\r/p\r"))
