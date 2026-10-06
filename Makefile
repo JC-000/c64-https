@@ -260,7 +260,7 @@ UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s src/net/uci/net_manifest.
 # build/https_host.inc, like the other build-time strings.
 TRUST_STORE ?=
 TRUST_STORE_DIR ?= /USB1
-TRUST_STORE_SRCS := src/net/uci/uci_dos.s src/net/uci/trust_store.s
+TRUST_STORE_SRCS := src/net/uci/uci_dos.s src/net/uci/trust_store.s src/net/uci/trust_policy.s
 TRUST_STORE_PATH :=
 ifeq ($(TRUST_STORE),1)
 ifneq ($(BACKEND),uci)
@@ -274,6 +274,32 @@ CA65FLAGS += -D TRUST_STORE=1
 UCI_SRCS += $(TRUST_STORE_SRCS)
 else ifneq ($(filter-out 0,$(TRUST_STORE)),)
 $(error TRUST_STORE must be 1 (link the trust store) or 0/unset)
+endif
+
+# #155 phase 2 (L3): the signed trust bundle, TRUST_STORE_DIR/TRUST.P
+# (src/net/uci/trust_bundle.s, format: tools/trust_bundle.py). Its P-256
+# public key and generation floor come from TRUST_BUNDLE_KEY_INC, a file
+# `tools/trust_bundle.py inc` writes. The tree's default is the TEST-ONLY
+# key, whose private half is committed: anyone can sign for it.
+TRUST_BUNDLE ?=
+TRUST_BUNDLE_KEY_INC ?= tools/trust_bundle_TEST_ONLY_pubkey.inc
+# The 64 key bytes of an .inc, as one word: what the guard compares.
+trust_key_bytes = $(shell sed -n '/^\.macro TRUST_BUNDLE_PUBKEY_BYTES/,/^\.endmacro/p' '$(1)' 2>/dev/null | grep -o '\$$[0-9A-Fa-f][0-9A-Fa-f]' | tr -d '\n$$' | tr a-f A-F)
+ifeq ($(TRUST_BUNDLE),1)
+ifneq ($(TRUST_STORE),1)
+$(error TRUST_BUNDLE=1 needs TRUST_STORE=1: the bundle is read with the store's DOS code, from TRUST_STORE_DIR)
+endif
+ifeq ($(wildcard $(TRUST_BUNDLE_KEY_INC)),)
+$(error TRUST_BUNDLE_KEY_INC=$(TRUST_BUNDLE_KEY_INC) does not exist (python3 tools/trust_bundle.py inc writes one))
+endif
+TRUST_BUNDLE_KEY_HEX := $(call trust_key_bytes,$(TRUST_BUNDLE_KEY_INC))
+ifneq ($(words $(TRUST_BUNDLE_KEY_HEX)) $(shell printf '%s' '$(TRUST_BUNDLE_KEY_HEX)' | wc -c | tr -d ' '),1 128)
+$(error TRUST_BUNDLE_KEY_INC=$(TRUST_BUNDLE_KEY_INC) has no 64-byte TRUST_BUNDLE_PUBKEY_BYTES macro)
+endif
+CA65FLAGS += -D TRUST_BUNDLE=1
+UCI_SRCS += src/net/uci/trust_bundle.s
+else ifneq ($(filter-out 0,$(TRUST_BUNDLE)),)
+$(error TRUST_BUNDLE must be 1 (link the signed bundle) or 0/unset)
 endif
 
 # Sibling-lib archive set. Phase C.3's nistcurves-p384 archive remains an
@@ -331,6 +357,8 @@ ifneq ($(COLD_BANK),0)
 CA65FLAGS += -D COLD_BANK=1
 CFG := cfg/c64-https-$(BACKEND)-onchip-cold.cfg
 UCI_SRCS += src/net/uci/cold_bank.s
+else ifeq ($(TRUST_STORE),1)
+$(error COLD_BANK=0 cannot hold TRUST_STORE=1 on comb: the trust policy (#155 phase 2, L3) needs ~2 KB that only the cold bank has. Drop COLD_BANK=0)
 endif
 else ifeq ($(COLD_BANK),1)
 $(error COLD_BANK=1 needs USE_NISTCURVES_ONCHIP_COMB=1: the cold bank is comb-only)
@@ -1034,6 +1062,27 @@ endif
 # pair, whichever of them grows a direct dependency next.
 build/boot.o build/http.o build/cert_pin.o: build/https_host.inc
 build/net/uci/trust_store.o: build/https_host.inc
+
+# The trust-bundle key (#155 phase 2, L3) gets the same content-compared
+# copy, build/trust_key.inc: a different key or floor rebuilds exactly
+# trust_bundle.o, whatever the .inc's mtime.
+ifeq ($(TRUST_BUNDLE),1)
+ifeq ($(STAMP_SKIP),)
+ifeq ($(MAKE_DRY_RUN),)
+_ := $(shell mkdir -p build; \
+             if ! cmp -s '$(TRUST_BUNDLE_KEY_INC)' build/trust_key.inc; then \
+                 cp '$(TRUST_BUNDLE_KEY_INC)' build/trust_key.inc; \
+                 rm -f build/net/uci/trust_bundle.o $(LINK_OUTPUTS); \
+             fi)
+endif
+endif
+build/net/uci/trust_bundle.o: build/trust_key.inc
+# Only reached when the parse-time copy did not run (a -n/-q/-t dry run on
+# a tree that has never staged the key): the same copy, as a recipe.
+build/trust_key.inc: $(TRUST_BUNDLE_KEY_INC)
+	@mkdir -p build
+	cp '$<' $@
+endif
 
 # Phase C.3: c64-nist-curves sibling archive (libs/nistcurves/ submodule).
 # Phase 1.5 split: produces TWO archives, one per overlay half. The

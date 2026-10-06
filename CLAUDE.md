@@ -128,7 +128,8 @@ Variables:
     ~36 min at 1 MHz — rigs need `C64_INIT_WAIT`). Fastest above ~5-7 MHz.
     This is the **only** flag that retargets `$(CFG)`, to
     `cfg/c64-https-$(BACKEND)-onchip-cold.cfg` (the cold-code bank,
-    `src/net/uci/cold_bank.s`; `COLD_BANK=0` = `-onchip.cfg`, resident) —
+    `src/net/uci/cold_bank.s`; `COLD_BANK=0` = `-onchip.cfg`, resident,
+    and an `$(error)` with `TRUST_STORE=1`) —
     both exist for uci only, so there is no ip65 comb build. Confirm from
     the `ld65 -C` line, not from the profile name.
   - `USE_X25519_SIBLING` — **retired, `$(error)`-guarded (#245)**: every
@@ -165,6 +166,8 @@ Variables:
     CRYPTO_RESIDENT, 0 B LOADER); unset = byte-identical PRG. Test: `tools/test_cert_pin.py` (builds its
     own images). The pin hashes the window the key SCANNER read, not the
     DER-parsed SPKI — see the header of `src/cert_pin.s` before changing it.
+    Under `TRUST_STORE=1` it binds only a typed host equal to `HTTPS_HOST`
+    (the trust policy, `src/net/uci/trust_policy.s`).
   - `HTTPS_HOST` / `HTTPS_PATH` / `HTTPS_SNI` / `HTTPS_PORT` /
     `HTTPS_BODY_TO_REU=1` — build-time target. Hosts >63 chars are a build
     error. The strings live in their own `HTTPS_TARGET_RODATA` segment

@@ -40,7 +40,7 @@
         .export cert_data_ptr
 .endif
 
-.ifdef HTTPS_PIN_SPKI
+.if .defined(HTTPS_PIN_SPKI) .or .defined(TRUST_STORE) ; #155: the pin / trust hook
 .import cert_pin_check
 .endif
         .ifdef X509_VERIFY_NAME
@@ -603,7 +603,7 @@ x509_extract_pubkey:
         ; handshake exactly like a bad key would — the carry we return is the
         ; caller's success/failure, so falling through to its `clc` would
         ; silently accept a certificate for the wrong host.
-.ifdef HTTPS_PIN_SPKI
+.if .defined(HTTPS_PIN_SPKI) .or .defined(TRUST_STORE) ; #155: the pin / trust hook
         ; Issue #155: the SPKI pin runs first, so a pin failure reports as
         ; one; it tail-calls the name check itself on success.
         jmp cert_pin_check              ; tail call: its carry IS our result

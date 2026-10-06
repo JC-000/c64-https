@@ -107,14 +107,41 @@ CFG_EDITS = [
      "    # areas can sit on it (src/net/uci/cold_bank.s asserts they do).\n"
      "    CERT_BUF_BSS:  load = CRYPTO_OVERLAY, type = bss, start = $4200;\n"
      "    X25519_RODATA: load = CRYPTO_OVERLAY, type = ro, align = $20;\n"),
-    ("    TARGET_PROMPT_CODE: load = LOADER,    type = ro,  optional = yes;\n",
+    ("    TARGET_PROMPT_CODE: load = LOADER,    type = ro,  optional = yes;\n"
+     "    # #155 phase 2 (L3): the signed bundle's check (TRUST_BUNDLE=1).\n"
+     "    TRUST_BUNDLE_CODE:  load = LOADER,    type = ro,  optional = yes;\n",
      "    TARGET_PROMPT_CODE: load = COLD_IMAGE, run = COLD_RUN_UI, type = ro, define = yes;\n"
+     "    TRUST_BUNDLE_CODE:  load = COLD_IMAGE, run = COLD_RUN_UI, type = ro, optional = yes;\n"
      "    COLD_TAIL_UI:       load = COLD_IMAGE, run = COLD_RUN_UI, type = ro, define = yes;\n"),
     ("    CERT_BUF_BSS:  load = CRYPTO_OVERLAY, type = bss, optional = yes;\n",
      "    # (cold bank: CERT_BUF_BSS is pinned at the head of the region, above)\n"),
-    ("    TRUST_STORE_CODE: load = CRYPTO_HOT,     type = ro,  optional = yes;\n",
+    ("    TRUST_STORE_CODE: load = CRYPTO_HOT,     type = ro,  optional = yes;\n"
+     "    # #155 phase 2 (L3): the trust policy's no-connection code, beside the\n"
+     "    # store it drives; its resident state in CRYPTO_HOT, where the room is.\n"
+     "    TRUST_POLICY_CODE: load = CRYPTO_HOT,    type = ro,  optional = yes;\n"
+     "    TRUST_POLICY_RODATA: load = CRYPTO_HOT,  type = ro,  optional = yes;\n",
      "    TRUST_STORE_CODE: load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes, define = yes;\n"
+     "    TRUST_POLICY_CODE: load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes;\n"
+     "    TRUST_POLICY_RODATA: load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes;\n"
+     "    TRUST_PROMPT_CODE: load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes;\n"
      "    COLD_TAIL_TRUST:  load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes, define = yes;\n"),
+    ("    LOADER_OVERFLOW: load = NET_CODE,     type = ro,  optional = yes;\n",
+     "    LOADER_OVERFLOW: load = NET_CODE,     type = ro,  optional = yes;\n"
+     "    # Cold bank: TRUST_STORE=1 renames it (src/loader_overflow.inc) and it\n"
+     "    # goes to CRYPTO_HOT, so the trust hook and its state fit NET_CODE on\n"
+     "    # the Wikipedia demo; images without the store keep it here.\n"
+     "    LOADER_OVERFLOW_TS: load = CRYPTO_HOT, type = ro, optional = yes;\n"),
+    ("    TRUST_POLICY_BSS: load = CRYPTO_HOT,     type = bss, optional = yes;\n"
+     "    # (L3) The policy's prompts touch no store: resident, so the TRUST\n"
+     "    # group keeps its 2 KB for the store and the store-driving policy.\n"
+     "    TRUST_PROMPT_CODE: load = LOADER,        type = ro,  optional = yes;\n",
+     "    TRUST_POLICY_BSS: load = NET_CODE,       type = bss, optional = yes;\n"
+     "    TRUST_PROMPT_RES: load = CRYPTO_HOT,     type = ro,  optional = yes;\n"
+     "    TRUST_POLICY_BSS_RES: load = CRYPTO_HOT, type = bss, optional = yes;\n"
+     "    # (L3, cold bank) The prompts ride the TRUST group: only the policy\n"
+     "    # calls them. TRUST_BUNDLE=1 fills that group and grows the state, so\n"
+     "    # the source switches both to their _RES segments, here in CRYPTO_HOT.\n"
+     "    # The plain state is in NET_CODE: the demo's CRYPTO_HOT has no room.\n"),
 ]
 # The cold cfg also carries its own header block after the comb cfg's first
 # line, ending with this.

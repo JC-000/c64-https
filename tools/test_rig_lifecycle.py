@@ -634,7 +634,7 @@ def test_discovery_finds_the_known_fetch_rigs() -> None:
     expected = {"rig_https_local.py", "rig_https_live.py",
                 "rig_https_bad_finished.py", "rig_https_banner.py",
                 "rig_https_wiki.py", "rig_http_local.py", "rig_http_live.py",
-                "phase3_tcp_echo.py", "rig_close_retry.py"}
+                "phase3_tcp_echo.py", "rig_close_retry.py", "rig_trust_policy.py"}
     missing = expected - found
     assert not missing, f"the fetch-rig rule no longer selects {missing}"
 

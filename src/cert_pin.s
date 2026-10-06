@@ -46,21 +46,59 @@
 ;
 ; No zero page and no BSS of its own (same convention as x509_name.s): the
 ; status byte lives in CERT_PIN_UI, which every cfg keeps in RAM.
+;
+; TRUST_STORE=1 (#155 phase 2, L3) makes this file the trust policy's ONE
+; resident hook, pinned build or not: the same hash, the same interlock,
+; but what the hash is compared with comes from tp_mode, which trust_pre
+; (src/net/uci/trust_policy.s) sets before the dial:
+;
+;   TP_M_STORE     the store's record for the typed host (ts_rec). A
+;                  mismatch is KEY CHANGED and aborts, unless the operator
+;                  armed the override with exactly this 32 B hash (ACCEPT);
+;   TP_M_FIRST     first use: nothing to compare, continue;
+;   TP_M_UNPINNED  the operator's one-fetch override: continue;
+;   TP_M_PIN       the build pin (typed host == HTTPS_HOST), as above;
+;   TP_M_NONE      trust_pre never ran: refuse.
+;
+; The hash goes to tp_got for trust_post, which records it after the close.
+; Under TRUST_BUNDLE a signed bundle's leaf pin (tb_spki) is advisory: a
+; mismatch prints BUNDLE MISMATCH and sets tp_bwarn, never aborts.
+; cert_pin_status takes the TP_ST_* verdicts (src/trust_policy.inc): only a
+; positive one lets cert_pin_require pass. Nothing here reads the keyboard.
+; Without TRUST_STORE every byte below assembles exactly as before.
 ; =============================================================================
 
 .include "constants.inc"
 
-.ifdef HTTPS_PIN_SPKI
+.if .defined(HTTPS_PIN_SPKI) .or .defined(TRUST_STORE)
 
+.ifdef HTTPS_PIN_SPKI
 .include "https_host.inc"               ; HTTPS_PIN_SPKI_BYTES
+.endif
 
 .export cert_pin_check
 .export cert_pin_require
+.ifdef HTTPS_PIN_SPKI
 .export cert_pin_banner
+.endif
 .export cert_pin_hs_keys
 .export cert_pin_send_finished
 .export cert_pin_status
+.ifdef HTTPS_PIN_SPKI
 .export cert_pin_expected
+.endif
+
+.ifdef TRUST_STORE
+.include "trust_store.inc"
+.include "trust_policy.inc"
+.export tp_mode, tp_bwarn, tp_ovr_armed, tp_got, tp_override, tp_ovr_key
+.export print_hex4, print_hexn, tp_cmp_got, trust_state_init
+.import ts_rec
+.ifdef TRUST_BUNDLE
+.export tb_found, tb_spki
+.import tb_loaded, tb_noted, tb_verdict
+.endif
+.endif
 
 .import sha256_init
 .import sha256_process_block
@@ -80,7 +118,14 @@ PIN_Y_OFFSET    = 59                    ; Qy's offset inside that TLV
 PIN_ST_MATCH    = $01
 PIN_ST_BAD      = $80
 
+; Under TRUST_STORE the hook has its own segment, so a cfg can place it
+; without moving the plain pin's CERT_PIN_CODE (comb: NET_CODE, adv-268 /
+; #273 -- CRYPTO_HOT has no room for it beside the wider body sink).
+.ifdef TRUST_STORE
+.segment "TRUST_HOOK_CODE"
+.else
 .segment "CERT_PIN_CODE"
+.endif
 
 ; -----------------------------------------------------------------------------
 ; cert_pin_check — tail of x509_extract_pubkey's success exit
@@ -123,6 +168,7 @@ cert_pin_check:
         jsr sha256_process_block
         jsr sha256_final
 
+.ifndef TRUST_STORE
         lda ecdsa_curve_id              ; P-256 only — see the header
         bne @bad
         ldx #31
@@ -152,6 +198,123 @@ cert_pin_check:
         rts
 .endif
 
+.else ; TRUST_STORE: the policy hook
+        ldx #TP_HASH_LEN-1              ; keep it: sha256_hash is reused
+:       lda sha256_hash,x               ;  long before trust_post runs
+        sta tp_got,x
+        dex
+        bpl :-
+        lda ecdsa_curve_id              ; P-256 only — see the header
+        bne @refuse
+        lda tp_mode
+        cmp #TP_M_FIRST
+        beq @set                        ; A = TP_ST_FIRST
+        cmp #TP_M_UNPINNED
+        beq @set                        ; A = TP_ST_UNPINNED
+        cmp #TP_M_STORE
+        beq @store
+.ifdef HTTPS_PIN_SPKI
+        cmp #TP_M_PIN
+        beq @pin
+.endif
+@refuse:                                ; TP_M_NONE, or not a P-256 window
+        lda #TP_ST_REFUSED
+        sta cert_pin_status
+        sec
+        rts
+
+@store:
+        lda #<(ts_rec + TS_REC_SPKI)
+        ldy #>(ts_rec + TS_REC_SPKI)
+        jsr tp_cmp_got
+        beq @match
+        lda tp_ovr_armed                ; the operator's one-shot accept:
+        beq @changed                    ;  all 32 bytes, or nothing
+        lda #<tp_override
+        ldy #>tp_override
+        jsr tp_cmp_got
+        bne @changed
+        lda #TP_ST_ACCEPT
+        bne @set                        ; always
+@changed:
+        lda #TP_ST_CHANGED
+        sta cert_pin_status
+        ldx #TP_REP_CHANGED
+        jsr tp_report
+        sec
+        rts
+
+.ifdef HTTPS_PIN_SPKI
+@pin:
+        lda #<cert_pin_expected
+        ldy #>cert_pin_expected
+        jsr tp_cmp_got
+        beq @match
+        ldx #TP_REP_PIN
+        jsr tp_report
+.ifdef HTTPS_PIN_WARN
+        lda #TP_ST_PINWARN              ; report, do not abort
+        bne @set
+.else
+        jmp @refuse
+.endif
+.endif
+
+@match: lda #TP_ST_MATCH
+@set:   sta cert_pin_status
+.ifdef TRUST_BUNDLE
+        ; Advisory only (DECISIONS 3). trust_pre clears tb_found for the
+        ; build-pin mode, so this never second-guesses a build pin.
+        lda tb_found
+        beq @pass
+        lda #<tb_spki
+        ldy #>tb_spki
+        jsr tp_cmp_got
+        beq @pass
+        lda #1                          ; NOT A: on a mismatch tp_cmp_got
+        sta tp_bwarn                    ;  leaves the pin's byte there, $00 too
+        ldx #TP_REP_BUNDLE
+        jsr tp_report
+.endif
+@pass:
+.ifdef X509_VERIFY_NAME
+        jmp x509_verify_hostname        ; its carry IS our result (#135)
+.else
+        clc
+        rts
+.endif
+
+; tp_cmp_got — A/Y = 32 B. Z=1 iff they equal tp_got. Clobbers zp_ptr, Y.
+; Only Z is the verdict: on a mismatch A is whatever byte differed (maybe 0).
+tp_cmp_got:
+        sta zp_ptr
+        sty zp_ptr+1
+        ldy #TP_HASH_LEN-1
+@c:     lda (zp_ptr),y
+        cmp tp_got,y
+        bne @out
+        dey
+        bpl @c
+        lda #0                          ; Z=1: all equal
+@out:   rts
+
+; trust_state_init — boot (src/boot.s start): forget the policy's state.
+; TRUST_POLICY_BSS is not under the boot-zeroed shadow, so without this an
+; accept armed before 'Q' survives RUN (or a reset and SYS) -- adv-268 #2.
+trust_state_init:
+        lda #0
+        ldx #tp_bss_end - tp_bss_start
+:       sta tp_bss_start-1,x
+        dex
+        bne :-
+.ifdef TRUST_BUNDLE
+        sta tb_loaded
+        sta tb_noted
+        sta tb_verdict
+.endif
+        rts
+.endif ; TRUST_STORE
+
 ; Everything below — the interlock, the status byte, the diagnostic and the
 ; pin itself — is a separate segment so the comb cfg can split the ~270 B
 ; across two regions (neither of its tails holds all of it with a long
@@ -166,7 +329,14 @@ cert_pin_check:
 ; -----------------------------------------------------------------------------
 cert_pin_require:
         lda cert_pin_status
-.ifdef HTTPS_PIN_WARN
+.ifdef TRUST_STORE
+        beq :+                          ; never ran
+        bmi :+                          ; refused (TP_ST_CHANGED/_REFUSED)
+        clc
+        rts
+:       sec
+        rts
+.elseif .defined(HTTPS_PIN_WARN)
         sec
         beq :+
         clc
@@ -200,6 +370,7 @@ cert_pin_send_finished:
 ; warn mode): the first 4 bytes of both, so the operator reads the server's
 ; new fingerprint off the screen instead of meeting an undifferentiated stall.
 ; -----------------------------------------------------------------------------
+.ifndef TRUST_STORE
 cert_pin_report:
         lda #<pin_fail_msg
         ldy #>pin_fail_msg
@@ -213,7 +384,55 @@ cert_pin_report:
         jsr print_hex4
         lda #$0d
         jmp chrout
+.else
+; tp_report — X = TP_REP_*: "<what> EXP xxxxxxxx GOT yyyyyyyy", the first
+; 4 bytes of the expected hash and of tp_got. Clobbers A, X, Y, zp_ptr.
+tp_report:
+        lda tp_rep_msg_lo,x
+        ldy tp_rep_msg_hi,x
+        jsr print_string
+        lda tp_rep_exp_lo,x
+        ldy tp_rep_exp_hi,x
+        jsr print_hex4
+        lda #<pin_got_msg
+        ldy #>pin_got_msg
+        jsr print_string
+        lda #<tp_got
+        ldy #>tp_got
+        jsr print_hex4
+        lda #$0d
+        jmp chrout
 
+; One row per report: its message and the hash it was expecting.
+.ifdef TRUST_BUNDLE
+TP_BUNDLE_EXP = tb_spki
+.else
+TP_BUNDLE_EXP = 0                       ; no bundle: never reported
+.endif
+.define TP_REP_MSGS tp_changed_msg, tp_bundle_msg
+.define TP_REP_EXPS ts_rec + TS_REC_SPKI, TP_BUNDLE_EXP
+TP_REP_CHANGED  = 0
+TP_REP_BUNDLE   = 1
+TP_REP_PIN      = 2                     ; HTTPS_PIN_SPKI only
+.ifdef HTTPS_PIN_SPKI
+tp_rep_msg_lo:  .lobytes TP_REP_MSGS, pin_fail_msg
+tp_rep_msg_hi:  .hibytes TP_REP_MSGS, pin_fail_msg
+tp_rep_exp_lo:  .lobytes TP_REP_EXPS, cert_pin_expected
+tp_rep_exp_hi:  .hibytes TP_REP_EXPS, cert_pin_expected
+.else
+tp_rep_msg_lo:  .lobytes TP_REP_MSGS
+tp_rep_msg_hi:  .hibytes TP_REP_MSGS
+tp_rep_exp_lo:  .lobytes TP_REP_EXPS
+tp_rep_exp_hi:  .hibytes TP_REP_EXPS
+.endif
+.endif ; TRUST_STORE
+
+.ifdef HTTPS_PIN_SPKI
+.ifdef TRUST_STORE
+; A pinned trust build: the pin's own pieces ride TRUST_HOOK_CODE, which
+; the comb cfgs put where the room is (CERT_PIN_UI's region is the tighter one).
+.segment "TRUST_HOOK_CODE"
+.endif
 ; -----------------------------------------------------------------------------
 ; cert_pin_banner — boot banner line, so a pinned build is identifiable
 ; before it ever fails: "SPKI PIN xxxxxxxx" (+ " WARN" in warn mode). Takes
@@ -242,8 +461,17 @@ print_expected4:
         lda #<cert_pin_expected
         ldy #>cert_pin_expected
         ; fall through
+.endif
 ; print_hex4 — 4 bytes at A/Y (lo/hi) as 8 hex digits
+.ifdef TRUST_STORE
+; print_hexn — X bytes (1..255) at A/Y as 2X hex digits
+.endif
 print_hex4:
+.ifdef TRUST_STORE
+        ldx #4
+print_hexn:
+        stx @n+1
+.endif
         sta zp_ptr
         sty zp_ptr+1
         ldy #0
@@ -258,7 +486,7 @@ print_hex4:
         and #$0f
         jsr @nib
         iny
-        cpy #4
+@n:     cpy #4
         bne @byte
         rts
 @nib:   cmp #10                         ; CHROUT preserves Y
@@ -267,6 +495,10 @@ print_hex4:
 :       adc #'0'
         jmp chrout
 
+.ifdef HTTPS_PIN_SPKI
+.ifdef TRUST_STORE
+.segment "TRUST_HOOK_CODE"
+.endif
 cert_pin_expected:
         .byte HTTPS_PIN_SPKI_BYTES
         .assert * - cert_pin_expected = 32, error, "HTTPS_PIN_SPKI_BYTES must be 32 bytes"
@@ -277,8 +509,10 @@ pin_fail_msg:
 .else
         .byte "PIN FAIL EXP ", 0
 .endif
+.endif
 pin_got_msg:
         .byte " GOT ", 0
+.ifdef HTTPS_PIN_SPKI
 pin_banner_msg:
         .byte "SPKI PIN ", 0
 pin_banner_tail:
@@ -286,5 +520,34 @@ pin_banner_tail:
         .byte " WARN"
 .endif
         .byte $0d, 0
+.endif
 
-.endif ; HTTPS_PIN_SPKI
+.ifdef TRUST_STORE
+tp_changed_msg:
+        .byte "KEY CHANGED EXP ", 0
+tp_bundle_msg:
+        .byte "BUNDLE MISMATCH EXP ", 0
+
+; The policy's resident state: it outlives the cold calls that set and
+; read it (src/net/uci/trust_policy.s) and the handshake in between.
+.ifdef TRUST_BUNDLE
+.segment "TRUST_POLICY_BSS_RES" ; the bundle's larger state: comb has no NET_CODE for it
+.else
+.segment "TRUST_POLICY_BSS"
+.endif
+tp_bss_start:
+tp_mode:      .res 1            ; TP_M_*: this connection's mode
+tp_bwarn:     .res 1            ; != 0: the bundle pin disagreed
+tp_ovr_armed: .res 1            ; != 0: tp_override applies to tp_ovr_key
+tp_got:       .res TP_HASH_LEN  ; the server's SPKI hash, this connection
+tp_override:  .res TP_HASH_LEN  ; the one hash the operator accepted
+tp_ovr_key:   .res TS_KEY_SIZE  ; ...for this host key (ts_key)
+.ifdef TRUST_BUNDLE
+tb_found:     .res 1            ; != 0: tb_spki is the bundle's pin
+tb_spki:      .res TP_HASH_LEN
+.endif
+tp_bss_end:
+.assert tp_bss_end - tp_bss_start <= 255, error, "trust_state_init clears with X"
+.endif
+
+.endif ; HTTPS_PIN_SPKI .or TRUST_STORE
