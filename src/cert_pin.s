@@ -530,7 +530,11 @@ tp_bundle_msg:
 
 ; The policy's resident state: it outlives the cold calls that set and
 ; read it (src/net/uci/trust_policy.s) and the handshake in between.
+.ifdef TRUST_BUNDLE
+.segment "TRUST_POLICY_BSS_RES" ; the bundle's larger state: comb has no NET_CODE for it
+.else
 .segment "TRUST_POLICY_BSS"
+.endif
 tp_bss_start:
 tp_mode:      .res 1            ; TP_M_*: this connection's mode
 tp_bwarn:     .res 1            ; != 0: the bundle pin disagreed

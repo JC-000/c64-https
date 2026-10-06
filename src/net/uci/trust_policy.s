@@ -61,8 +61,9 @@
 ; beside the store, so the policy calls the store's cold_ts_* bodies
 ; directly (a cold tenant must never call cold_call: the fetch would
 ; overwrite it). TRUST_PROMPT_CODE (the shared question, the key reader,
-; the hex helpers) is resident on every profile. The policy's state is
-; resident too: TRUST_POLICY_BSS, in src/cert_pin.s.
+; the hex helpers) rides the same group on comb; under TRUST_BUNDLE the
+; group is full, so it is TRUST_PROMPT_RES, resident. The policy's state is
+; resident: TRUST_POLICY_BSS (_RES under TRUST_BUNDLE), in src/cert_pin.s.
 
 .include "constants.inc"
 .include "trust_store.inc"
@@ -448,10 +449,15 @@ tp_bundle_rd_msg: .byte "BUNDLE READ FAIL ", 0
 
 ; =============================================================================
 ; TRUST_PROMPT_CODE: the shared question, the key reader and the hex
-; helpers. Resident on every profile (the comb TRUST group's 2 KB is the
-; store's and the policy's), and called only from trust_pre / trust_post.
+; helpers. Called only from trust_pre / trust_post, so on comb they can
+; ride the cold TRUST group with them; under TRUST_BUNDLE that group is
+; full and they are TRUST_PROMPT_RES, resident (the cfgs place both).
 ; =============================================================================
+.ifdef TRUST_BUNDLE
+.segment "TRUST_PROMPT_RES"
+.else
 .segment "TRUST_PROMPT_CODE"
+.endif
 
 ; tp_ask_unpinned — "CONTINUE UNPINNED? Y/N". C=0 and tp_mode =
 ; TP_M_UNPINNED (banner shown) on Y; C=1 otherwise.

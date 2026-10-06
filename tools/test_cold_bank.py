@@ -123,7 +123,23 @@ CFG_EDITS = [
      "    TRUST_STORE_CODE: load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes, define = yes;\n"
      "    TRUST_POLICY_CODE: load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes;\n"
      "    TRUST_POLICY_RODATA: load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes;\n"
+     "    TRUST_PROMPT_CODE: load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes;\n"
      "    COLD_TAIL_TRUST:  load = COLD_IMAGE, run = COLD_RUN_TRUST, type = ro, optional = yes, define = yes;\n"),
+    ("    LOADER_OVERFLOW: load = NET_CODE,     type = ro,  optional = yes;\n",
+     "    # Cold bank: LOADER_OVERFLOW in CRYPTO_HOT, so the trust hook and its\n"
+     "    # state fit NET_CODE on the Wikipedia demo (TRUST_STORE=1).\n"
+     "    LOADER_OVERFLOW: load = CRYPTO_HOT,   type = ro,  optional = yes;\n"),
+    ("    TRUST_POLICY_BSS: load = CRYPTO_HOT,     type = bss, optional = yes;\n"
+     "    # (L3) The policy's prompts touch no store: resident, so the TRUST\n"
+     "    # group keeps its 2 KB for the store and the store-driving policy.\n"
+     "    TRUST_PROMPT_CODE: load = LOADER,        type = ro,  optional = yes;\n",
+     "    TRUST_POLICY_BSS: load = NET_CODE,       type = bss, optional = yes;\n"
+     "    TRUST_PROMPT_RES: load = CRYPTO_HOT,     type = ro,  optional = yes;\n"
+     "    TRUST_POLICY_BSS_RES: load = CRYPTO_HOT, type = bss, optional = yes;\n"
+     "    # (L3, cold bank) The prompts ride the TRUST group: only the policy\n"
+     "    # calls them. TRUST_BUNDLE=1 fills that group and grows the state, so\n"
+     "    # the source switches both to their _RES segments, here in CRYPTO_HOT.\n"
+     "    # The plain state is in NET_CODE: the demo's CRYPTO_HOT has no room.\n"),
 ]
 # The cold cfg also carries its own header block after the comb cfg's first
 # line, ending with this.
