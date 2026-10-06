@@ -501,16 +501,28 @@ net_poll:
 ;   -> push_wait -> check_err -> read 12 bytes -> drain resp
 ;   -> drain status -> ack
 ;
-; Interface fallback: the U64E has a single interface (index 0), but the
-; C64 Ultimate has Ethernet AND WiFi — a box on WiFi returns 0.0.0.0 for
-; index 0. We probe indices 0..NET_DHCP_MAX_IFACE-1 and take the first
-; one with a non-zero lease. A CMD_FAILED on an out-of-range index is
-; cleaned up (drain + ack) and treated like "no lease on this interface".
+; Interface fallback: on both the U64E (fw 3a1ff9ff) and the C64 Ultimate,
+; Ethernet registers as index 0 whether or not a cable is in, and WiFi as
+; index 1 (rmii_interface.cc / wifi.cc init order), so a box on WiFi returns
+; 0.0.0.0 for index 0. We probe indices 0..NET_DHCP_MAX_IFACE-1 and take the first
+; one with a non-zero lease.
+;
+; An out-of-range index is NOT a command failure: network_target.cc answers
+; it with an EMPTY reply and "82,PARAMETER(S) OUT OF RANGE" on the status
+; channel, and the $DF1C ERROR bit stays clear (its only setter is a PUSH
+; while not idle). So the reply is checked by length: only a full 12-byte
+; record is a lease. Anything shorter (uci_resp_count != 12, an empty
+; reply included) reads as "no lease here" without touching net_local_ip,
+; so a buffer left over from an earlier call can never be reported as this
+; call's lease. net_local_ip is also zeroed on entry. net_init already
+; does that on the menu path; it is kept for a caller that skips net_init
+; (none in tree today), per net_abi.inc's "zero until net_dhcp_acquire
+; succeeds".
 ;
 ; The 12-byte response layout is IP(4) + Netmask(4) + Gateway(4). We copy
-; the first 4 bytes into net_local_ip. If all probed interfaces yield a
-; zero IP we return C=1 with net_last_error = UCI_ERR_NO_IP (or
-; UCI_ERR_CMD_FAILED if the last probe failed at the command layer).
+; the first 4 bytes into net_local_ip. If all probed interfaces yield no
+; lease we return C=1 with net_last_error = UCI_ERR_NO_IP (or
+; UCI_ERR_CMD_FAILED if the last push was rejected).
 ;
 ; Clobbers: A, X, Y
 ; Output:   C=0 on success (net_local_ip populated), C=1 on failure
@@ -521,6 +533,11 @@ NET_DHCP_MAX_IFACE = 4          ; probe interface indices 0..3
 net_dhcp_acquire:
         lda #$00
         sta @iface_idx          ; SMC-style local, no-ZP file convention
+        ldx #3                  ; no lease until a probe returns one: a
+@clear_ip:                      ; failed call reads 0.0.0.0, never the last
+        sta net_local_ip,x      ; call's address
+        dex
+        bpl @clear_ip
 
 @next_iface:
         jsr uci_wait_idle
@@ -532,8 +549,8 @@ net_dhcp_acquire:
         lda #UCI_CMD_GET_IPADDR
         jsr uci_put_byte
 
-        ; Interface index — 0 first (only iface on U64E; Ethernet on the
-        ; C64 Ultimate), then 1.. (C64U WiFi) until one has a lease.
+        ; Interface index — 0 first (Ethernet), then 1.. (WiFi is 1)
+        ; until one has a lease.
         lda @iface_idx
         jsr uci_put_byte
 
@@ -544,9 +561,10 @@ net_dhcp_acquire:
         jsr uci_check_err
         bcc @no_err
 
-        ; Command failed for this interface (e.g. index out of range on
-        ; single-interface firmware). Clean up response/status state so
-        ; the next probe starts from idle, then advance.
+        ; The push was rejected (the interface was not idle). Clean up
+        ; response/status state so the next probe starts from idle, then
+        ; advance. An out-of-range index does NOT land here — see the
+        ; header.
         lda #UCI_ERR_CMD_FAILED
         sta net_last_error
         jsr uci_drain_resp
@@ -563,7 +581,8 @@ net_dhcp_acquire:
 @iface_idx: .byte 0
 
 @no_err:
-        ; Read the 12-byte response into uci_ipaddr_resp.
+        ; Read the 12-byte response into uci_ipaddr_resp. An empty reply
+        ; returns at once with uci_resp_count = 0 (the read does not wait).
         lda #<uci_ipaddr_resp
         sta uci_resp_dst
         lda #>uci_ipaddr_resp
@@ -581,6 +600,11 @@ net_dhcp_acquire:
         bcs @dhcp_wait_to
         jsr uci_ack
 
+        ; Anything but the full record is "no lease on this interface".
+        lda uci_resp_count
+        cmp #12
+        bne @no_ip
+
         ; Copy the first 4 bytes (IP) into net_local_ip.
         ldx #3
 @copy_ip:
@@ -597,6 +621,7 @@ net_dhcp_acquire:
         ora net_local_ip+3
         bne @have_ip
 
+@no_ip:
         lda #UCI_ERR_NO_IP
         sta net_last_error
 
@@ -604,8 +629,9 @@ net_dhcp_acquire:
         inc @iface_idx
         lda @iface_idx
         cmp #NET_DHCP_MAX_IFACE
-        bcc @next_iface
-        sec                     ; every interface probed, none had a lease
+        bcs @probed_all         ; C=1: every interface probed, none leased
+        jmp @next_iface         ; long branch: out of BCC range
+@probed_all:
         rts
 
 @have_ip:
@@ -767,7 +793,8 @@ net_tcp_connect:
 ; Response: 2 bytes = written_lo/hi (LE). If written != requested we set
 ; UCI_ERR_SHORT_WRITE but still return C=0 so the caller can continue
 ; (mirrors ip65 behaviour that treats short writes as best-effort). A
-; written count of $FFFF (lwip_send's -1) is a failed send: C=1, $87.
+; written count of $FFFF (lwip_send's -1), or a reply that is not exactly
+; the 2-byte count, is a failed send: C=1, $87.
 ; =============================================================================
 net_tcp_send:
         sta uci_send_ptr_lo
@@ -913,8 +940,17 @@ net_tcp_send:
         ; and GREW uci_send_rem by one per round trip, so the loop ran
         ; ~65k SOCKET_WRITEs (~45 min) before rem wrapped to zero and it
         ; returned C=0. A chunk is at most 800 B, so bit 15 is never a count.
+        ;
+        ; A reply that is not exactly 2 bytes carries no count at all, and
+        ; uci_write_resp would still hold the PREVIOUS chunk's: the #230(a)
+        ; mis-parse ("21,UNKNOWN COMMAND", empty reply) is that shape. Same
+        ; verdict as uci-m3's send: $87, C=1.
+        lda uci_resp_count
+        cmp #2
+        bne @sb_no_count
         lda uci_write_resp+1
         bpl @sb_counted
+@sb_no_count:
         lda #UCI_ERR_SHORT_WRITE
         sta net_last_error
         sec
