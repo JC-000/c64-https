@@ -95,6 +95,7 @@ trust_bundle:
 .endif
 
 .segment "TRUST_BUNDLE_CODE"
+tb_code_start:
 
 ; =============================================================================
 ; trust_bundle — check the bundle trust_pre read, if it read one.
@@ -328,6 +329,15 @@ tb_verify_msg:  .byte "VERIFYING BUNDLE...", $0d, 0
 tb_sig_msg:     .byte "BUNDLE BAD SIGNATURE", $0d, 0
 tb_old_msg:     .byte "BUNDLE OLD GEN", $0d, 0
 tb_pin_msg:     .byte "BUNDLE PIN ", 0
+tb_code_end:
+
+; This code calls ecdsa_verify, whose scratch (LIB_NISTCURVES_P256_BSS) is
+; unioned onto cert_buf (P256_SCRATCH_UNION, cfg/c64-https-uci*.cfg). Where
+; this code RUNS must therefore not overlap that scratch: on the comb cold
+; bank it runs from cert_buf, so the verify would overwrite its own caller.
+; The Makefile refuses that build; this is the link-time backstop.
+.import __P256_SCRATCH_UNION_START__, __P256_SCRATCH_UNION_SIZE__
+.assert tb_code_end <= __P256_SCRATCH_UNION_START__ .or tb_code_start >= __P256_SCRATCH_UNION_START__ + __P256_SCRATCH_UNION_SIZE__, lderror, "trust_bundle runs inside P256_SCRATCH_UNION: ecdsa_verify would overwrite it"
 
 .segment "TRUST_POLICY_BSS"
 tb_loaded:  .res 1              ; != 0: trust_pre read TRUST.P into the ring

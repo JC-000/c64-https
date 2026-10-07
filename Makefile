@@ -372,6 +372,13 @@ $(error COLD_BANK must be 1 (default on comb: cold code in the REU) or 0 (reside
 endif
 ifeq ($(USE_NISTCURVES_ONCHIP_COMB),1)
 ifneq ($(COLD_BANK),0)
+# The cold bank runs trust_bundle FROM cert_buf, and trust_bundle calls
+# ecdsa_verify, whose scratch (LIB_NISTCURVES_P256_BSS) is unioned onto
+# cert_buf on every UCI cfg (P256_SCRATCH_UNION): the verify would overwrite
+# the code running it. src/net/uci/trust_bundle.s asserts the same at link.
+ifeq ($(TRUST_BUNDLE),1)
+$(error TRUST_BUNDLE=1 cannot link on comb: the cold bank runs trust_bundle from cert_buf, which ecdsa_verify's scratch shares (P256_SCRATCH_UNION). Build the bundle on uci-onchip)
+endif
 CA65FLAGS += -D COLD_BANK=1
 CFG := cfg/c64-https-$(BACKEND)-onchip-cold.cfg
 UCI_SRCS += src/net/uci/cold_bank.s

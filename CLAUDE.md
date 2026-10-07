@@ -813,13 +813,18 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
   $0801-$1FFF  LOADER              BASIC stub + boot + HTTP + net wrapper
   $2000-$3B65  NET_CODE            UCI adapter + LOADER_OVERFLOW + TLS_CODE
                                    + CRYPTO_AUX_CODE
-  $3B66-$41FF  NET_BSS_TAIL        NET_BSS_TAIL segment (deframer/viewer BSS)
-                                   + LIB_NISTCURVES_P256_BSS. NOT `BSS_TAIL`
-                                   and NOT `UCI_BSS` — both are elsewhere
-                                   (below, and CRYPTO_HOT). Read the map.
+  $3B66-$41FF  NET_BSS_TAIL        NET_BSS_TAIL segment (deframer/viewer BSS),
+                                   then free. NOT `BSS_TAIL` and NOT `UCI_BSS`
+                                   — both are elsewhere (below, and
+                                   CRYPTO_HOT). Read the map.
   $4200-$5FFF  CRYPTO_OVERLAY      7.5 KB. Resident tenants in every UCI
                                    build: TLS_DEFRAME_CODE (~1.4 KB),
-                                   CERT_BUF_BSS (2,048 B), HTTPS_TARGET_RODATA,
+                                   CERT_BUF_BSS (2,048 B, pinned at $4200;
+                                   LIB_NISTCURVES_P256_BSS shares it —
+                                   P256_SCRATCH_UNION, #68's ip65 rule; so
+                                   nothing may read cert_buf after
+                                   CertificateVerify or run from it and
+                                   call ecdsa_verify), HTTPS_TARGET_RODATA,
                                    x509_name; comb adds RODATA/LIMLEE_BSS
                                    (small tail — the rigs' scratch). Also
                                    the slot for the (broken) overlay-embed
