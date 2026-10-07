@@ -55,7 +55,8 @@ REPO = Path(__file__).resolve().parent.parent
 WIKI = ("HTTPS_HOST=en.wikipedia.org",
         "HTTPS_PATH=/w/index.php?title=Commodore_64&action=raw")
 
-# The five link profiles, plus the wikipedia target on both ip65 profiles:
+# The five link profiles, the two shipped store products, the comb demo,
+# plus the wikipedia target on both ip65 profiles:
 # ip65's NET_CODE tail is a joint budget with HTTPS_TARGET_RODATA, so the
 # default target's figure does not say whether a longer target links.
 PROFILES = {
@@ -66,6 +67,14 @@ PROFILES = {
     "uci-comb":         ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1"),
     "ip65-wiki":        ("BACKEND=ip65",) + WIKI,
     "ip65-onchip-wiki": ("BACKEND=ip65", "USE_NISTCURVES_ONCHIP=1") + WIKI,
+    # The two shipped UCI products, flag for flag as PACKAGE_VARIANTS in
+    # tools/package/_common.sh builds them (TRUST_STORE=1 TRUST_RELEASE=1).
+    # The plain uci-onchip / uci-comb rows above are NOT what ships: the
+    # store moves CRYPTO_OVERLAY and CRYPTO_HOT by hundreds of bytes.
+    "uci-onchip-store": ("BACKEND=uci", "USE_NISTCURVES_ONCHIP=1",
+                         "TRUST_STORE=1", "TRUST_RELEASE=1"),
+    "uci-comb-store":   ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1",
+                         "TRUST_STORE=1", "TRUST_RELEASE=1"),
     # The comb Wikipedia demo with the trust store (#155 phase 2): the
     # build the cold bank exists for. HTTPS_BODY_TO_REU re-arms the viewer.
     "uci-comb-demo-store": ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1",
