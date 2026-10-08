@@ -791,6 +791,11 @@ sha256_maj:
 ; the asserts below fail the link if either stops being so.
 ; Clobbers A, X. Runs once per 64 B block, so the loop overhead is noise
 ; beside the 64 rounds; the 250 B it saves are resident on both backends.
+; Cost vs the 406-cycle unrolled copy: 527 cycles (+121) where the loop sits
+; inside one page, 534 (+128) where the taken `bpl @word` crosses one (+1
+; per taken branch, 7 per call) -- placement-dependent, so it differs by
+; profile (the comb TRUST_STORE images cross today). Any indexed access whose
+; base+X crossed a page would add +1 more each; none does at present.
 ; =============================================================================
 .assert sha256_h1 = sha256_h0 + 4 .and sha256_h2 = sha256_h0 + 8 .and sha256_h3 = sha256_h0 + 12 .and sha256_h4 = sha256_h0 + 16 .and sha256_h5 = sha256_h0 + 20 .and sha256_h6 = sha256_h0 + 24 .and sha256_h7 = sha256_h0 + 28, lderror, "sha256_add_to_hash: sha256_h0..h7 must be contiguous (src/data.s)"
 .assert sha_b = sha_a + 4 .and sha_c = sha_a + 8 .and sha_d = sha_a + 12 .and sha_e = sha_a + 16 .and sha_f = sha_a + 20 .and sha_g = sha_a + 24 .and sha_h = sha_a + 28, lderror, "sha256_add_to_hash: sha_a..sha_h must be contiguous (src/data.s)"
