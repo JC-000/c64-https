@@ -66,9 +66,12 @@
         .import ecdsa_pubkey_y
         ; Phase 5 Fix B: separate 48 B P-384 pubkey slots so the cert
         ; handler doesn't overrun the 32 B P-256 slots when the leaf
-        ; cert advertises secp384r1.
+        ; cert advertises secp384r1. Armed builds only: without
+        ; ENABLE_P384_VERIFY nothing here recognises a P-384 leaf.
+.ifdef ENABLE_P384_VERIFY
         .import ecdsa_pubkey_x_384
         .import ecdsa_pubkey_y_384
+.endif
 
         ; Debug progress byte repurposed from tls_record_io.s's existing label.
         ; Used by tls_handle_cert_verify to mark which stage we reached so a
@@ -361,8 +364,13 @@ x509_extract_pubkey:
         lda (zp_ptr),y              ; OID length
         cmp #$08                    ; P-256 curve OID length
         beq @check_p256_oid
+.ifdef ENABLE_P384_VERIFY
         cmp #$05                    ; P-384 curve OID length
         beq @check_p384_oid
+.endif
+        ; Unarmed builds verify P-256 only, so a P-384 leaf's curve OID is
+        ; just another OID: the scan finds no supported key and the
+        ; Certificate is refused here (C=1), before any CertificateVerify.
         jmp @scan_next
 
 @check_p256_oid:
@@ -409,6 +417,7 @@ x509_extract_pubkey:
         iny                         ; past curve OID
         jmp @find_bitstring
 
+.ifdef ENABLE_P384_VERIFY
 @check_p384_oid:
         ; P-384 OID: 2B 81 04 00 22
         iny
@@ -440,6 +449,7 @@ x509_extract_pubkey:
         sta ecdsa_hash_len
         iny                         ; past curve OID
         jmp @find_bitstring
+.endif ; ENABLE_P384_VERIFY
 
 @scan_next:
         ; Advance pointer by 1 and continue scanning
@@ -545,6 +555,7 @@ x509_extract_pubkey:
         ; remaining 16 would clobber the next BSS variable).
         lda ecdsa_sig_len           ; 32 or 48
         sta zp_count
+.ifdef ENABLE_P384_VERIFY
         lda ecdsa_curve_id
         beq @copy_x_p256
         ; --- P-384 ---
@@ -557,6 +568,7 @@ x509_extract_pubkey:
         bne @copy_x_p384
         jmp @advance_past_x
 @copy_x_p256:
+.endif ; unarmed: the only curve that reaches here is P-256 (curve_id 0)
         ldy #0
 @copy_x_p256_loop:
         lda (zp_ptr),y
@@ -576,6 +588,7 @@ x509_extract_pubkey:
         sta zp_ptr+1
 
         ; Copy Y coordinate.  Same dispatch as X.
+.ifdef ENABLE_P384_VERIFY
         lda ecdsa_curve_id
         beq @copy_y_p256
         ldy #0
@@ -587,6 +600,7 @@ x509_extract_pubkey:
         bne @copy_y_p384
         jmp @copy_y_done
 @copy_y_p256:
+.endif
         ldy #0
 @copy_y_p256_loop:
         lda (zp_ptr),y
@@ -681,8 +695,15 @@ tls_handle_cert_verify:
         ; layer — the Phase 4b deliverable.
         lda cv_sig_scheme
         beq @cv_p256_path
+.ifdef ENABLE_P384_VERIFY
         sta ecdsa_curve_id          ; A = 1
         jmp ecdsa_verify
+.else
+        ; No P-384 verify in this build (the ClientHello never offers
+        ; 0x0503): refuse the scheme here, as ecdsa_verify's gated arm
+        ; would, without routing a curve_id = 1 into the dispatcher.
+        jmp @cv_error
+.endif
 @cv_p256_path:
 
         ; --- Read signature length [6-7] (big-endian) ---

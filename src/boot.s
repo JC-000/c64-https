@@ -77,7 +77,11 @@ SINK_PROBE = 1
         .import reu_execute
 
         ; ---- exports: Phase 3 P-384 overlay REU stash ----
+        ; Same gate as src/crypto/shared/crypto_swap.s: the stash and the
+        ; swaps that read it back exist together or not at all.
+.if .defined(KEEP_CRYPTO_SWAP) .or .defined(ENABLE_P384_VERIFY) .or .defined(USE_OVERLAY_P384_EMBED) .or .defined(USE_OVERLAY_P256_EMBED)
         .export reu_p384_overlay_init
+.endif
         .endif                          ; BACKEND_UCI_M3
 
         ; ---- exports: menu handlers ----
@@ -433,9 +437,11 @@ start:
 
         ; Phase 3: stash both P-384 split overlay images in REU banks 6
         ; and 7 from the .incbin'd staging blocks at $4200 and $E000.
-        ; Inert under BACKEND=ip65 and every shipped UCI build (see
-        ; reu_p384_overlay_init's body for the conditional).
+        ; Not linked at all in a shipped build (gate as crypto_swap.s's);
+        ; even where it is, its body is an RTS without the P-384 embed.
+.if .defined(KEEP_CRYPTO_SWAP) .or .defined(ENABLE_P384_VERIFY) .or .defined(USE_OVERLAY_P384_EMBED) .or .defined(USE_OVERLAY_P256_EMBED)
         jsr reu_p384_overlay_init
+.endif
 .endif ; BACKEND_UCI_M3
 
         ; Auto-initialize networking at boot so the banner shows the
@@ -1474,6 +1480,7 @@ reu_fetch_mul_row:
 ; that responsibility; boot calls neither because the BSS reset at
 ; entry already left current_overlay = OV_NONE = 0.
 ; =============================================================================
+.if .defined(KEEP_CRYPTO_SWAP) .or .defined(ENABLE_P384_VERIFY) .or .defined(USE_OVERLAY_P384_EMBED) .or .defined(USE_OVERLAY_P256_EMBED)
 reu_p384_overlay_init:
 .ifdef USE_OVERLAY_P384_EMBED
         ; --- Stash 1: $4200 (SHA blob) -> REU bank 6, offset $0000 ---
@@ -1604,6 +1611,7 @@ reu_p384_overlay_init:
 .endif ; .ifdef USE_OVERLAY_P256_EMBED
 
         rts
+.endif ; reu_p384_overlay_init gate (crypto_swap.s's)
 .endif ; BACKEND_UCI_M3
 
 ; =============================================================================

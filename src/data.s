@@ -490,8 +490,10 @@ mul_src2_buf:   .res 35         ; 32 bytes + 3 zero pad (see above)
 .export ecdsa_sig_s
 .export ecdsa_pubkey_x
 .export ecdsa_pubkey_y
+.ifdef ENABLE_P384_VERIFY      ; P-384 pubkey slots: armed builds only
 .export ecdsa_pubkey_x_384
 .export ecdsa_pubkey_y_384
+.endif
 ecdsa_curve_id: .res 1          ; 0=P-256, 1=P-384
 
 ; Phase C.4: for P-256, these five 32-byte BE buffers are laid out
@@ -515,8 +517,12 @@ ecdsa_pubkey_y: .res 32         ; public key Q.y          (BE, struct +128)
 ; and the P-384 dispatcher (src/crypto/ecdsa_verify_384.s) reads from
 ; the _384 slots.  96 B total in CRYPTO_BSS — well within the slack
 ; reclaimed by Phase 6's tls_hs_buf removal.
+; Only an ENABLE_P384_VERIFY build reaches them (tls_cert.s's P-384 copy
+; and ecdsa_verify_384.s), so only that build reserves them.
+.ifdef ENABLE_P384_VERIFY
 ecdsa_pubkey_x_384: .res 48     ; P-384 public key Q.x  (BE, dispatcher input)
 ecdsa_pubkey_y_384: .res 48     ; P-384 public key Q.y  (BE, dispatcher input)
+.endif
 
 ; --- Legacy in-tree ECDSA scratch (ecdsa_verify_tmp, ev_u1, ev_u2,
 ;     ev_point_save, ev_u1_384, ev_u2_384, ev_point_save_384) was

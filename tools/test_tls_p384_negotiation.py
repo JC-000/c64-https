@@ -241,7 +241,12 @@ def test_client_hello_sig_algs(transport, labels, rng):
 # ---------------------------------------------------------------------------
 
 def test_cert_verify_p384_dispatch(transport, labels):
-    """Verify tls_handle_cert_verify routes 0x0503 through the dispatcher.
+    """Verify tls_handle_cert_verify refuses 0x0503 (C=1).
+
+    UNARMED (every shipped build): the handler refuses the scheme itself
+    and leaves ecdsa_curve_id alone -- asserted below. ARMED
+    (ENABLE_P384_VERIFY=1): the original contract, which the rest of this
+    docstring describes.
 
     Synthesizes a CertificateVerify handshake message whose
     signature_scheme = 0x0503, calls tls_handle_cert_verify, and asserts:
@@ -327,12 +332,20 @@ def test_cert_verify_p384_dispatch(transport, labels):
     cv_scheme = read_bytes(transport, cv_scheme_addr, 1)[0]
     curve_id = read_bytes(transport, curve_id_addr, 1)[0]
 
+    # Unarmed builds (no ENABLE_P384_VERIFY, i.e. everything that ships)
+    # refuse 0x0503 in the handler itself: the P-384 short-circuit is gated
+    # out of src/tls_cert.s, so ecdsa_curve_id keeps the 0xFF pre-clear and
+    # the dispatcher is never entered. Armed builds still route curve_id = 1
+    # into ecdsa_verify. ecdsa_verify_384_tls links only in armed builds.
+    armed = labels.address("ecdsa_verify_384_tls") is not None
+    want_curve = 1 if armed else 0xFF
     ok = True
     if cv_scheme != 1:
         print(f"       FAIL: cv_sig_scheme = {cv_scheme:#x}, expected 0x01")
         ok = False
-    if curve_id != 1:
-        print(f"       FAIL: ecdsa_curve_id = {curve_id:#x}, expected 0x01")
+    if curve_id != want_curve:
+        print(f"       FAIL: ecdsa_curve_id = {curve_id:#x}, expected "
+              f"{want_curve:#x} ({'armed: dispatched' if armed else 'unarmed: untouched'})")
         ok = False
     if carry != 1:
         # C=1 is set by the `sec` in ecdsa_verify's gated-off P-384 arm.
@@ -346,10 +359,75 @@ def test_cert_verify_p384_dispatch(transport, labels):
         ok = False
 
     if ok:
-        print("       PASS: cv_sig_scheme=1, ecdsa_curve_id=1, "
-              "C=1 (ecdsa_verify dispatcher reached)")
+        if armed:
+            print("       PASS: cv_sig_scheme=1, ecdsa_curve_id=1, "
+                  "C=1 (ecdsa_verify dispatcher reached)")
+        else:
+            print("       PASS: cv_sig_scheme=1, C=1, ecdsa_curve_id untouched "
+                  "(refused in the handler; no P-384 in this build)")
         return 1, 0
     return 0, 1
+
+
+# ---------------------------------------------------------------------------
+# Test 1c: a P-384 LEAF is refused at Certificate (unarmed builds)
+# ---------------------------------------------------------------------------
+
+P384_HOST = "www.foo.invalid"
+
+
+def test_p384_leaf_refused(transport, labels):
+    """The live extractor (x509_extract_pubkey) given a P-384 leaf.
+
+    The leaf carries a SAN naming tls_hostname, so on UCI the name check
+    would pass it: only the curve can refuse it. UNARMED (every shipped
+    build) the P-384 curve OID is gated out of src/tls_cert.s, the scan
+    finds no supported key, and the Certificate fails with C=1 -- with
+    ecdsa_curve_id and the P-256 key slots untouched (pre-cleared here).
+    ARMED (ENABLE_P384_VERIFY=1) it is extracted as curve 1, as before.
+    """
+    print("\n  [1c] a P-384 leaf through x509_extract_pubkey")
+    need = ["x509_extract_pubkey", "cert_buf", "cert_data_ptr",
+            "cert_data_len_lo", "cert_data_len_hi", "ecdsa_curve_id",
+            "ecdsa_pubkey_x"]
+    missing = [n for n in need if labels.address(n) is None]
+    if missing:
+        print(f"       FAIL: missing labels {missing}")
+        return 0, 1
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from test_cert_pin import make_cert, spki
+
+    key = ec.derive_private_key(0x384, ec.SECP384R1())
+    leaf = make_cert(spki(key), [P384_HOST])
+    cb = labels["cert_buf"]
+    write_bytes(transport, cb, leaf)
+    write_bytes(transport, labels["cert_data_ptr"], bytes([cb & 0xFF, cb >> 8]))
+    write_bytes(transport, labels["cert_data_len_lo"], bytes([len(leaf) & 0xFF]))
+    write_bytes(transport, labels["cert_data_len_hi"], bytes([len(leaf) >> 8]))
+    if labels.address("tls_hostname") is not None:
+        write_bytes(transport, labels["tls_hostname"], P384_HOST.encode() + b"\x00")
+        write_bytes(transport, labels["tls_hostname_len"], bytes([len(P384_HOST)]))
+    canary = bytes([0xA5] * 32)
+    write_bytes(transport, labels["ecdsa_pubkey_x"], canary)
+    write_bytes(transport, labels["ecdsa_curve_id"], bytes([0xFF]))
+    try:
+        carry = jsr_with_carry(transport, labels["x509_extract_pubkey"], timeout=60.0)
+    except Exception as e:
+        print(f"       FAIL: jsr_with_carry raised {e} (a hang is a failure)")
+        return 0, 1
+    curve = read_bytes(transport, labels["ecdsa_curve_id"], 1)[0]
+    qx = read_bytes(transport, labels["ecdsa_pubkey_x"], 32)
+    armed = labels.address("ecdsa_verify_384_tls") is not None
+    if armed:
+        ok = curve == 1
+        what = f"armed: extracted as curve 1 (C={carry} curve_id={curve:#x})"
+    else:
+        ok = carry == 1 and curve == 0xFF and qx == canary
+        what = (f"unarmed: C={carry} (want 1), curve_id={curve:#x} (want 0xff), "
+                f"P-256 key slot {'untouched' if qx == canary else 'WRITTEN'}")
+    print(f"       {'PASS' if ok else 'FAIL'}: {what}")
+    return (1, 0) if ok else (0, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +499,10 @@ def main():
         failed += f
 
         p, f = test_cert_verify_p384_dispatch(transport, labels)
+        passed += p
+        failed += f
+
+        p, f = test_p384_leaf_refused(transport, labels)
         passed += p
         failed += f
 
