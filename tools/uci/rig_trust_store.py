@@ -22,10 +22,12 @@ Everything happens in /<volume>/c64https-test/ (the image's
 TRUST_STORE_DIR), which the rig creates if missing and in which it only
 ever writes and deletes TRUST.A / TRUST.B. The files go through
 c64-test-harness's storage API (tools/uci/_trust_storage.py), under the
-DeviceLock; the directory is left in place, empty, at the end (the API
-has no rmdir). The volume must be one storage_volumes() lists that is not
-/Temp or /Flash; a device without one (a C64U with no medium lists only
-Flash and Temp) is COULD NOT RUN, exit 2, before the device is touched.
+DeviceLock. The rig refuses a directory holding anything else (listing,
+plus TRUST.P by name: listings omit hidden names) and removes the
+directory at the end. The volume must be in storage_writable_volumes(); a
+device without one (a C64U with no medium lists only Flash and Temp) is
+COULD NOT RUN, exit 2, before the device is touched. Any other storage
+error (lock, FTP) is a failure, exit 1.
 An explicit TRUST_STORE_DIR in the environment must match the image. No
 socket is ever opened (the program's boot DHCP is the only network
 traffic), so the one reset the rig issues cannot poison a lease.
@@ -47,16 +49,14 @@ device's storage):
  11  version 2 file                           -> FAIL VERSION
  12  32 records (2,064 B, multi-part read); replace one -> 9 write chunks
  13  (TURBO_MHZ=1 only) reset DURING trust_store_save's WRITE_DATA
- 14  missing directory                        -> FAIL NOPATH (resident
-     store only: the rig points ts_name at an absent sibling directory,
-     since the storage API cannot remove one; not run on the cold bank)
+ 14  directory removed                        -> FAIL NOPATH; then put back
 
 The torn write in phase 5 is produced with the store's own DOS layer
 (dos_open FA_WRITE|FA_CREATE_ALWAYS + one dos_write, no close), so it is
 deterministic at any clock. Phase 13 interrupts the real save; only at
 1 MHz is its write window (~1 s) wide enough for a REST poll to land in.
 
-Exit: 0 pass, 1 a check failed, 2 could not run, 3 lock timeout, 4 device
+Exit: 0 pass, 1 a check failed (or a storage call failed), 2 could not run, 3 lock timeout, 4 device
 prep/preflight/load refused.
 """
 from __future__ import annotations
@@ -85,8 +85,9 @@ from _memory_policy import build_policy_and_low_ram_arbiter                     
 from _prg_load import PrgLoadError, load_verified_and_run                         # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu                       # noqa: E402
 from _skip_policy import cannot_run, verdict                                      # noqa: E402
-from _trust_storage import (OURS, SETUP_ERRORS, StoreUnavailable, TrustFiles,   # noqa: E402
-                            image_dir, select_store_dir)
+from _trust_storage import (CANNOT_RUN_ERRORS, OURS, StoreUnavailable,         # noqa: E402
+                            TrustFiles, image_dir, select_store_dir)
+from c64_test_harness import Ultimate64StorageError                              # noqa: E402
 import trust_store as ts                                                          # noqa: E402
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
@@ -431,29 +432,18 @@ def run_phases(r: Rig):
 
 
 def phase_nopath(r: Rig):
-    """[14] FAIL NOPATH. The storage API has no rmdir, so instead of
-    removing the directory the rig points the resident ts_name at a sibling
-    that does not exist (one byte), and puts it back afterwards."""
+    """[14] FAIL NOPATH: the test directory itself removed, then put back."""
     print("\n[14] no directory")
-    if "cold_call" in r.L:
-        # The cold bank re-fetches ts_name from the REU on every call.
-        r.notes["nopath"] = "not run: cold bank (ts_name is re-fetched; no rmdir)"
-        print(f"  {r.notes['nopath']}")
-        return
     ftp = r.ftp
-    at = r.L["ts_name"] + len(ftp.dir) - 1
-    orig = bytes(r.tr.read_memory(at, 1))
-    missing = ftp.dir[:-1] + ("x" if ftp.dir[-1] != "x" else "y")
-    r.require(orig == ftp.dir[-1].encode("ascii"), f"ts_name in RAM ends in {ftp.dir!r}")
-    r.require(not ftp.dir_exists(missing), f"{missing} does not exist")
-    r.tr.write_memory(at, missing[-1].encode("ascii"),
-                      override="rig_trust_store: point ts_name at a missing directory")
+    ftp.delete_ours()
+    gone = ftp.remove_dir()
+    r.notes["nopath_rmdir"] = gone
+    r.require(gone == "removed", f"{ftp.dir} removed ({gone})")
     try:
         c, a, st = r.load("example.com")
     finally:
-        r.tr.write_memory(at, orig, override="rig_trust_store: restore ts_name")
-    r.notes["nopath"] = missing
-    r.check(c == 1 and st["reason"] == ts.R_NOPATH, f"FAIL NOPATH ({missing})")
+        ftp.ensure_dir()
+    r.check(c == 1 and st["reason"] == ts.R_NOPATH, "FAIL NOPATH")
 
 
 def phase_midsave(r: Rig):
@@ -546,13 +536,21 @@ def main() -> int:
         # COULD NOT RUN before anything on it is touched.
         try:
             store = TrustFiles(HOST, select_store_dir(HOST, path, explicit))
+            store.check_only_ours()
             store.ensure_dir()
             store.delete_ours()
-        except (StoreUnavailable, *SETUP_ERRORS) as exc:
+        except CANNOT_RUN_ERRORS as exc:
+            # No writable volume, or a directory that is not ours: the
+            # device cannot host the test store. Both name what they saw.
             store = None
-            # Both messages name the volumes the device does have.
-            return cannot_run(f"no usable trust-store volume on {HOST}: {exc}",
+            return cannot_run(f"trust store unavailable on {HOST}: {exc}",
                               executed=0, total=None, certifies=CERTIFIES)
+        except Ultimate64StorageError as exc:
+            # Lock not held, FTP unreachable, a failed transfer: a real
+            # failure, never "no volume".
+            store = None
+            print(f"[fatal] storage on {HOST}: {exc}", file=sys.stderr)
+            return 1
         print(f"store {store.dir} on {HOST}")
         # The harness sweeps /Temp itself for this client while the lock
         # is held (leak-prone firmware only): no private GC.
@@ -587,7 +585,7 @@ def main() -> int:
         if store is not None:
             try:
                 store.delete_ours()
-                print(f"cleanup: {', '.join(OURS)} deleted; {store.dir} left in place")
+                print(f"cleanup: {', '.join(OURS)} deleted; {store.dir}: {store.remove_dir()}")
             except Exception as exc:  # noqa: BLE001
                 print(f"WARNING: cleanup of {store.dir} failed: {exc}")
         if client is not None:

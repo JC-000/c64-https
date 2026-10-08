@@ -106,13 +106,15 @@ DeviceLock, so a rig only has to build its client the default way (no
 Files on the device's volumes go through the harness's `storage_*` API,
 never a private FTP session. The two trust rigs keep TRUST.A / TRUST.B in
 `/<volume>/c64https-test` (the image's `TRUST_STORE_DIR`) via
-`_trust_storage.py`: the volume must be one `storage_volumes()` lists that
-is not in `WRITE_REFUSED_VOLUMES` (compared casefolded), and an explicit
-`TRUST_STORE_DIR` must match the image. A device with no such volume — a
-C64U with no medium lists only `Flash` and `Temp` — is COULD NOT RUN,
-exit 2, before anything on it is touched. The empty test directory is
-left in place (the API has no rmdir). Tests: `tools/test_trust_rig_storage.py`
-(faked storage, no hardware).
+`_trust_storage.py`: the volume must be in `storage_writable_volumes()`,
+and an explicit `TRUST_STORE_DIR` must match the image. A device with no
+such volume — a C64U with no medium lists only `Flash` and `Temp` — or a
+directory holding anything but TRUST.A/B (listed, or TRUST.P probed by
+name, since listings omit hidden names) is COULD NOT RUN, exit 2, before
+anything on it is touched. Any other storage error (lock, FTP) is exit 1.
+The directory is removed at the end; hidden leftovers are reported, never
+forced. Tests: `tools/test_trust_rig_storage.py` (faked storage that
+refuses without the fake lock, no hardware).
 
 ## Listener and socket lifecycle (#246, #234)
 

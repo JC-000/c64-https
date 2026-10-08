@@ -2,12 +2,10 @@
 
 rig_trust_store.py and rig_trust_policy.py read, write and delete the store
 files on the device's removable volume. They do it only through the
-harness's storage API (``storage_volumes`` / ``storage_get_file`` /
-``storage_put_file`` / ``storage_mkdir`` / ``storage_delete_file``), never
-over a private FTP session, so the harness's rules hold for every call:
-the DeviceLock must be held by this process, ``/Temp`` and ``/Flash`` are
-never written, paths are validated, and a failed new-file upload is
-removed.
+harness's storage API (``storage_*``), never over a private FTP session, so
+the harness's rules hold for every call: the DeviceLock must be held by
+this process, ``/Temp`` and ``/Flash`` are never written, paths are
+validated, and a failed new-file upload is removed.
 
 The store directory is baked into the image (``TRUST_STORE_DIR`` at build
 time), so the rig cannot move it at run time; it can only check that the
@@ -15,43 +13,47 @@ image's directory is somewhere the device can write. ``select_store_dir``
 does that:
 
 * the directory must be ``/<volume>/c64https-test`` -- the rigs delete
-  TRUST.A / TRUST.B there, so they refuse any directory a real store could
-  live in;
+  TRUST.A / TRUST.B there and remove the directory, so they refuse any
+  directory a real store could live in;
 * an explicit ``TRUST_STORE_DIR`` in the environment wins, and must be the
   image's directory (otherwise the C64 writes one place and the rig reads
   another);
-* the volume must be in ``storage_volumes(host)`` minus
-  ``WRITE_REFUSED_VOLUMES`` (compared casefolded: the device says ``Flash``,
-  the harness's set holds ``flash``).
+* the volume must be in ``storage_writable_volumes(host)``.
 
-Anything else is ``StoreUnavailable``, which the rigs turn into a COULD NOT
-RUN block and exit 2. A C64U with no medium (``['Flash', 'Temp']``) lands
-there by design.
+Exit-code contract for a rig's setup: ``StoreUnavailable`` and
+``Ultimate64StorageVolumeError`` mean "this device cannot host the test
+store" -- COULD NOT RUN, exit 2. A C64U with no medium (``['Flash',
+'Temp']``) lands there by design. Every other storage error (lock not
+held, FTP unreachable, a transfer failure) is a real failure, never
+reported as a missing volume.
 
-The harness has no directory listing or rmdir: the rigs only ever touch
-the two file names in ``OURS``, and leave the (empty) test directory in
-place at the end.
+``check_only_ours`` refuses a directory holding anything but TRUST.A /
+TRUST.B. Listings omit hidden names (a leading ``.``, or the hidden
+attribute), so TRUST.P -- which a TRUST_BUNDLE build reads -- is also
+probed by name; a hidden file is caught only when ``storage_rmdir``
+refuses the directory, and is reported, never forced.
 """
 from __future__ import annotations
 
 from c64_test_harness import (
     WRITE_REFUSED_VOLUMES,
-    Ultimate64StorageError,
+    Ultimate64StorageNotEmptyError,
     Ultimate64StorageVolumeError,
     storage_delete_file,
     storage_get_file,
+    storage_list_dir,
     storage_mkdir,
     storage_put_file,
+    storage_rmdir,
     storage_volumes,
+    storage_writable_volumes,
 )
 
 TEST_DIR_NAME = "c64https-test"
 OURS = ("TRUST.A", "TRUST.B")
+#: Read by the image when present (TRUST_BUNDLE=1), so it must not be.
+PROBED = ("TRUST.P",)
 SLOT_SUFFIX = "/TRUST."
-
-#: What a rig's setup may raise that means "this device cannot host the
-#: store" rather than "the code under test is wrong": exit 2, not 1.
-SETUP_ERRORS = (Ultimate64StorageVolumeError, Ultimate64StorageError)
 
 
 class StoreUnavailable(Exception):
@@ -60,6 +62,10 @@ class StoreUnavailable(Exception):
     def __init__(self, message: str, available: list[str] | None = None) -> None:
         super().__init__(message)
         self.available = list(available or [])
+
+
+#: Setup errors that mean COULD NOT RUN (exit 2). Nothing else does.
+CANNOT_RUN_ERRORS = (StoreUnavailable, Ultimate64StorageVolumeError)
 
 
 def _vols(names) -> str:
@@ -83,11 +89,6 @@ def image_dir(store_path: str) -> str:
     return d
 
 
-def writable_volumes(volumes) -> list[str]:
-    """``volumes`` minus the harness's write-refused set, compared casefolded."""
-    return [v for v in volumes if v.casefold() not in WRITE_REFUSED_VOLUMES]
-
-
 def select_store_dir(host: str, store_path: str, explicit: str | None = None) -> str:
     """The test directory to use, in the device's spelling of its volume.
 
@@ -106,16 +107,16 @@ def select_store_dir(host: str, store_path: str, explicit: str | None = None) ->
     vol = want.split("/")[1]
     if vol.casefold() in WRITE_REFUSED_VOLUMES:
         raise StoreUnavailable(f"{want} is on /{vol}, which the harness never writes")
-    volumes = storage_volumes(host)
-    writable = writable_volumes(volumes)
+    writable = storage_writable_volumes(host)
+    for v in writable:
+        if v.casefold() == vol.casefold():
+            return f"/{v}/{TEST_DIR_NAME}"
+    volumes = storage_volumes(host)                # only to name them
     if not writable:
         raise StoreUnavailable(
             f"{host} has no writable storage volume (available: {_vols(volumes)}; "
             f"/Temp and /Flash are never written). Insert a USB stick or SD card.",
             volumes)
-    for v in writable:
-        if v.casefold() == vol.casefold():
-            return f"/{v}/{TEST_DIR_NAME}"
     raise StoreUnavailable(
         f"/{vol} is not a writable volume on {host} (available: {_vols(volumes)}); "
         f"rebuild with TRUST_STORE_DIR=/{writable[0]}/{TEST_DIR_NAME}", volumes)
@@ -129,7 +130,8 @@ class TrustFiles:
         self.a, self.b = f"{directory}/TRUST.A", f"{directory}/TRUST.B"
 
     def get(self, path: str) -> bytes | None:
-        """The file's bytes, or None when it does not exist."""
+        """The file's bytes, or None when it does not exist. Every other
+        error (lock not held, FTP failure) propagates."""
         try:
             return storage_get_file(self.host, path)
         except FileNotFoundError:
@@ -156,16 +158,32 @@ class TrustFiles:
         for n in OURS:
             self.delete(n)
 
+    def check_only_ours(self) -> None:
+        """StoreUnavailable if the directory exists and holds anything but
+        TRUST.A / TRUST.B (visible entries, or TRUST.P by name)."""
+        try:
+            names = [e.name for e in storage_list_dir(self.host, self.dir)]
+        except FileNotFoundError:
+            return
+        foreign = sorted(set(names) - set(OURS))
+        for n in PROBED:
+            if n not in foreign and self.get(f"{self.dir}/{n}") is not None:
+                foreign.append(n)
+        if foreign:
+            raise StoreUnavailable(
+                f"{self.dir} holds files that are not the rig's: {foreign}; "
+                "move them away (the rig deletes TRUST.A/TRUST.B and removes the directory)")
+
     def ensure_dir(self) -> bool:
         """Create the test directory if missing; True if it was created."""
         return storage_mkdir(self.host, self.dir, exist_ok=True)
 
-    def dir_exists(self, directory: str | None = None) -> bool:
-        """Whether *directory* (default: ours) is a directory on the device."""
+    def remove_dir(self) -> str:
+        """Remove the (emptied) test directory. Returns "removed", "absent",
+        or a report of what is left -- hidden entries are never forced."""
         try:
-            storage_get_file(self.host, directory or self.dir)
-        except IsADirectoryError:
-            return True
-        except FileNotFoundError:
-            return False
-        raise StoreUnavailable(f"{directory or self.dir} is a file, not a directory")
+            return "removed" if storage_rmdir(self.host, self.dir, missing_ok=True) else "absent"
+        except Ultimate64StorageNotEmptyError as exc:
+            what = (f"visible entries {exc.entries}" if exc.entries else
+                    "hidden entries the listing omits (e.g. .DS_Store, ._*)")
+            return f"NOT removed: {self.dir} still holds {what}; remove them by hand"

@@ -1138,9 +1138,9 @@ The scripts:
                             (`HTTPS_TARGET=github.com`, DMA-fed to the
                             PRG so any build works). Pass criteria are
                             C64-side only (sentinel + `http_status=200`).
-                            Runs the `/Temp` GC (`_temp_gc.py`) after
-                            enable_uci — see the writemem-wedge note in
-                            "End-to-end HTTPS status". Comb
+                            `/Temp` hygiene is the harness's (its
+                            `Ultimate64Client`, under the DeviceLock;
+                            the old `_temp_gc.py` is retired). Comb
                             `C64_INIT_WAIT=75` is auto-detected from
                             labels.txt. Keep `DEBUG_CAPTURE=0` here.
   - `rig_https_local.py` — HTTPS e2e scaffolding against a local TLS 1.3
@@ -1312,7 +1312,8 @@ and then REST *and* the UCI bridge wedge together — ping alive, REST
 refuses instantly, C64 parks mid-transfer. Power cycle fixes; upstream
 GideonZ/1541ultimate#686 (merged, unreleased). Mitigated by
 `tools/uci/_temp_gc.py` (FTP-deletes managed `temp<HEX>` files, keep
-youngest 2; wired into the live/wiki rigs). Budget PRG loads per session;
+youngest 2; wired into the live/wiki rigs; since retired — the harness's
+`Ultimate64Client` sweeps `/Temp` under the DeviceLock). Budget PRG loads per session;
 `readmem` is not implicated.
 
 

@@ -22,8 +22,9 @@ package-m3-demo`, which leaves that build in build/).
 Drive A's state is read first and restored at the end: our image removed,
 the old image re-mounted by path when it had one, the drive switched back
 off when it was off, and the result compared with what was read. The
-upload (/Temp/cache/upload/image[_N].d64: the U64E numbers a repeat rather
-than overwrite it) is deleted over FTP once unmounted.
+upload (/Temp/cache/upload/image[_N].d64) is left alone: that is the
+U64E firmware's own managed upload directory, and deleting from it behind
+the firmware's back risks its tracking (c64-test-harness's note).
 Device prep, the REU preflight, the DeviceLock, the init wait and the
 refusal verdict are rig_https_m3.py's.
 
@@ -40,8 +41,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import ftplib
-from ftplib import FTP
 from pathlib import Path
 
 from c64_test_harness.backends.device_lock import DeviceLock, DeviceLockTimeout
@@ -104,29 +103,9 @@ def drive_a(client) -> dict:
     return {}
 
 
-def delete_upload(ours: dict, before: dict) -> None:
-    """FTP-delete the /Temp file our mount created (never one found mounted).
-    Never raises: it is the last step of the restore, and best-effort."""
-    name = ours.get("image_file", "")
-    if not name:
-        print("WARNING: our mount reported no image_file; its /Temp upload "
-              "(if any) is not deleted")
-        return
-    if not name.startswith("/Temp/") or name == before.get("image_file"):
-        return
-    try:
-        with FTP(HOST, timeout=10.0) as ftp:
-            ftp.login()
-            ftp.delete(name)
-        print(f"  deleted {name}")
-    except ftplib.all_errors as exc:
-        print(f"WARNING: {name} not deleted: {exc}")
-
-
 def restore_drive_a(client, before: dict, ours: dict, mounted: bool) -> None:
     """Put drive A back. `mounted` is False when our mount itself failed:
-    whatever the drive held is still there, so only the power is undone.
-    The upload is deleted last, so nothing it does can skip the rest."""
+    whatever the drive held is still there, so only the power is undone."""
     # fw 3.15 reports the whole path in image_file and image_path empty.
     path, file = before.get("image_path"), before.get("image_file")
     if mounted:
@@ -146,8 +125,6 @@ def restore_drive_a(client, before: dict, ours: dict, mounted: bool) -> None:
         print(f"WARNING: drive A not as found (before, after): {diff}")
     else:
         print(f"drive A restored: {after}")
-    if mounted:
-        delete_upload(ours, before)
 
 
 def main() -> int:

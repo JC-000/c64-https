@@ -47,12 +47,13 @@ comb Wikipedia demo:
 
 Both modes work in /<volume>/c64https-test (the image's TRUST_STORE_DIR,
 shared with rig_trust_store.py), which the rig creates if missing and in
-which it only ever writes and deletes TRUST.A / TRUST.B; the empty
-directory is left in place (the storage API has no rmdir). The volume must
-be one storage_volumes() lists that is not /Temp or /Flash, and an explicit
+which it only ever writes and deletes TRUST.A / TRUST.B, refuses if it
+holds anything else (listing, plus TRUST.P by name), and removes at the
+end. The volume must be in storage_writable_volumes(), and an explicit
 TRUST_STORE_DIR in the environment must match the image; a device without
 one (a C64U with no medium lists only Flash and Temp) is COULD NOT RUN,
-exit 2, before the device is touched. Every fetch is allowed to finish (or to refuse and
+exit 2, before the device is touched. Any other storage error (lock, FTP)
+is a failure, exit 1. Every fetch is allowed to finish (or to refuse and
 close) before the next key; the C64 is reset only at boot, before any
 socket, and at the end after the close is confirmed.
 
@@ -93,8 +94,9 @@ from _reu_preflight import ReuPreflightError, preflight_reu                     
 from _rig_lifecycle import guard_socket_teardown                                  # noqa: E402
 from _skip_policy import cannot_run, verdict                                      # noqa: E402
 from boot_check import decode_screen, screen_text                                 # noqa: E402
-from _trust_storage import (OURS, SETUP_ERRORS, StoreUnavailable, TrustFiles,   # noqa: E402
-                            image_dir, select_store_dir)
+from _trust_storage import (CANNOT_RUN_ERRORS, OURS, StoreUnavailable,         # noqa: E402
+                            TrustFiles, image_dir, select_store_dir)
+from c64_test_harness import Ultimate64StorageError                              # noqa: E402
 from rig_trust_store import image_store_path, load_labels                        # noqa: E402
 import trust_store as ts                                                          # noqa: E402
 
@@ -111,6 +113,7 @@ PRG_PATH = REPO / "build" / "c64-https.prg"
 LABELS_PATH = REPO / "build" / "labels.txt"
 CERTIFIES = "the trust policy on the U64E (#155 phase 2, L3)"
 NET_CONNECTED = 1
+CLOSED = "CONNECTION CLOSED"    # done_msg (src/boot.s): a fetch that ran to the end
 RESPONSE = (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
             b"Content-Length: 19\r\nConnection: close\r\n\r\nHELLO TRUST POLICY\n")
 
@@ -294,7 +297,8 @@ def phases_local(run, ftp, ip, port, out, listener_box, fetch_in_flight_box):
     print("\n[2] same key")
     n0 = len(lst.conns)
     press_g(ip)
-    s = run.wait("DONE", FETCH_TIMEOUT)
+    s = run.wait(CLOSED, FETCH_TIMEOUT)
+    run.check(s is not None, f"match: {CLOSED}")
     run.check(f"TRUST: KNOWN KEY {hx(h1)}" in run.seen, "match: KNOWN KEY K1")
     run.check(run.settled(), "match: settled")
     run.check(len(lst.conns) == n0 + 1 and lst.conns[-1]["handshake"], "match: the GET completed")
@@ -351,7 +355,8 @@ def phases_local(run, ftp, ip, port, out, listener_box, fetch_in_flight_box):
     run.keys("\r")
     run.wait("CONTINUE UNPINNED? Y/N", 30)
     run.keys("y")
-    s = run.wait("DONE", FETCH_TIMEOUT)
+    s = run.wait(CLOSED, FETCH_TIMEOUT)
+    run.check(s is not None, f"override: {CLOSED}")
     run.check(run.seen.count("** UNPINNED: KEY NOT CHECKED **") >= 1, "override: UNPINNED banner")
     run.check(run.settled(), "override: settled")
     run.check(len(lst.conns) == 2 and not lst.conns[0]["handshake"] and lst.conns[1]["handshake"]
@@ -448,13 +453,21 @@ def main() -> int:
         # COULD NOT RUN before anything on it is touched.
         try:
             store = TrustFiles(HOST, select_store_dir(HOST, path, explicit))
+            store.check_only_ours()
             store.ensure_dir()
             store.delete_ours()
-        except (StoreUnavailable, *SETUP_ERRORS) as exc:
+        except CANNOT_RUN_ERRORS as exc:
+            # No writable volume, or a directory that is not ours: the
+            # device cannot host the test store. Both name what they saw.
             store = None
-            # Both messages name the volumes the device does have.
-            return cannot_run(f"no usable trust-store volume on {HOST}: {exc}",
+            return cannot_run(f"trust store unavailable on {HOST}: {exc}",
                               certifies=CERTIFIES)
+        except Ultimate64StorageError as exc:
+            # Lock not held, FTP unreachable, a failed transfer: a real
+            # failure, never "no volume".
+            store = None
+            print(f"[fatal] storage on {HOST}: {exc}", file=sys.stderr)
+            return 1
         ftp = store
         print(f"store {store.dir} on {HOST}")
         # The harness sweeps /Temp itself for this client while the lock
@@ -520,7 +533,7 @@ def main() -> int:
         if store is not None:
             try:
                 store.delete_ours()
-                print(f"cleanup: {', '.join(OURS)} deleted; {store.dir} left in place")
+                print(f"cleanup: {', '.join(OURS)} deleted; {store.dir}: {store.remove_dir()}")
             except Exception as exc:    # noqa: BLE001
                 print(f"WARNING: cleanup of {store.dir} failed: {exc}")
         if client is not None:
