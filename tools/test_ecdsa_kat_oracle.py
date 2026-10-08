@@ -90,12 +90,25 @@ image's OWN path, not a staged struct: the leaf goes into cert_buf,
 `tls_handle_cert_verify` hashes a CertificateVerify against a transcript
 and calls `ecdsa_verify`. It checks that the scratch really lies inside
 cert_buf ([3k]), that the leaf is accepted ([3l]), that the signature
-verifies with the scratch landing on the leaf's bytes ([3m] -- the bytes
-must change, or the overlap was not exercised), and that a signature over
+verifies over a junk-filled cert_buf and its scratch overwrote it ([3m] --
+the bytes must change, or the overlap was not exercised), and that a signature over
 another transcript is refused ([3n]). Mutation-proven: moving the name
 check to after the signature (a cert_buf read while the scratch is live)
 turns [3m] red on the union layout and leaves it green without it. Only
 UCI builds that stream the Certificate (tls_cert_stream_finish) run it.
+
+All 2,048 B of cert_buf are seeded with junk before the leaf is staged, and
+re-seeded after the leaf is consumed and before each verify. So every verify
+runs with arbitrary bytes across its whole scratch span, not just over a
+160 B leaf, which is the lifetime claim: cert_buf holds nothing the verify
+may read. On a TRUST_STORE build (both shipped products) the extractor
+tail-calls the trust hook (cert_pin_check), which refuses unless trust_pre
+set tp_mode; the group sets TP_M_FIRST, as a first-use trust_pre would.
+
+NOT covered here: the deframer streaming the leaf in (tls_deframe.s), the
+interleaving of a real flight, trust_pre / trust_post and the cold bank's
+calls (rig_trust_policy.py on hardware, test_trust_policy_6502.py), and
+anything after CertificateVerify (Finished, traffic keys, the GET).
 
 Usage:
     python3 tools/test_ecdsa_kat_oracle.py [--verbose]
@@ -107,6 +120,8 @@ skipped build applies no arguments, and the run reports that.
 
 import hashlib
 import os
+import re
+import random
 import shlex
 import subprocess
 import sys
@@ -475,6 +490,14 @@ def jsr_ax_with_carry(transport, addr, a, x, timeout=2400.0, poll_interval=5.0):
     raise TimeoutError(f"jsr ${addr:04X} timed out after {timeout:.0f}s")
 
 
+def _tp_mode_first():
+    """TP_M_FIRST from src/trust_policy.inc (never a copied number)."""
+    inc = os.path.join(PROJECT_ROOT, "src", "trust_policy.inc")
+    m = re.search(r"^TP_M_FIRST\s*=\s*(\$?[0-9A-Fa-f]+)", open(inc).read(), re.M)
+    v = m.group(1)
+    return int(v[1:], 16) if v.startswith("$") else int(v)
+
+
 def _cert_verify_msg(sig_der):
     body = b"\x04\x03" + len(sig_der).to_bytes(2, "big") + sig_der
     return bytes([0x0F]) + len(body).to_bytes(3, "big") + body
@@ -506,7 +529,14 @@ def run_union_lifetime(transport, labels):
         return 0, len(UNION_SUBTESTS)
 
     cb = labels["cert_buf"]
-    cb_end = cb + labels["cert_buf_size"]
+    cb_size = labels["cert_buf_size"]
+    cb_end = cb + cb_size
+    rng = random.Random(0xCE27B0F)
+
+    def seed_cert_buf():
+        junk = bytes(rng.randrange(256) for _ in range(cb_size))
+        write_bytes(transport, cb, junk)
+        return junk
     where = {n: labels[n] for n in UNION_SCRATCH}
     inside = all(cb <= a < cb_end for a in where.values())
     check("3k", "P-256 scratch lies inside cert_buf (P256_SCRATCH_UNION linked)",
@@ -515,7 +545,12 @@ def run_union_lifetime(transport, labels):
 
     key = ec.derive_private_key(0x5EC0DE0FCE27B0F, ec.SECP256R1())
     leaf = make_cert(spki(key), [UNION_HOST])
+    seed_cert_buf()                    # junk behind the leaf, all 2,048 B
     write_bytes(transport, cb, leaf)
+    if labels.address("tp_mode") is not None:
+        # TRUST_STORE (both shipped products): the extractor tail-calls the
+        # trust hook, which refuses TP_M_NONE ("trust_pre never ran").
+        write_bytes(transport, labels["tp_mode"], bytes([_tp_mode_first()]))
     write_bytes(transport, labels["tls_hostname"], UNION_HOST.encode() + b"\x00")
     write_bytes(transport, labels["tls_hostname_len"], bytes([len(UNION_HOST)]))
     c = jsr_ax_with_carry(transport, labels["tls_cert_stream_finish"],
@@ -532,6 +567,9 @@ def run_union_lifetime(transport, labels):
     rec = labels["tls_rec_buf"]
 
     def cert_verify(signed_over):
+        # The leaf is dead now: re-seed ALL of cert_buf, so the verify starts
+        # over arbitrary bytes in its whole scratch span.
+        before = seed_cert_buf()
         sig = key.sign(signed + signed_over, ec.ECDSA(hashes.SHA256()))
         write_bytes(transport, labels["tls_transcript"], transcript)
         write_bytes(transport, rec, _cert_verify_msg(sig))
@@ -539,17 +577,15 @@ def run_union_lifetime(transport, labels):
         t0 = time.time()
         c = jsr_ax_with_carry(transport, labels["tls_handle_cert_verify"], 0, 0,
                               timeout=2400.0, poll_interval=15.0)
-        return c, time.time() - t0
+        after = read_bytes(transport, cb, cb_size)
+        return c, time.time() - t0, sum(1 for a, b in zip(before, after) if a != b)
 
-    before = read_bytes(transport, cb, len(leaf))
-    c, dt = cert_verify(transcript)
-    after = read_bytes(transport, cb, len(leaf))
-    changed = sum(1 for a, b in zip(before, after) if a != b)
-    check("3m", "tls_handle_cert_verify accepts the server's signature, and the "
-          "verify's scratch overwrote the (dead) leaf",
+    c, dt, changed = cert_verify(transcript)
+    check("3m", "tls_handle_cert_verify accepts the server's signature over a "
+          "junk-filled cert_buf, and its scratch overwrote it",
           c == 0 and changed > 0,
-          f"C={c} [{dt:.0f}s], {changed} of {len(leaf)} leaf bytes overwritten")
-    c, dt = cert_verify(hashlib.sha256(b"another transcript").digest())
+          f"C={c} [{dt:.0f}s], {changed} of {cb_size} cert_buf bytes overwritten")
+    c, dt, _ = cert_verify(hashlib.sha256(b"another transcript").digest())
     check("3n", "a signature over another transcript is refused",
           c == 1, f"C={c} [{dt:.0f}s]")
     return passed, failed
