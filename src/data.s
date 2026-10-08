@@ -510,8 +510,8 @@ ecdsa_pubkey_y: .res 32         ; public key Q.y          (BE, struct +128)
 ;     reclaimed in Phase C.4.  The sibling c64-nist-curves
 ;     `ecdsa_verify_256` now owns its own scratch inside the archive's
 ;     BSS (ecdsa_w/u1/u2/u1_be/u2_be/u1g_x/u1g_y, fp_rev_buf), so the
-;     legacy ev_* labels are unused.  Phase G can reclaim the matching
-;     P-384 slots when ecdsa_verify_384 is re-integrated the same way.
+;     legacy ev_* labels are unused.  (Their P-384 counterparts left
+;     with the P-384 lane, which is retired.)
 
 ; --- DER parsing temporaries ---
 .export ev_der_int_len

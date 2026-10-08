@@ -7,8 +7,9 @@ image's own code (VICE, jsr into the real routines):
 
   [1a] the ClientHello's signature_algorithms offers 0x0403 and nothing else
   [1b] tls_handle_cert_verify's scheme gate: 0x0503, 0x0603, 0x0804 and
-       0x0003 stop AT the gate (tls_recv_sub_progress $21, C=1,
-       ecdsa_curve_id untouched); 0x0403 gets past it ($22)
+       0x0003 (wrong high byte) and 0x0401, 0x0402, 0x04FF (wrong low byte)
+       stop AT the gate (tls_recv_sub_progress $21, C=1, ecdsa_curve_id
+       untouched); 0x0403 gets past it ($22)
   [1c] a plain P-384 leaf through x509_extract_pubkey: C=1, ecdsa_curve_id
        and the P-256 key slots untouched
   [1d] CHARACTERISATION, not a guarantee: a P-384 leaf that ALSO carries a
@@ -192,7 +193,11 @@ def test_cert_verify_scheme_gate(transport, labels):
     sig = bytes(48)
     ok_all = True
     for scheme, accept in ((0x0503, False), (0x0603, False), (0x0804, False),
-                           (0x0003, False), (0x0403, True)):
+                           (0x0003, False),
+                           # high byte $04: only the LOW-byte check refuses
+                           # these (0x0401 = rsa_pkcs1_sha256)
+                           (0x0401, False), (0x0402, False), (0x04FF, False),
+                           (0x0403, True)):
         msg = (bytes([0x0F]) + b"\x00\x00\x00" + struct.pack(">H", scheme)
                + struct.pack(">H", len(sig)) + sig)
         write_bytes(transport, labels["tls_rec_buf"], msg)
