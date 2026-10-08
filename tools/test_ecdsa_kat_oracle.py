@@ -92,10 +92,15 @@ and calls `ecdsa_verify`. It checks that the scratch really lies inside
 cert_buf ([3k]), that the leaf is accepted ([3l]), that the signature
 verifies over a junk-filled cert_buf and its scratch overwrote it ([3m] --
 the bytes must change, or the overlap was not exercised), and that a signature over
-another transcript is refused ([3n]). Mutation-proven: moving the name
-check to after the signature (a cert_buf read while the scratch is live)
-turns [3m] red on the union layout and leaves it green without it. Only
-UCI builds that stream the Certificate (tls_cert_stream_finish) run it.
+another transcript is refused ([3n]). Mutation: moving the name check to
+after the signature (a cert_buf read while the scratch is live) turns [3m]
+red. That red alone does NOT prove the union: cert_buf is re-seeded with
+junk before each verify (below), so the deferred check reads junk on any
+layout and the same mutant is red on master's too. What shows the union is
+exercised is [3k] (the scratch symbols lie inside cert_buf) and [3m]'s
+`changed > 0` (the verify really wrote over cert_buf) -- on master's layout
+[3k] fails and [3m] reports 0 bytes overwritten. Only UCI builds that stream
+the Certificate (tls_cert_stream_finish) run it.
 
 All 2,048 B of cert_buf are seeded with junk before the leaf is staged, and
 re-seeded after the leaf is consumed and before each verify. So every verify
