@@ -71,7 +71,7 @@
 ;
 ;   src/tls_ecdh.s          x25519_base         (keypair generation)
 ;   src/tls_ecdh.s          x25519_scalarmult   (shared secret)
-;   src/crypto/ecdsa_verify.s  ecdsa_verify_256 / ecdsa_verify_384_tls
+;   src/crypto/ecdsa_verify.s  ecdsa_verify_256
 ;
 ; Those are >90% of the handshake's CPU time, so this captures nearly all
 ; of the available win while every marker still prints between phases.

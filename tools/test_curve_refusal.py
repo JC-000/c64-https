@@ -6,9 +6,9 @@ every other key or scheme a server can present is turned away cleanly, by the
 image's own code (VICE, jsr into the real routines):
 
   [1a] the ClientHello's signature_algorithms offers 0x0403 and nothing else
-  [1b] a CertificateVerify with scheme 0x0503 (ecdsa_secp384r1_sha384) is
-       refused by tls_handle_cert_verify itself (C=1) -- ecdsa_curve_id
-       untouched, so nothing curve-specific is ever dispatched
+  [1b] tls_handle_cert_verify's scheme gate: 0x0503, 0x0603, 0x0804 and
+       0x0003 stop AT the gate (tls_recv_sub_progress $21, C=1,
+       ecdsa_curve_id untouched); 0x0403 gets past it ($22)
   [1c] a plain P-384 leaf through x509_extract_pubkey: C=1, ecdsa_curve_id
        and the P-256 key slots untouched
   [1d] CHARACTERISATION, not a guarantee: a P-384 leaf that ALSO carries a
@@ -22,7 +22,11 @@ image's own code (VICE, jsr into the real routines):
   [1f] an Ed25519 leaf: C=1, slots untouched
 
 Every leaf carries a SAN naming tls_hostname, so on UCI the name check would
-pass it: only the key type can refuse it. Ported from the retired
+pass it: only the key type can refuse it. On TRUST_STORE builds (both shipped
+UCI products) the extractor tail-calls the trust hook, which refuses unless
+trust_pre set tp_mode; every extraction here first sets TP_M_FIRST, as a
+first-use trust_pre would, so a refusal is the extractor's, not the hook's.
+Run it on both shipped store builds, not only on plain images. Ported from the retired
 test_tls_p384_negotiation.py ([1a]-[1d]) with the armed-build branches removed.
 
 Usage:
@@ -63,6 +67,24 @@ CARRY_FLAG_ADDR = 0x0353
 HOST = "www.foo.invalid"
 EXPECTED_CHECKS = 6               # [1a] [1b] [1c] [1d] [1e] [1f]
 CANARY = bytes([0xA5] * 32)
+
+
+def _tp_mode_first():
+    """TP_M_FIRST from src/trust_policy.inc (never a copied number)."""
+    import re
+    inc = os.path.join(PROJECT_ROOT, "src", "trust_policy.inc")
+    m = re.search(r"^TP_M_FIRST\s*=\s*(\$?[0-9A-Fa-f]+)", open(inc).read(), re.M)
+    v = m.group(1)
+    return int(v[1:], 16) if v.startswith("$") else int(v)
+
+
+def _arm_trust_hook(transport, labels):
+    """TRUST_STORE builds (both shipped UCI products): x509_extract_pubkey
+    tail-calls the trust hook (cert_pin_check), which refuses while tp_mode
+    is TP_M_NONE ("trust_pre never ran"). Set first use, as trust_pre would,
+    so a refusal seen here is the extractor's, never the hook's."""
+    if labels.address("tp_mode") is not None:
+        write_bytes(transport, labels["tp_mode"], bytes([_tp_mode_first()]))
 
 
 def jsr_with_carry(transport, addr, timeout=120.0, poll_interval=0.5):
@@ -144,32 +166,60 @@ def test_client_hello_sig_algs(transport, labels, rng):
 # [1b] CertificateVerify 0x0503 refused in the handler
 # ---------------------------------------------------------------------------
 
-def test_cert_verify_0503_refused(transport, labels):
-    print("\n  [1b] CertificateVerify, signature_scheme 0x0503")
+def test_cert_verify_scheme_gate(transport, labels):
+    """tls_handle_cert_verify accepts signature_scheme 0x0403 and nothing else.
+
+    Judged by tls_recv_sub_progress, which the handler sets to $21 after the
+    handshake-type check and to $22 only once the scheme gate has passed --
+    so the assertion is about the GATE, not about what fails later. (The
+    first version of this check sent 48 zero bytes and asserted only C=1:
+    ecdsa_parse_der_sig rejects those regardless, so a handler with no
+    scheme gate at all still passed. Review finding on the retirement.)
+
+    Refused schemes must stop at $21 with C=1 and ecdsa_curve_id untouched;
+    the 0x0403 control must get past the gate (>= $22). The signature bytes
+    are zeros, so even the control fails the DER parse right after the gate
+    and no verify runs.
+    """
+    print("\n  [1b] CertificateVerify scheme gate: 0x0403 only")
     need = ["tls_handle_cert_verify", "tls_hs_ptr_reset", "tls_rec_buf",
-            "ecdsa_curve_id"]
+            "ecdsa_curve_id", "tls_recv_sub_progress"]
     missing = [n for n in need if labels.address(n) is None]
     if missing:
         print(f"       FAIL: missing labels {missing}")
         return 0, 1
-    sig = bytes(48)                       # never read: refused on the scheme
-    msg = (bytes([0x0F]) + b"\x00\x00\x00" + b"\x05\x03"
-           + struct.pack(">H", len(sig)) + sig)
-    write_bytes(transport, labels["tls_rec_buf"], msg)
-    write_bytes(transport, labels["ecdsa_curve_id"], bytes([0xFF]))
-    try:
-        # Under TLS_STREAM_DEFRAME (UCI) the handler does not reset
-        # tls_hs_ptr itself; tls_hs_ptr_reset does, on either backend.
-        jsr(transport, labels["tls_hs_ptr_reset"], timeout=30.0)
-        carry = jsr_with_carry(transport, labels["tls_handle_cert_verify"], timeout=60.0)
-    except Exception as e:
-        print(f"       FAIL: raised {e}")
-        return 0, 1
-    curve = read_bytes(transport, labels["ecdsa_curve_id"], 1)[0]
-    ok = carry == 1 and curve == 0xFF
-    print(f"       {'PASS' if ok else 'FAIL'}: C={carry} (want 1), "
-          f"ecdsa_curve_id={curve:#x} (want 0xff: nothing dispatched)")
-    return (1, 0) if ok else (0, 1)
+    prog = labels["tls_recv_sub_progress"]
+    sig = bytes(48)
+    ok_all = True
+    for scheme, accept in ((0x0503, False), (0x0603, False), (0x0804, False),
+                           (0x0003, False), (0x0403, True)):
+        msg = (bytes([0x0F]) + b"\x00\x00\x00" + struct.pack(">H", scheme)
+               + struct.pack(">H", len(sig)) + sig)
+        write_bytes(transport, labels["tls_rec_buf"], msg)
+        write_bytes(transport, labels["ecdsa_curve_id"], bytes([0xFF]))
+        write_bytes(transport, prog, bytes([0x00]))
+        try:
+            # Under TLS_STREAM_DEFRAME (UCI) the handler does not reset
+            # tls_hs_ptr itself; tls_hs_ptr_reset does, on either backend.
+            jsr(transport, labels["tls_hs_ptr_reset"], timeout=30.0)
+            carry = jsr_with_carry(transport, labels["tls_handle_cert_verify"],
+                                   timeout=60.0)
+        except Exception as e:
+            print(f"       FAIL 0x{scheme:04x}: raised {e}")
+            ok_all = False
+            continue
+        p = read_bytes(transport, prog, 1)[0]
+        curve = read_bytes(transport, labels["ecdsa_curve_id"], 1)[0]
+        if accept:
+            ok = p >= 0x22
+            what = f"progress ${p:02X} (want >= $22: past the gate)"
+        else:
+            ok = p == 0x21 and carry == 1 and curve == 0xFF
+            what = (f"progress ${p:02X} (want $21: stopped at the gate), C={carry}, "
+                    f"curve_id={curve:#x}")
+        print(f"       {'PASS' if ok else 'FAIL'} 0x{scheme:04x}: {what}")
+        ok_all = ok_all and ok
+    return (1, 0) if ok_all else (0, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +256,7 @@ def _extract(transport, labels, leaf):
     write_bytes(transport, labels["ecdsa_pubkey_x"], CANARY)
     write_bytes(transport, labels["ecdsa_pubkey_y"], CANARY)
     write_bytes(transport, labels["ecdsa_curve_id"], bytes([0xFF]))
+    _arm_trust_hook(transport, labels)
     carry = jsr_with_carry(transport, labels["x509_extract_pubkey"], timeout=60.0)
     curve = read_bytes(transport, labels["ecdsa_curve_id"], 1)[0]
     q = (read_bytes(transport, labels["ecdsa_pubkey_x"], 32)
@@ -270,12 +321,31 @@ def test_leaves(transport, labels):
 # Driver
 # ---------------------------------------------------------------------------
 
+def run_tests(transport, labels, seed=None):
+    """Runner entry point (tools/run_all_tests.py): returns (passed, failed).
+
+    Assumes a booted machine at the menu. A check that produced no verdict
+    counts as a failure, so the tally always covers EXPECTED_CHECKS."""
+    rng = random.Random(seed)
+    passed = failed = 0
+    for fn in (lambda: test_client_hello_sig_algs(transport, labels, rng),
+               lambda: test_cert_verify_scheme_gate(transport, labels),
+               lambda: test_leaves(transport, labels)):
+        p, f = fn()
+        passed += p
+        failed += f
+    if passed + failed != EXPECTED_CHECKS:
+        print(f"  [-] curve refusal: only {passed + failed} of "
+              f"{EXPECTED_CHECKS} checks produced a verdict")
+        failed += EXPECTED_CHECKS - (passed + failed)
+    return passed, failed
+
+
 def main():
     os.chdir(PROJECT_ROOT)
     seed = random.randint(0, 2**32 - 1)
     if "--seed" in sys.argv:
         seed = int(sys.argv[sys.argv.index("--seed") + 1])
-    rng = random.Random(seed)
     print(f"Random seed: {seed} (reproduce with --seed {seed})")
 
     if os.environ.get("C64_SKIP_BUILD"):
@@ -300,21 +370,10 @@ def main():
         if wait_for_text(t, "Q=QUIT", timeout=menu_wait(60), verbose=False) is None:
             print("FATAL: main menu did not appear")
             sys.exit(1)
-        for fn in (lambda: test_client_hello_sig_algs(t, labels, rng),
-                   lambda: test_cert_verify_0503_refused(t, labels),
-                   lambda: test_leaves(t, labels)):
-            p, f = fn()
-            passed += p
-            failed += f
+        passed, failed = run_tests(t, labels, seed)
         mgr.release(inst)
 
     print(f"\n{'=' * 60}\n  Passed: {passed}/{passed + failed}")
-    if passed + failed != EXPECTED_CHECKS:
-        # Every declared check must produce a verdict; one that silently
-        # dropped out is a failure, not a smaller pass.
-        print(f"  [-] curve refusal: only {passed + failed} of "
-              f"{EXPECTED_CHECKS} checks produced a verdict")
-        failed += EXPECTED_CHECKS - (passed + failed)
     print(f"  [{'+' if failed == 0 else '-'}] curve refusal: "
           f"{'PASS' if failed == 0 else 'FAIL'} ({passed}/{EXPECTED_CHECKS})")
     sys.exit(verdict(passed, failed,

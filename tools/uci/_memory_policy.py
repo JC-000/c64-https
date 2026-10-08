@@ -293,10 +293,9 @@ def build_policy_and_arbiter_with_overlay_carveout(
 ) -> tuple[MemoryPolicy, MemoryArbiter]:
     """Build a policy + arbiter that carves harness scratch from a tail region.
 
-    Use this when ``CRYPTO_OVERLAY`` ($4200-$5FFF) is fully occupied by
-    an overlay blob (e.g. ``OVERLAY_BLOB_SHA384`` under the P-384 build,
-    or any future overlay that fills the whole region at PRG-load time
-    AND is the active swap slot at runtime). In that case the default
+    Use this when ``CRYPTO_OVERLAY`` ($4200-$5FFF) is fully occupied
+    (historically by a P-384 overlay blob; the overlay swap and P-384 are
+    retired, so today only resident segments fill it). In that case the default
     arbiter window ($4000-$5FFF) finds no free range and raises
     :class:`MemoryArbiterError`.
     Under the baseline P-256 / X25519-sibling P-256 builds the same
@@ -330,20 +329,11 @@ def build_policy_and_arbiter_with_overlay_carveout(
          tail vanished); the fallback exists for older builds and the
          ip65 backend where NET_CODE still has slack.
       3. ``CRYPTO_OVERLAY`` — the 7,680 B swap slot at $4200-$5FFF.
-         Conditional fallback: usable ONLY when the build has no
-         overlay blob linked into the slot. The default UCI build
-         (no ``EMBED_P256_OVERLAY=1`` /
-         no ``USE_OVERLAY_P384_EMBED=1``) leaves CRYPTO_OVERLAY
-         zero-filled in the PRG with nothing reading from it at
-         runtime, which is a natural scratch home.
+         Conditional fallback: usable ONLY when nothing in the build
+         claims the slot through the segments listed below.
 
-         We gate on labels.txt: if any of
-         ``__OVERLAY_BLOB_SHA384_SIZE__``,
-         ``__OVERLAY_BLOB_P256_SIZE__``,
-         ``__X25519_RODATA_SIZE__``, or ``__X25519_BSS_SIZE__`` is
-         non-zero — OR any of ``__OVERLAY_P256_SIZE__`` /
-         ``__OVERLAY_P384_SIZE__`` (the segment names that route
-         linked .o files into the slot) — CRYPTO_OVERLAY is *skipped*
+         We gate on labels.txt: if ``__X25519_RODATA_SIZE__`` or
+         ``__X25519_BSS_SIZE__`` is non-zero, CRYPTO_OVERLAY is *skipped*
          and we fall through to the standard error message naming the
          NET_BSS_TAIL / NET_CODE shortfalls. The harness loses no
          functionality on builds that need the overlay slot for real:
@@ -393,11 +383,9 @@ def build_policy_and_arbiter_with_overlay_carveout(
     # bytes (i.e. its `.segment "NAME"` block was non-empty at link
     # time), so the *presence* of any of these symbols in
     # ``_parse_segment_bounds()``'s output is itself the gate.
+    # (The OVERLAY_BLOB_SHA384 / OVERLAY_BLOB_P256 / OVERLAY_P256 /
+    # OVERLAY_P384 entries left with the P-384 lane: no cfg defines them.)
     overlay_blockers = (
-        "OVERLAY_BLOB_SHA384",
-        "OVERLAY_BLOB_P256",
-        "OVERLAY_P256",
-        "OVERLAY_P384",
         "X25519_RODATA",
         "X25519_BSS",
     )

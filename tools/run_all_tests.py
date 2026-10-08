@@ -63,6 +63,7 @@ SUITE_ORDER = (
     "aead_fail_closed",
     "tls_connected_latch",
     "drbg_isolation",
+    "curve_refusal",
 )
 
 # Suites that define run_tests() but are deliberately NOT dispatched here,
@@ -239,6 +240,12 @@ def run_test_suite(name, transport, labels, seed):
             # transport; patches it makes are restored.
             from test_drbg_isolation import run_tests as drbg_iso_run
             passed, failed = drbg_iso_run(transport, labels)
+
+        elif name == "curve_refusal":
+            # P-384 is retired: only P-256 is accepted. Cheap (no verify
+            # runs), and valid on the ip65 build this runner produces.
+            from test_curve_refusal import run_tests as curve_refusal_run
+            passed, failed = curve_refusal_run(transport, labels, seed)
 
         elif name == "reu_row_abi":
             from test_reu_row_abi import run_tests as reu_row_abi_run

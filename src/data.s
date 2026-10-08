@@ -28,7 +28,7 @@ drbg_buf_idx:           .byte 32        ; Buffer index (32 = empty, forces first
 ecdsa_hash_len:         .byte 32        ; hash length default (P-256)
 
 .export ecdsa_sig_len
-ecdsa_sig_len:          .byte 32        ; component length default (32 or 48)
+ecdsa_sig_len:          .byte 32        ; component length: 32 (P-256, the only curve)
 
 ; =============================================================================
 ; BSS — zero-initialized mutable state

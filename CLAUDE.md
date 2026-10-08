@@ -137,7 +137,8 @@ Variables:
     build links the `libs/x25519` sibling; any value is refused.
   - `ENABLE_P384_VERIFY`, `USE_OVERLAY_P384_EMBED`, `KEEP_CRYPTO_SWAP`,
     `EMBED_P256_OVERLAY`, `USE_OVERLAY_P256_EMBED` — **retired,
-    `$(error)`-guarded**: any value is refused. **P-384 is retired** (branch `retire/p384-lane`; PR link TBD): only P-256 is verified, every other key or scheme is refused (`tools/test_curve_refusal.py`).
+    `$(error)`-guarded**: any value is refused (P-384 retired, see
+    Crypto ABI).
   - `HTTPS_PIN_SPKI_SHA256=<64 hex>` (+ `HTTPS_PIN_WARN=1` = report, don't
     abort) — leaf SPKI pin, #155. `tools/spki_pin.py <host>` computes it;
     the bytes ride `build/https_host.inc`. Both backends (ip65: in
@@ -237,7 +238,7 @@ fixed buffers in crypto BSS.
     are live. §13 (network ABI) **is** adopted (#70, merged #142); see
     Networking backend ABI for what its retirement did and did not change.
 
-**P-384 is retired** (branch `retire/p384-lane`; PR link TBD): only P-256 is verified, every other key or scheme is refused (`tools/test_curve_refusal.py`).
+**P-384 is retired** (branch `retire/p384-lane`; PR link TBD): only P-256 is verified. P-384 / RSA / Ed25519 leaves and any CertificateVerify scheme but 0x0403 are refused, with one exception: the extractor scans rather than parses, so a leaf that also carries a P-256 SPKI byte pattern has THAT key extracted and verified against (`tools/test_curve_refusal.py` [1d]).
 
 Sibling-library memory requirements: code + rodata in `CRYPTO_HOT` /
 `CRYPTO_RESIDENT` ($6000-$9FFF), never crossing $A000 (boot zeroes

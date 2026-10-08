@@ -247,7 +247,7 @@ tls_handle_certificate:
 ;
 ; Input: cert_data_ptr = pointer to DER certificate
 ;        cert_data_len_hi/lo = certificate length
-; Output: ecdsa_pubkey_x/y filled (32 or 48 bytes depending on curve)
+; Output: ecdsa_pubkey_x/y filled (32 bytes each: P-256 only)
 ;         C=0 success, C=1 not found / unsupported
 ; =============================================================================
 x509_extract_pubkey:
