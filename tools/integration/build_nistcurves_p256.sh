@@ -368,6 +368,13 @@ grep -q 'CONTRACT_ZP_DEFINES' "$LIB_DIR/Makefile" \
 #           member layout — and, more to the point, was VACUOUS against it
 #           until retargeted, because the member it used to read can no
 #           longer carry a bare alias whether or not the flag took.
+#   v0.15.0 (pinned; ABI_VERSION still 4) needs nothing new here: the bare
+#           sqtab_lo/hi moved to their own member (sqtab_aliases.o, still
+#           gated by LIB_NO_BARE_EXPORTS), and fp_sqr stopped borrowing
+#           poly_prod_lo/hi as scratch (fp_diag_lo/hi, +2 B P-256 BSS), so
+#           the APP_OWNED archive no longer imports them. That touches the
+#           poly_prod rendezvous, which only the ECDSA KAT guards: run
+#           tools/test_ecdsa_kat_oracle.py on onchip AND comb after a bump.
 CONTRACT_DEFINES="-D SHARED_SQTAB_INIT -D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH -D SHARED_CT_MUL_8X8 -D LIB_NO_BARE_EXPORTS=1 -D LIB_SHARED_SQTAB_BASE=0xBC00"
 # ZP-slot overrides go in the SEPARATE variable, not the one above: SPEC §6.2
 # splits them because a globally-delivered slot define collides with every

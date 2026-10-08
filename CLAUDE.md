@@ -210,7 +210,7 @@ fixed buffers in crypto BSS.
   ChaCha20-Poly1305     in-tree, permanent: `chacha20_encrypt`,
                         `poly1305_init/update/final`, `aead_encrypt/decrypt`
   SHA-256               in-tree: `sha256_init/update/final`
-  ECDSA P-256           sibling `libs/nistcurves@v0.14.0`:
+  ECDSA P-256           sibling `libs/nistcurves@v0.15.0`:
                         `ecdsa_verify_256`, `ec_scalar_mul_var` (plus the
                         `ec_base_x`, `ec_gx256` data — that is the whole
                         surface we import). Dispatcher:
@@ -221,7 +221,8 @@ fixed buffers in crypto BSS.
     range + on-curve check); c64-https does none of its own, and `Q` comes
     straight from the attacker-supplied certificate, so `ecdsa_verify.s`
     carries `.assert LIB_NISTCURVES_VERSION_MINOR >= 9`.
-  - `LIB_NISTCURVES_ABI_VERSION` is **4** from the v0.14.0 pin and
+  - `LIB_NISTCURVES_ABI_VERSION` is **4** from the v0.14.0 pin (unchanged
+    at v0.15.0) and
     `src/lib_contract_asserts.s` pins it. Two hops from the 2 that stood
     at v0.11.2 — v0.13.0 gave `ec_scalar_mul` a carry return, v0.14.0
     fixed `reu_fetch_mul_row` to take the row index in A as §8.2 always
@@ -726,7 +727,7 @@ Model: `T(f) = D + C/f`. The REU profile has a ~42-56 s floor (row-fetch
 DMA anchored to the ~1 MHz bus, ~16 KB per `fp_mul`); onchip has none but
 ~1.9x the CPU work; comb halves the CPU work again but needs REU bank 2
 and a boot precompute. **Read the pin, not the commit** — almost every
-figure was taken at `libs/nistcurves` v0.6.0; the pin is v0.14.0 and the
+figure was taken at `libs/nistcurves` v0.6.0; the pin is v0.15.0 and the
 only re-measured points are 48 MHz UCI REU (80.8 → 82.1 → 82.4 s, n=1; the
 +1.6% is v0.7.0's public-key validation, worth paying) and comb.
 
