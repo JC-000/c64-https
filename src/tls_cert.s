@@ -369,8 +369,13 @@ x509_extract_pubkey:
         beq @check_p384_oid
 .endif
         ; Unarmed builds verify P-256 only, so a P-384 leaf's curve OID is
-        ; just another OID: the scan finds no supported key and the
-        ; Certificate is refused here (C=1), before any CertificateVerify.
+        ; just another OID and the scan moves on. A plain P-384 leaf then
+        ; holds no supported key and the Certificate is refused here (C=1),
+        ; before any CertificateVerify. NOT for every P-384 leaf: one that
+        ; carries a P-256 SPKI byte pattern later (an unknown extension,
+        ; say) has THAT key extracted (C=0) -- the extractor scans, it does
+        ; not parse; RSA leaves behave the same on master -- and
+        ; CertificateVerify is then checked against the extracted key.
         jmp @scan_next
 
 @check_p256_oid:

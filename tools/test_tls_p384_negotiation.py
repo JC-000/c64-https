@@ -385,6 +385,8 @@ def test_p384_leaf_refused(transport, labels):
     finds no supported key, and the Certificate fails with C=1 -- with
     ecdsa_curve_id and the P-256 key slots untouched (pre-cleared here).
     ARMED (ENABLE_P384_VERIFY=1) it is extracted as curve 1, as before.
+    "Refused" holds for a PLAIN P-384 leaf only; [1d] characterises one
+    that also carries a P-256 SPKI pattern.
     """
     print("\n  [1c] a P-384 leaf through x509_extract_pubkey")
     need = ["x509_extract_pubkey", "cert_buf", "cert_data_ptr",
@@ -426,6 +428,72 @@ def test_p384_leaf_refused(transport, labels):
         ok = carry == 1 and curve == 0xFF and qx == canary
         what = (f"unarmed: C={carry} (want 1), curve_id={curve:#x} (want 0xff), "
                 f"P-256 key slot {'untouched' if qx == canary else 'WRITTEN'}")
+    print(f"       {'PASS' if ok else 'FAIL'}: {what}")
+    return (1, 0) if ok else (0, 1)
+
+
+def _p384_leaf_with_trailing_p256(spki384, spki256, host):
+    """A P-384 leaf whose real SPKI comes first, plus a P-256 SPKI's bytes
+    inside an unknown, non-critical extension (OID 1.3.6.1.4.1.99999.1)
+    AFTER it. Unsigned: nothing on the C64 checks a certificate signature."""
+    from test_cert_pin import tlv
+    tbs = (tlv(0xA0, tlv(0x02, b"\x02")) + tlv(0x02, b"\x01")
+           + tlv(0x30, tlv(0x06, bytes.fromhex("2a8648ce3d040303")))
+           + tlv(0x30, b"") + tlv(0x30, b"") + tlv(0x30, b"") + spki384)
+    san = tlv(0x30, tlv(0x06, b"\x55\x1d\x11")
+              + tlv(0x04, tlv(0x30, tlv(0x82, host.encode()))))
+    unknown = tlv(0x30, tlv(0x06, bytes.fromhex("2b0601040186 8d1f01".replace(" ", "")))
+                  + tlv(0x04, spki256))
+    tbs += tlv(0xA3, tlv(0x30, san + unknown))
+    return tlv(0x30, tlv(0x30, tbs) + tlv(0x30, b"") + tlv(0x03, b"\x00"))
+
+
+def test_p384_leaf_trailing_p256(transport, labels):
+    """CHARACTERISATION, not a guarantee: a P-384 leaf that carries a P-256
+    SPKI byte pattern after its real key (here inside an unknown extension).
+
+    x509_extract_pubkey SCANS for the first supported curve OID rather than
+    parsing the TBS. Unarmed, the P-384 OID is skipped, so the scan reaches
+    the trailing P-256 pattern and extracts THAT key: C=0, curve 0, the
+    planted point in ecdsa_pubkey_x/y. RSA leaves already behave this way
+    at 75dd519. CertificateVerify is then checked against the extracted key,
+    i.e. one the server chose -- the same position as any self-chosen leaf,
+    since nothing here validates a chain; a pin binds to the extracted key
+    (src/cert_pin.s). Armed builds take the first curve OID, P-384.
+    """
+    print("\n  [1d] P-384 leaf + a trailing P-256 SPKI pattern (characterisation)")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from test_cert_pin import point, spki
+
+    k384 = ec.derive_private_key(0x384, ec.SECP384R1())
+    k256 = ec.derive_private_key(0x256, ec.SECP256R1())
+    leaf = _p384_leaf_with_trailing_p256(spki(k384), spki(k256), P384_HOST)
+    cb = labels["cert_buf"]
+    write_bytes(transport, cb, leaf)
+    write_bytes(transport, labels["cert_data_ptr"], bytes([cb & 0xFF, cb >> 8]))
+    write_bytes(transport, labels["cert_data_len_lo"], bytes([len(leaf) & 0xFF]))
+    write_bytes(transport, labels["cert_data_len_hi"], bytes([len(leaf) >> 8]))
+    if labels.address("tls_hostname") is not None:
+        write_bytes(transport, labels["tls_hostname"], P384_HOST.encode() + b"\x00")
+        write_bytes(transport, labels["tls_hostname_len"], bytes([len(P384_HOST)]))
+    write_bytes(transport, labels["ecdsa_curve_id"], bytes([0xFF]))
+    try:
+        carry = jsr_with_carry(transport, labels["x509_extract_pubkey"], timeout=60.0)
+    except Exception as e:
+        print(f"       FAIL: jsr_with_carry raised {e} (a hang is a failure)")
+        return 0, 1
+    curve = read_bytes(transport, labels["ecdsa_curve_id"], 1)[0]
+    q = (read_bytes(transport, labels["ecdsa_pubkey_x"], 32)
+         + read_bytes(transport, labels["ecdsa_pubkey_y"], 32))
+    armed = labels.address("ecdsa_verify_384_tls") is not None
+    if armed:
+        ok = carry == 0 and curve == 1
+        what = f"armed: P-384 key taken first (C={carry} curve_id={curve:#x})"
+    else:
+        ok = carry == 0 and curve == 0 and q == point(k256)
+        what = (f"unarmed: C={carry} (want 0), curve_id={curve:#x} (want 0), "
+                f"extracted key {'= the trailing P-256 one' if q == point(k256) else 'UNEXPECTED'}")
     print(f"       {'PASS' if ok else 'FAIL'}: {what}")
     return (1, 0) if ok else (0, 1)
 
@@ -503,6 +571,10 @@ def main():
         failed += f
 
         p, f = test_p384_leaf_refused(transport, labels)
+        passed += p
+        failed += f
+
+        p, f = test_p384_leaf_trailing_p256(transport, labels)
         passed += p
         failed += f
 
