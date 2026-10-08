@@ -141,7 +141,7 @@ AR65="${AR65:-ar65}"
 #
 # Probing for those two says exactly what the next 200 lines depend on, and
 # keeps saying it correctly if upstream renames a tag under us. It is
-# deliberately NOT the full requirement — CLAUDE.md records >= v0.14.0 for
+# deliberately NOT the full requirement — CLAUDE.md records >= v0.15.0 for
 # reasons this cannot see (the list is at the CONTRACT_DEFINES block below;
 # every one of them fails later and elsewhere, and one of them does not fail
 # at all — it changes what a signature check accepts). This gate exists to
@@ -251,6 +251,20 @@ grep -q 'CONTRACT_ZP_DEFINES' "$LIB_DIR/Makefile" \
   route for consumer ZP-slot overrides arrived in libs/nistcurves v0.10.0.
   Without it the -D flags below are silently discarded."
 
+# v0.15.0 markers. The pin's KAT evidence (onchip + comb) was taken against
+# v0.15.0's member layout and fp_sqr scratch; an older checkout links fine
+# and differs exactly there, around the poly_prod rendezvous that only the
+# KAT guards. Two independent features, so one renamed upstream file does
+# not hide the other.
+[ -f "$LIB_SRC/sqtab_aliases.s" ] || lib_preflight_fail \
+    "libs/nistcurves/src/sqtab_aliases.s is missing — the SPEC 6.1 sqtab_lo/hi
+  member split arrived in libs/nistcurves v0.15.0, which this repo pins."
+grep -qE '^fp_diag_lo:' "$LIB_SRC/data_p256.s" \
+    || lib_preflight_fail \
+    "src/data_p256.s defines no fp_diag_lo — fp_sqr's own diagonal scratch (in
+  place of borrowing poly_prod_lo/hi) arrived in libs/nistcurves v0.15.0,
+  which this repo pins."
+
 # --- ZP-slot overrides (c64-https canonical map) ---
 # nistcurves_zp_ptr2 = $3D : library default $fd collides with c64-https
 #                 zp_temp/zp_count used by der_decode.s during cert parsing.
@@ -333,7 +347,7 @@ grep -q 'CONTRACT_ZP_DEFINES' "$LIB_DIR/Makefile" \
 #                                           and silently yields a WRONG
 #                                           address with no diagnostic.
 #
-# Requires libs/nistcurves >= v0.14.0:
+# Requires libs/nistcurves >= v0.15.0:
 #   v0.11.1 made SHARED_CT_MUL_8X8 assemble against the on-chip TU
 #           (c64-nist-curves#123) — before that this needed a glue TU.
 #   v0.11.2 added the knob-staleness guard: a changed CONTRACT_DEFINES used
@@ -371,10 +385,13 @@ grep -q 'CONTRACT_ZP_DEFINES' "$LIB_DIR/Makefile" \
 #   v0.15.0 (pinned; ABI_VERSION still 4) needs nothing new here: the bare
 #           sqtab_lo/hi moved to their own member (sqtab_aliases.o, still
 #           gated by LIB_NO_BARE_EXPORTS), and fp_sqr stopped borrowing
-#           poly_prod_lo/hi as scratch (fp_diag_lo/hi, +2 B P-256 BSS), so
-#           the APP_OWNED archive no longer imports them. That touches the
-#           poly_prod rendezvous, which only the ECDSA KAT guards: run
+#           poly_prod_lo/hi as scratch (fp_diag_lo/hi, +2 B P-256 BSS).
+#           Only the APP_OWNED variant stopped importing the pair: the
+#           onchip archives every shipped image links still import it
+#           (mul_8x8_onchip.o, via SHARED_CT_MUL_8X8), so the poly_prod
+#           rendezvous stays LIVE. Only the ECDSA KAT guards it: run
 #           tools/test_ecdsa_kat_oracle.py on onchip AND comb after a bump.
+#           The source probe above checks for both v0.15.0 changes.
 CONTRACT_DEFINES="-D SHARED_SQTAB_INIT -D SHARED_REU_MUL_INIT -D SHARED_REU_MUL_FETCH -D SHARED_CT_MUL_8X8 -D LIB_NO_BARE_EXPORTS=1 -D LIB_SHARED_SQTAB_BASE=0xBC00"
 # ZP-slot overrides go in the SEPARATE variable, not the one above: SPEC §6.2
 # splits them because a globally-delivered slot define collides with every

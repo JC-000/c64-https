@@ -59,9 +59,29 @@ from check_upstream_pins import _SEMVER_RE, parse_gitmodules, pinned_sha  # noqa
 NOT_A_SIBLING = {"ip65"}
 
 
+def _is_own_checkout(sub_path):
+    """True only if sub_path is the top of its OWN git work tree.
+
+    An uninitialised submodule is an empty directory inside the
+    superproject, and `git -C` there walks UP and answers for the
+    superproject: its tags, not the submodule's. Reading those produced a
+    confident false "no vX.Y.Z tag points at" for a pin that was fine.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(REPO / sub_path), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return False
+    return Path(out.stdout.strip()).resolve() == (REPO / sub_path).resolve()
+
+
 def _local_tags(sub_path):
     """tag name -> commit, from the submodule's own clone (annotated tags
-    peeled through %(*objectname), lightweight ones taken as-is)."""
+    peeled through %(*objectname), lightweight ones taken as-is). None if
+    sub_path is not its own checkout (see _is_own_checkout)."""
+    if not _is_own_checkout(sub_path):
+        return None
     out = subprocess.run(
         ["git", "-C", str(REPO / sub_path), "for-each-ref", "refs/tags",
          "--format=%(refname:short) %(objectname) %(*objectname)"],
@@ -120,10 +140,15 @@ def test_contract_siblings_are_pinned_on_a_semver_tag():
         if sha is None:
             problems.append(f"{m['path']}: no gitlink in HEAD")
             continue
+        if tags is None:
+            problems.append(
+                f"{m['path']}: not initialised (not its own git checkout), so "
+                f"its tags cannot be read. Run: git submodule update --init "
+                f"{m['path']}")
+            continue
         if not tags:
             problems.append(
-                f"{m['path']}: the submodule clone has no tags (or is not "
-                f"initialised). Run: git submodule update --init && "
+                f"{m['path']}: the submodule clone has no tags. Run: "
                 f"git -C {m['path']} fetch --tags")
             continue
         on = sorted(n for n, c in tags.items() if c == sha and _SEMVER_RE.match(n))

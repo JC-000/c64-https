@@ -43,10 +43,11 @@ Fresh clone (ip65 backend; UCI needs none of the ip65 steps):
   - To test blob provenance, **flip a byte** — never move the blob aside.
     `make` regenerates it deterministically, reproducing the baseline hash,
     which reads exactly like a live trap. That false positive has been hit.
-  - **`libs/nistcurves` must be >= v0.14.0** (`CONTRACT_ZP_DEFINES`,
+  - **`libs/nistcurves` must be >= v0.15.0** (`CONTRACT_ZP_DEFINES`,
     knob-staleness guard, the §8.2 REU DMA settle, the #148 comb
-    fail-closed fix, and the §6.1 `zp_aliases*.o` split the wrapper's
-    bare-export guard is written against — full list in the
+    fail-closed fix, the §6.1 `zp_aliases*.o` split the wrapper's
+    bare-export guard is written against, and v0.15.0's sqtab member split
+    and fp_sqr scratch, which the KATs were taken against — full list in the
     `CONTRACT_DEFINES` block of `tools/integration/build_nistcurves_p256.sh`).
     A stale checkout is caught in ~0.05 s by a source probe in that same
     script (#124); `tools/check_upstream_pins.py --worktree` reports
