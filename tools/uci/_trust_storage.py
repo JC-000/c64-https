@@ -64,6 +64,12 @@ class StoreUnavailable(Exception):
         self.available = list(available or [])
 
 
+class StoreLeftovers(StoreUnavailable):
+    """The emptied test directory cannot be removed: it still holds entries
+    -- hidden ones the listing omits (.DS_Store, ._*) when none are named.
+    Device state, not a product defect: COULD NOT RUN."""
+
+
 #: Setup errors that mean COULD NOT RUN (exit 2). Nothing else does.
 CANNOT_RUN_ERRORS = (StoreUnavailable, Ultimate64StorageVolumeError)
 
@@ -178,12 +184,56 @@ class TrustFiles:
         """Create the test directory if missing; True if it was created."""
         return storage_mkdir(self.host, self.dir, exist_ok=True)
 
-    def remove_dir(self) -> str:
-        """Remove the (emptied) test directory. Returns "removed", "absent",
-        or a report of what is left -- hidden entries are never forced."""
+    def remove_dir(self) -> bool:
+        """Remove the (emptied) test directory: True if removed, False if it
+        was absent. Leftovers raise StoreLeftovers -- hidden entries are
+        reported, never forced."""
         try:
-            return "removed" if storage_rmdir(self.host, self.dir, missing_ok=True) else "absent"
+            return storage_rmdir(self.host, self.dir, missing_ok=True)
         except Ultimate64StorageNotEmptyError as exc:
             what = (f"visible entries {exc.entries}" if exc.entries else
                     "hidden entries the listing omits (e.g. .DS_Store, ._*)")
-            return f"NOT removed: {self.dir} still holds {what}; remove them by hand"
+            raise StoreLeftovers(f"{self.dir} cannot be removed: it still holds {what}; "
+                                 "remove them by hand") from exc
+
+    def prepare(self) -> None:
+        """Setup, in order: refuse a foreign directory; prove the directory
+        can be removed (hidden leftovers are COULD NOT RUN here, before the
+        device is touched, not a phase-14 failure later); recreate it."""
+        self.check_only_ours()
+        self.delete_ours()
+        self.remove_dir()
+        self.ensure_dir()
+
+
+def clean_up(store: "TrustFiles | None") -> tuple[int, str]:
+    """End of run: delete TRUST.A/B and remove the directory, under the lock.
+
+    Returns ``(0, msg)`` when done, ``(2, msg)`` for leftovers the rig must
+    not force (StoreLeftovers), ``(1, msg)`` for any other failure -- a
+    cleanup failure leaves TRUST.A/B behind and must not exit 0."""
+    if store is None:
+        return 0, "cleanup: nothing to clean"
+    try:
+        store.delete_ours()
+        store.remove_dir()
+    except StoreLeftovers as exc:
+        return 2, f"cleanup: {', '.join(OURS)} deleted, but {exc}"
+    except Exception as exc:  # noqa: BLE001 - reported, and turns the exit non-zero
+        return 1, f"cleanup of {store.dir} FAILED: {type(exc).__name__}: {exc}"
+    return 0, f"cleanup: {', '.join(OURS)} deleted; {store.dir} removed"
+
+
+def final_exit(rc: int, cleanup: tuple[int, str], cannot_run_fn) -> int:
+    """Fold the cleanup result into the run's exit code. A failed check
+    (1) stands; otherwise a cleanup failure is 1 and leftovers are 2."""
+    crc, msg = cleanup
+    if rc == 1 or crc == 0:
+        return rc
+    if crc == 1:
+        print(f"[fatal] {msg}")
+        return 1
+    if rc == 2:                 # already COULD NOT RUN; just say why else
+        print(msg)
+        return 2
+    return cannot_run_fn(msg)

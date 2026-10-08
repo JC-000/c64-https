@@ -94,8 +94,8 @@ from _reu_preflight import ReuPreflightError, preflight_reu                     
 from _rig_lifecycle import guard_socket_teardown                                  # noqa: E402
 from _skip_policy import cannot_run, verdict                                      # noqa: E402
 from boot_check import decode_screen, screen_text                                 # noqa: E402
-from _trust_storage import (CANNOT_RUN_ERRORS, OURS, StoreUnavailable,         # noqa: E402
-                            TrustFiles, image_dir, select_store_dir)
+from _trust_storage import (CANNOT_RUN_ERRORS, StoreUnavailable, TrustFiles,   # noqa: E402
+                            clean_up, final_exit, image_dir, select_store_dir)
 from c64_test_harness import Ultimate64StorageError                              # noqa: E402
 from rig_trust_store import image_store_path, load_labels                        # noqa: E402
 import trust_store as ts                                                          # noqa: E402
@@ -113,7 +113,12 @@ PRG_PATH = REPO / "build" / "c64-https.prg"
 LABELS_PATH = REPO / "build" / "labels.txt"
 CERTIFIES = "the trust policy on the U64E (#155 phase 2, L3)"
 NET_CONNECTED = 1
-CLOSED = "CONNECTION CLOSED"    # done_msg (src/boot.s): a fetch that ran to the end
+# done_msg (src/boot.s): printed whenever do_https_get closes the socket --
+# after a completed fetch, but also after a send failure (boot.s, the
+# send_fail_msg branch) and after a truncated body. Seeing it proves the
+# fetch ENDED, not that it succeeded; the listener and store checks beside
+# each await_closed() say whether it did.
+CLOSED = "CONNECTION CLOSED"
 RESPONSE = (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
             b"Content-Length: 19\r\nConnection: close\r\n\r\nHELLO TRUST POLICY\n")
 
@@ -250,6 +255,14 @@ class Run:
         self.seen = ""
 
 
+def await_closed(run, what) -> str | None:
+    """Wait for done_msg and record the wait as a check: a fetch that never
+    closes is a failure, not a silent 240 s timeout."""
+    s = run.wait(CLOSED, FETCH_TIMEOUT)
+    run.check(s is not None, f"{what}: {CLOSED}")
+    return s
+
+
 def record_of(ftp, host):
     return ts.lookup(ts.select(ftp.get(ftp.a), ftp.get(ftp.b)), host)
 
@@ -297,8 +310,7 @@ def phases_local(run, ftp, ip, port, out, listener_box, fetch_in_flight_box):
     print("\n[2] same key")
     n0 = len(lst.conns)
     press_g(ip)
-    s = run.wait(CLOSED, FETCH_TIMEOUT)
-    run.check(s is not None, f"match: {CLOSED}")
+    s = await_closed(run, "match")
     run.check(f"TRUST: KNOWN KEY {hx(h1)}" in run.seen, "match: KNOWN KEY K1")
     run.check(run.settled(), "match: settled")
     run.check(len(lst.conns) == n0 + 1 and lst.conns[-1]["handshake"], "match: the GET completed")
@@ -355,8 +367,7 @@ def phases_local(run, ftp, ip, port, out, listener_box, fetch_in_flight_box):
     run.keys("\r")
     run.wait("CONTINUE UNPINNED? Y/N", 30)
     run.keys("y")
-    s = run.wait(CLOSED, FETCH_TIMEOUT)
-    run.check(s is not None, f"override: {CLOSED}")
+    s = await_closed(run, "override")
     run.check(run.seen.count("** UNPINNED: KEY NOT CHECKED **") >= 1, "override: UNPINNED banner")
     run.check(run.settled(), "override: settled")
     run.check(len(lst.conns) == 2 and not lst.conns[0]["handshake"] and lst.conns[1]["handshake"]
@@ -436,6 +447,8 @@ def main() -> int:
     try:
         acquire_device_lock(lock)
     except LockTimeoutConfigError as exc:
+        # exit 2 for a malformed C64_DEVICE_LOCK_TIMEOUT predates the
+        # storage port (_device_lock_helper.py), unchanged here
         print(f"[fatal] {exc}", file=sys.stderr)
         return 2
     except DeviceLockTimeout as exc:
@@ -453,12 +466,11 @@ def main() -> int:
         # COULD NOT RUN before anything on it is touched.
         try:
             store = TrustFiles(HOST, select_store_dir(HOST, path, explicit))
-            store.check_only_ours()
-            store.ensure_dir()
-            store.delete_ours()
+            store.prepare()
         except CANNOT_RUN_ERRORS as exc:
-            # No writable volume, or a directory that is not ours: the
-            # device cannot host the test store. Both name what they saw.
+            # No writable volume, a directory that is not ours, or one that
+            # cannot be removed (hidden entries): the device cannot host the
+            # test store. Each names what it saw.
             store = None
             return cannot_run(f"trust store unavailable on {HOST}: {exc}",
                               certifies=CERTIFIES)
@@ -530,12 +542,8 @@ def main() -> int:
                 {"passed": run.passed, "failed": run.failed, "notes": run.notes},
                 indent=1, default=str))
             print(f"\nartifacts: {out}")
-        if store is not None:
-            try:
-                store.delete_ours()
-                print(f"cleanup: {', '.join(OURS)} deleted; {store.dir}: {store.remove_dir()}")
-            except Exception as exc:    # noqa: BLE001
-                print(f"WARNING: cleanup of {store.dir} failed: {exc}")
+        cleanup = clean_up(store)
+        print(cleanup[1])
         if client is not None:
             try:
                 if uci_on:
@@ -544,9 +552,11 @@ def main() -> int:
                 print(f"WARNING: teardown: {exc}")
         lock.release()
     if run is None:
-        return 2
+        return final_exit(2, cleanup, None)
     print(f"\n{run.passed} passed, {len(run.failed)} failed")
-    return verdict(run.passed, len(run.failed), certifies=CERTIFIES)
+    rc = verdict(run.passed, len(run.failed), certifies=CERTIFIES)
+    return final_exit(rc, cleanup, lambda m: cannot_run(
+        m, executed=run.passed, total=None, certifies=CERTIFIES))
 
 
 if __name__ == "__main__":

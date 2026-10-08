@@ -107,12 +107,14 @@ class _Calls:
     """Fake storage_* functions. Each refuses unless the fake lock is held."""
 
     def __init__(self, volumes, *, listing=(), files=None, raises=None,
-                 rmdir_raises=None):
+                 rmdir_raises=None, nth=None):
         self.volumes = list(volumes)
         self.listing = list(listing)            # visible names in DIR
         self.files = dict(files or {})          # path -> bytes, for gets
         self.raises = dict(raises or {})        # op -> exception
         self.rmdir_raises = rmdir_raises
+        self.nth = dict(nth or {})              # op -> (n, exception): the nth call raises
+        self.counts = {}
         self.log, self.violations = [], []
 
     def _op(self, op, *args):
@@ -123,6 +125,9 @@ class _Calls:
                                          "the device's DeviceLock (fake)")
         if op in self.raises:
             raise self.raises[op]
+        self.counts[op] = self.counts.get(op, 0) + 1
+        if op in self.nth and self.nth[op][0] == self.counts[op]:
+            raise self.nth[op][1]
 
     def storage_volumes(self, host, **kw):
         self._op("volumes")
@@ -346,9 +351,116 @@ def test_hidden_leftovers_are_reported_not_forced() -> None:
     files = m.TrustFiles("dev", DIR)
     calls = _Calls(U64E_VOLUMES, rmdir_raises=Ultimate64StorageNotEmptyError("550", []))
     with calls.install(), _held():
-        got = files.remove_dir()
-    assert got.startswith("NOT removed") and "hidden" in got, got
+        try:
+            files.remove_dir()
+        except m.StoreLeftovers as exc:
+            assert "hidden" in str(exc), str(exc)
+        else:
+            raise AssertionError("hidden leftovers did not raise StoreLeftovers")
     assert len(calls.ops("rmdir")) == 1 and not calls.ops("delete"), calls.log
+    with _Calls(U64E_VOLUMES).install(), _held():
+        assert files.remove_dir() is True
+
+
+def test_final_exit_folds_cleanup() -> None:
+    m = _storage()
+    skip = lambda msg: 2                                    # noqa: E731
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert m.final_exit(0, (0, ""), skip) == 0
+        assert m.final_exit(0, (1, "x"), skip) == 1
+        assert m.final_exit(0, (2, "x"), skip) == 2
+        assert m.final_exit(1, (2, "x"), skip) == 1         # a failed check stands
+        assert m.final_exit(2, (1, "x"), skip) == 1
+
+
+# --- phase 14 (rig_trust_store) and the CLOSED waits (rig_trust_policy), offline ----
+
+class _NopathRig:
+    """Just enough of rig_trust_store.Rig for phase_nopath."""
+
+    def __init__(self, store_rig, ftp, calls, reason):
+        self.ftp, self.calls, self.reason = ftp, calls, reason
+        self.passed, self.failed, self.notes = 0, [], {}
+        self.check = store_rig.Rig.check.__get__(self)
+        self.require = store_rig.Rig.require.__get__(self)
+
+    def load(self, host):
+        self.calls.log.append(("c64-load", host))
+        return 1, 3, {"reason": self.reason}
+
+
+def _phase14(calls, reason=None):
+    store_rig = _load_rig("rig_trust_store.py")
+    import trust_store as ts  # noqa: PLC0415
+    files = _storage().TrustFiles("dev", DIR)
+    r = _NopathRig(store_rig, files, calls, ts.R_NOPATH if reason is None else reason)
+    exc = None
+    with calls.install(), _held(), contextlib.redirect_stdout(io.StringIO()):
+        try:
+            store_rig.phase_nopath(r)
+        except Exception as e:  # noqa: BLE001
+            exc = e
+    return r, exc
+
+
+def test_phase14_removes_loads_then_restores() -> None:
+    calls = _Calls(U64E_VOLUMES)
+    r, exc = _phase14(calls)
+    assert exc is None and not r.failed and r.passed >= 2, (exc, r.failed)
+    seq = [c[0] for c in calls.log]
+    i_rm, i_load = seq.index("rmdir"), seq.index("c64-load")
+    assert i_rm < i_load, seq
+    assert "mkdir" in seq[i_load:], f"the directory was not put back after the load: {seq}"
+
+
+def test_phase14_stops_when_the_directory_was_not_removed() -> None:
+    calls = _Calls(U64E_VOLUMES)
+    calls.storage_rmdir = lambda host, path, **kw: (calls._op("rmdir", path), False)[1]
+    r, exc = _phase14(calls)
+    assert exc is not None and r.failed, "phase 14 went on after rmdir removed nothing"
+    assert "c64-load" not in [c[0] for c in calls.log], calls.log
+
+
+def test_phase14_checks_the_reason() -> None:
+    r, exc = _phase14(_Calls(U64E_VOLUMES), reason=0)
+    assert r.failed and any("NOPATH" in f for f in r.failed), r.failed
+
+
+def test_closed_wait_is_a_check() -> None:
+    pol = _load_rig("rig_trust_policy.py")
+
+    class R:
+        def __init__(self, screen):
+            self.screen, self.passed, self.failed = screen, 0, []
+
+        def wait(self, marker, budget):
+            return self.screen if marker == pol.CLOSED else None
+
+        def check(self, cond, what):
+            if cond:
+                self.passed += 1
+            else:
+                self.failed.append(what)
+
+    r = R(None)
+    pol.await_closed(r, "match")
+    assert r.failed == [f"match: {pol.CLOSED}"], r.failed
+    r = R("... CONNECTION CLOSED")
+    pol.await_closed(r, "match")
+    assert not r.failed and r.passed == 1
+    assert pol.CLOSED == "CONNECTION CLOSED"
+
+
+def test_phases_use_the_checked_closed_wait() -> None:
+    tree = ast.parse((UCI / "rig_trust_policy.py").read_text())
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "phases_local")
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+    awaited = [c for c in calls if getattr(c.func, "id", None) == "await_closed"]
+    assert len(awaited) >= 2, f"phases_local calls await_closed {len(awaited)} time(s), want 2"
+    bare = [c for c in calls if getattr(c.func, "attr", None) == "wait" and c.args
+            and isinstance(c.args[0], ast.Name) and c.args[0].id == "CLOSED"]
+    assert not bare, "an unchecked run.wait(CLOSED) is back in phases_local"
 
 
 # --- 2. the rigs' exit codes -----------------------------------------------------------
@@ -406,7 +518,69 @@ def _labels(rig):
     return labels
 
 
-def _run_main(rig_name, calls):
+class _FakeClient:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def reset(self):
+        self.calls.log.append(("reset",))
+
+    def get_info(self):
+        return {}
+
+    def send_text(self, *a, **kw):
+        pass
+
+    def read_mem(self, addr, n):
+        return bytes(n)
+
+    def write_mem(self, *a, **kw):
+        pass
+
+
+class _FakeTransport:
+    def __init__(self, **kw):
+        self.memory_policy = None
+
+
+class _FakeRun:
+    def __init__(self, client, L):
+        self.passed, self.failed, self.notes = 0, [], {}
+
+    def wait(self, *a, **kw):
+        return "screen"
+
+    def check(self, cond, what):
+        if cond:
+            self.passed += 1
+        else:
+            self.failed.append(what)
+
+    def settled(self, *a):
+        return True
+
+    def r8(self, name):
+        return 0
+
+
+def _full_run_patches(rig, calls):
+    """Let main() run to the end with no device: every device step faked,
+    the phases reduced to one passing check."""
+    noop = lambda *a, **kw: None                            # noqa: E731
+    p = dict(Ultimate64Client=lambda **kw: _FakeClient(calls), enable_uci=noop,
+             disable_uci=noop, prepare_device=noop, preflight_reu=noop,
+             load_verified_and_run=noop)
+    if hasattr(rig, "Ultimate64Transport"):
+        p["Ultimate64Transport"] = _FakeTransport
+    if hasattr(rig, "run_phases"):
+        p["run_phases"] = lambda r: r.check(True, "fake phase")
+    if hasattr(rig, "phases_local"):
+        p.update(Run=_FakeRun, guard_socket_teardown=noop,
+                 phases_local=lambda run, *a: run.check(True, "fake phase"))
+    return p
+
+
+def _run_main(rig_name, calls, *, full=False, extra=None):
     rig = _load_rig(rig_name)
     tmp = Path(tempfile.mkdtemp(prefix="trust_rig_ut_"))
     prg = tmp / "c64-https.prg"
@@ -429,8 +603,13 @@ def _run_main(rig_name, calls):
     peers = [sys.modules[n] for n in ("rig_trust_store",) if n in sys.modules]
     out, err = io.StringIO(), io.StringIO()
     rc = exc = None
+    if full:
+        patches.update(_full_run_patches(rig, calls))
+    patches.update(extra or {})
     with contextlib.ExitStack() as st:
         st.enter_context(_patched(rig, **patches))
+        if full and hasattr(rig, "Rig"):
+            st.enter_context(_patched(rig.Rig, boot=lambda self: None))
         for peer in peers:
             if hasattr(peer, "FTP"):
                 st.enter_context(_patched(peer, FTP=_no_network))
@@ -500,6 +679,69 @@ def test_rigs_fail_not_skip_on_other_storage_errors() -> None:
     _both(lambda r: _assert_exit(
         r, _Calls(U64E_VOLUMES, raises={"writable": Ultimate64StorageError("cannot reach FTP")}),
         1, names=("cannot reach FTP",), absent=("COULD NOT RUN", "unavailable")))
+
+
+def test_rigs_exit_2_on_hidden_leftovers_before_touching_the_device() -> None:
+    _both(lambda r: _assert_exit(
+        r, _Calls(U64E_VOLUMES, rmdir_raises=Ultimate64StorageNotEmptyError("550", [])),
+        2, names=("hidden",)))
+
+
+def _full(rig_name, calls, **extra):
+    rc, exc, text = _run_main(rig_name, calls, full=True, extra=extra)
+    assert exc is None, f"{rig_name}: main() raised {type(exc).__name__}: {exc}\n{text}"
+    assert "Traceback" not in text, text
+    _check_lock(rig_name, calls, text)
+    return rc, text
+
+
+def test_rigs_full_offline_run_passes_and_removes_the_directory() -> None:
+    def one(r):
+        calls = _Calls(U64E_VOLUMES)
+        rc, text = _full(r, calls)
+        assert rc == 0, f"{r}: exit {rc}\n{text}"
+        assert len(calls.ops("rmdir")) == 2, f"{r}: setup + cleanup rmdir: {calls.log}"
+    _both(one)
+
+
+def test_rigs_cleanup_failure_is_not_exit_0() -> None:
+    def one(r):
+        calls = _Calls(U64E_VOLUMES, nth={"rmdir": (2, Ultimate64StorageError("FTP dropped"))})
+        rc, text = _full(r, calls)
+        assert rc == 1, f"{r}: a failed cleanup rmdir exited {rc}\n{text}"
+        calls = _Calls(U64E_VOLUMES, nth={"delete": (3, Ultimate64StorageError("FTP dropped"))})
+        rc, text = _full(r, calls)
+        assert rc == 1, f"{r}: a failed cleanup delete exited {rc}\n{text}"
+    _both(one)
+
+
+def test_rigs_cleanup_leftovers_exit_2() -> None:
+    def one(r):
+        calls = _Calls(U64E_VOLUMES, nth={"rmdir": (2, Ultimate64StorageNotEmptyError("550", []))})
+        rc, text = _full(r, calls)
+        assert rc == 2 and "hidden" in text, f"{r}: exit {rc}\n{text}"
+    _both(one)
+
+
+def test_store_rig_phase_leftovers_exit_2() -> None:
+    """Hidden entries met at phase 14's rmdir are device state: exit 2."""
+    m = _storage()
+    calls = _Calls(U64E_VOLUMES)
+
+    def phases(r):
+        r.check(True, "fake phase")
+        raise m.StoreLeftovers("hidden entries the listing omits")
+    rc, text = _full("rig_trust_store.py", calls, run_phases=phases)
+    assert rc == 2 and "hidden" in text, f"exit {rc}\n{text}"
+
+
+def test_store_rig_resets_before_cleanup() -> None:
+    calls = _Calls(U64E_VOLUMES)
+    rc, text = _full("rig_trust_store.py", calls)
+    seq = [c[0] for c in calls.log]
+    resets = [i for i, op in enumerate(seq) if op == "reset"]
+    first_cleanup = seq.index("delete", seq.index("mkdir"))
+    assert resets and resets[-1] < first_cleanup, f"cleanup ran before the C64 was reset: {seq}"
 
 
 def test_rigs_clean_up_under_the_lock() -> None:

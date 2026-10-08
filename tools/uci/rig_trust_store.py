@@ -85,8 +85,8 @@ from _memory_policy import build_policy_and_low_ram_arbiter                     
 from _prg_load import PrgLoadError, load_verified_and_run                         # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu                       # noqa: E402
 from _skip_policy import cannot_run, verdict                                      # noqa: E402
-from _trust_storage import (CANNOT_RUN_ERRORS, OURS, StoreUnavailable,         # noqa: E402
-                            TrustFiles, image_dir, select_store_dir)
+from _trust_storage import (CANNOT_RUN_ERRORS, StoreUnavailable, TrustFiles,   # noqa: E402
+                            clean_up, final_exit, image_dir, select_store_dir)
 from c64_test_harness import Ultimate64StorageError                              # noqa: E402
 import trust_store as ts                                                          # noqa: E402
 
@@ -436,9 +436,9 @@ def phase_nopath(r: Rig):
     print("\n[14] no directory")
     ftp = r.ftp
     ftp.delete_ours()
-    gone = ftp.remove_dir()
+    gone = ftp.remove_dir()             # StoreLeftovers: COULD NOT RUN, see main()
     r.notes["nopath_rmdir"] = gone
-    r.require(gone == "removed", f"{ftp.dir} removed ({gone})")
+    r.require(gone is True, f"{ftp.dir} removed (rmdir returned {gone!r})")
     try:
         c, a, st = r.load("example.com")
     finally:
@@ -522,6 +522,8 @@ def main() -> int:
     try:
         acquire_device_lock(lock)
     except LockTimeoutConfigError as exc:
+        # exit 2 for a malformed C64_DEVICE_LOCK_TIMEOUT predates the
+        # storage port (_device_lock_helper.py), unchanged here
         print(f"[fatal] {exc}", file=sys.stderr)
         return 2
     except DeviceLockTimeout as exc:
@@ -531,17 +533,17 @@ def main() -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     client = tr = rig = store = None
     uci_enabled = False
+    blocked = None              # device state met mid-run (StoreLeftovers)
     try:
         # The store's volume first: a device with nowhere to write it is
         # COULD NOT RUN before anything on it is touched.
         try:
             store = TrustFiles(HOST, select_store_dir(HOST, path, explicit))
-            store.check_only_ours()
-            store.ensure_dir()
-            store.delete_ours()
+            store.prepare()
         except CANNOT_RUN_ERRORS as exc:
-            # No writable volume, or a directory that is not ours: the
-            # device cannot host the test store. Both name what they saw.
+            # No writable volume, a directory that is not ours, or one that
+            # cannot be removed (hidden entries): the device cannot host the
+            # test store. Each names what it saw.
             store = None
             return cannot_run(f"trust store unavailable on {HOST}: {exc}",
                               executed=0, total=None, certifies=CERTIFIES)
@@ -573,6 +575,9 @@ def main() -> int:
             return 4
         try:
             run_phases(rig)
+        except StoreUnavailable as exc:
+            blocked = str(exc)
+            print(f"\n{exc}")
         except Exception as exc:  # noqa: BLE001 - any escape is a failed run
             rig.failed.append(f"{type(exc).__name__}: {exc}")
             print(f"\n{exc}")
@@ -582,12 +587,8 @@ def main() -> int:
                        "passed": rig.passed, "failed": rig.failed, "notes": rig.notes}
             (run_dir / "result.json").write_text(json.dumps(summary, indent=1))
             print(f"\nnotes: {json.dumps(rig.notes)}\nartifacts: {run_dir}")
-        if store is not None:
-            try:
-                store.delete_ours()
-                print(f"cleanup: {', '.join(OURS)} deleted; {store.dir}: {store.remove_dir()}")
-            except Exception as exc:  # noqa: BLE001
-                print(f"WARNING: cleanup of {store.dir} failed: {exc}")
+        # Reset first: the 6502 must not be mid-DOS-write while the rig
+        # deletes the files and removes the directory under it.
         if client is not None:
             try:
                 if uci_enabled:
@@ -595,8 +596,15 @@ def main() -> int:
                 client.reset()
             except Exception as exc:  # noqa: BLE001
                 print(f"WARNING: teardown: {exc}")
+        cleanup = clean_up(store)
+        print(cleanup[1])
         lock.release()
-    return verdict(rig.passed, len(rig.failed), certifies=CERTIFIES)
+    if blocked and not rig.failed:
+        rc = cannot_run(blocked, executed=rig.passed, total=None, certifies=CERTIFIES)
+    else:
+        rc = verdict(rig.passed, len(rig.failed), certifies=CERTIFIES)
+    return final_exit(rc, cleanup, lambda m: cannot_run(
+        m, executed=rig.passed, total=None, certifies=CERTIFIES))
 
 
 if __name__ == "__main__":
