@@ -8,7 +8,7 @@
 ; Sibling library correspondence (from Phase 0 discovery):
 ;   x25519/fe25519 symbols        → c64-x25519
 ;   chacha20/poly1305/aead symbols → c64-ChaCha20-Poly1305
-;   ec_point_* symbols             → c64-nist-curves (P-256; P-384 deferred)
+;   ec_point_* symbols             → c64-nist-curves (P-256 only)
 ;   sha256 symbols                 → in-tree only, no sibling equivalent
 
 ; X25519: libs/x25519 (issue #245). Call the *_fresh entries: they rebuild
@@ -26,5 +26,4 @@
 
 .import ec_point_double, ec_point_add, ec_jacobian_to_affine
 
-; P-384 symbols NOT imported — stubbed per project_p384_stubbed.
-; Future: ec_point_double_384, ec_point_add_384, ec_jacobian_to_affine_384
+; P-384 is retired: no *_384 symbol is imported.

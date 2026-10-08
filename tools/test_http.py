@@ -750,9 +750,10 @@ def test_reu_body_sink(transport, labels):
         failed += 1
 
     # --- vector 3: a body past its REU region (adv-l5 on #266) ---
-    # Boot probed VICE's 512 KB REU; a base 1 KB below bank 6 (the P-384
-    # banks) gets a 1 KB region. A 1,500 B body: the first two bounces
-    # fit exactly, the last is refused, and bank 6 is never written.
+    # Boot probed VICE's 512 KB REU; a base 1 KB below its end ($080000)
+    # gets a 1 KB region. A 1,500 B body: the first two bounces fit
+    # exactly, the last is refused, and bank 0 -- where a write past the
+    # end of a 512 KB REU would wrap -- is never written.
     size_ok = labels.address("reu_size_ok")
     if size_ok is not None:
         top = read_bytes(transport, labels.address("reu_top_bank"), 1)[0]
@@ -764,26 +765,26 @@ def test_reu_body_sink(transport, labels):
             print(f"  FAIL: REU probe: reu_size_ok={ok} reu_top_bank={top} "
                   "(want 1, 7 for -reusize 512)")
             failed += 1
-        bank6 = (0x00, 0x00, 0x06)
-        before = bytes(_reu_fetch_to_ram(transport, labels, 512, reu_base=bank6))
-        write_bytes(transport, base_var, [0x00, 0xFC, 0x05])
+        bank0 = (0x00, 0x00, 0x00)
+        before = bytes(_reu_fetch_to_ram(transport, labels, 512, reu_base=bank0))
+        write_bytes(transport, base_var, [0x00, 0xFC, 0x07])
         body3 = bytes((i * 29 + 11) & 0xFF for i in range(1500))
         wire3 = (b"HTTP/1.1 200 OK\r\nContent-Length: 1500\r\n\r\n" + body3)
         _run_span_response(transport, labels, [wire3])
         full = read_bytes(transport, labels.address("http_sink_full"), 1)[0]
         room = _read_u24(transport, labels, "http_sink_room")
-        after = bytes(_reu_fetch_to_ram(transport, labels, 512, reu_base=bank6))
+        after = bytes(_reu_fetch_to_ram(transport, labels, 512, reu_base=bank0))
         head = b"".join(bytes(_reu_fetch_to_ram(transport, labels, 512,
-                                                reu_base=(0x00, hi, 0x05)))
+                                                reu_base=(0x00, hi, 0x07)))
                         for hi in (0xFC, 0xFE))   # 512 B: the stub is at $C380
         if full == 1 and room == 1024 and after == before and head == body3[:1024]:
             print("  PASS: body past its 1 KB region: the bounces that fit "
-                  "are written, the rest refused (http_sink_full), bank 6 "
+                  "are written, the rest refused (http_sink_full), bank 0 "
                   "untouched")
             passed += 1
         else:
             print(f"  FAIL: over-region body: full={full} room={room} "
-                  f"bank6_untouched={after == before} "
+                  f"bank0_untouched={after == before} "
                   f"head_ok={head == body3[:1024]}")
             failed += 1
     else:

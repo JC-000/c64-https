@@ -1589,24 +1589,19 @@ http_body_finish:
 ; (bank 2) -- all executed or trusted later. Now every body has a region:
 ;
 ;   [http_reu_body_base, end), end = the REU's size as probed at boot,
-;   or bank SINK_P384_BANK when the base sits below it,
 ;
-; and a base in banks 0..SINK_FLOOR_BANK-1 or the P-384 banks, past the
-; REU's end, or with no REU size established, gets an EMPTY region. A
+; and a base in banks 0..SINK_FLOOR_BANK-1, past the REU's end, or with no
+; REU size established, gets an EMPTY region. (Banks 6-7 were also excluded
+; while they were reserved for P-384 overlays; P-384 is retired.) A
 ; blit that would cross the end writes nothing and latches
 ; http_sink_full; http_recv_body then stops and every verdict is C=1.
 ; =============================================================================
-        .include "reu_layout.inc"   ; REU_OVERLAY_* (reserved slots)
         .include "cold_bank.inc"    ; COLD_REU (comb's cold-code bank)
 SINK_FLOOR_BANK = 3             ; banks 0-1: multiply rows; 2: comb Lim-Lee
                                 ;  + the cold bank (src/cold_bank.inc)
-SINK_P384_BANK  = 6             ; banks 6-7: the parked P-384 overlays
 .assert HTTP_REU_BODY_BASE >= SINK_FLOOR_BANK * $10000, error, "HTTP_REU_BODY_BASE overlaps REU banks 0-2 (multiply rows, Lim-Lee, cold bank)"
-.assert HTTP_REU_BODY_BASE < SINK_P384_BANK * $10000 .or HTTP_REU_BODY_BASE >= (SINK_P384_BANK + 2) * $10000, error, "HTTP_REU_BODY_BASE is in the P-384 banks 6-7"
 .assert HTTP_REU_BODY_BASE < $1000000, error, "HTTP_REU_BODY_BASE past a 16 MB REU"
-.assert REU_OVERLAY_P384_SHA384 >= SINK_P384_BANK * $10000 .and REU_OVERLAY_P384_CURVE + OVERLAY_SIZE <= (SINK_P384_BANK + 2) * $10000, error, "P-384 overlays left banks 6-7"
 .assert ^(COLD_REU + COLD_IMAGE_MAX - 1) < SINK_FLOOR_BANK, error, "the cold bank left banks 0-2"
-.assert REU_OVERLAY_STORE_BASE + OVERLAY_SIZE <= SINK_FLOOR_BANK * $10000 .and REU_OVERLAY_P256 + OVERLAY_SIZE <= SINK_FLOOR_BANK * $10000, error, "REU overlays left banks 0-2"
 
         .segment "HTTP_SINK_GUARD"
 
@@ -1693,19 +1688,9 @@ sink_room_init:
         lda http_reu_body_base+2
         cmp #SINK_FLOOR_BANK
         bcc @none               ; banks 0-2
-        cmp #SINK_P384_BANK
-        bcs @high
-        cpx #0                  ; below P-384: end = min(banks, 6)
-        beq @six                ;  (X = 0 is 256 banks)
-        cpx #SINK_P384_BANK+1
-        bcc @below
-@six:   ldx #SINK_P384_BANK
-        bne @end                ; always
-@high:  cmp #SINK_P384_BANK+2
-        bcc @none               ; banks 6-7
         cpx #0
         beq @end                ; 16 MB: end is $1000000
-@below: stx reu_probe_bank      ; (scratch) base bank must be < banks
+        stx reu_probe_bank      ; (scratch) base bank must be < banks
         cmp reu_probe_bank
         bcs @none
 @end:   sec                     ; room = end - base (bit 24 dropped: 16 MB)

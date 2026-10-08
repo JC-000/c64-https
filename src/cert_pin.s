@@ -24,7 +24,8 @@
 ; at window+27 and Qy at window+59 — exactly where the extractor copied
 ; ecdsa_pubkey_x/y from. Where in the certificate the window sits does not
 ; matter; which key gets verified does. P-256 leaves only: ecdsa_curve_id
-; must be 0, because a P-384 extraction writes the _384 slots and leaves
+; must be 0. With P-384 retired the extractor never sets anything else, so
+; this is defence in depth: a non-P-256 extraction would leave
 ; ecdsa_pubkey_x/y holding whatever an EARLIER connection put there.
 ;
 ; POSITIVE FLAG, not abort-on-mismatch (#152 interlock). cert_pin_status is

@@ -9,14 +9,12 @@
 ;
 ; Inputs provided by TLS cert handler (big-endian, 32 bytes each):
 ;   ecdsa_hash, ecdsa_sig_r, ecdsa_sig_s, ecdsa_pubkey_x, ecdsa_pubkey_y
-; Plus: ecdsa_curve_id (0 = P-256, 1 = P-384), ecdsa_sig_len, ecdsa_hash_len.
+; Plus: ecdsa_curve_id (0 = P-256), ecdsa_sig_len, ecdsa_hash_len.
 ;
 ; Output: C=0 signature VALID, C=1 INVALID or unsupported curve.
 ;
-; Phase 4a: P-384 dispatch jumps to ecdsa_verify_384_tls in
-; src/crypto/ecdsa_verify_384.s, which composes the dual-overlay swap
-; (sha384 -> curve) plus sibling ecdsa_verify_384.  See that file's
-; header for the per-step contract and the SHA-384 transcript caveat.
+; Only P-256 is verified. P-384 was retired: any non-zero ecdsa_curve_id is
+; a clean C=1 reject, before the VIC is blanked or the library is entered.
 ; =============================================================================
 
 .include "constants.inc"
@@ -54,9 +52,6 @@
 .assert LIB_NISTCURVES_VERSION_MAJOR = 0, lderror, "libs/nistcurves: expected MAJOR 0"
 .assert LIB_NISTCURVES_VERSION_MINOR >= 9, lderror, "libs/nistcurves: pin is older than v0.9.0"
 
-; --- Phase 4a: P-384 TLS dispatcher (src/crypto/ecdsa_verify_384.s) ---
-.import ecdsa_verify_384_tls
-
 ; --- State buffers (in-tree data.s) ---
 .import ecdsa_curve_id
 .import ecdsa_hash
@@ -88,78 +83,27 @@
 ; ecdsa_verify - curve dispatch (called from tls_cert.s)
 ; =============================================================================
 ecdsa_verify:
+        ; Any curve but P-256 (ecdsa_curve_id = 0) is refused outright:
+        ; P-384 is retired, and nothing is blanked or entered for it.
+        lda ecdsa_curve_id
+        beq @p256
+        sec                             ; C=1 — unsupported curve
+        rts
+
+@p256:
         ; Boot banks out BASIC ROM before any crypto runs (src/boot.s
         ; writes $36 to $01); the legacy defensive re-bank here was
         ; redundant and has been removed to save bytes.
         ;
-        ; Blank the VIC across the whole dispatch: this is the single
-        ; longest CPU-bound stretch of the handshake, and it produces no
-        ; screen output of its own, so badline DMA here is pure loss.
-        ; At the v0.6.0 REU pin the verify was 59.2 s of a U64E's 80.8 s
+        ; Blank the VIC across the verify: this is the single longest
+        ; CPU-bound stretch of the handshake, and it produces no screen
+        ; output of its own, so badline DMA here is pure loss. At the
+        ; v0.6.0 REU pin the verify was 59.2 s of a U64E's 80.8 s
         ; handshake at 48 MHz, and 1,416.7 s of a stock 1 MHz ip65 run's
-        ; 2,159.7 s — i.e. roughly two thirds of the whole handshake in
-        ; both cases. See src/vic.s for why blanking is scoped to the
-        ; heavy primitives rather than wrapped around tls_connect.
-        ;
-        ; Both dispatch arms were tail-calls before blanking landed. They
-        ; are now JSRs so there is a return site to unblank at; the carry
-        ; that each arm returns is the verify result and is preserved
-        ; across the unblank by the PHP/PLP pair below.
+        ; 2,159.7 s. See src/vic.s for why blanking is scoped to the
+        ; heavy primitives rather than wrapped around tls_connect. The
+        ; verify's carry is preserved across the unblank by PHP/PLP.
         jsr vic_blank
-
-        lda ecdsa_curve_id
-        beq @p256
-
-        ; --- P-384: REJECTED, and this is a safety gate, not a TODO ---
-        ;
-        ; Reaching ecdsa_verify_384_tls from a shipped build is destructive.
-        ; Its step 4 calls crypto_swap_to_p384_sha384, which DMAs OVERLAY_SIZE
-        ; ($1E00) bytes from REU into __CRYPTO_OVERLAY_START__ with no check
-        ; that anything was ever staged — and in every shipped configuration
-        ; reu_p384_overlay_init is `.ifdef USE_OVERLAY_P384_EMBED`, i.e. an
-        ; empty RTS, so those REU banks are never written. The destination is
-        ; not spare: under UCI it is HTTP_SINK_CODE + TLS_DEFRAME_CODE +
-        ; CERT_BUF_BSS + VIEWER_CODE + HTTPS_TARGET_RODATA; under ip65 the
-        ; fixed $1E00 length overruns the 4,212 B slot by 3,468 B, through
-        ; RODATA and HTTP_AUX_CODE2 into CRYPTO_CODE.
-        ;
-        ; Measured on the SHIPPED v0.4.0 images with
-        ; tools/test_p384_overlay_hazard.py — live resident code overwritten
-        ; and the routine never returned:
-        ;
-        ;   uci-onchip  (1950c6e8…)  5,316 / 7,680 B corrupted, hung
-        ;   ip65-onchip (0a420911…)  7,496 / 7,680 B corrupted, hung
-        ;
-        ; The ClientHello no longer advertises ecdsa_secp384r1_sha384, so a
-        ; compliant server will not choose P-384. This gate is what makes that
-        ; safe against a server that does anyway. ecdsa_curve_id has TWO
-        ; writers that can select this arm, both attacker-controlled, and the
-        ; second overrides the first:
-        ;
-        ;   1. src/tls_cert.s, "P-384 curve confirmed" — the curve OID in the
-        ;      certificate's SubjectPublicKeyInfo.
-        ;   2. src/tls_cert.s, the "P-384 short-circuit (Phase 4b)" block —
-        ;      cv_sig_scheme, i.e. the CertificateVerify's signature
-        ;      algorithm. It stores curve_id = 1 over whatever (1) decided
-        ;      and TAIL-CALLS this dispatcher, so a P-256 certificate with a
-        ;      0x0503 CertificateVerify still lands here.
-        ;
-        ; (Grep those strings rather than trusting a line number; both have
-        ; moved before.) The advertisement is therefore a request, never a
-        ; guarantee. Two independent changes are needed to reach the swap
-        ; again, by design.
-        ;
-        ; P-384 is parked as roadmap work, not deleted: the dispatcher and the
-        ; sibling primitives stay in tree, and re-enabling is this flag plus a
-        ; P-384 overlay image that actually builds (see "Known issues").
-        .ifdef ENABLE_P384_VERIFY
-        jsr ecdsa_verify_384_tls
-        .else
-        sec                             ; C=1 — unsupported curve, clean reject
-        .endif
-        jmp @done
-
-@p256:
         ; The TLS-populated ecdsa_sig_r, ecdsa_sig_s, ecdsa_hash,
         ; ecdsa_pubkey_x, ecdsa_pubkey_y are laid out contiguously at 32 B
         ; each (see src/data.s), matching the r|s|h|Qx|Qy BE struct that

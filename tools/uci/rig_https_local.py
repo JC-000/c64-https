@@ -160,7 +160,7 @@ KEY_PATH = REPO_ROOT / "tools" / "https_e2e" / "certs" / "server.key"
 # none and this script used to die with "cert/key not found" (issue #93).
 # They are generated on demand instead — see _ensure_certs_or_fail(), called
 # from main() and skipped under EXTERNAL_LISTENER=1, which by contract loads
-# no repo certs at all.  CERT_PROFILE is what the P-384 sibling overrides.
+# no repo certs at all.
 CERT_PROFILE = "p256"
 
 

@@ -123,7 +123,7 @@ Variables:
   - `USE_NISTCURVES_ONCHIP=1` — libs/nistcurves FP_ONCHIP_MUL profile: no
     REU row-fetch DMA, wins above ~18-22 MHz. Keeps the **base**
     `cfg/c64-https-$(BACKEND).cfg` — it only adds a `-D` and swaps the
-    archive. `$(error)`-guarded against the overlay-embed flags.
+    archive.
   - `USE_NISTCURVES_ONCHIP_COMB=1` — implies ONCHIP; Lim-Lee comb + boot
     precompute into REU bank 2 (**needs an REU**; ~45 s boot at 48 MHz,
     ~36 min at 1 MHz — rigs need `C64_INIT_WAIT`). Fastest above ~5-7 MHz.
@@ -135,32 +135,9 @@ Variables:
     the `ld65 -C` line, not from the profile name.
   - `USE_X25519_SIBLING` — **retired, `$(error)`-guarded (#245)**: every
     build links the `libs/x25519` sibling; any value is refused.
-  - `EMBED_P256_OVERLAY=1` — **retired, `$(error)`-guarded (#118)**: the
-    P-256 verify image is 644 B larger than the 7,680 B slot at every pin
-    since v0.7.0, and `CRYPTO_OVERLAY` now holds ~5 KB of resident
-    deframer/`cert_buf`/name-check code that the swap would DMA over. The
-    plumbing (`p256_overlay_blobs.s`, `crypto_swap_to_p256_verify`,
-    `cfg/p256-overlay-verify.cfg`, `make p256-overlay`) stays in tree.
-  - `USE_OVERLAY_P384_EMBED=1` — broken: from a clean tree the overlay
-    `.bin` rules order-only depend on `build/labels.txt`, which only the
-    (gated-off) main link produces; past that, the SHA-384 tables overflow
-    the slot by 1,536 B.
-  - `ENABLE_P384_VERIFY=1` — re-arms the P-384 verify arm. **Unsafe on its
-    own** (overwrites live code — see Crypto ABI); exists so
-    `tools/test_p384_overlay_hazard.py` can be mutation-tested. It is also
-    the **only** thing that links `src/crypto/ecdsa_verify_384.s` and
-    `src/crypto/p384_force_link.s` at all, so it is the one command that
-    keeps `ecdsa_verify_384.s` honest:
-
-        make BACKEND=uci USE_NISTCURVES_ONCHIP=1 ENABLE_P384_VERIFY=1
-
-    **Assembling that file is worthless as coverage**: `.import` of a
-    symbol nothing defines is a LINK-time error in ca65, not an
-    assemble-time one, so `ca65 src/crypto/ecdsa_verify_384.s` succeeds
-    with every one of its imports unresolved. Only the armed link finds a
-    P-384 symbol that has gone away. The flag applies on all five profiles
-    since the hoist out of the `USE_NISTCURVES_ONCHIP` block — it used to
-    be silently dropped by the two REU-profile builds.
+  - `ENABLE_P384_VERIFY`, `USE_OVERLAY_P384_EMBED`, `KEEP_CRYPTO_SWAP`,
+    `EMBED_P256_OVERLAY`, `USE_OVERLAY_P256_EMBED` — **retired,
+    `$(error)`-guarded**: any value is refused. **P-384 is retired** (branch `retire/p384-lane`; PR link TBD): only P-256 is verified, every other key or scheme is refused (`tools/test_curve_refusal.py`).
   - `HTTPS_PIN_SPKI_SHA256=<64 hex>` (+ `HTTPS_PIN_WARN=1` = report, don't
     abort) — leaf SPKI pin, #155. `tools/spki_pin.py <host>` computes it;
     the bytes ride `build/https_host.inc`. Both backends (ip65: in
@@ -260,33 +237,14 @@ fixed buffers in crypto BSS.
     are live. §13 (network ABI) **is** adopted (#70, merged #142); see
     Networking backend ABI for what its retirement did and did not change.
 
-**P-384 is PARKED, and deliberately gated.** The wire path used to be fully
-live while the overlay image was a stub: a P-384 certificate made
-`crypto_swap_to_p384_sha384` DMA `$1E00` bytes of nothing over resident
-code and hung the machine (measured on v0.4.0 images). Closed by two
-independent changes: the ClientHello no longer advertises `0x0503`, **and**
-`ecdsa_verify`'s P-384 arm is a `sec` reject unless `ENABLE_P384_VERIFY=1`.
-The curve comes from the certificate, so the gate is what makes the
-advertisement change safe. No P-384 build target has ever completed (see
-Known issues); fix the build before re-wiring.
-
-The lane is now gated at the **link line** as well as in the source:
-`ecdsa_verify_384.o` used to be in every shipped image and reachable from
-none of them (ca65 emits no import record for an `.import` nothing
-references, so the wildcard pulled it in), costing 299 B of
-`CRYPTO_AUX_CODE` + 33 B of `CRYPTO_RODATA` everywhere. Both P-384-only
-objects now link only under `ENABLE_P384_VERIFY=1`. Measured consequence:
-exactly two symbols lose their only link-time consumer —
-`crypto_swap_to_p384_sha384` and `crypto_swap_to_p384_curve`. With them
-`src/crypto/shared/crypto_swap.s` had no importer in any unarmed build, so
-it now assembles empty unless `ENABLE_P384_VERIFY`, an overlay embed, or
-`KEEP_CRYPTO_SWAP=1` is set (#155 phase 2; knobs in the Makefile).
+**P-384 is retired** (branch `retire/p384-lane`; PR link TBD): only P-256 is verified, every other key or scheme is refused (`tools/test_curve_refusal.py`).
 
 Sibling-library memory requirements: code + rodata in `CRYPTO_HOT` /
 `CRYPTO_RESIDENT` ($6000-$9FFF), never crossing $A000 (boot zeroes
 $A000-$BFFF); big BSS in `CRYPTO_COLD_SHADOW`; segments named per contract
 §4 (`LIB_NISTCURVES_P256_CODE` etc.). REU Profile B baseline; comb claims
-bank 2; banks 6-7 reserved for the P-384 overlay experiment.
+bank 2; the HTTP body sink starts at bank 3 (`src/lib_contract_asserts.s`
+refuses a library claim at or above it).
 
 Our own REU executes: never `sta reu_command` — `jsr reu_execute`
 (`src/reu_exec.s`, SPEC §8.2 bit-6 confirm + settle; X/Y/C preserved;
@@ -465,7 +423,7 @@ stdout.
                                               `TURBO_MHZ`, `EXTERNAL_LISTENER=1`,
                                               `DEBUG_CAPTURE`, artifacts under
                                               `$UCI_DEBUG_DIR`)
-  rig_https_print_body.py / rig_https_local_p384.py — wrappers (P-384 has no PRG)
+  rig_https_print_body.py                   — wrapper over rig_https_local
   rig_https_live.py / rig_https_wiki.py      — real servers (github, wikipedia)
   rig_https_banner.py                       — the ONLY rig that executes
                                               `do_https_get` (walks the menu,
@@ -612,16 +570,6 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
 
 ## Known issues
 
-  - **P-384 build is broken**, one link deeper than before: the `ar65`
-    member-name bug was ours (fixed), and the chain now stops at
-    `LIB_NISTCURVES_SHA384_TABLES` overflowing `OVERLAY_REGION` by 1,536 B
-    (`cfg/p384-overlay-sha384.cfg`); the embed variant dies on the
-    `build/labels.txt` ordering defect. `ec_scalar_mul_384_shim` is
-    unreferenced by any shipped PRG, but it is the only provider of
-    `ec_scalar_mul_384` in the P-384 curve archive (upstream's
-    `lib-p384-verify` excludes `points384_comb.s`) — retire it with the
-    P-384 lane, not separately. Issues #32/#45 closed stale; file fresh
-    ones.
   - **Sibling archive member names are discovered, never hardcoded.**
     Upstream v0.9.0 made them per-variant; a hardcoded `zp_config.o` means
     the ZP-override object is silently dropped and `zp_ptr2` reverts to
@@ -762,24 +710,6 @@ ill-conditioned. A "+12% comb gap" between devices recorded earlier closed
 on re-measurement — do not attach mechanisms to deltas without checking
 magnitude first.
 
-### ECDSA P-384 verify wall-clock
-
-Unmeasured and unmeasurable until the P-384 build is fixed. **Every figure
-here is an extrapolation, not a measurement** — treat it as a rig budget, not
-a result.
-
-Scale the **onchip** P-256 verify, not the REU one: the REU profile's
-42-56 s floor is row-fetch DMA anchored to the ~1 MHz bus and does not grow
-with field width, so multiplying it mis-shapes the estimate. Onchip is
-CPU-bound and structurally the same code path — `ec_scalar_mul_384_shim`
-runs the variable-base ladder for u1*G exactly as the no-comb P-256
-`ec_scalar_mul` shim does. From operation counts: 48-byte vs 32-byte limbs
-make each schoolbook `fp_mul` ~(48/32)^2 = 2.25x, and a 384-bit scalar is
-1.5x the ladder steps, so ~3-4x the onchip P-256 verify — **~1.5-2.5 min at
-48 MHz** against the 30.5 s onchip row above. SHA-384 is excluded as
-negligible beside two variable-base scalar mults. `rig_https_local_p384.py`
-keeps its 90-minute budget (it also has to cover 1 MHz).
-
 ### Design note — bounded timeouts must use wall-clock time
 
 Fences make per-iteration cost scale with CPU clock while the FPGA does
@@ -832,9 +762,7 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
                                    CertificateVerify or run from it and
                                    call ecdsa_verify), HTTPS_TARGET_RODATA,
                                    x509_name; comb adds RODATA/LIMLEE_BSS
-                                   (small tail — the rigs' scratch). Also
-                                   the slot for the (broken) overlay-embed
-                                   flags.
+                                   (small tail — the rigs' scratch).
   $6000-$9FFF  CRYPTO_HOT          resident code + rodata + small BSS
   $A000-$BFFF  CRYPTO_COLD_SHADOW  large BSS (RAM under BASIC ROM, $01=$36);
                                    BSS_TAIL pinned at $A000 (`tls_rec_buf`,
@@ -847,7 +775,6 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
                                    (LIB_SHARED_SQTAB_BASE, asserted
                                    post-link)
   $C000-$DFFF  OVERLAY_FILE_PAD    zero-pad; runtime TCP ring at $C000
-  $E000-$FDFF  OVERLAY_BLOB_CURVE_RAM  P-384 curve blob staging (unused)
 
 ip65 (`cfg/c64-https-ip65.cfg`):
 
@@ -880,7 +807,7 @@ budget, and CRYPTO_COLD_SHADOW's only gap is alignment padding below
 TABLES_BSS.
 
   - `http.s` is **not** in `LOADER_OVERFLOW`; its tenants are `boot.o`
-    and `vic.o` (plus `crypto_swap.o` when re-armed). W4 moved `http.s`'s share out to
+    and `vic.o`. W4 moved `http.s`'s share out to
     `HTTP_AUX_CODE` (`src/http.s`, grep "W4: moved from LOADER_OVERFLOW").
   - `src/loadaddr.s` (PRG load address) and `src/exports.s` (promotes
     equates to `labels.txt`, incl. `cert_buf_size` — rigs must read it, not
@@ -948,9 +875,8 @@ vacuously (zero checks = fail; any `SKIP_*` = `PARTIAL VERIFICATION`).
   exits **2** with a CANNOT RUN message, not 0 — that is the behaviour to
   copy, along with `test_x509.py` (missing labels counted as failures) and
   `test_finished_verify.py` (missing label = FATAL)),
-  test_p384_overlay_hazard.py (fails under
-  ENABLE_P384_VERIFY=1 by design; needs a well-formed DER sig to reach the
-  swap), test_finished_verify.py (18 cases), test_ecdsa_kat_oracle.py
+  test_curve_refusal.py (P-384 / RSA / Ed25519 leaves and a 0x0503
+  CertificateVerify refused), test_finished_verify.py (18 cases), test_ecdsa_kat_oracle.py
   (6 vectors incl. 3 negative), test_tls_deframer.py, test_x25519.py.
 
 `tools/run_all_tests.py` is the aggregate runner, and **its suite list

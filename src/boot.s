@@ -76,12 +76,6 @@ SINK_PROBE = 1
         ; Every REU execute goes through src/reu_exec.s (#191, SPEC §8.2).
         .import reu_execute
 
-        ; ---- exports: Phase 3 P-384 overlay REU stash ----
-        ; Same gate as src/crypto/shared/crypto_swap.s: the stash and the
-        ; swaps that read it back exist together or not at all.
-.if .defined(KEEP_CRYPTO_SWAP) .or .defined(ENABLE_P384_VERIFY) .or .defined(USE_OVERLAY_P384_EMBED) .or .defined(USE_OVERLAY_P256_EMBED)
-        .export reu_p384_overlay_init
-.endif
         .endif                          ; BACKEND_UCI_M3
 
         ; ---- exports: menu handlers ----
@@ -218,41 +212,6 @@ BORDER_DEFAULT   = $0E
         .import poly_prod_lo
         .import poly_prod_hi
 
-        ; ---- imports: Phase 3 embedded P-384 overlay blob anchors ----
-        ; Resolved by src/crypto/shared/p384_overlay_blobs.s when
-        ; USE_OVERLAY_P384_EMBED is on; the symbols are weak/optional
-        ; in the same way OVERLAY_BLOB_* segments are optional in the
-        ; cfg.  reu_p384_overlay_init below is .ifdef-gated so it does
-        ; not reference the symbols when the flag is off (otherwise the
-        ; .import would fail for a missing symbol).
-        .ifdef USE_OVERLAY_P384_EMBED
-        .import p384_overlay_sha384_blob
-        .import p384_overlay_curve_blob
-        ; Re-include the REU layout header so REU_OVERLAY_P384_*
-        ; (24-bit) and OVERLAY_SIZE (16-bit) resolve as local literals
-        ; at assembly time rather than as cross-TU imports.  This
-        ; sidesteps the ld65 "size mismatch" warning that fires when a
-        ; 24-bit export from crypto_swap.o is .import'd as the default
-        ; 16-bit absolute (ca65 has no `:far` attribute on the 6502
-        ; CPU).  The header is `.ifndef`-guarded so the duplicate
-        ; include is a no-op aside from making the equates visible.
-        .include "reu_layout.inc"
-        .endif
-
-        ; ---- imports: W3 embedded P-256 verify overlay blob anchor ----
-        ; Mirror of the P-384 pattern above.  Resolved by
-        ; src/crypto/shared/p256_overlay_blobs.s when
-        ; USE_OVERLAY_P256_EMBED is on (gated from the top-level Makefile
-        ; by EMBED_P256_OVERLAY=1).  Mutually exclusive with
-        ; USE_OVERLAY_P384_EMBED at the cfg level -- both target the
-        ; CRYPTO_OVERLAY slot at PRG-load time, so the Makefile turns
-        ; P-384 embedding off when EMBED_P256_OVERLAY=1.
-        .ifdef USE_OVERLAY_P256_EMBED
-        .import p256_overlay_verify_blob
-        ; Same REU layout include rationale as the P-384 block above
-        ; (.ifndef-guarded; idempotent).
-        .include "reu_layout.inc"
-        .endif
 
 ; =============================================================================
 ; BASIC stub: 10 SYS 2061
@@ -435,13 +394,6 @@ start:
         sta border_color
         .endif
 
-        ; Phase 3: stash both P-384 split overlay images in REU banks 6
-        ; and 7 from the .incbin'd staging blocks at $4200 and $E000.
-        ; Not linked at all in a shipped build (gate as crypto_swap.s's);
-        ; even where it is, its body is an RTS without the P-384 embed.
-.if .defined(KEEP_CRYPTO_SWAP) .or .defined(ENABLE_P384_VERIFY) .or .defined(USE_OVERLAY_P384_EMBED) .or .defined(USE_OVERLAY_P256_EMBED)
-        jsr reu_p384_overlay_init
-.endif
 .endif ; BACKEND_UCI_M3
 
         ; Auto-initialize networking at boot so the banner shows the
@@ -1450,168 +1402,6 @@ reu_fetch_mul_row:
         jmp reu_execute         ; tail call: A clobbered, as documented
 
 
-; =============================================================================
-; reu_p384_overlay_init - Stash both P-384 split-overlay images in REU.
-;
-; Reads the two .incbin'd images at p384_overlay_sha384_blob ($4200) and
-; p384_overlay_curve_blob ($E000) and STASHes (C64->REU) each into the
-; REU bank reserved by src/crypto/shared/reu_layout.inc:
-;
-;   REU bank 6 ($60000)  <-  $4200..$5FFF (OVERLAY_SIZE bytes, sha384)
-;   REU bank 7 ($70000)  <-  $E000..$FDFF (OVERLAY_SIZE bytes, curve)
-;
-; After this returns, the live CRYPTO_OVERLAY slot at $4200 still holds
-; the SHA-384 image bytes -- but the linker considers it free (no segment
-; references the bytes by symbol after this point) so a subsequent
-; jsr crypto_swap_to_p384_curve will overwrite the slot with the curve
-; image from REU bank 7.  The under-KERNAL block at $E000-$FDFF is
-; freed unconditionally; KERNAL ROM is banked in by default so future
-; reads from $E000 hit ROM, not the no-longer-needed blob bytes.
-;
-; Inert when USE_OVERLAY_P384_EMBED is undefined (BACKEND=ip65, and
-; every shipped UCI build) -- the routine compiles to a single
-; RTS so the call site in `start` is harmless.
-;
-; SEI around each DMA window; restores caller's I flag.  ~16 ms total
-; wall-clock at any CPU speed (REU DMA bus runs at ~1 MHz regardless
-; of turbo).
-;
-; Clobbers: A.  Does NOT update current_overlay -- crypto_swap_none has
-; that responsibility; boot calls neither because the BSS reset at
-; entry already left current_overlay = OV_NONE = 0.
-; =============================================================================
-.if .defined(KEEP_CRYPTO_SWAP) .or .defined(ENABLE_P384_VERIFY) .or .defined(USE_OVERLAY_P384_EMBED) .or .defined(USE_OVERLAY_P256_EMBED)
-reu_p384_overlay_init:
-.ifdef USE_OVERLAY_P384_EMBED
-        ; --- Stash 1: $4200 (SHA blob) -> REU bank 6, offset $0000 ---
-        php
-        sei
-        lda #<p384_overlay_sha384_blob
-        sta reu_c64_lo
-        lda #>p384_overlay_sha384_blob
-        sta reu_c64_hi
-        lda #<REU_OVERLAY_P384_SHA384
-        sta reu_reu_lo
-        lda #>REU_OVERLAY_P384_SHA384
-        sta reu_reu_hi
-        lda #^REU_OVERLAY_P384_SHA384
-        sta reu_reu_bank
-        lda #<OVERLAY_SIZE
-        sta reu_len_lo
-        lda #>OVERLAY_SIZE
-        sta reu_len_hi
-        lda #0
-        sta reu_addr_ctrl       ; both addresses autoincrement
-        lda #$90                ; execute + STASH (C64->REU)
-        jsr reu_execute
-        plp
-
-        ; --- Intermediate: copy CURVE blob from $E000 -> CRYPTO_OVERLAY ---
-        ; The CURVE blob lives in RAM under KERNAL ROM at $E000-$FDFF.
-        ; VICE's REU emulator reads C64 RAM via a path that does NOT
-        ; respect $01 banking for the $E000-$FFFF range -- a STASH
-        ; from $E000 with KERNAL banked off still returns ROM bytes
-        ; (and on bank 7 specifically returns an undefined fill
-        ; pattern, see the empirical results documented in Phase 3
-        ; commit).  Workaround: CPU-copy the blob from $E000 (with
-        ; KERNAL banked off so the LDA sees RAM) into the now-free
-        ; CRYPTO_OVERLAY slot at $4200 (the SHA-384 blob has already
-        ; been stashed to REU bank 6, so the slot bytes are no longer
-        ; load-bearing), then STASH from $4200.  CPU copy is
-        ; ~7,680 * 5 cy ~= 38 K cycles ~= 38 ms at 1 MHz / ~0.8 ms at
-        ; 48 MHz -- negligible vs the DMA latency itself.
-        php
-        sei
-        lda $01
-        pha                     ; save banking
-        and #%11111101          ; clear bit 1 (KERNAL ROM off, RAM at $E000)
-        sta $01
-
-        ; Copy 30 pages ($1E00 = 7,680 B) from $E000-$FDFF to $4200-$5FFF
-        ; via self-modifying base+Y indexing.  Y walks 0..255; outer
-        ; loop bumps the high byte of both src and dst pointers.
-        lda #$E0
-        sta @cp_src+2
-        lda #$42
-        sta @cp_dst+2
-        ldx #30                 ; 30 pages = $1E00 bytes
-@cp_page:
-        ldy #0
-@cp_byte:
-@cp_src:
-        lda $E000,y             ; high byte self-modified above
-@cp_dst:
-        sta $4200,y             ; high byte self-modified above
-        iny
-        bne @cp_byte
-        inc @cp_src+2
-        inc @cp_dst+2
-        dex
-        bne @cp_page
-
-        pla                     ; restore banking (KERNAL back on)
-        sta $01
-
-        ; --- Stash 2: $4200 (CURVE blob, freshly copied) -> REU bank 7 ---
-        lda #$00
-        sta reu_c64_lo
-        lda #$42
-        sta reu_c64_hi
-        lda #<REU_OVERLAY_P384_CURVE
-        sta reu_reu_lo
-        lda #>REU_OVERLAY_P384_CURVE
-        sta reu_reu_hi
-        lda #^REU_OVERLAY_P384_CURVE
-        sta reu_reu_bank
-        lda #<OVERLAY_SIZE
-        sta reu_len_lo
-        lda #>OVERLAY_SIZE
-        sta reu_len_hi
-        lda #0
-        sta reu_addr_ctrl
-        lda #$90
-        jsr reu_execute
-        plp
-.endif ; .ifdef USE_OVERLAY_P384_EMBED
-
-; -----------------------------------------------------------------------------
-; W3: P-256 verify image stash (Makefile EMBED_P256_OVERLAY=1).
-;
-; When `USE_OVERLAY_P256_EMBED` is defined the cfg routes
-; OVERLAY_BLOB_P256 into CRYPTO_OVERLAY at PRG-load time (mutually
-; exclusive with OVERLAY_BLOB_SHA384 -- the Makefile turns
-; USE_OVERLAY_P384_EMBED off when EMBED_P256_OVERLAY=1).  Boot DMAs the
-; slot bytes to REU_OVERLAY_P256_VERIFY (bank 2, $22100) so a later
-; `crypto_swap_to_p256_verify` can refresh the slot.  Same SEI window
-; + ~8 ms cost as the P-384 stash above; STASH (C64->REU) command
-; $90.
-; -----------------------------------------------------------------------------
-.ifdef USE_OVERLAY_P256_EMBED
-        php
-        sei
-        lda #<p256_overlay_verify_blob
-        sta reu_c64_lo
-        lda #>p256_overlay_verify_blob
-        sta reu_c64_hi
-        lda #<REU_OVERLAY_P256_VERIFY
-        sta reu_reu_lo
-        lda #>REU_OVERLAY_P256_VERIFY
-        sta reu_reu_hi
-        lda #^REU_OVERLAY_P256_VERIFY
-        sta reu_reu_bank
-        lda #<OVERLAY_SIZE
-        sta reu_len_lo
-        lda #>OVERLAY_SIZE
-        sta reu_len_hi
-        lda #0
-        sta reu_addr_ctrl
-        lda #$90                ; execute + STASH (C64->REU)
-        jsr reu_execute
-        plp
-.endif ; .ifdef USE_OVERLAY_P256_EMBED
-
-        rts
-.endif ; reu_p384_overlay_init gate (crypto_swap.s's)
 .endif ; BACKEND_UCI_M3
 
 ; =============================================================================

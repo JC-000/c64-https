@@ -135,7 +135,7 @@ reu_addr_ctrl   = $df0a         ; address control
 ; --- W4 REU body sink ---
 ; Default REU destination for a streamed HTTP response body: bank 16
 ; ($10:0000) — clear of the mul-table banks 0-1, the comb profile's
-; Lim-Lee bank 2, and the reserved P-384 overlay banks 6-7.  The
+; Lim-Lee bank 2 and the cold bank.  The
 ; shipped default therefore needs a 16 MB REU (the stretch-goal
 ; config).  Build-time override: `make HTTP_REU_BODY_BASE=196608`
 ; (decimal; ca65 -D takes no 0x and $ needs shell quoting) puts it at

@@ -394,36 +394,16 @@ def test_require_hands_a_skip_to_pytest_when_pytest_is_driving():
 # a genuine could-not-run lane (six tests need the sibling c64_test_harness
 # checkout).
 #
-# SPAWN DEPTH IS 2, AND BOUNDED BY INSPECTION ONLY -- there is no guard in the
-# code, so read this before adding a third link.  The full chain is:
+# SPAWN DEPTH IS 1, AND BOUNDED BY INSPECTION ONLY -- there is no guard in the
+# code, so read this before adding a second link.  The chain is:
 #
 #   pytest
 #     -> test_rig_skip_contract.py   (this file spawns it, below)
-#          -> test_ecdsa_p384_kat.py (its test_the_u64_gate_* spawns THAT,
-#                                     and _standalone() runs every test_*,
-#                                     so the link really does fire here)
 #
-# It terminates, and it is cheap, for the SAME reason -- and that reason is a
-# cross-dependency worth naming, because it is not local to either file.
-#
-# The KAT is not a leaf in general: _build_prg() runs `make clean` and two
-# `make BACKEND=uci` invocations (test_ecdsa_p384_kat.py:646-665).  What makes
-# it a leaf HERE is that its --u64-with-no-U64_HOST gate returns BEFORE
-# _build_prg(), so nothing further is spawned and the whole nested run
-# measures ~0.07 s.  Timeouts nest correctly -- 180 s on the outer call here,
-# 120 s on the inner one there.
-#
-# So THE COST BOUND OF THIS TEST RESTS ON WHERE THAT GATE SITS.  Moving it
-# below _build_prg() -- the alternative fix considered and rejected when the
-# gate was made non-opt-out-able -- would start a full `make clean && make`
-# inside that 120 s inner timeout.  Anyone reconsidering the gate's placement
-# is also deciding this, and there is nothing at the gate that would say so;
-# hence the note here and the pointer at the spawn site itself.
-#
-# An earlier version of this comment claimed the target "has no spawner of its
-# own".  That was true when it was written and false in the same commit, which
-# is the whole reason the chain is spelled out rather than asserted: a third
-# link would have to be added deliberately, in sight of this.
+# It used to be two deep: test_rig_skip_contract.py spawned
+# tools/test_ecdsa_p384_kat.py, whose --u64 gate returned before its build.
+# That KAT left with the P-384 lane, and with it the second link. A new one
+# would have to be added deliberately, in sight of this.
 # ---------------------------------------------------------------------------
 
 _RIG_CONTRACT = os.path.join(_HERE, "test_rig_skip_contract.py")

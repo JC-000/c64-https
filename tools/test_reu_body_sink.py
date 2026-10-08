@@ -129,13 +129,13 @@ def case_regions(env):
         (512 * KB, 0x100000, 0),            # aliases bank 0: refused
         (1 * MB, 0x100000, 0),
         (16 * MB, 0x100000, 0xF00000),      # to the REU's end, no wrap
-        (512 * KB, 0x030000, 0x030000),     # banks 3-5 (VICE tests)
-        (512 * KB, 0x05F000, 0x001000),
-        (16 * MB, 0x030000, 0x030000),      # stops below the P-384 banks
+        (512 * KB, 0x030000, 0x050000),     # banks 3-7, to the REU's end
+        (512 * KB, 0x07F000, 0x001000),
+        (16 * MB, 0x030000, 0xFD0000),      # P-384 retired: banks 6-7 are body
         (16 * MB, 0x080000, 0xF80000),
         (16 * MB, 0x020000, 0), (16 * MB, 0x02A000, 0),   # bank 2
         (16 * MB, 0x000000, 0), (16 * MB, 0x010000, 0),   # banks 0-1
-        (16 * MB, 0x060000, 0), (16 * MB, 0x07FFFF, 0),   # banks 6-7
+        (16 * MB, 0x060000, 0xFA0000), (16 * MB, 0x07FFFF, 0xF80001),
         (2 * MB, 0x200000, 0),              # past the end
     ]:
         b = Box(env, size=size)
@@ -145,21 +145,26 @@ def case_regions(env):
 
 
 def case_bound(env):
+    # The region's end is the REU's end ($080000 on 512 KB); one byte past
+    # it the REU wraps to bank 0, the multiply rows.
     b = Box(env, size=512 * KB)
-    room = b.body_begin(0x05F000)                    # 4 KB region
+    room = b.body_begin(0x07F000)                    # 4 KB region
+    if room != 0x1000:                               # the cases below assume it
+        check(False, f"case_bound: base $07F000 got a {room:#x} region, want 0x1000")
+        return
     data = bytes(range(256)) * 2
     w = b.blit(room - 512, data)
-    check(len(w) == 1 and bytes(b.reu.mem[0x05F000 + room - 512:0x060000]) == data,
+    check(len(w) == 1 and bytes(b.reu.mem[0x07F000 + room - 512:0x080000]) == data,
           f"a bounce ending exactly at the region's end was not written: {w}")
-    p6 = bytes(b.reu.mem[0x060000:0x060200])
+    p0 = bytes(b.reu.mem[0x000000:0x000200])
     w = b.blit(room - 511, data)
     check(not w and b.r8("http_sink_full") == 1,
           f"a bounce crossing the end by 1 B was written or not latched: {w}")
-    check(bytes(b.reu.mem[0x060000:0x060200]) == p6, "bank 6 was written")
+    check(bytes(b.reu.mem[0x000000:0x000200]) == p0, "bank 0 was written (wrap)")
     w = b.blit(0, data)
     check(not w, "after the latch, a bounce inside the region was still written")
     b = Box(env, size=512 * KB)                       # fresh: no latch
-    b.body_begin(0x05F000)
+    b.body_begin(0x07F000)
     w = b.blit(0xFFFF00, data)
     check(not w and b.r8("http_sink_full") == 1,
           "a cursor + length that wraps 24 bits was written")
@@ -197,7 +202,7 @@ def case_attack(env):
 def case_verdict(env):
     """A refused body fails even when its Content-Length is satisfied."""
     b = Box(env, size=512 * KB)
-    b.body_begin(0x05F000)
+    b.body_begin(0x07F000)
     b.blit(0x1000, bytes(512))                       # past the 4 KB region
     L = env.labels
     b.ram[L["http_parse_state"]] = 2
@@ -219,7 +224,7 @@ def case_verdict_flush(env):
     for entry, framed in (("http_recv_close_verdict", False),
                           ("http_recv_timeout_verdict", True)):
         b = Box(env, size=512 * KB)
-        check(b.body_begin(0x05F000) == 0x1000, f"{entry}: 4 KB region")
+        check(b.body_begin(0x07F000) == 0x1000, f"{entry}: 4 KB region")
         b.ram[L["http_body_sink"]] = 1
         b.put24("http_reu_cursor", 0x1000)       # 8 bounces fill it exactly
         tail = 100                               # so any tail crosses the end
@@ -241,12 +246,12 @@ def case_benign_big_body(env):
 
     Streamed 512 B a bounce, as body_append does. With the default base on
     512 KB / 1 MB (it aliases bank 0) nothing may be written at all; with a
-    base in bank 3 the region ends at bank 6 and the body stops there.
-    Before the fix the same stream wrapped onto banks 0-2 (multiply rows,
-    Lim-Lee table, cold bank) and on into the P-384 banks."""
+    base in bank 3 the region ends at the REU's end and the body stops
+    there. Before the fix the same stream wrapped onto banks 0-2 (multiply
+    rows, Lim-Lee table, cold bank)."""
     total = 751_073
     for size, base, room in ((512 * KB, 0x100000, 0), (1 * MB, 0x100000, 0),
-                             (512 * KB, 0x030000, 0x030000)):
+                             (512 * KB, 0x030000, 0x050000)):
         b = Box(env, size=size)
         mark = bytes((i * 7 + 1) & 0xFF for i in range(len(b.reu.mem)))
         b.reu.mem[:] = mark                     # every REU byte known
