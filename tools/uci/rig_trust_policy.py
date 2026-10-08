@@ -551,12 +551,8 @@ def main() -> int:
             except Exception as exc:    # noqa: BLE001
                 print(f"WARNING: teardown: {exc}")
         lock.release()
-    if run is None:
-        return final_exit(2, cleanup, None)
     print(f"\n{run.passed} passed, {len(run.failed)} failed")
-    rc = verdict(run.passed, len(run.failed), certifies=CERTIFIES)
-    return final_exit(rc, cleanup, lambda m: cannot_run(
-        m, executed=run.passed, total=None, certifies=CERTIFIES))
+    return final_exit(verdict(run.passed, len(run.failed), certifies=CERTIFIES), cleanup)
 
 
 if __name__ == "__main__":

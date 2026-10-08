@@ -67,7 +67,16 @@ class StoreUnavailable(Exception):
 class StoreLeftovers(StoreUnavailable):
     """The emptied test directory cannot be removed: it still holds entries
     -- hidden ones the listing omits (.DS_Store, ._*) when none are named.
-    Device state, not a product defect: COULD NOT RUN."""
+
+    Who put them there decides the exit code. Met at SETUP they predate the
+    run: device state, COULD NOT RUN (2). Met at phase 14 or at cleanup they
+    were written DURING the run -- setup proved the directory removable and
+    the DeviceLock excludes other FTP writers -- so the program under test
+    wrote them: a failure (1)."""
+
+    def __init__(self, directory: str, what: str) -> None:
+        super().__init__(f"{directory} cannot be removed: it still holds {what}")
+        self.what = what
 
 
 #: Setup errors that mean COULD NOT RUN (exit 2). Nothing else does.
@@ -193,8 +202,7 @@ class TrustFiles:
         except Ultimate64StorageNotEmptyError as exc:
             what = (f"visible entries {exc.entries}" if exc.entries else
                     "hidden entries the listing omits (e.g. .DS_Store, ._*)")
-            raise StoreLeftovers(f"{self.dir} cannot be removed: it still holds {what}; "
-                                 "remove them by hand") from exc
+            raise StoreLeftovers(self.dir, what) from exc
 
     def prepare(self) -> None:
         """Setup, in order: refuse a foreign directory; prove the directory
@@ -202,38 +210,39 @@ class TrustFiles:
         device is touched, not a phase-14 failure later); recreate it."""
         self.check_only_ours()
         self.delete_ours()
-        self.remove_dir()
+        try:
+            self.remove_dir()
+        except StoreLeftovers as exc:
+            raise StoreLeftovers(self.dir, exc.what + " from before this run; "
+                                 "remove them by hand") from exc
         self.ensure_dir()
 
 
 def clean_up(store: "TrustFiles | None") -> tuple[int, str]:
     """End of run: delete TRUST.A/B and remove the directory, under the lock.
 
-    Returns ``(0, msg)`` when done, ``(2, msg)`` for leftovers the rig must
-    not force (StoreLeftovers), ``(1, msg)`` for any other failure -- a
-    cleanup failure leaves TRUST.A/B behind and must not exit 0."""
+    Returns ``(0, msg)`` when done and ``(1, msg)`` otherwise: a cleanup
+    failure leaves TRUST.A/B behind, and leftovers here were written during
+    the run (see StoreLeftovers) -- neither may exit 0. Leftovers are
+    reported, never forced."""
     if store is None:
         return 0, "cleanup: nothing to clean"
     try:
         store.delete_ours()
         store.remove_dir()
     except StoreLeftovers as exc:
-        return 2, f"cleanup: {', '.join(OURS)} deleted, but {exc}"
+        return 1, (f"cleanup: {', '.join(OURS)} deleted, but {exc}; "
+                   "written DURING the run (setup proved the directory removable and the DeviceLock excludes other writers), so the program under test left it")
     except Exception as exc:  # noqa: BLE001 - reported, and turns the exit non-zero
         return 1, f"cleanup of {store.dir} FAILED: {type(exc).__name__}: {exc}"
     return 0, f"cleanup: {', '.join(OURS)} deleted; {store.dir} removed"
 
 
-def final_exit(rc: int, cleanup: tuple[int, str], cannot_run_fn) -> int:
-    """Fold the cleanup result into the run's exit code. A failed check
-    (1) stands; otherwise a cleanup failure is 1 and leftovers are 2."""
+def final_exit(rc: int, cleanup: tuple[int, str]) -> int:
+    """Fold the cleanup result into the run's exit code: a failed cleanup
+    turns any other code into 1."""
     crc, msg = cleanup
-    if rc == 1 or crc == 0:
+    if crc == 0 or rc == 1:
         return rc
-    if crc == 1:
-        print(f"[fatal] {msg}")
-        return 1
-    if rc == 2:                 # already COULD NOT RUN; just say why else
-        print(msg)
-        return 2
-    return cannot_run_fn(msg)
+    print(f"[fatal] {msg}")
+    return 1

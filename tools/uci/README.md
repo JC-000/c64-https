@@ -113,9 +113,10 @@ directory holding anything but TRUST.A/B (listed, or TRUST.P probed by
 name, since listings omit hidden names), or one that cannot be removed
 because of hidden entries (`.DS_Store`, `._*`; setup proves it removable)
 is COULD NOT RUN, exit 2, before anything on it is touched. Any other
-storage error (lock, FTP) is exit 1. The directory is removed at the end;
-hidden leftovers are reported, never forced, and a cleanup failure makes
-the exit non-zero. Tests: `tools/test_trust_rig_storage.py` (faked storage that
+storage error (lock, FTP) is exit 1. The directory is removed at the end.
+Leftovers met at phase 14 or at cleanup were written during the run (setup
+proved the directory empty; the lock excludes other writers), so they are
+a failure, exit 1, reported and never forced; so is any cleanup failure. Tests: `tools/test_trust_rig_storage.py` (faked storage that
 refuses without the fake lock, no hardware).
 
 ## Listener and socket lifecycle (#246, #234)

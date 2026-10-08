@@ -27,8 +27,10 @@ DeviceLock is held. Pinned:
 3. **Every storage call runs under the lock**, cleanup included; an error
    from a read is never swallowed as "file absent".
 4. **No zero-byte trust file is ever written.**
-5. **Cleanup removes the directory**; hidden leftovers are reported, not
-   forced.
+5. **Cleanup removes the directory.** Leftovers found at SETUP predate the
+   run (exit 2); found at phase 14 or cleanup they were written during it,
+   by the program under test (setup proved the directory empty, the lock
+   excludes other writers): exit 1, named, never forced.    forced.
 6. **No private FTP, no private /Temp GC**: neither trust rig imports
    ``ftplib`` or ``_temp_gc``, nor does ``rig_https_m3_demo.py`` import
    ``ftplib``; no rig imports ``_temp_gc``, and the module is gone.
@@ -364,14 +366,25 @@ def test_hidden_leftovers_are_reported_not_forced() -> None:
 
 def test_final_exit_folds_cleanup() -> None:
     m = _storage()
-    skip = lambda msg: 2                                    # noqa: E731
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        assert m.final_exit(0, (0, ""), skip) == 0
-        assert m.final_exit(0, (1, "x"), skip) == 1
-        assert m.final_exit(0, (2, "x"), skip) == 2
-        assert m.final_exit(1, (2, "x"), skip) == 1         # a failed check stands
-        assert m.final_exit(2, (1, "x"), skip) == 1
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert m.final_exit(0, (0, "")) == 0
+        assert m.final_exit(0, (1, "x")) == 1
+        assert m.final_exit(1, (1, "x")) == 1
+        assert m.final_exit(2, (1, "x")) == 1
+
+
+def test_setup_leftovers_say_they_predate_the_run() -> None:
+    m = _storage()
+    files = m.TrustFiles("dev", DIR)
+    calls = _Calls(U64E_VOLUMES, rmdir_raises=Ultimate64StorageNotEmptyError("550", []))
+    with calls.install(), _held():
+        try:
+            files.prepare()
+        except m.StoreLeftovers as exc:
+            assert "before this run" in str(exc), str(exc)
+        else:
+            raise AssertionError("prepare() accepted a directory it cannot remove")
+    assert not calls.ops("mkdir"), calls.log
 
 
 # --- phase 14 (rig_trust_store) and the CLOSED waits (rig_trust_policy), offline ----
@@ -715,24 +728,27 @@ def test_rigs_cleanup_failure_is_not_exit_0() -> None:
     _both(one)
 
 
-def test_rigs_cleanup_leftovers_exit_2() -> None:
+def test_rigs_cleanup_leftovers_are_a_failure() -> None:
+    """A stray TRUST.C (visible) or hidden entry at cleanup was written
+    during the run: exit 1, named -- not COULD NOT RUN."""
     def one(r):
-        calls = _Calls(U64E_VOLUMES, nth={"rmdir": (2, Ultimate64StorageNotEmptyError("550", []))})
-        rc, text = _full(r, calls)
-        assert rc == 2 and "hidden" in text, f"{r}: exit {rc}\n{text}"
+        for entries, name in ((["TRUST.C"], "TRUST.C"), ([], "hidden")):
+            err = Ultimate64StorageNotEmptyError("not empty", entries)
+            calls = _Calls(U64E_VOLUMES, nth={"rmdir": (2, err)})
+            rc, text = _full(r, calls)
+            assert rc == 1 and name in text and "DURING the run" in text, \
+                f"{r}: leftovers {entries} exited {rc}\n{text}"
+            assert "COULD NOT RUN" not in text, text
     _both(one)
 
 
-def test_store_rig_phase_leftovers_exit_2() -> None:
-    """Hidden entries met at phase 14's rmdir are device state: exit 2."""
-    m = _storage()
-    calls = _Calls(U64E_VOLUMES)
-
-    def phases(r):
-        r.check(True, "fake phase")
-        raise m.StoreLeftovers("hidden entries the listing omits")
-    rc, text = _full("rig_trust_store.py", calls, run_phases=phases)
-    assert rc == 2 and "hidden" in text, f"exit {rc}\n{text}"
+def test_store_rig_phase14_leftovers_are_a_failure() -> None:
+    calls = _Calls(U64E_VOLUMES,
+                   rmdir_raises=Ultimate64StorageNotEmptyError("not empty", ["TRUST.C"]))
+    r, exc = _phase14(calls)
+    assert exc is not None and any("TRUST.C" in f and "DURING the run" in f for f in r.failed), \
+        (exc, r.failed)
+    assert "c64-load" not in [c[0] for c in calls.log], calls.log
 
 
 def test_store_rig_resets_before_cleanup() -> None:

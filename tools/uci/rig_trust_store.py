@@ -86,7 +86,8 @@ from _prg_load import PrgLoadError, load_verified_and_run                       
 from _reu_preflight import ReuPreflightError, preflight_reu                       # noqa: E402
 from _skip_policy import cannot_run, verdict                                      # noqa: E402
 from _trust_storage import (CANNOT_RUN_ERRORS, StoreUnavailable, TrustFiles,   # noqa: E402
-                            clean_up, final_exit, image_dir, select_store_dir)
+                            StoreLeftovers, clean_up, final_exit, image_dir,
+                            select_store_dir)
 from c64_test_harness import Ultimate64StorageError                              # noqa: E402
 import trust_store as ts                                                          # noqa: E402
 
@@ -436,7 +437,14 @@ def phase_nopath(r: Rig):
     print("\n[14] no directory")
     ftp = r.ftp
     ftp.delete_ours()
-    gone = ftp.remove_dir()             # StoreLeftovers: COULD NOT RUN, see main()
+    try:
+        gone = ftp.remove_dir()
+    except StoreLeftovers as exc:
+        r.notes["nopath_rmdir"] = str(exc)
+        # Setup proved the directory removable and the DeviceLock excludes
+        # other writers: whatever is left was written by the program under
+        # test, during the run. A failure, not device state.
+        r.require(False, f"phase 14: {exc}; written DURING the run")
     r.notes["nopath_rmdir"] = gone
     r.require(gone is True, f"{ftp.dir} removed (rmdir returned {gone!r})")
     try:
@@ -533,7 +541,6 @@ def main() -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     client = tr = rig = store = None
     uci_enabled = False
-    blocked = None              # device state met mid-run (StoreLeftovers)
     try:
         # The store's volume first: a device with nowhere to write it is
         # COULD NOT RUN before anything on it is touched.
@@ -575,9 +582,6 @@ def main() -> int:
             return 4
         try:
             run_phases(rig)
-        except StoreUnavailable as exc:
-            blocked = str(exc)
-            print(f"\n{exc}")
         except Exception as exc:  # noqa: BLE001 - any escape is a failed run
             rig.failed.append(f"{type(exc).__name__}: {exc}")
             print(f"\n{exc}")
@@ -599,12 +603,7 @@ def main() -> int:
         cleanup = clean_up(store)
         print(cleanup[1])
         lock.release()
-    if blocked and not rig.failed:
-        rc = cannot_run(blocked, executed=rig.passed, total=None, certifies=CERTIFIES)
-    else:
-        rc = verdict(rig.passed, len(rig.failed), certifies=CERTIFIES)
-    return final_exit(rc, cleanup, lambda m: cannot_run(
-        m, executed=rig.passed, total=None, certifies=CERTIFIES))
+    return final_exit(verdict(rig.passed, len(rig.failed), certifies=CERTIFIES), cleanup)
 
 
 if __name__ == "__main__":
