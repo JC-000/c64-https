@@ -93,6 +93,22 @@ def check(ok, msg):
 # The cold cfg's whole delta from the comb cfg. If the comb cfg changes, the
 # change is owed to the cold one too, and this fails until it is made.
 CFG_EDITS = [
+    # The ladder's placement comment: the cold cfg speaks for the shipped
+    # TRUST_STORE products, which the comb cfg (COLD_BANK=0) cannot link.
+    (
+     '    # Sibling ladder (x25519.s, x25519_init.s). This cfg links only\n'
+     '    # COLD_BANK=0 comb images, which cannot hold TRUST_STORE (the Makefile\n'
+     '    # refuses it), so neither shipped product is built here; whether\n'
+     "    # CRYPTO_HOT could take the ladder is a question for this cfg's own\n"
+     "    # build, measured, not for the cold cfg's figures.\n"
+     '    LIB_X25519_CODE: load = CRYPTO_OVERLAY, type = ro;\n',
+     '    # Sibling ladder (x25519.s, x25519_init.s). It is here for the comb\n'
+     '    # DEMO build (HTTPS_BODY_TO_REU=1), whose CRYPTO_HOT cannot hold it.\n'
+     '    # The shipped product (TRUST_STORE=1, no viewer) has CRYPTO_HOT room to\n'
+     '    # spare, so "no room" is a demo constraint, not a product one: compare\n'
+     '    # the uci-comb-store and uci-comb-demo-store rows of\n'
+     '    # tools/measure_margins.py before moving it, never a figure here.\n'
+     '    LIB_X25519_CODE: load = CRYPTO_OVERLAY, type = ro;\n'),
     ("    OVERLAY_FILE_PAD: start = $C000, size = $2000, file = %O, define = yes, fill = yes, fillval = $00;\n",
      "    # Cold bank: the PRG's copy of the cold groups (src/net/uci/cold_bank.s),\n"
      "    # back to back; boot stashes it into the REU. The head of what was\n"
