@@ -176,9 +176,9 @@ def _run_to_lock(modname: str, labels_text: str | None = None):
         patch("ACCEPT_TIMEOUT", 0.2)
         # rig_https_wiki: trampoline mode is the one that allocates.
         patch("MENU_MODE", False)
-        # rig_trust_store: the fake PRG carries no store path to read.
-        if hasattr(mod, "TEST_DIR"):
-            patch("image_store_path", lambda prg, L: mod.TEST_DIR + "/TRUST.")
+        # the trust rigs: the fake PRG carries no store path to read.
+        if hasattr(mod, "image_store_path"):
+            patch("image_store_path", lambda prg, L: "/USB1/c64https-test/TRUST.")
         if orig_bind is not None:
             patch("_try_bind", lambda ip, port: orig_bind("127.0.0.1", 0))
         try:

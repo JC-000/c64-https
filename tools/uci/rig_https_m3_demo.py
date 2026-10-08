@@ -203,12 +203,6 @@ def main() -> int:
         except ReuPreflightError as exc:
             print(str(exc), file=sys.stderr)
             return 4
-        try:
-            from _temp_gc import gc_temp
-            print(f"/Temp GC: removed {gc_temp(HOST)} stale file(s)")
-        except Exception as exc:                # noqa: BLE001
-            print(f"WARNING: /Temp GC skipped: {exc}")
-
         before = drive_a(client)
         print(f"drive A before: {before}")
         touched = True                  # from here drive A needs restoring

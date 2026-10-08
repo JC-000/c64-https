@@ -176,12 +176,6 @@ def main() -> int:
         print(f"device info: {json.dumps(info)}")
         enable_uci(client)
         uci_on = True
-        if os.environ.get("C64_SKIP_TEMP_GC") != "1":
-            try:
-                from _temp_gc import gc_temp
-                print(f"/Temp GC: removed {gc_temp(HOST)} stale file(s)")
-            except Exception as exc:    # noqa: BLE001
-                print(f"WARNING: /Temp GC skipped: {exc}")
 
         prep_dir = _create_run_dir(DEBUG_BASE_DIR)
         _prune_old_run_dirs(DEBUG_BASE_DIR, keep=5)

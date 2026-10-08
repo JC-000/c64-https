@@ -56,7 +56,7 @@ Environment variables:
   PHASE_TIMING      — screen-scrape phase table (default 0 here: the
                       run is long and body progress is the signal)
   UCI_DEBUG_DIR     — artifact dir (default /tmp/uci_https_wiki_debug)
-  C64_SKIP_TEMP_GC / C64_SKIP_REU_PREFLIGHT / C64_SKIP_DEVICE_PREP —
+  C64_SKIP_REU_PREFLIGHT / C64_SKIP_DEVICE_PREP —
                       bypass those steps
   C64_FORCE_TURBO_WRITE — write turbo blind when its state cannot be
                       read (accepts the $88 risk; see _device_prep.py)
@@ -76,7 +76,8 @@ Hardware conventions honored (CLAUDE.md "UCI rig scripts"):
     checks presence/enabled against the build profile, not size.
   * turbo set BEFORE reset with the read-skip-write pattern — and an
     unreadable turbo read now aborts rather than writing blind (#187);
-  * /Temp GC after enable_uci (fw <= 3.14d writemem leak);
+  * /Temp hygiene is the harness's (its Ultimate64Client sweeps a
+    leak-prone device's /Temp while the DeviceLock is held);
   * every DMA address from build_policy_and_low_ram_arbiter() (pages 2
     and 3, outside the link) — nothing hardcoded;
   * DEBUG_CAPTURE (6510 bus stream) is NOT wired here at all — OFF;
@@ -124,7 +125,6 @@ from _rig_lifecycle import (
     guard_socket_teardown, teardown_warning, tls_evidence_addrs,
 )
 from _reu_preflight import ReuPreflightError, preflight_reu
-from _temp_gc import gc_temp
 
 # Pure helpers shared with the local/live rigs (side-effect free imports).
 from rig_https_local import (
@@ -627,9 +627,6 @@ def main() -> int:
         print("Enabling UCI...")
         enable_uci(client)
         uci_enabled = True
-
-        # Userspace /Temp GC (fw <= 3.14d writemem attachment leak).
-        gc_temp(HOST)
 
         try:
             runner_health_check(client)

@@ -3,8 +3,9 @@
 
 tools/test_trust_policy_6502.py runs the shipped policy against models.
 This walks the MENU on the U64E, the way a person does, with the store on
-the firmware's real /USB1 and a real TLS 1.3 server, and reads the result
-back over FTP. Two modes:
+the firmware's real removable volume (/USB1 on the U64E) and a real TLS 1.3
+server, and reads the result back through c64-test-harness's storage API
+(tools/uci/_trust_storage.py, under the DeviceLock). Two modes:
 
 LOCAL (default). A listener on this Mac serves a self-signed P-256 leaf
 whose SAN dNSName is this Mac's LAN address, which is also what the rig
@@ -44,9 +45,14 @@ comb Wikipedia demo:
      bytes are the ones shown on screen. The key this Mac sees for the
      host is printed beside it (informational: edges may differ).
 
-Both modes work in /USB1/c64https-test (shared with rig_trust_store.py),
-which the rig creates, requires to hold nothing but TRUST.A / TRUST.B, and
-removes at the end. Every fetch is allowed to finish (or to refuse and
+Both modes work in /<volume>/c64https-test (the image's TRUST_STORE_DIR,
+shared with rig_trust_store.py), which the rig creates if missing and in
+which it only ever writes and deletes TRUST.A / TRUST.B; the empty
+directory is left in place (the storage API has no rmdir). The volume must
+be one storage_volumes() lists that is not /Temp or /Flash, and an explicit
+TRUST_STORE_DIR in the environment must match the image; a device without
+one (a C64U with no medium lists only Flash and Temp) is COULD NOT RUN,
+exit 2, before the device is touched. Every fetch is allowed to finish (or to refuse and
 close) before the next key; the C64 is reset only at boot, before any
 socket, and at the end after the close is confirmed.
 
@@ -86,9 +92,10 @@ from _prg_load import PrgLoadError, load_verified_and_run                       
 from _reu_preflight import ReuPreflightError, preflight_reu                       # noqa: E402
 from _rig_lifecycle import guard_socket_teardown                                  # noqa: E402
 from _skip_policy import cannot_run, verdict                                      # noqa: E402
-from _temp_gc import gc_temp                                                      # noqa: E402
 from boot_check import decode_screen, screen_text                                 # noqa: E402
-from rig_trust_store import OURS, TEST_DIR, Ftp, image_store_path, load_labels   # noqa: E402
+from _trust_storage import (OURS, SETUP_ERRORS, StoreUnavailable, TrustFiles,   # noqa: E402
+                            image_dir, select_store_dir)
+from rig_trust_store import image_store_path, load_labels                        # noqa: E402
 import trust_store as ts                                                          # noqa: E402
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
@@ -102,7 +109,6 @@ FETCH_TIMEOUT = float(os.environ.get(
     "FETCH_TIMEOUT", str((900 if MODE == "live" else 240) * SCALE)))
 PRG_PATH = REPO / "build" / "c64-https.prg"
 LABELS_PATH = REPO / "build" / "labels.txt"
-A_PATH, B_PATH = f"{TEST_DIR}/TRUST.A", f"{TEST_DIR}/TRUST.B"
 CERTIFIES = "the trust policy on the U64E (#155 phase 2, L3)"
 NET_CONNECTED = 1
 RESPONSE = (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
@@ -242,7 +248,7 @@ class Run:
 
 
 def record_of(ftp, host):
-    return ts.lookup(ts.select(ftp.get(A_PATH), ftp.get(B_PATH)), host)
+    return ts.lookup(ts.select(ftp.get(ftp.a), ftp.get(ftp.b)), host)
 
 
 def phases_local(run, ftp, ip, port, out, listener_box, fetch_in_flight_box):
@@ -276,13 +282,13 @@ def phases_local(run, ftp, ip, port, out, listener_box, fetch_in_flight_box):
     run.check(run.settled(), "first use: settled")
     rec = record_of(ftp, ip)
     run.check(rec is not None and rec.spki == h1 and rec.mode == ts.MODE_TOFU,
-              f"first use: the store on /USB1 holds TOFU/K1 ({rec})")
+              f"first use: the store on the device holds TOFU/K1 ({rec})")
     want = ts.save(None, None, ip, ts.Record.for_host(ip, h1))
-    run.check(want[0] == 0 and ftp.get(A_PATH) == want[1],
+    run.check(want[0] == 0 and ftp.get(ftp.a) == want[1],
               "first use: TRUST.A is byte-identical to the host mirror's")
     run.check(lst.conns and lst.conns[-1]["handshake"] and b"GET " in lst.conns[-1]["request"],
               "first use: the listener saw client Finished and the GET")
-    snap = (ftp.get(A_PATH), ftp.get(B_PATH))
+    snap = (ftp.get(ftp.a), ftp.get(ftp.b))
 
     # 2 -- match
     print("\n[2] same key")
@@ -292,7 +298,7 @@ def phases_local(run, ftp, ip, port, out, listener_box, fetch_in_flight_box):
     run.check(f"TRUST: KNOWN KEY {hx(h1)}" in run.seen, "match: KNOWN KEY K1")
     run.check(run.settled(), "match: settled")
     run.check(len(lst.conns) == n0 + 1 and lst.conns[-1]["handshake"], "match: the GET completed")
-    run.check((ftp.get(A_PATH), ftp.get(B_PATH)) == snap, "match: the store was not written")
+    run.check((ftp.get(ftp.a), ftp.get(ftp.b)) == snap, "match: the store was not written")
 
     # 3 -- restarted with a NEW key: refused
     print("\n[3] listener restarted with K2; RETURN, N")
@@ -309,7 +315,7 @@ def phases_local(run, ftp, ip, port, out, listener_box, fetch_in_flight_box):
     run.check(run.settled(), "changed: settled")
     run.check(all(not c["handshake"] for c in lst.conns) and len(lst.conns) == 1,
               f"changed: no client Finished reached the listener ({lst.conns})")
-    run.check((ftp.get(A_PATH), ftp.get(B_PATH)) == snap, "changed: the store was not written")
+    run.check((ftp.get(ftp.a), ftp.get(ftp.b)) == snap, "changed: the store was not written")
 
     # 4 -- arm the accept
     print("\n[4] K2 again; A")
@@ -319,7 +325,7 @@ def phases_local(run, ftp, ip, port, out, listener_box, fetch_in_flight_box):
     s = run.wait("ACCEPT ARMED: G, SAME HOST", 30)
     run.check(s is not None, "accept: ACCEPT ARMED")
     run.check(run.settled(), "accept: settled")
-    run.check((ftp.get(A_PATH), ftp.get(B_PATH)) == snap, "accept: arming wrote nothing")
+    run.check((ftp.get(ftp.a), ftp.get(ftp.b)) == snap, "accept: arming wrote nothing")
 
     # 5 -- retry: recorded
     print("\n[5] K2, retry")
@@ -333,9 +339,9 @@ def phases_local(run, ftp, ip, port, out, listener_box, fetch_in_flight_box):
     rec = record_of(ftp, ip)
     run.check(rec is not None and rec.spki == h2 and rec.mode == ts.MODE_ACCEPTED,
               f"retry: the store holds ACCEPTED/K2 ({rec})")
-    b = ftp.get(B_PATH)
+    b = ftp.get(ftp.b)
     run.check(b is not None and ts.decode(b)[0] == 2, "retry: written to TRUST.B, generation 2")
-    snap = (ftp.get(A_PATH), ftp.get(B_PATH))
+    snap = (ftp.get(ftp.a), ftp.get(ftp.b))
 
     # 6 -- override
     print("\n[6] listener restarted with K1; RETURN, Y")
@@ -351,7 +357,7 @@ def phases_local(run, ftp, ip, port, out, listener_box, fetch_in_flight_box):
     run.check(len(lst.conns) == 2 and not lst.conns[0]["handshake"] and lst.conns[1]["handshake"]
               and b"GET " in lst.conns[1]["request"],
               f"override: refused once, then one unpinned fetch ({lst.conns})")
-    run.check((ftp.get(A_PATH), ftp.get(B_PATH)) == snap, "override: nothing recorded")
+    run.check((ftp.get(ftp.a), ftp.get(ftp.b)) == snap, "override: nothing recorded")
     rec = record_of(ftp, ip)
     run.check(rec is not None and rec.spki == h2, "override: the store still holds K2")
 
@@ -406,9 +412,11 @@ def main() -> int:
                           certifies=CERTIFIES)
     prg = PRG_PATH.read_bytes()
     path = image_store_path(prg, L)
-    if path != TEST_DIR + "/TRUST.":
-        return cannot_run(f"the image stores at {path!r}; this rig only runs against "
-                          f"TRUST_STORE_DIR={TEST_DIR}", certifies=CERTIFIES)
+    explicit = os.environ.get("TRUST_STORE_DIR")
+    try:
+        image_dir(path)
+    except StoreUnavailable as exc:
+        return cannot_run(str(exc), certifies=CERTIFIES)
     load = prg[0] | prg[1] << 8
     off = L["http_host_target"] - load + 2
     build_host = prg[off:prg.index(b"\0", off)].decode("ascii")
@@ -430,27 +438,32 @@ def main() -> int:
         return 3
     out = REPO / "build" / "rig_trust_policy" / time.strftime("%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
-    client = run = None
+    client = run = store = None
     uci_on = False
     fetch_in_flight = False
     box = [False]
     listener_box = [None]
     try:
+        # The store's volume first: a device with nowhere to write it is
+        # COULD NOT RUN before anything on it is touched.
+        try:
+            store = TrustFiles(HOST, select_store_dir(HOST, path, explicit))
+            store.ensure_dir()
+            store.delete_ours()
+        except (StoreUnavailable, *SETUP_ERRORS) as exc:
+            store = None
+            # Both messages name the volumes the device does have.
+            return cannot_run(f"no usable trust-store volume on {HOST}: {exc}",
+                              certifies=CERTIFIES)
+        ftp = store
+        print(f"store {store.dir} on {HOST}")
+        # The harness sweeps /Temp itself for this client while the lock
+        # is held (leak-prone firmware only): no private GC.
         client = Ultimate64Client(host=HOST, timeout=20.0)
         info = client.get_info()
         print(f"device /v1/info: {json.dumps(info)}")
-        ftp = Ftp()
-        listing = ftp.listdir()
-        if listing is None:
-            ftp.mkdir()
-        elif set(listing) - set(OURS):
-            return cannot_run(f"{TEST_DIR} holds files that are not the rig's: {listing}",
-                              certifies=CERTIFIES)
-        for n in OURS:
-            ftp.delete(n)
         enable_uci(client)
         uci_on = True
-        gc_temp(HOST)
         try:
             prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ, artifact_dir=out)
             preflight_reu(client, LABELS_PATH)
@@ -504,25 +517,18 @@ def main() -> int:
                 {"passed": run.passed, "failed": run.failed, "notes": run.notes},
                 indent=1, default=str))
             print(f"\nartifacts: {out}")
-        try:
-            ftp = Ftp()
-            for n in OURS:
-                ftp.delete(n)
-            if ftp.listdir() == []:
-                ftp.rmdir()
-            print(f"cleanup: {TEST_DIR} -> {ftp.listdir()}")
-        except Exception as exc:        # noqa: BLE001
-            print(f"WARNING: cleanup of {TEST_DIR} failed: {exc}")
+        if store is not None:
+            try:
+                store.delete_ours()
+                print(f"cleanup: {', '.join(OURS)} deleted; {store.dir} left in place")
+            except Exception as exc:    # noqa: BLE001
+                print(f"WARNING: cleanup of {store.dir} failed: {exc}")
         if client is not None:
             try:
                 if uci_on:
                     disable_uci(client)
             except Exception as exc:    # noqa: BLE001
                 print(f"WARNING: teardown: {exc}")
-        try:
-            gc_temp(HOST)
-        except Exception as exc:        # noqa: BLE001
-            print(f"WARNING: gc_temp: {exc}")
         lock.release()
     if run is None:
         return 2

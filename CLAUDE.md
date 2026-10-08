@@ -472,6 +472,9 @@ stdout.
                                               Also the only completeness
                                               oracle: `tools/http_body_checks.py`
                                               (exit 78 = inconclusive, #210)
+  rig_trust_store.py / rig_trust_policy.py  — TRUST.A/B on `/<vol>/c64https-test`
+                                              via harness `storage_*`; no
+                                              writable volume = exit 2
   rig_https_bad_finished.py                 — forged server Finished must abort
                                               (`FINISHED_MODE=good` control first)
   bench_ecdsa_u64e.py                       — verify wall-clock sweeps
@@ -531,8 +534,9 @@ engineering-notes.
     'Q'. Probe DHCP with a fast-boot (onchip) image, never comb.
   - **writemem exhaustion wedge** (fw 3.14d, GideonZ/1541ultimate#686):
     each REST `writemem` leaks a `/Temp` file; after ~15 loads REST and the
-    UCI bridge wedge together. `tools/uci/_temp_gc.py` FTP-deletes them;
-    wired into the live/wiki rigs.
+    UCI bridge wedge together. c64-test-harness handles it: any default
+    `Ultimate64Client` on a leak-prone device sweeps `/Temp` while this
+    process holds the DeviceLock (our `_temp_gc.py` is retired).
   - The U64E is a shared device: trust `DeviceLock`, never kill other
     sessions' processes or force-reboot it.
 

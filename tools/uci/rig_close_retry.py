@@ -78,7 +78,6 @@ from _memory_policy import (  # noqa: E402
 )
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
-from _temp_gc import gc_temp  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _skip_policy import verdict  # noqa: E402
 from rig_https_local import (  # noqa: E402
@@ -423,7 +422,6 @@ def main() -> int:
         tr.memory_policy = policy
         enable_uci(client)
         uci_enabled = True
-        gc_temp(HOST)
         try:
             prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ,
                            artifact_dir=run_dir)
