@@ -782,128 +782,44 @@ sha256_maj:
 
 
 ; =============================================================================
-; sha256_add_to_hash - add working variables to hash state
+; sha256_add_to_hash - add working variables to hash state (h[i] += a..h[i])
+;
+; One word per pass, high word first; within a word bytes go LSB (+3) to MSB
+; (+0) with the carry rippling, as the 8 unrolled copies this replaced did.
+; Indexes both blocks with one X, so it relies on sha256_h0..h7 and
+; sha_a..sha_h each being 8 contiguous words in the same order (src/data.s);
+; the asserts below fail the link if either stops being so.
+; Clobbers A, X. Runs once per 64 B block, so the loop overhead is noise
+; beside the 64 rounds; the 250 B it saves are resident on both backends.
+; Cost vs the 406-cycle unrolled copy: 527 cycles (+121) where the loop sits
+; inside one page, 534 (+128) where the taken `bpl @word` crosses one (+1
+; per taken branch, 7 per call) -- placement-dependent, so it differs by
+; profile (the comb TRUST_STORE images cross today). Any indexed access whose
+; base+X crossed a page would add +1 more each; none does at present.
 ; =============================================================================
+.assert sha256_h1 = sha256_h0 + 4 .and sha256_h2 = sha256_h0 + 8 .and sha256_h3 = sha256_h0 + 12 .and sha256_h4 = sha256_h0 + 16 .and sha256_h5 = sha256_h0 + 20 .and sha256_h6 = sha256_h0 + 24 .and sha256_h7 = sha256_h0 + 28, lderror, "sha256_add_to_hash: sha256_h0..h7 must be contiguous (src/data.s)"
+.assert sha_b = sha_a + 4 .and sha_c = sha_a + 8 .and sha_d = sha_a + 12 .and sha_e = sha_a + 16 .and sha_f = sha_a + 20 .and sha_g = sha_a + 24 .and sha_h = sha_a + 28, lderror, "sha256_add_to_hash: sha_a..sha_h must be contiguous (src/data.s)"
 sha256_add_to_hash:
-	; h0 += a
+	ldx #28			; word 7 (h7 += h) first, down to word 0
+@word:
 	clc
-	lda sha256_h0+3
-	adc sha_a+3
-	sta sha256_h0+3
-	lda sha256_h0+2
-	adc sha_a+2
-	sta sha256_h0+2
-	lda sha256_h0+1
-	adc sha_a+1
-	sta sha256_h0+1
-	lda sha256_h0
-	adc sha_a
-	sta sha256_h0
-
-	; h1 += b
-	clc
-	lda sha256_h1+3
-	adc sha_b+3
-	sta sha256_h1+3
-	lda sha256_h1+2
-	adc sha_b+2
-	sta sha256_h1+2
-	lda sha256_h1+1
-	adc sha_b+1
-	sta sha256_h1+1
-	lda sha256_h1
-	adc sha_b
-	sta sha256_h1
-
-	; h2 += c
-	clc
-	lda sha256_h2+3
-	adc sha_c+3
-	sta sha256_h2+3
-	lda sha256_h2+2
-	adc sha_c+2
-	sta sha256_h2+2
-	lda sha256_h2+1
-	adc sha_c+1
-	sta sha256_h2+1
-	lda sha256_h2
-	adc sha_c
-	sta sha256_h2
-
-	; h3 += d
-	clc
-	lda sha256_h3+3
-	adc sha_d+3
-	sta sha256_h3+3
-	lda sha256_h3+2
-	adc sha_d+2
-	sta sha256_h3+2
-	lda sha256_h3+1
-	adc sha_d+1
-	sta sha256_h3+1
-	lda sha256_h3
-	adc sha_d
-	sta sha256_h3
-
-	; h4 += e
-	clc
-	lda sha256_h4+3
-	adc sha_e+3
-	sta sha256_h4+3
-	lda sha256_h4+2
-	adc sha_e+2
-	sta sha256_h4+2
-	lda sha256_h4+1
-	adc sha_e+1
-	sta sha256_h4+1
-	lda sha256_h4
-	adc sha_e
-	sta sha256_h4
-
-	; h5 += f
-	clc
-	lda sha256_h5+3
-	adc sha_f+3
-	sta sha256_h5+3
-	lda sha256_h5+2
-	adc sha_f+2
-	sta sha256_h5+2
-	lda sha256_h5+1
-	adc sha_f+1
-	sta sha256_h5+1
-	lda sha256_h5
-	adc sha_f
-	sta sha256_h5
-
-	; h6 += g
-	clc
-	lda sha256_h6+3
-	adc sha_g+3
-	sta sha256_h6+3
-	lda sha256_h6+2
-	adc sha_g+2
-	sta sha256_h6+2
-	lda sha256_h6+1
-	adc sha_g+1
-	sta sha256_h6+1
-	lda sha256_h6
-	adc sha_g
-	sta sha256_h6
-
-	; h7 += h
-	clc
-	lda sha256_h7+3
-	adc sha_h+3
-	sta sha256_h7+3
-	lda sha256_h7+2
-	adc sha_h+2
-	sta sha256_h7+2
-	lda sha256_h7+1
-	adc sha_h+1
-	sta sha256_h7+1
-	lda sha256_h7
-	adc sha_h
-	sta sha256_h7
+	lda sha256_h0+3,x
+	adc sha_a+3,x
+	sta sha256_h0+3,x
+	lda sha256_h0+2,x
+	adc sha_a+2,x
+	sta sha256_h0+2,x
+	lda sha256_h0+1,x
+	adc sha_a+1,x
+	sta sha256_h0+1,x
+	lda sha256_h0,x
+	adc sha_a,x
+	sta sha256_h0,x
+	txa
+	sec
+	sbc #4
+	tax
+	bpl @word
 	rts
 
 ; =============================================================================
