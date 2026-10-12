@@ -777,7 +777,8 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
                                    post-link)
   $C000-$CFFF  (no region)         TCP ring by equate; not in the PRG,
                                    except comb's COLD_IMAGE (cold bank)
-                                   — the PRG ends $BFFF, comb $CFFF
+                                   — the PRG ends $BFFF; comb with the
+                                   cold bank (COLD_BANK=1) ends $CFFF
   $D000-$DFFF  I/O                 never in the PRG: a KERNAL LOAD would
                                    store into the registers (#288,
                                    `tools/test_prg_io_range.py`)

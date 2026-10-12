@@ -252,8 +252,8 @@ def check_d64_boots(variants: list[dict]) -> None:
     measured for #288: the poll below halted the machine for its whole
     sleep (every binary-monitor command halts the 6510 until resume(), and
     the loop read AFTER resuming), and the UCI images then ran to $DFFF and
-    froze the load with its pointer in CIA1's page ($DC06 and $DC09
-    observed). With the loop resuming after the read and the pad gone,
+    froze the load with its pointer in CIA1's page ($DC06, $DC09 and
+    $DC0A observed). With the loop resuming after the read and the pad gone,
     each image loads under TDE in ~20 s. The drive setup is read back from
     the instance (TDE_RESOURCES) and a mismatch fails the image.
 

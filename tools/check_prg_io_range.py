@@ -5,7 +5,7 @@ A KERNAL LOAD (disk, .d64, a real 1541) stores every byte of a PRG with
 the CPU, and with the default $01 every byte at $D000-$DFFF lands in a
 chip register (VIC-II, SID, colour RAM, the CIAs). Measured in VICE under
 true drive emulation, the old 55,297 B UCI images froze the load with its
-pointer in CIA1's page ($DC06 and $DC09 observed). On a U64 the DMA
+pointer in CIA1's page ($DC06, $DC09 and $DC0A observed). On a U64 the DMA
 load (Ultimate64Client.load_prg) of the old image left $D020/$D021/
 $DC02/$DC03/$DD02 unchanged, so there only RAM changes.
 

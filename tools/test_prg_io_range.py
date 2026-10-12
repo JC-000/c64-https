@@ -6,7 +6,7 @@ the CPU, so bytes at $D000-$DFFF land in the chip registers. The UCI
 images used to carry a zero pad to $DFFF (OVERLAY_FILE_PAD, which
 positioned the retired P-384 curve blob at $E000); in VICE under true
 drive emulation that froze the load with its pointer in CIA1's page
-($DC06 and $DC09 observed). The checker is tools/check_prg_io_range.py;
+($DC06, $DC09 and $DC0A observed). The checker is tools/check_prg_io_range.py;
 this is its test:
 
   * cfg: every ``cfg/c64-https-*.cfg`` is run through the checker's

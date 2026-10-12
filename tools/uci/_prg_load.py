@@ -54,7 +54,8 @@ from c64_test_harness.execute import parse_basic_sys_address
 #: BASIC ROM, which a host read returns as ROM until boot.s banks it out.
 VERIFY_END = 0xA000
 #: A second span that IS compared: RAM no ROM shadows. The cold-code bank
-#: (src/net/uci/cold_bank.s) carries its image here; other images zeros.
+#: (src/net/uci/cold_bank.s) carries its image here; no other image reaches
+#: it since #288 (they end at $BFFF), so the window compares nothing there.
 RAM_WINDOW = (0xC000, 0xD000)
 #: The head-zeroing event lands 2-5 s after READY; re-check past it.
 HEAD_SETTLE_S = 7.0

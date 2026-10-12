@@ -2834,19 +2834,36 @@ statement had two causes, separated by measurement:
     The loop now reads, then resumes.
   - **The UCI images loaded into I/O.** With the machine running
     (read-then-resume probe, 10 s samples, VICE via c64-test-harness,
-    NTSC, warp, REU on), the 55,297 B images ending at $DFFF froze with
-    the load pointer at $DC06 (uci-onchip, base `a3fdc772…`, 900 s) and
-    $DC09 (uci-comb, base `6a5a2993…`) — inside CIA1's page — while the
-    ip65-onchip image (ends $BFFF, `b262f3f9…`) loaded and showed the menu
-    in 21 s. Which register write stops the load was not isolated. After
-    dropping the pad, uci-onchip (47,105 B, `5571c41c…`) and uci-comb
-    (51,201 B, `4c23bc3d…`) each reached the banner in 21 s.
-    `make package-verify` with the new boot step: 11/11, banners at
-    10 s / 15 s / 10 s (ip65-onchip / uci-comb / uci-onchip).
+    NTSC, warp, REU on), every 55,297 B image ending at $DFFF froze with
+    the load pointer inside CIA1's page, and every image ending at or
+    below $CFFF loaded. Which register write stops it was not isolated.
+    Store builds = `BACKEND=uci USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1
+    TRUST_RELEASE=1` (onchip) and `... USE_NISTCURVES_ONCHIP_COMB=1 ...`
+    (comb); TRUST_RELEASE does not move these hashes.
+
+    | tree | image | PRG | TDE result |
+    |---|---|---|---|
+    | 3f420f2 (nistcurves v0.14.0), pad | onchip-store | `a3fdc772…` | frozen at $DC06, 900 s |
+    | 3f420f2, pad | comb-store | `6a5a2993…` | frozen at $DC09, 600 s |
+    | b4a88b1 (pad dropped, v0.14.0) | onchip-store | `5571c41c…` | banner 21 s |
+    | b4a88b1 | comb-store | `4c23bc3d…` | banner 21 s |
+    | b4a88b1 | ip65-onchip | `b262f3f9…` | menu 21 s |
+    | 17654bf (v0.15.0), pad | onchip-store | `7059930a…` | frozen at $DC0A, 300 s |
+    | 17654bf, pad | comb-store | `936884e9…` | frozen at $DC0A, 300 s |
+    | this branch (v0.15.0) | onchip-store | `fd37600b…` | banner 21 s |
+    | this branch | comb-store | `025af934…` | banner 21 s |
+
+    `make package-verify` with the new boot step, on this branch's
+    images (`810f1158…`, `fd37600b…`, `025af934…`): 11/11, banners at
+    10 s each. The pre-rebase images do not reproduce at the rebased
+    commits (the nistcurves pin moved), which is why both sets are listed.
 
 The hypothesis filed with #288 named CIA2 ($DD00/$DD02, the IEC lines);
-the measured stop is in CIA1's page, before $DD00 is reached. Probe
-scripts were scratch (`probe2.py`), not committed.
+the measured stops are in CIA1's page ($DC06, $DC09, $DC0A), before $DD00
+is reached. On a U64 the DMA load (`Ultimate64Client.load_prg`) of the
+old image left $D020/$D021/$DC02/$DC03/$DD02 unchanged (measured in
+review), so there only RAM changes. Probe scripts were scratch
+(`probe2.py`), not committed.
 
 **The comb profile now SHIPS** (`uci-comb`). It was excluded from the
 lineup while its costs — REU bank 2 residency plus the boot precompute —
