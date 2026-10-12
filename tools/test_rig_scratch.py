@@ -547,6 +547,33 @@ def test_page2_window_withholds_the_vectors() -> None:
                    for r in policy.reserved_regions)
 
 
+#: Writes the rig write guard must refuse on every UCI profile (#288): the
+#: TCP ring and the I/O page. The dropped OVERLAY_FILE_PAD region used to
+#: reserve both by accident; nothing linked covers them now.
+RUNTIME_ONLY_PROBES = (0xC000, 0xC800, 0xCF00, 0xCFFF, 0xD000, 0xD020,
+                       0xDC00, 0xDFFF)
+
+
+def test_policy_reserves_the_ring_and_the_io_page() -> None:
+    from c64_test_harness.memory_policy import MemoryPolicyError
+    import warnings
+    fixtures = _profile_fixtures()
+    assert fixtures, "no profile fixtures"
+    for name, text in fixtures.items():
+        with tempfile.TemporaryDirectory() as td:
+            labels = Path(td) / "labels.txt"
+            labels.write_text(text)
+            policy = mp.build_policy(labels, labels)
+        for addr in RUNTIME_ONLY_PROBES:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    policy.check_write(addr, 1)
+            except MemoryPolicyError:
+                continue
+            raise AssertionError(f"{name}: a write at ${addr:04X} is allowed")
+
+
 def test_every_rig_allocates_on_the_current_build() -> None:
     """The real build/labels.txt, whole, when build/ holds a UCI link — the
     captured fixtures above can go stale; this cannot. A non-UCI or absent

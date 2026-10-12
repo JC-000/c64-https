@@ -198,11 +198,43 @@ def build_policy(
                 MemoryRegion(start, declared_end, note=f"segment:{name}")
             )
 
+    # Runtime-only ranges no linked region covers (#288). The image used to
+    # run on to $DFFF with a file-backed pad, and that pad region was what
+    # reserved both of these; with it gone they would be "unknown" (a
+    # warning, not a refusal). The TCP ring is the `tcp_recv_buf` equate
+    # (src/constants.inc), 4 KB, live from the first connect; the I/O page
+    # is never scratch.
+    ring = _label_value(labels_path, "tcp_recv_buf", TCP_RING_DEFAULT)
+    reserved.append(MemoryRegion(ring, ring + TCP_RING_SIZE,
+                                 note="tcp_recv_buf ring (runtime, #288)"))
+    reserved.append(MemoryRegion(IO_PAGE[0], IO_PAGE[1],
+                                 note="I/O page (#288)"))
+
     reserved.extend(extra_reserved)
     return MemoryPolicy(
         reserved_regions=tuple(reserved),
         unknown=unknown,
     )
+
+
+#: The TCP rx ring (src/constants.inc `tcp_recv_buf`, TCP_RECV_MASK + 1).
+TCP_RING_DEFAULT = 0xC000
+TCP_RING_SIZE = 0x1000
+#: VIC/SID/colour RAM/CIAs/expansion I/O, [start, end).
+IO_PAGE = (0xD000, 0xE000)
+
+
+def _label_value(labels_path: Path, name: str, default: int) -> int:
+    """A label's value from a VICE-format labels.txt, or ``default``."""
+    try:
+        text = Path(labels_path).read_text()
+    except OSError:
+        return default
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] == "." + name:
+            return int(parts[1].split(":")[-1], 16)
+    return default
 
 
 def _parse_used_ends(labels_path: Path) -> dict[str, int]:
