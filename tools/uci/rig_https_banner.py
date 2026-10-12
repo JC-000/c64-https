@@ -254,18 +254,6 @@ def main() -> int:
         enable_uci(client)
         uci_on = True
 
-        # fw <= 3.14d leaks one /Temp file per REST body; run_prg is a big
-        # writemem, and a session's worth of them wedges REST and the UCI
-        # bridge together (CLAUDE.md "writemem exhaustion wedge"). Cheap
-        # insurance, same as the live/wiki rigs.
-        if os.environ.get("C64_SKIP_TEMP_GC") != "1":
-            try:
-                from _temp_gc import gc_temp
-                removed = gc_temp(HOST)
-                print(f"/Temp GC: removed {removed} stale file(s)")
-            except Exception as exc:
-                print(f"WARNING: /Temp GC skipped: {exc}")
-
         # --- Device prep: reset-then-configure (#197, #187, #212) -------
         # This rig used to probe `CPU Speed` / `Turbo Control` inline and,
         # when the read failed, perform the write regardless — the #187

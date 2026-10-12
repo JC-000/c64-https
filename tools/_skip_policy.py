@@ -156,7 +156,7 @@ def _opted_out(opt_out_env: Optional[str]) -> bool:
     Bare truthiness would make ``C64_ALLOW_SKIP=0`` and
     ``C64_ALLOW_SKIP=false`` ENABLE the opt-out -- someone setting 0 to shut
     the escape hatch would silently disable the whole policy.  Every other
-    gate in this repo (``C64_SKIP_BUILD``, ``C64_SKIP_TEMP_GC``,
+    gate in this repo (``C64_SKIP_BUILD``,
     ``C64_NET_TESTS_OPTIONAL``, ``VICE_HTTPS_OK_TO_RUN``) compares to the
     literal "1"; this one does too.  Surrounding whitespace is tolerated
     because a shell export can carry it; nothing else is.

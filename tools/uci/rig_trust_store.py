@@ -2,12 +2,12 @@
 """rig_trust_store.py -- the trust store's disk I/O on a real Ultimate (#155).
 
 VICE has no UCI, so the DOS-target path of src/net/uci/trust_store.s is
-proven here, on the U64E, against the firmware's real filesystem on /USB1.
+proven here, on the U64E, against the firmware's real filesystem (a USB stick or SD card).
 tools/test_trust_store_6502.py covers the same logic against a model; this
 rig checks the model's assumptions and the bytes that land on the stick.
 
-Build first (the rig refuses any other store path, so it can never touch a
-real TRUST.A / TRUST.B):
+Build first (the rig refuses any store path but /<volume>/c64https-test, so
+it can never touch a real TRUST.A / TRUST.B):
 
     make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1 \\
         TRUST_STORE_DIR=/USB1/c64https-test
@@ -18,12 +18,22 @@ bank (src/net/uci/cold_bank.s): every call is fetched from the REU into
 cert_buf. Boot then includes the ~45 s precompute at 48 MHz, so set
 C64_INIT_WAIT (e.g. 90), the seconds the boot may take to reach the menu.
 
-Everything happens in /USB1/c64https-test/, which the rig creates, requires
-to hold nothing but TRUST.A / TRUST.B, and removes at the end. No socket is
-ever opened (the program's boot DHCP is the only network traffic), so the
-one reset the rig issues cannot poison a lease.
+Everything happens in /<volume>/c64https-test/ (the image's
+TRUST_STORE_DIR), which the rig creates if missing and in which it only
+ever writes and deletes TRUST.A / TRUST.B. The files go through
+c64-test-harness's storage API (tools/uci/_trust_storage.py), under the
+DeviceLock. The rig refuses a directory holding anything else (listing,
+plus TRUST.P by name: listings omit hidden names) and removes the
+directory at the end. The volume must be in storage_writable_volumes(); a
+device without one (a C64U with no medium lists only Flash and Temp) is
+COULD NOT RUN, exit 2, before the device is touched. Any other storage
+error (lock, FTP) is a failure, exit 1.
+An explicit TRUST_STORE_DIR in the environment must match the image. No
+socket is ever opened (the program's boot DHCP is the only network
+traffic), so the one reset the rig issues cannot poison a lease.
 
-Phases (each checked against tools/trust_store.py, and over FTP):
+Phases (each checked against tools/trust_store.py, and read back from the
+device's storage):
   1  load, empty directory                    -> EMPTY
   2  save github.com                          -> TRUST.A, generation 1
   3  load GitHub.COM                          -> VALID, record found
@@ -39,25 +49,23 @@ Phases (each checked against tools/trust_store.py, and over FTP):
  11  version 2 file                           -> FAIL VERSION
  12  32 records (2,064 B, multi-part read); replace one -> 9 write chunks
  13  (TURBO_MHZ=1 only) reset DURING trust_store_save's WRITE_DATA
- 14  directory removed                        -> FAIL NOPATH
+ 14  directory removed                        -> FAIL NOPATH; then put back
 
 The torn write in phase 5 is produced with the store's own DOS layer
 (dos_open FA_WRITE|FA_CREATE_ALWAYS + one dos_write, no close), so it is
 deterministic at any clock. Phase 13 interrupts the real save; only at
 1 MHz is its write window (~1 s) wide enough for a REST poll to land in.
 
-Exit: 0 pass, 1 a check failed, 2 could not run, 3 lock timeout, 4 device
+Exit: 0 pass, 1 a check failed (or a storage call failed), 2 could not run, 3 lock timeout, 4 device
 prep/preflight/load refused.
 """
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import os
 import sys
 import time
-from ftplib import FTP, error_perm
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -77,7 +85,10 @@ from _memory_policy import build_policy_and_low_ram_arbiter                     
 from _prg_load import PrgLoadError, load_verified_and_run                         # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu                       # noqa: E402
 from _skip_policy import cannot_run, verdict                                      # noqa: E402
-from _temp_gc import gc_temp                                                      # noqa: E402
+from _trust_storage import (CANNOT_RUN_ERRORS, StoreUnavailable, TrustFiles,   # noqa: E402
+                            StoreLeftovers, clean_up, final_exit, image_dir,
+                            select_store_dir)
+from c64_test_harness import Ultimate64StorageError                              # noqa: E402
 import trust_store as ts                                                          # noqa: E402
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
@@ -85,9 +96,6 @@ TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
 SCALE = max(1.0, 48.0 / TURBO_MHZ)
 PRG_PATH = REPO / "build" / "c64-https.prg"
 LABELS_PATH = REPO / "build" / "labels.txt"
-TEST_DIR = "/USB1/c64https-test"
-OURS = ("TRUST.A", "TRUST.B")
-A_PATH, B_PATH = f"{TEST_DIR}/TRUST.A", f"{TEST_DIR}/TRUST.B"
 CERTIFIES = "the trust store's UCI DOS I/O on the U64E (#155 phase 2)"
 TS_BUF = 0xC000
 TEAR_LEN = 100
@@ -175,51 +183,8 @@ def build_routine(L, a, rec, host, op, sent, ra, rp):
     return bytes(c)
 
 
-class Ftp:
-    def _do(self, fn):
-        with FTP(HOST, timeout=15) as f:
-            f.login()
-            return fn(f)
-
-    def listdir(self):
-        """None if TEST_DIR does not exist. NLST alone cannot say: on the
-        Ultimate's server it answers [] for a missing directory; CWD fails."""
-        def go(f):
-            try:
-                f.cwd(TEST_DIR)
-            except error_perm:
-                return None
-            return sorted(n.rsplit("/", 1)[-1] for n in f.nlst(TEST_DIR))
-        return self._do(go)
-
-    def get(self, path):
-        buf = bytearray()
-        try:
-            self._do(lambda f: f.retrbinary(f"RETR {path}", buf.extend))
-        except error_perm:
-            return None
-        return bytes(buf)
-
-    def put(self, path, data):
-        self._do(lambda f: f.storbinary(f"STOR {path}", io.BytesIO(data)))
-
-    def delete(self, name):
-        def go(f):
-            try:
-                f.delete(f"{TEST_DIR}/{name}")
-            except error_perm:
-                pass
-        self._do(go)
-
-    def mkdir(self):
-        self._do(lambda f: f.mkd(TEST_DIR))
-
-    def rmdir(self):
-        self._do(lambda f: f.rmd(TEST_DIR))
-
-
 class Rig:
-    def __init__(self, tr, client, L, prg, alloc):
+    def __init__(self, tr, client, L, prg, alloc, store):
         self.tr, self.client, self.L, self.prg = tr, client, L, prg
         (self.a, self.rec, self.host, self.op, self.sent, self.ra,
          self.rp) = alloc
@@ -228,7 +193,7 @@ class Rig:
         self.passed = 0
         self.failed = []
         self.notes = {}
-        self.ftp = Ftp()
+        self.ftp = store
 
     def require(self, cond, what):
         """A check every later phase depends on: stop the run if it fails."""
@@ -325,7 +290,7 @@ class Rig:
                 == (ts.ST_VALID, slot, gen) and st2["found"] == 1)
 
     def files(self):
-        return self.ftp.get(A_PATH), self.ftp.get(B_PATH)
+        return self.ftp.get(self.ftp.a), self.ftp.get(self.ftp.b)
 
 
 def rec(host, spki=SPKI_1):
@@ -376,25 +341,25 @@ def run_phases(r: Rig):
                   f"marker=${mark:02X})")
     rp, ra, took = r.sys(OP_TEAR)
     ra &= 1                                         # the write's carry
-    torn_open = ftp.get(A_PATH)
+    torn_open = ftp.get(ftp.a)
     r.notes["torn_open_c"], r.notes["torn_write_c"] = rp, ra
     r.notes["torn_A_size_before_reset"] = None if torn_open is None else len(torn_open)
-    print(f"  dos_open C={rp} dos_write C={ra}; TRUST.A over FTP before the reset: "
+    print(f"  dos_open C={rp} dos_write C={ra}; TRUST.A on the device before the reset: "
           f"{r.notes['torn_A_size_before_reset']} B")
     r.check(rp == 0 and ra == 0, "the torn open + write were accepted")
     r.client.reset()
     time.sleep(3.0)
-    torn = ftp.get(A_PATH)
+    torn = ftp.get(ftp.a)
     r.notes["torn_A_size_after_reset"] = None if torn is None else len(torn)
     print(f"  TRUST.A after the reset: {r.notes['torn_A_size_after_reset']} B")
-    r.check(ftp.get(B_PATH) == pre_b, "TRUST.B (the loaded slot) is byte-identical")
+    r.check(ftp.get(ftp.b) == pre_b, "TRUST.B (the loaded slot) is byte-identical")
     r.check(torn is not None and ts.slot_result(torn) != ts.SLOT_OK,
             "TRUST.A is damaged, as DECISIONS #6 predicts")
 
     print("\n[6] reload the PRG; load after the torn write")
     r.boot()
     c, a, st = r.load("lwn.net")
-    torn_after = ftp.get(A_PATH)
+    torn_after = ftp.get(ftp.a)
     r.notes["torn_A_size_after_load"] = None if torn_after is None else len(torn_after)
     print(f"  TRUST.A after the load's close-first: {r.notes['torn_A_size_after_load']} B")
     r.check(c == 0 and (st["state"], st["slot"], st["gen"]) == (ts.ST_VALID, 1, 2)
@@ -414,7 +379,7 @@ def run_phases(r: Rig):
     print("\n[8] corrupt TRUST.B")
     bad_b = bytearray(fb)
     bad_b[20] ^= 0x01
-    ftp.put(B_PATH, bytes(bad_b))
+    ftp.put(ftp.b, bytes(bad_b))
     c, a, st = r.load("example.com")
     r.check(c == 0 and (st["state"], st["slot"], st["gen"]) == (ts.ST_VALID, 0, 3)
             and st["slot_st"][1] == ts.R_CHECKSUM, "VALID from A; B reported CHECKSUM")
@@ -422,7 +387,7 @@ def run_phases(r: Rig):
     print("\n[9] corrupt both; then one corrupt beside an absent one")
     bad_a = bytearray(fa)
     bad_a[-1] ^= 0x80
-    ftp.put(A_PATH, bytes(bad_a))
+    ftp.put(ftp.a, bytes(bad_a))
     c, a, st = r.load("example.com")
     r.check(c == 1 and a == ts.ST_FAIL and st["reason"] == ts.R_CHECKSUM,
             "both corrupt: FAIL CHECKSUM")
@@ -439,14 +404,14 @@ def run_phases(r: Rig):
     print("\n[11] unknown version")
     v2 = bytearray(ts.encode(1, [rec("example.com")]))
     v2[4] = 2
-    ftp.put(A_PATH, bytes(v2))
+    ftp.put(ftp.a, bytes(v2))
     c, a, st = r.load("example.com")
     r.check(c == 1 and st["reason"] == ts.R_VERSION, "FAIL VERSION")
     ftp.delete("TRUST.A")
 
     print("\n[12] 32 records: a 2,064 B image")
     full = ts.encode(40, [rec(f"h{i}.example") for i in range(32)])
-    ftp.put(A_PATH, full)
+    ftp.put(ftp.a, full)
     c, a, st = r.load("h31.example")
     r.check(c == 0 and st["found"] == 1 and st["rec"] == rec("h31.example").pack(),
             "record 32 of 32 found (five 512 B read parts)")
@@ -464,9 +429,28 @@ def run_phases(r: Rig):
     if TURBO_MHZ == 1:
         phase_midsave(r)
 
+    phase_nopath(r)
+
+
+def phase_nopath(r: Rig):
+    """[14] FAIL NOPATH: the test directory itself removed, then put back."""
     print("\n[14] no directory")
-    ftp.rmdir()
-    c, a, st = r.load("example.com")
+    ftp = r.ftp
+    ftp.delete_ours()
+    try:
+        gone = ftp.remove_dir()
+    except StoreLeftovers as exc:
+        r.notes["nopath_rmdir"] = str(exc)
+        # Setup proved the directory removable and the DeviceLock excludes
+        # other writers: whatever is left was written by the program under
+        # test, during the run. A failure, not device state.
+        r.require(False, f"phase 14: {exc}; written DURING the run")
+    r.notes["nopath_rmdir"] = gone
+    r.require(gone is True, f"{ftp.dir} removed (rmdir returned {gone!r})")
+    try:
+        c, a, st = r.load("example.com")
+    finally:
+        ftp.ensure_dir()
     r.check(c == 1 and st["reason"] == ts.R_NOPATH, "FAIL NOPATH")
 
 
@@ -475,7 +459,7 @@ def phase_midsave(r: Rig):
     if TURBO_MHZ == 1:
         print("\n[13] reset DURING trust_store_save's write (1 MHz)")
         base = ts.encode(5, [rec("a.example"), rec("b.example"), rec("c.example")])
-        ftp.put(A_PATH, base)
+        ftp.put(ftp.a, base)
         c, a, st = r.load("d.example")
         r.check(c == 0 and st["slot"] == 0, "loaded generation 5 from A")
         # ts_target is store state in CRYPTO_OVERLAY: a deliberate, one-byte
@@ -526,10 +510,11 @@ def main() -> int:
                           executed=0, total=None, certifies=CERTIFIES)
     prg = PRG_PATH.read_bytes()
     path = image_store_path(prg, L)
-    if path != TEST_DIR + "/TRUST.":
-        return cannot_run(f"the image stores at {path!r}; this rig only runs against "
-                          f"TRUST_STORE_DIR={TEST_DIR}", executed=0, total=None,
-                          certifies=CERTIFIES)
+    explicit = os.environ.get("TRUST_STORE_DIR")
+    try:
+        image_dir(path)
+    except StoreUnavailable as exc:
+        return cannot_run(str(exc), executed=0, total=None, certifies=CERTIFIES)
     policy, arbiter = build_policy_and_low_ram_arbiter(LABELS_PATH, PRG_PATH)
     code_len = len(build_routine(L, 0x0400, 0, 0, 0, 0, 0, 0))
     alloc = (arbiter.alloc(code_len, name="routine"), arbiter.alloc(64, name="record"),
@@ -545,6 +530,8 @@ def main() -> int:
     try:
         acquire_device_lock(lock)
     except LockTimeoutConfigError as exc:
+        # exit 2 for a malformed C64_DEVICE_LOCK_TIMEOUT predates the
+        # storage port (_device_lock_helper.py), unchanged here
         print(f"[fatal] {exc}", file=sys.stderr)
         return 2
     except DeviceLockTimeout as exc:
@@ -552,31 +539,42 @@ def main() -> int:
         return 3
     run_dir = REPO / "build" / "rig_trust_store" / time.strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
-    client = tr = rig = None
+    client = tr = rig = store = None
     uci_enabled = False
     try:
+        # The store's volume first: a device with nowhere to write it is
+        # COULD NOT RUN before anything on it is touched.
+        try:
+            store = TrustFiles(HOST, select_store_dir(HOST, path, explicit))
+            store.prepare()
+        except CANNOT_RUN_ERRORS as exc:
+            # No writable volume, a directory that is not ours, or one that
+            # cannot be removed (hidden entries): the device cannot host the
+            # test store. Each names what it saw.
+            store = None
+            return cannot_run(f"trust store unavailable on {HOST}: {exc}",
+                              executed=0, total=None, certifies=CERTIFIES)
+        except Ultimate64StorageError as exc:
+            # Lock not held, FTP unreachable, a failed transfer: a real
+            # failure, never "no volume".
+            store = None
+            print(f"[fatal] storage on {HOST}: {exc}", file=sys.stderr)
+            return 1
+        print(f"store {store.dir} on {HOST}")
+        # The harness sweeps /Temp itself for this client while the lock
+        # is held (leak-prone firmware only): no private GC.
         client = Ultimate64Client(host=HOST, timeout=15.0)
         tr = Ultimate64Transport(host=HOST, timeout=15.0, client=client)
         tr.memory_policy = policy
-        ftp = Ftp()
-        listing = ftp.listdir()
-        if listing is None:
-            ftp.mkdir()
-        elif set(listing) - set(OURS):
-            return cannot_run(f"{TEST_DIR} holds files that are not the rig's: {listing}",
-                              executed=0, total=None, certifies=CERTIFIES)
-        for n in OURS:
-            ftp.delete(n)
         enable_uci(client)
         uci_enabled = True
-        gc_temp(HOST)
         try:
             prepare_device(client, LABELS_PATH, turbo_mhz=TURBO_MHZ, artifact_dir=run_dir)
             preflight_reu(client, LABELS_PATH)
         except (DevicePrepError, ReuPreflightError) as exc:
             print(str(exc), file=sys.stderr)
             return 4
-        rig = Rig(tr, client, L, prg, alloc)
+        rig = Rig(tr, client, L, prg, alloc, store)
         try:
             rig.boot()
         except PrgLoadError as exc:
@@ -593,15 +591,8 @@ def main() -> int:
                        "passed": rig.passed, "failed": rig.failed, "notes": rig.notes}
             (run_dir / "result.json").write_text(json.dumps(summary, indent=1))
             print(f"\nnotes: {json.dumps(rig.notes)}\nartifacts: {run_dir}")
-        try:
-            ftp = Ftp()
-            for n in OURS:
-                ftp.delete(n)
-            if ftp.listdir() == []:
-                ftp.rmdir()
-            print(f"cleanup: {TEST_DIR} -> {ftp.listdir()}")
-        except Exception as exc:  # noqa: BLE001
-            print(f"WARNING: cleanup of {TEST_DIR} failed: {exc}")
+        # Reset first: the 6502 must not be mid-DOS-write while the rig
+        # deletes the files and removes the directory under it.
         if client is not None:
             try:
                 if uci_enabled:
@@ -609,12 +600,10 @@ def main() -> int:
                 client.reset()
             except Exception as exc:  # noqa: BLE001
                 print(f"WARNING: teardown: {exc}")
-        try:
-            gc_temp(HOST)
-        except Exception as exc:  # noqa: BLE001
-            print(f"WARNING: gc_temp: {exc}")
+        cleanup = clean_up(store)
+        print(cleanup[1])
         lock.release()
-    return verdict(rig.passed, len(rig.failed), certifies=CERTIFIES)
+    return final_exit(verdict(rig.passed, len(rig.failed), certifies=CERTIFIES), cleanup)
 
 
 if __name__ == "__main__":

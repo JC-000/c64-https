@@ -22,12 +22,14 @@ deliberate — see "Why not pytest" below.
 | `rig_https_print_body.py` | issue #28 — the decrypted body renders correctly on screen |
 | `rig_https_refetch.py` | several menu-driven HTTPS fetches in ONE boot — per-connection state a second `tls_connect` would inherit |
 | `rig_https_local_p384.py` | the P-384 cert profile (blocked: no P-384 PRG builds today) |
+| `rig_trust_store.py` | the trust store's UCI DOS I/O against a real volume (#155) |
+| `rig_trust_policy.py` | the trust policy end to end through the menu (#155) |
 | `bench_ecdsa_u64e.py` | ECDSA-P256 verify wall-clock across a clock sweep |
 
 Files with a leading underscore are helper modules, not entry points:
 `_device_lock_helper.py`, `_memory_policy.py`, `_device_prep.py`,
 `_reu_preflight.py`, `_sni_precondition.py`, `_ecdsa_vectors.py`,
-`_analyze_ecdsa_trace.py`.
+`_analyze_ecdsa_trace.py`, `_trust_storage.py`.
 `_sni_precondition.py` is pure logic and carries its own checks:
 
 ```sh
@@ -91,6 +93,31 @@ previous lane left, which is the outcome the turbo policy exists to refuse
 ON.
 Policy and tests: `tools/uci/_device_prep.py`, `tools/test_device_prep.py`
 (faked client, no hardware).
+
+## `/Temp` hygiene and device storage
+
+There is no private `/Temp` GC here any more (`_temp_gc.py` is retired).
+c64-test-harness sweeps the firmware's leaked `/Temp` attachments (the
+writemem exhaustion wedge, GideonZ/1541ultimate#686) for any
+`Ultimate64Client` on a leak-prone device while this process holds the
+DeviceLock, so a rig only has to build its client the default way (no
+`write_mem_query_threshold`, no `temp_hygiene=False`) inside the lock.
+
+Files on the device's volumes go through the harness's `storage_*` API,
+never a private FTP session. The two trust rigs keep TRUST.A / TRUST.B in
+`/<volume>/c64https-test` (the image's `TRUST_STORE_DIR`) via
+`_trust_storage.py`: the volume must be in `storage_writable_volumes()`,
+and an explicit `TRUST_STORE_DIR` must match the image. A device with no
+such volume — a C64U with no medium lists only `Flash` and `Temp` — a
+directory holding anything but TRUST.A/B (listed, or TRUST.P probed by
+name, since listings omit hidden names), or one that cannot be removed
+because of hidden entries (`.DS_Store`, `._*`; setup proves it removable)
+is COULD NOT RUN, exit 2, before anything on it is touched. Any other
+storage error (lock, FTP) is exit 1. The directory is removed at the end.
+Leftovers met at phase 14 or at cleanup were written during the run (setup
+proved the directory empty; the lock excludes other writers), so they are
+a failure, exit 1, reported and never forced; so is any cleanup failure. Tests: `tools/test_trust_rig_storage.py` (faked storage that
+refuses without the fake lock, no hardware).
 
 ## Listener and socket lifecycle (#246, #234)
 

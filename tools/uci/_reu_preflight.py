@@ -436,7 +436,7 @@ def _unreadable_message(detail: str, reason: str) -> str:
         "refuses\n"
         "     instantly while ping still answers, that is the writemem "
         "exhaustion\n"
-        "     wedge (GideonZ/1541ultimate#686) — tools/uci/_temp_gc.py. Run "
+        "     wedge (GideonZ/1541ultimate#686); the harness sweeps /Temp. Run "
         "the\n"
         "     diagnostic ladder; do NOT jump to 'firmware corruption', which "
         "is a\n"
