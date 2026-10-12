@@ -60,7 +60,15 @@ MUTANTS = {
     # follow $BFFF in the file, so they load at $C000-$D0FF
     "fill after the last area": ANCHOR + "    HIGHPAD: start = $E000, "
         "size = $1100, file = %O, fill = yes;\n",
+    # (d), (e) the old pad with the other spellings ld65 accepts for fill
+    "fill = true": ANCHOR + "    OVERLAY_FILE_PAD: start = $C000, "
+        "size = $2000, file = %O, fill = true;\n",
+    "fill = 1": ANCHOR + "    OVERLAY_FILE_PAD: start = $C000, "
+        "size = $2000, file = %O, fill = 1;\n",
 }
+#: The old pad in a second MEMORY block appended to the cfg.
+SECOND_MEMORY_BLOCK = ("\nMEMORY {\n    OVERLAY_FILE_PAD: start = $C000, "
+                       "size = $2000, file = %O, fill = yes;\n}\n")
 
 
 def _uci_cfg() -> str:
@@ -89,12 +97,20 @@ def test_cfg_check_fails_closed():
     base = _uci_cfg()
     for broken in (ANCHOR + "    PAD: start = $C000, size = PADLEN, fill = yes;\n",
                    ANCHOR + "    PAD start = $C000, size = $10;\n",
-                   ANCHOR + "    PAD: start = $C000, fill = yes;\n"):
+                   ANCHOR + "    PAD: start = $C000, fill = yes;\n",
+                   ANCHOR + "    PAD: start = $C000, size = $10, fill = maybe;\n"):
         try:
             cfg_io_violations(base.replace(ANCHOR, broken))
         except CfgError:
             continue
         raise AssertionError(f"unparseable area accepted: {broken.strip()!r}")
+    for text in (base + SECOND_MEMORY_BLOCK,
+                 base + "\nSEGMENTS {\n    PADSEG: load = LOADER, type = ro;\n}\n"):
+        try:
+            cfg_io_violations(text)
+        except CfgError:
+            continue
+        raise AssertionError("a second MEMORY/SEGMENTS block was accepted")
 
 
 def test_prg_checker_sees_the_defect():

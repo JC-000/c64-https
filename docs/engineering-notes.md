@@ -2854,7 +2854,10 @@ statement had two causes, separated by measurement:
     | this branch | comb-store | `025af934…` | banner 21 s |
 
     `make package-verify` with the new boot step, on this branch's
-    images (`810f1158…`, `fd37600b…`, `025af934…`): 11/11, banners at
+    images (`810f1158…`, `fd37600b…`, `025af934…`), on the #288 branch's
+    final commit: 14/14 checks (3 reproducibility, 3 dist-PRG load
+    ranges in step 1b, 3 d64 contents, 3 boots under TDE with the drive
+    setup read back, 2 listener), RELEASE ARTIFACTS VERIFIED; banners at
     10 s each. The pre-rebase images do not reproduce at the rebased
     commits (the nistcurves pin moved), which is why both sets are listed.
 

@@ -17,8 +17,14 @@ Two checks, both pure:
        lands at the load address plus the bytes written before it. A
        `fill = yes` area writes its whole size; any other area writes up to
        its size if a segment that is not bss/zp loads into it, else
-       nothing. Sizes and starts may be expressions; anything this cannot
-       parse or evaluate is an error (fail closed), never a pass.
+       nothing. Sizes and starts may be expressions, and `fill` may be
+       yes/no/true/false or a numeric expression. It fails closed (an
+       error, never a pass) on: an entry, attribute, expression or boolean
+       it cannot parse; a missing MEMORY or SEGMENTS block, or more than
+       one of either; an area without start/size; a segment without load;
+       a first writing area that is not a 2-byte header. Attributes it
+       does not model (align, define, a MEMORY area's type, ...) are
+       ignored.
   PRG  a linked PRG's load range: load address + body length.
 
     python3 tools/check_prg_io_range.py [--cfg CFG ...] [PRG ...]
@@ -66,11 +72,27 @@ def eval_expr(text: str) -> int:
     return int(eval(compile(tree, "<cfg>", "eval"), {"__builtins__": {}}))
 
 
+def _bool(text: str, what: str) -> bool:
+    """An ld65 boolean: yes/no/true/false, or a numeric expression."""
+    word = text.strip().lower()
+    if word in ("yes", "true"):
+        return True
+    if word in ("no", "false"):
+        return False
+    try:
+        return eval_expr(text) != 0
+    except CfgError as e:
+        raise CfgError(f"{what}: not a boolean: {text!r}") from e
+
+
 # --- cfg parsing ----------------------------------------------------------------
 def _block(text: str, name: str) -> str:
-    m = re.search(r"\b" + name + r"\s*\{", text)
-    if not m:
+    heads = list(re.finditer(r"\b" + name + r"\s*\{", text))
+    if not heads:
         raise CfgError(f"no {name} block")
+    if len(heads) > 1:
+        raise CfgError(f"{len(heads)} {name} blocks; this checker reads one")
+    m = heads[0]
     end = text.find("}", m.end())
     if end < 0:
         raise CfgError(f"{name} block is not closed")
@@ -119,7 +141,7 @@ def load_map(cfg_text: str) -> list[dict]:
             start, size = eval_expr(a["start"]), eval_expr(a["size"])
         except KeyError as e:
             raise CfgError(f"area {name} has no {e.args[0]} =") from e
-        fill = a.get("fill", "no").lower() == "yes"
+        fill = _bool(a.get("fill", "no"), f"area {name} fill")
         writes = fill or bool(loaded_types.get(name, set()) - NO_OUTPUT_TYPES)
         if not writes:
             continue
