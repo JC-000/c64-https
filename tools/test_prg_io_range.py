@@ -2,28 +2,23 @@
 """No image may load into the I/O page at $D000-$DFFF (#288).
 
 A KERNAL LOAD (disk, .d64, a real 1541) stores every byte of a PRG with
-the CPU, and with the default $01 those stores land in the VIC-II, SID,
-colour RAM and both CIAs -- CIA2 drives the IEC bus the drive is loading
-over. Only DMA loaders (VICE autostart injection, U64 REST) put such bytes
-in the RAM underneath. The UCI images used to carry a zero pad to $DFFF
-(OVERLAY_FILE_PAD, which positioned the retired P-384 curve blob at
-$E000); this suite fails if anything puts it back.
+the CPU, so bytes at $D000-$DFFF land in the chip registers. The UCI
+images used to carry a zero pad to $DFFF (OVERLAY_FILE_PAD, which
+positioned the retired P-384 curve blob at $E000); in VICE under true
+drive emulation that froze the load with its pointer in CIA1's page
+($DC06 and $DC09 observed). The checker is tools/check_prg_io_range.py;
+this is its test:
 
-Two halves, no build needed for the first:
+  * cfg: every ``cfg/c64-https-*.cfg`` is run through the checker's
+    load map (where each file-backed area LOADS, from file order and
+    evaluated sizes), and the three cfg shapes that beat the first
+    version of this guard are red cases: a size written as an expression,
+    the old pad split over two lines, and a fill area after the last one.
+  * PRG: synthetic images at the boundaries. Standalone, it also checks
+    the PRGs named on the command line, or build/ and dist/ ones.
 
-  * cfg: every ``cfg/c64-https-*.cfg`` MEMORY area that overlaps the I/O
-    page must be non-file (``file = ""``). ld65's default for an area with
-    no ``file`` attribute is the output file, so a missing attribute
-    counts as file-backed. This is stricter than the PRG (a file-backed
-    area holding only BSS writes nothing) and it covers every profile,
-    built or not.
-  * PRG: a PRG's load range ($0801 + body length) must end below $D000.
-    Standalone, it checks the PRGs named on the command line, or else
-    whatever ``build/c64-https.prg`` and ``dist/*.prg`` exist.
-
-The checkers are pure functions with red cases below (a synthetic image
-ending at $DFFF, the old pad line), so a checker that stopped seeing the
-defect fails here too.
+The Makefile checks every linked PRG's range after ld65, and
+make package-verify checks every dist/*.prg.
 
     pytest tools/test_prg_io_range.py
     python3 tools/test_prg_io_range.py [PRG ...]
@@ -31,7 +26,6 @@ defect fails here too.
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -39,99 +33,88 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
 from _skip_policy import verdict  # noqa: E402
+from check_prg_io_range import (  # noqa: E402
+    CfgError, cfg_io_violations, load_map, prg_io_violation, prg_range,
+)
 
-IO_LO, IO_HI = 0xD000, 0xDFFF            # inclusive
 CERTIFIES = "no linked image loads into the $D000-$DFFF I/O page (#288)"
 # Every profile the Makefile can select links one of these; a rename that
 # hid one from the glob would otherwise shrink this suite silently.
-UCI_CFGS = ("c64-https-uci.cfg", "c64-https-uci-onchip.cfg",
-            "c64-https-uci-onchip-cold.cfg", "c64-https-uci-m3.cfg")
+CFGS = ("c64-https-ip65.cfg", "c64-https-uci.cfg", "c64-https-uci-onchip.cfg",
+        "c64-https-uci-onchip-cold.cfg", "c64-https-uci-m3.cfg")
+# Where each real cfg's file bytes end (the linked PRGs end there too).
+LOAD_END = {"c64-https-ip65.cfg": 0xBFFF, "c64-https-uci.cfg": 0xBFFF,
+            "c64-https-uci-onchip.cfg": 0xBFFF,
+            "c64-https-uci-onchip-cold.cfg": 0xCFFF,
+            "c64-https-uci-m3.cfg": 0x9FFF}
 
-_AREA = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?);", re.M)
-_ATTR = re.compile(r"(\w+)\s*=\s*(\"[^\"]*\"|[^,;\s]+)")
-
-
-def _num(tok: str) -> int:
-    tok = tok.strip()
-    return int(tok[1:], 16) if tok.startswith("$") else int(tok, 0)
-
-
-def memory_areas(cfg_text: str) -> list[dict]:
-    """The MEMORY block's areas: name, start, size, file (None = absent)."""
-    text = re.sub(r"#[^\n]*", "", cfg_text)
-    m = re.search(r"\bMEMORY\s*\{(.*?)\}", text, re.S)
-    if not m:
-        raise ValueError("no MEMORY block")
-    out = []
-    for name, body in _AREA.findall(m.group(1)):
-        attrs = dict(_ATTR.findall(body))
-        out.append({"name": name, "start": _num(attrs["start"]),
-                    "size": _num(attrs["size"]), "file": attrs.get("file")})
-    if not out:
-        raise ValueError("MEMORY block has no areas")
-    return out
+ANCHOR = "    X25519_SCRATCH:     start = $A000, size = $0224, type = rw, define = yes;\n"
+MUTANTS = {
+    # (a) the old pad, its size an expression: relinks the 55,297 B image
+    "size expression": ANCHOR + "    OVERLAY_FILE_PAD: start = $C000, "
+        "size = $1000 + $1000, file = %O, define = yes, fill = yes, fillval = $00;\n",
+    # (b) the old pad split over two lines
+    "split over lines": ANCHOR + "    OVERLAY_FILE_PAD: start = $C000, size = $2000,\n"
+        "        file = %O, define = yes, fill = yes, fillval = $00;\n",
+    # (c) a fill area after the last one, STARTING above I/O: its bytes
+    # follow $BFFF in the file, so they load at $C000-$D0FF
+    "fill after the last area": ANCHOR + "    HIGHPAD: start = $E000, "
+        "size = $1100, file = %O, fill = yes;\n",
+}
 
 
-def cfg_io_violations(cfg_text: str) -> list[str]:
-    """File-backed MEMORY areas overlapping $D000-$DFFF."""
-    bad = []
-    for a in memory_areas(cfg_text):
-        lo, hi = a["start"], a["start"] + a["size"] - 1
-        if a["file"] == '""' or hi < IO_LO or lo > IO_HI:
-            continue
-        bad.append(f"{a['name']} ${lo:04X}-${hi:04X} file={a['file'] or '(default %O)'}")
-    return bad
-
-
-def prg_range(prg: bytes) -> tuple[int, int]:
-    """(first, last) address a PRG loads to, inclusive."""
-    if len(prg) < 3:
-        raise ValueError(f"PRG is {len(prg)} bytes")
-    la = prg[0] | prg[1] << 8
-    return la, la + len(prg) - 3
-
-
-def prg_io_violation(prg: bytes) -> str | None:
-    lo, hi = prg_range(prg)
-    if hi < IO_LO or lo > IO_HI:
-        return None
-    return f"loads ${lo:04X}-${hi:04X}, into ${max(lo, IO_LO):04X}-${min(hi, IO_HI):04X}"
+def _uci_cfg() -> str:
+    text = (REPO / "cfg" / "c64-https-uci.cfg").read_text()
+    assert text.count(ANCHOR) == 1, "mutation anchor moved: re-derive it"
+    return text
 
 
 def _synthetic(last: int, la: int = 0x0801) -> bytes:
     return bytes([la & 0xFF, la >> 8]) + bytes(last - la + 1)
 
 
-OLD_PAD = ("MEMORY {\n    CRYPTO_COLD_SHADOW: start = $A000, size = $2000, "
-           "file = %O, fill = yes;\n    OVERLAY_FILE_PAD: start = $C000, "
-           "size = $2000, file = %O, define = yes, fill = yes, fillval = $00;\n}\n")
-
-
 # --- pytest ------------------------------------------------------------------
-def test_checkers_see_the_defect():
-    # red cases: the shape #288 removed, in both halves
+def test_cfg_mutants_are_red():
+    base = _uci_cfg()
+    for name, repl in MUTANTS.items():
+        bad = cfg_io_violations(base.replace(ANCHOR, repl))
+        assert bad, f"mutant {name!r} passed the cfg check"
+    assert "$C000-$DFFF" in cfg_io_violations(
+        base.replace(ANCHOR, MUTANTS["size expression"]))[0]
+    assert "$C000-$D0FF" in cfg_io_violations(
+        base.replace(ANCHOR, MUTANTS["fill after the last area"]))[0]
+
+
+def test_cfg_check_fails_closed():
+    base = _uci_cfg()
+    for broken in (ANCHOR + "    PAD: start = $C000, size = PADLEN, fill = yes;\n",
+                   ANCHOR + "    PAD start = $C000, size = $10;\n",
+                   ANCHOR + "    PAD: start = $C000, fill = yes;\n"):
+        try:
+            cfg_io_violations(base.replace(ANCHOR, broken))
+        except CfgError:
+            continue
+        raise AssertionError(f"unparseable area accepted: {broken.strip()!r}")
+
+
+def test_prg_checker_sees_the_defect():
     assert prg_io_violation(_synthetic(0xDFFF))           # the old 55,297 B image
     assert prg_io_violation(_synthetic(0xD000))           # one byte in
-    assert cfg_io_violations(OLD_PAD) == [
-        "OVERLAY_FILE_PAD $C000-$DFFF file=%O"]
-    assert cfg_io_violations(OLD_PAD.replace(", file = %O, define", ", define"))
-    # green cases at the boundary
-    assert prg_io_violation(_synthetic(0xBFFF)) is None    # onchip, 47,105 B
-    assert prg_io_violation(_synthetic(0xCFFF)) is None    # comb, 51,201 B
+    assert prg_io_violation(_synthetic(0xBFFF)) is None    # 47,105 B
+    assert prg_io_violation(_synthetic(0xCFFF)) is None    # comb cold bank, 51,201 B
     assert len(_synthetic(0xBFFF)) == 47105 and len(_synthetic(0xCFFF)) == 51201
-    assert cfg_io_violations(OLD_PAD.replace("file = %O, define", 'file = "", define')) == []
 
 
-def test_no_cfg_area_reaches_the_io_page():
-    cfgs = sorted((REPO / "cfg").glob("c64-https-*.cfg"))
-    names = {p.name for p in cfgs}
-    assert set(UCI_CFGS) <= names, f"missing: {set(UCI_CFGS) - names}"
+def test_no_cfg_loads_into_the_io_page():
     checked = 0
-    for p in cfgs:
-        bad = cfg_io_violations(p.read_text())
-        assert not bad, f"{p.name}: {bad}"
+    for name in CFGS:
+        text = (REPO / "cfg" / name).read_text()
+        assert not cfg_io_violations(text), f"{name}: {cfg_io_violations(text)}"
+        assert load_map(text)[-1]["hi"] == LOAD_END[name], name
         checked += 1
-    assert checked >= len(UCI_CFGS) + 1                   # + ip65
+    assert checked == len(CFGS)
+    others = {p.name for p in (REPO / "cfg").glob("c64-https-*.cfg")} - set(CFGS)
+    assert not others, f"unlisted cfgs (add them to CFGS): {sorted(others)}"
 
 
 # --- standalone --------------------------------------------------------------
@@ -146,11 +129,12 @@ def main(argv: list[str]) -> int:
         else:
             failed += 1
 
-    for fn in (test_checkers_see_the_defect, test_no_cfg_area_reaches_the_io_page):
+    for fn in (test_cfg_mutants_are_red, test_cfg_check_fails_closed,
+               test_prg_checker_sees_the_defect, test_no_cfg_loads_into_the_io_page):
         try:
             fn()
             check(True, fn.__name__)
-        except AssertionError as e:
+        except (AssertionError, CfgError) as e:
             check(False, f"{fn.__name__}: {e}")
 
     prgs = [Path(a) for a in argv] or [
