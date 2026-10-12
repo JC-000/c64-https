@@ -346,8 +346,10 @@ $A000-$BFFF  CRYPTO_COLD_SHADOW  8 KB BSS (same tenants as ip65, less
                                  cert_buf — which sits in CRYPTO_OVERLAY
                                  under UCI, at 2,048 B against ip65's
                                  1,536 B)
-$C000-$DFFF  OVERLAY_FILE_PAD    zero-pad in the PRG; at runtime the
-                                 4 KB TCP_BUF ring lives at $C000
+$C000-$CFFF  (no region)          the 4 KB TCP ring, by equate; not in
+                                 the PRG, except uci-comb's cold-code
+                                 image, which boot stashes to the REU
+$D000-$DFFF  I/O                 never in the PRG (#288)
 ```
 
 `CRYPTO_OVERLAY` is not empty in any shipped UCI image — it holds the
@@ -369,9 +371,11 @@ one pool and moving segments between them creates nothing. `uci-onchip` is the
 roomy one, and only because it ships neither the comb tables nor the comb
 rodata; `uci-comb`'s `CRYPTO_OVERLAY` tail is small.
 
-**PRG size is not a headroom gauge.** Both UCI products are 62,977 B and both
-ip65 profiles are 47,105 B, because the ld65 configs mark the inter-region
-gaps `fill = yes` so load addresses stay right. Re-measure from the map.
+**PRG size is not a headroom gauge.** Every image ending at $BFFF is
+47,105 B (both ip65 profiles, `uci-onchip`) and `uci-comb`, whose cold-code
+image runs to $CFFF, is 51,201 B, because the ld65 configs mark the
+inter-region gaps `fill = yes` so load addresses stay right. Re-measure from
+the map.
 
 No segment may cross $A000: boot zeroes $A000-$BFFF as BSS, so anything
 executable there would be wiped on first call.
@@ -505,7 +509,7 @@ Current status of the three shipped products (re-measured at the
 | `c64-https-uci-comb`    | 62,977 B | 2,859 |
 
 The unshipped default profiles land on the same two PRG sizes (47,105 B /
-62,977 B) with fewer labels, which is the point: **the PRG size is not a
+51,201 B) with fewer labels, which is the point: **the PRG size is not a
 code-size measurement and not a headroom gauge.** Much of each image is
 deliberate zero fill, because the ld65 configs mark the inter-region gaps
 `fill = yes` so the load addresses stay right. Two different builds sharing a

@@ -2568,7 +2568,9 @@ UCI layout (W1 reference — `cfg/c64-https-uci.cfg`):
                                   BSS chunks (BSS, CRYPTO_BSS,
                                   TABLES_BSS, BSS_TAIL).
   $C000-$DFFF  OVERLAY_FILE_PAD   Zero-pad in the PRG; runtime: TCP_BUF
-                                  ring at $C000.
+                                  ring at $C000. (Dropped by #288: the
+                                  PRG now ends at $BFFF, comb at $CFFF
+                                  — see Packaging for why it mattered.)
   $E000-$FDFF  OVERLAY_BLOB_CURVE_RAM
                                   P-384 CURVE overlay blob; boot DMAs
                                   it to REU bank 7 then this region is
@@ -2816,10 +2818,35 @@ byte-compares, boots every image in VICE asserting the banner, and runs
 the listener selftest. `SKIP_REBUILD` / `SKIP_VICE` / `SKIP_LISTENER`
 narrow it.
 
-Booting a .d64 in VICE needs `-trapdevice8 +drive8truedrive`: under true
-drive emulation the ~250-block load never completes inside any sane
-budget, and the symptom is a screen stuck on `LOADING` that looks like a
-bad image rather than a slow one. `verify_release.py` passes both flags.
+Booting a .d64 in VICE used to need `-trapdevice8 +drive8truedrive`:
+under true drive emulation (TDE) the load "never completed", the screen
+stuck on `LOADING`. **Superseded by #288 (2026-10-12): `verify_release.py`
+now boots every image through a real serial LOAD under TDE
+(`-drive8truedrive +trapdevice8 +autostart-handle-tde`).** The old
+statement had two causes, separated by measurement:
+
+  - **The poll halted the machine.** Every binary-monitor command halts
+    the 6510 until `resume()`, and the loop did `sleep; resume; read`, so
+    VICE sat stopped through every sleep (0.0% CPU in `ps`) and ran only
+    in the gap between resume and read. A KERNAL trap load finishes in one
+    such slice; a TDE load crawled at ~0.5 B/s ($AE/$AF sampled every 15 s:
+    $0B54 → $0BF8 in 377 s) on every image, the ip65 control included.
+    The loop now reads, then resumes.
+  - **The UCI images loaded into I/O.** With the machine running
+    (read-then-resume probe, 10 s samples, VICE via c64-test-harness,
+    NTSC, warp, REU on), the 55,297 B images ending at $DFFF froze with
+    the load pointer at $DC06 (uci-onchip, base `a3fdc772…`, 900 s) and
+    $DC09 (uci-comb, base `6a5a2993…`) — inside CIA1's page — while the
+    ip65-onchip image (ends $BFFF, `b262f3f9…`) loaded and showed the menu
+    in 21 s. Which register write stops the load was not isolated. After
+    dropping the pad, uci-onchip (47,105 B, `5571c41c…`) and uci-comb
+    (51,201 B, `4c23bc3d…`) each reached the banner in 21 s.
+    `make package-verify` with the new boot step: 11/11, banners at
+    10 s / 15 s / 10 s (ip65-onchip / uci-comb / uci-onchip).
+
+The hypothesis filed with #288 named CIA2 ($DD00/$DD02, the IEC lines);
+the measured stop is in CIA1's page, before $DD00 is reached. Probe
+scripts were scratch (`probe2.py`), not committed.
 
 **The comb profile now SHIPS** (`uci-comb`). It was excluded from the
 lineup while its costs — REU bank 2 residency plus the boot precompute —

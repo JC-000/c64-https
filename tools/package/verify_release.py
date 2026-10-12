@@ -200,14 +200,17 @@ def check_d64_contents(variants: list[dict]) -> None:
 def check_d64_boots(variants: list[dict]) -> None:
     """Autostart every disk image in VICE and assert the boot banner.
 
-    Two flags are load-bearing, and both were found the hard way:
-
-      -trapdevice8 +drive8truedrive — use the KERNAL load traps instead of
-        true drive emulation. Under TDE the ~250-block serial load of a 63 KB
-        PRG does not finish inside any budget worth waiting for, and the
-        symptom (a screen frozen on LOADING) reads as a corrupt image rather
-        than a slow one. The image's contents are byte-compared separately in
-        2a, so nothing is lost by loading it fast.
+    The load is a real KERNAL serial LOAD under true drive emulation
+    (-drive8truedrive, +trapdevice8, +autostart-handle-tde), which is what
+    a .d64 on a real 1541 does: every byte is a CPU store, so an image that
+    reaches the I/O page writes the chip registers (#288; the build-side
+    guard is tools/test_prg_io_range.py). It used to load through the
+    KERNAL traps because "the TDE load never finishes". Two causes, both
+    measured for #288: the poll below halted the machine for its whole
+    sleep (every binary-monitor command halts the 6510 until resume(), and
+    the loop read AFTER resuming), and the UCI images then ran to $DFFF and
+    froze the load with its pointer at $DC06. With the loop resuming after
+    the read and the pad gone, each image loads under TDE in ~20 s.
 
     The pass criterion is the BANNER, not the menu. Two reasons, both
     measured. The ip65 images print NETWORK INIT FAILED with no network
@@ -249,22 +252,30 @@ def check_d64_boots(variants: list[dict]) -> None:
         # -autostart on a .d64 loads and runs the first program on the disk.
         config = default_vice_config(prg_path=str(image), warp=True,
                                      ntsc=True, sound=False,
-                                     extra_args=["-trapdevice8",
-                                                 "+drive8truedrive"])
+                                     extra_args=["-drive8truedrive",
+                                                 "+trapdevice8",
+                                                 "+autostart-handle-tde"])
         seen: dict[str, float] = {}
         needles = [COMMON_BANNER, expected, MENU_MARKER] + list(foreign_banners.values())
         try:
             with ViceInstanceManager(config=config) as mgr:
                 inst = mgr.acquire()
                 start = time.monotonic()
+                inst.transport.resume()
                 while time.monotonic() - start < timeout:
                     time.sleep(5.0)
+                    # Read, THEN resume: the read halts the 6510, and the
+                    # machine must run through the next sleep.
                     try:
-                        inst.transport.resume()
                         text = ScreenGrid.from_transport(
                             inst.transport).continuous_text().upper()
                     except Exception:                       # noqa: BLE001
                         continue
+                    finally:
+                        try:
+                            inst.transport.resume()
+                        except Exception:                   # noqa: BLE001
+                            pass
                     for needle in needles:
                         if needle in text and needle not in seen:
                             seen[needle] = time.monotonic() - start
