@@ -499,14 +499,14 @@ it is supposed to detect.
 ## Project Status
 
 Current status of the three shipped products (re-measured at the
-`libs/nistcurves` v0.14.0 pin with cc65 from Homebrew; `make clean` before each, then `stat` the PRG and
+`libs/nistcurves` v0.15.0 pin with cc65 from Homebrew; `make clean` before each, then `stat` the PRG and
 `grep -c '^al ' build/labels.txt`):
 
 | product | PRG | labels |
 |---|---:|---:|
-| `c64-https-ip65-onchip` | 47,105 B | 2,395 |
-| `c64-https-uci-onchip`  | 62,977 B | 2,726 |
-| `c64-https-uci-comb`    | 62,977 B | 2,859 |
+| `c64-https-ip65-onchip` | 47,105 B | 2,420 |
+| `c64-https-uci-onchip`  | 47,105 B | 2,939 |
+| `c64-https-uci-comb`    | 51,201 B | 3,181 |
 
 The unshipped default profiles land on the same two PRG sizes (47,105 B /
 51,201 B) with fewer labels, which is the point: **the PRG size is not a
