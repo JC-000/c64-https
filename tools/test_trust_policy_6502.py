@@ -136,8 +136,11 @@ IMAGES = {
     "comb": ["BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1", "TRUST_STORE=1"],
     "onchip-bundle": ["BACKEND=uci", "USE_NISTCURVES_ONCHIP=1", "TRUST_STORE=1",
                       "TRUST_BUNDLE=1"],
-    "comb-bundle": ["BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1",
-                    "TRUST_STORE=1", "TRUST_BUNDLE=1"],
+    # No comb-bundle image: comb + TRUST_BUNDLE=1 is a Makefile $(error).
+    # The cold bank runs trust_bundle from cert_buf, and ecdsa_verify's
+    # scratch shares cert_buf (P256_SCRATCH_UNION). This file's verify is
+    # a Python stub, so an image built here would pass a test that the
+    # real verify fails.
     # the pin's value is set per run (the hash of K1)
     "onchip-pinned": ["BACKEND=uci", "USE_NISTCURVES_ONCHIP=1", "TRUST_STORE=1",
                       "TRUST_BUNDLE=1"],

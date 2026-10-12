@@ -598,11 +598,26 @@ cert_curve_id:     .res 1               ; 0=P-256, 1=P-384
 ; the CRYPTO_BSS pubkey slots. ecdsa_verify may therefore scribble
 ; cert_buf freely. Any future cert-chain validation that re-reads
 ; cert_buf (or hashes TBS via cert_tbs_ptr) after Certificate
-; processing MUST first break the union in cfg/c64-https-ip65.cfg.
+; processing MUST first break the union in cfg/c64-https-ip65.cfg
+; AND the UCI one (P256_SCRATCH_UNION in every cfg/c64-https-uci*.cfg,
+; asserted below). The same holds for code that RUNS from cert_buf: it
+; must not call ecdsa_verify (the comb cold bank's trust_bundle would —
+; the Makefile refuses TRUST_BUNDLE=1 there).
 ; Size is backend-conditional (net_tuning.inc): 2048 under UCI (fits
 ; en.wikipedia.org's 1636 B leaf; segment routed to CRYPTO_OVERLAY),
 ; 1536 under ip65 (SCRATCH_UNION cap — see cfg/c64-https-ip65.cfg).
 .segment "CERT_BUF_BSS"
 cert_buf:          .res CERT_BUF_SIZE   ; certificate DER buffer
+
+; UCI: LIB_NISTCURVES_P256_BSS shares cert_buf (P256_SCRATCH_UNION), the
+; twin of ip65's SCRATCH_UNION (src/net/ip65/exports.s asserts that one).
+; The area must start ON cert_buf and be no larger than it, so a library
+; whose verify scratch outgrows cert_buf fails the link (ld65's memory-area
+; overflow) instead of spilling over the next CRYPTO_OVERLAY tenant.
+.if .defined(BACKEND_UCI) .and (.not .defined(BACKEND_UCI_M3))
+.import __P256_SCRATCH_UNION_START__, __P256_SCRATCH_UNION_SIZE__
+.assert __P256_SCRATCH_UNION_START__ = cert_buf, lderror, "P256_SCRATCH_UNION must start at cert_buf (cfg/c64-https-uci*.cfg)"
+.assert __P256_SCRATCH_UNION_SIZE__ <= CERT_BUF_SIZE, lderror, "P256_SCRATCH_UNION is larger than cert_buf: P-256 BSS would overrun it"
+.endif
 .segment "BSS"
 cert_buf_len:      .res 2               ; certificate length

@@ -78,6 +78,43 @@ forgery), and the three ``Result = F`` records here are the oracle for a
 verify that fails open. Its boot precompute runs 256 point multiplies
 before the menu appears; raise ``C64_INIT_TIMEOUT`` accordingly.
 
+The cert_buf union (UCI, [3k]-[3n])
+----------------------------------
+On UCI the library's verify scratch, LIB_NISTCURVES_P256_BSS, shares
+cert_buf (P256_SCRATCH_UNION in cfg/c64-https-uci*.cfg; ip65 has done the
+same since #68). That is safe only while cert_buf is dead whenever the
+scratch is live: the leaf is consumed (key copied out, SAN check, SPKI pin)
+before CertificateVerify, and nothing reads it after. This group drives the
+image's OWN path, not a staged struct: the leaf goes into cert_buf,
+`tls_cert_stream_finish` extracts the key and runs the name check, then
+`tls_handle_cert_verify` hashes a CertificateVerify against a transcript
+and calls `ecdsa_verify`. It checks that the scratch really lies inside
+cert_buf ([3k]), that the leaf is accepted ([3l]), that the signature
+verifies over a junk-filled cert_buf and its scratch overwrote it ([3m] --
+the bytes must change, or the overlap was not exercised), and that a signature over
+another transcript is refused ([3n]). Mutation: moving the name check to
+after the signature (a cert_buf read while the scratch is live) turns [3m]
+red. That red alone does NOT prove the union: cert_buf is re-seeded with
+junk before each verify (below), so the deferred check reads junk on any
+layout and the same mutant is red on master's too. What shows the union is
+exercised is [3k] (the scratch symbols lie inside cert_buf) and [3m]'s
+`changed > 0` (the verify really wrote over cert_buf) -- on master's layout
+[3k] fails and [3m] reports 0 bytes overwritten. Only UCI builds that stream
+the Certificate (tls_cert_stream_finish) run it.
+
+All 2,048 B of cert_buf are seeded with junk before the leaf is staged, and
+re-seeded after the leaf is consumed and before each verify. So every verify
+runs with arbitrary bytes across its whole scratch span, not just over a
+160 B leaf, which is the lifetime claim: cert_buf holds nothing the verify
+may read. On a TRUST_STORE build (both shipped products) the extractor
+tail-calls the trust hook (cert_pin_check), which refuses unless trust_pre
+set tp_mode; the group sets TP_M_FIRST, as a first-use trust_pre would.
+
+NOT covered here: the deframer streaming the leaf in (tls_deframe.s), the
+interleaving of a real flight, trust_pre / trust_post and the cold bank's
+calls (rig_trust_policy.py on hardware, test_trust_policy_6502.py), and
+anything after CertificateVerify (Finished, traffic keys, the GET).
+
 Usage:
     python3 tools/test_ecdsa_kat_oracle.py [--verbose]
 
@@ -86,7 +123,10 @@ note that it and `C64_MAKE_ARGS` are mutually exclusive in effect: a
 skipped build applies no arguments, and the run reports that.
 """
 
+import hashlib
 import os
+import re
+import random
 import shlex
 import subprocess
 import sys
@@ -404,6 +444,158 @@ def run_kat_oracle(transport, labels):
     return passed, failed
 
 
+# ---------------------------------------------------------------------------
+# [3k]-[3n] cert_buf union: the image's own Certificate -> CertificateVerify
+# path, with the P-256 scratch sharing cert_buf (see the module docstring).
+# ---------------------------------------------------------------------------
+
+UNION_LABELS = [
+    "cert_buf", "cert_buf_size", "tls_cert_stream_finish",
+    "tls_handle_cert_verify", "tls_transcript", "tls_rec_buf",
+    "tls_hostname", "tls_hostname_len", "ecdsa_pubkey_x", "ecdsa_pubkey_y",
+]
+# One symbol from each part of data_p256.s's LIB_NISTCURVES_P256_BSS: the
+# first slot, the point registers, the verify staging, the last slot.
+UNION_SCRATCH = ["fp_wide", "ec_p1", "ecdsa_r", "ecdsa_u1g_jac", "fp_rev_buf"]
+TLS_HS_PTR = 0x3E                  # src/constants.inc: tls_hs_ptr ($3E-$3F)
+UNION_HOST = "www.foo.invalid"
+UNION_SUBTESTS = ["3k", "3l", "3m", "3n"]
+# Past the result/flag bytes the carry trampoline above uses ($0352/$0353),
+# still inside page 3 (the rigs' and suites' scratch window).
+AX_TRAMPOLINE = 0x0360
+
+
+def jsr_ax_with_carry(transport, addr, a, x, timeout=2400.0, poll_interval=5.0):
+    """jsr_with_carry with A/X loaded first (tls_cert_stream_finish's ABI)."""
+    lo, hi = addr & 0xFF, (addr >> 8) & 0xFF
+    rl, rh = CARRY_RESULT_ADDR & 0xFF, CARRY_RESULT_ADDR >> 8
+    fl, fh = CARRY_FLAG_ADDR & 0xFF, CARRY_FLAG_ADDR >> 8
+    loop = AX_TRAMPOLINE + 23
+    tramp = bytes([
+        0xA9, 0x00, 0x8D, fl, fh,          # flag = 0
+        0xA9, a & 0xFF, 0xA2, x & 0xFF,    # A/X = arguments
+        0x20, lo, hi,                      # jsr addr
+        0xA9, 0x00, 0x2A, 0x8D, rl, rh,    # result = C
+        0xA9, 0xFF, 0x8D, fl, fh,          # flag = $FF
+        0x4C, loop & 0xFF, loop >> 8,      # park
+    ])
+    assert len(tramp) == 26 and AX_TRAMPOLINE + len(tramp) <= 0x0400
+    write_bytes(transport, AX_TRAMPOLINE, tramp)
+    write_bytes(transport, CARRY_FLAG_ADDR, bytes([0x00]))
+    goto(transport, AX_TRAMPOLINE)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(poll_interval)
+        try:
+            if read_bytes(transport, CARRY_FLAG_ADDR, 1)[0] == 0xFF:
+                return read_bytes(transport, CARRY_RESULT_ADDR, 1)[0]
+            transport.resume()
+        except Exception:
+            continue
+    raise TimeoutError(f"jsr ${addr:04X} timed out after {timeout:.0f}s")
+
+
+def _tp_mode_first():
+    """TP_M_FIRST from src/trust_policy.inc (never a copied number)."""
+    inc = os.path.join(PROJECT_ROOT, "src", "trust_policy.inc")
+    m = re.search(r"^TP_M_FIRST\s*=\s*(\$?[0-9A-Fa-f]+)", open(inc).read(), re.M)
+    v = m.group(1)
+    return int(v[1:], 16) if v.startswith("$") else int(v)
+
+
+def _cert_verify_msg(sig_der):
+    body = b"\x04\x03" + len(sig_der).to_bytes(2, "big") + sig_der
+    return bytes([0x0F]) + len(body).to_bytes(3, "big") + body
+
+
+def run_union_lifetime(transport, labels):
+    """Returns (passed, failed), or None when the build has no streaming
+    Certificate path (ip65: its union is asserted in src/net/ip65/exports.s)."""
+    if labels.address("tls_cert_stream_finish") is None:
+        return None
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_cert_pin import make_cert, point, spki
+
+    passed = failed = 0
+
+    def check(sub, name, ok, detail=""):
+        nonlocal passed, failed
+        passed += bool(ok)
+        failed += not ok
+        print(f"\n  [{sub}] {name}\n       {'PASS' if ok else 'FAIL'}"
+              f"{(': ' + detail) if detail else ''}")
+        return ok
+
+    missing = [n for n in UNION_LABELS + UNION_SCRATCH if labels.address(n) is None]
+    if missing:
+        print(f"  FAIL: union labels missing: {missing}")
+        return 0, len(UNION_SUBTESTS)
+
+    cb = labels["cert_buf"]
+    cb_size = labels["cert_buf_size"]
+    cb_end = cb + cb_size
+    rng = random.Random(0xCE27B0F)
+
+    def seed_cert_buf():
+        junk = bytes(rng.randrange(256) for _ in range(cb_size))
+        write_bytes(transport, cb, junk)
+        return junk
+    where = {n: labels[n] for n in UNION_SCRATCH}
+    inside = all(cb <= a < cb_end for a in where.values())
+    check("3k", "P-256 scratch lies inside cert_buf (P256_SCRATCH_UNION linked)",
+          inside, " ".join(f"{n}=${a:04X}" for n, a in where.items())
+          + f" cert_buf=${cb:04X}-${cb_end - 1:04X}")
+
+    key = ec.derive_private_key(0x5EC0DE0FCE27B0F, ec.SECP256R1())
+    leaf = make_cert(spki(key), [UNION_HOST])
+    seed_cert_buf()                    # junk behind the leaf, all 2,048 B
+    write_bytes(transport, cb, leaf)
+    if labels.address("tp_mode") is not None:
+        # TRUST_STORE (both shipped products): the extractor tail-calls the
+        # trust hook, which refuses TP_M_NONE ("trust_pre never ran").
+        write_bytes(transport, labels["tp_mode"], bytes([_tp_mode_first()]))
+    write_bytes(transport, labels["tls_hostname"], UNION_HOST.encode() + b"\x00")
+    write_bytes(transport, labels["tls_hostname_len"], bytes([len(UNION_HOST)]))
+    c = jsr_ax_with_carry(transport, labels["tls_cert_stream_finish"],
+                          len(leaf) & 0xFF, len(leaf) >> 8, timeout=120.0)
+    q = (read_bytes(transport, labels["ecdsa_pubkey_x"], 32)
+         + read_bytes(transport, labels["ecdsa_pubkey_y"], 32))
+    if not check("3l", "tls_cert_stream_finish accepts the leaf (key + SAN)",
+                 c == 0 and q == point(key),
+                 f"C={c} key {'ok' if q == point(key) else 'WRONG'}"):
+        return passed, failed + 2
+
+    transcript = hashlib.sha256(b"c64-https P256_SCRATCH_UNION").digest()
+    signed = b" " * 64 + b"TLS 1.3, server CertificateVerify" + b"\x00"
+    rec = labels["tls_rec_buf"]
+
+    def cert_verify(signed_over):
+        # The leaf is dead now: re-seed ALL of cert_buf, so the verify starts
+        # over arbitrary bytes in its whole scratch span.
+        before = seed_cert_buf()
+        sig = key.sign(signed + signed_over, ec.ECDSA(hashes.SHA256()))
+        write_bytes(transport, labels["tls_transcript"], transcript)
+        write_bytes(transport, rec, _cert_verify_msg(sig))
+        write_bytes(transport, TLS_HS_PTR, bytes([rec & 0xFF, rec >> 8]))
+        t0 = time.time()
+        c = jsr_ax_with_carry(transport, labels["tls_handle_cert_verify"], 0, 0,
+                              timeout=2400.0, poll_interval=15.0)
+        after = read_bytes(transport, cb, cb_size)
+        return c, time.time() - t0, sum(1 for a, b in zip(before, after) if a != b)
+
+    c, dt, changed = cert_verify(transcript)
+    check("3m", "tls_handle_cert_verify accepts the server's signature over a "
+          "junk-filled cert_buf, and its scratch overwrote it",
+          c == 0 and changed > 0,
+          f"C={c} [{dt:.0f}s], {changed} of {cb_size} cert_buf bytes overwritten")
+    c, dt, _ = cert_verify(hashlib.sha256(b"another transcript").digest())
+    check("3n", "a signature over another transcript is refused",
+          c == 1, f"C={c} [{dt:.0f}s]")
+    return passed, failed
+
+
 def make_args_from_env():
     """Make arguments for this run, from ``C64_MAKE_ARGS``.
 
@@ -430,7 +622,11 @@ def run_tests(transport, labels):
     except Exception as e:
         print(f"  FAIL: sqtab_init: {e}")
         return 0, 1
-    return run_kat_oracle(transport, labels)
+    passed, failed = run_kat_oracle(transport, labels)
+    union = run_union_lifetime(transport, labels)
+    if union is not None:
+        passed, failed = passed + union[0], failed + union[1]
+    return passed, failed
 
 
 def main():
@@ -516,6 +712,16 @@ def main():
         print(f"\n=== ECDSA P-256 KAT oracle "
               f"({n_pos} valid + {n_neg} invalid vectors) ===")
         passed, failed = run_kat_oracle(transport, labels)
+        expected = len(KAT_VECTORS)
+
+        print("\n=== cert_buf union: Certificate -> CertificateVerify ===")
+        union = run_union_lifetime(transport, labels)
+        if union is None:
+            print("  not run: no streaming Certificate path in this build "
+                  "(ip65 -- its union is asserted in src/net/ip65/exports.s)")
+        else:
+            passed, failed = passed + union[0], failed + union[1]
+            expected += len(UNION_SUBTESTS)
 
         mgr.release(inst)
 
@@ -525,15 +731,16 @@ def main():
     print(f"{'='*60}")
     print(f"  Passed: {passed}/{total}")
     print(f"  Failed: {failed}/{total}")
-    if total != len(KAT_VECTORS):
+    if total != expected:
         # Every declared vector must produce a verdict; a vector that silently
         # dropped out is the same class of defect as F3's skipped group.
         print(f"\n  [-] ECDSA KAT oracle: only {total} of "
-              f"{len(KAT_VECTORS)} declared vectors produced a verdict")
+              f"{expected} declared checks produced a verdict")
         sys.exit(1)
     if failed == 0:
-        print(f"\n  [+] ECDSA KAT oracle: ALL {total} VECTORS PASSED "
-              f"({n_pos} valid accepted, {n_neg} invalid rejected)")
+        print(f"\n  [+] ECDSA KAT oracle: ALL {total} CHECKS PASSED "
+              f"({n_pos} valid accepted, {n_neg} invalid rejected"
+              f"{', cert_buf union 4/4' if expected > len(KAT_VECTORS) else ''})")
     else:
         print(f"\n  [-] ECDSA KAT oracle: {failed} VECTOR(S) FAILED")
     print(f"{'='*60}")
