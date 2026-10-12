@@ -21,8 +21,7 @@ Occupancy is by address, not by the cfg's `load =` names, so a region
 that another region overlaps (ip65's SCRATCH_UNION inside
 CRYPTO_COLD_SHADOW) counts the union's tenants as occupying it. A region
 with no segments at all is reported as EMPTY to ld65, which is NOT
-headroom: ip65's NET_BSS is the blob's own BSS and the UCI
-OVERLAY_FILE_PAD holds the TCP ring by equate.
+headroom: ip65's NET_BSS is the blob's own BSS.
 
 Usage:
 
