@@ -238,7 +238,7 @@ fixed buffers in crypto BSS.
     are live. §13 (network ABI) **is** adopted (#70, merged #142); see
     Networking backend ABI for what its retirement did and did not change.
 
-**P-384 is retired** (branch `retire/p384-lane`; PR link TBD): only P-256 is verified. P-384 / RSA / Ed25519 leaves and any CertificateVerify scheme but 0x0403 are refused, with one exception: the extractor scans rather than parses, so a leaf that also carries a P-256 SPKI byte pattern has THAT key extracted and verified against (`tools/test_curve_refusal.py` [1d]).
+**P-384 is retired** (#294): only P-256 is verified. P-384 / RSA / Ed25519 leaves and any CertificateVerify scheme but 0x0403 are refused, with one exception: the extractor scans rather than parses, so a leaf that also carries a P-256 SPKI byte pattern has THAT key extracted and verified against (`tools/test_curve_refusal.py` [1d]).
 
 Sibling-library memory requirements: code + rodata in `CRYPTO_HOT` /
 `CRYPTO_RESIDENT` ($6000-$9FFF), never crossing $A000 (boot zeroes
