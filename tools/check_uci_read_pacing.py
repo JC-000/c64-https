@@ -10,6 +10,16 @@ uci_fence executions that follow it before the next access. A fence is
 recognised by its bytes as assembled (that module's FENCE), whether it is
 inline or inside uci_settle.
 
+On a TRUST_STORE=1 image it also runs the trust store's DOS traffic
+(trust_store_load on an empty medium, a stage + save, a reload) on
+test_trust_store_6502.py's DOS model: the path every 'G' takes in the
+shipped products (trust_pre). uci_dos.s keeps the fences after its own
+four reads, but it goes through the same primitives as the network path
+(uci_wait_idle, uci_wait_reply, uci_check_err, uci_drain_resp,
+uci_drain_status), so on the default image those reads are unfenced too,
+and they are held to the same rule; uci_dos.s's own four are listed by
+address in DOS_FENCED and must stay fenced on every image.
+
   every image   each WRITE to $DF1C/$DF1D is followed by a fence before
                 the next UCI access.
   default       no READ is followed by a fence, except the one kept before
@@ -18,9 +28,8 @@ inline or inside uci_settle.
                 every READ is followed by a fence (the previous products).
 
 What it does not see: a delay that is not a uci_fence (a NOP sled, a
-loop), the trust store's uci_dos.s (not on these flows; still fenced),
-and anything about the FPGA's real timing -- the hardware A/B in the PR
-is that evidence.
+loop), and anything about the FPGA's real timing -- the hardware runs in
+the PR are that evidence.
 
     make BACKEND=uci ... && python3 tools/check_uci_read_pacing.py [--expect default|fenced]
 
@@ -42,11 +51,15 @@ UCI_REGS = range(0xDF1C, 0xDF20)
 
 class Log:
     def __init__(self):
-        self.events = []        # [kind, addr, [fence pcs after it]]
+        self.events = []        # [kind, addr, [fence pcs after it], insn pc]
+        self.cpu = None         # set once the machine exists
 
     def access(self, kind, addr):
         if addr in UCI_REGS:
-            self.events.append([kind, addr, []])
+            # every UCI access is an absolute LDA/STA: 3 bytes, and the
+            # operand has been fetched when the data cycle runs
+            pc = (self.cpu.pc - 3) & 0xFFFF if self.cpu else None
+            self.events.append([kind, addr, [], pc])
 
     def fence(self, pc):
         if self.events:
@@ -83,6 +96,7 @@ def _machine(replies, log):
     cpu, mem, labels = A._require(model)
     pcpu = PacingCPU(mem)
     pcpu.log = log
+    log.cpu = pcpu
     return pcpu, mem, labels, model
 
 
@@ -117,6 +131,59 @@ def flows():
     return out, labels
 
 
+def trust_flows():
+    """[(name, Log)] for the trust store's DOS traffic, or None when the
+    image has no trust store."""
+    import test_trust_store_6502 as TS
+    env = TS.Env()
+    if "trust_store_load" not in env.labels:
+        return None
+    out = []
+    for name in ("trust load+save", "trust reload"):
+        log = Log()
+        dos = TS.Dos() if name == "trust load+save" else out_dos
+        m = env.machine(dos)
+        mem, cpu = m.mem, m.cpu
+        log.cpu = cpu
+        r0, w0 = mem.read, mem.write
+
+        def r(addr, r0=r0, log=log):
+            if (addr & 0xFFFF) in UCI_REGS:
+                log.access("r", addr & 0xFFFF)
+            return r0(addr)
+
+        def w(addr, value, w0=w0, log=log):
+            if (addr & 0xFFFF) in UCI_REGS:
+                log.access("w", addr & 0xFFFF)
+            return w0(addr, value)
+        mem.read, mem.write = r, w
+        step0 = cpu.step
+
+        def step(cpu=cpu, step0=step0, log=log):
+            pc = cpu.pc
+            if cpu.mem.ram[pc] == 0xE9 and cpu.mem.ram[pc:pc + 4] == TS.FENCE:
+                log.fence(pc)
+            step0()
+        cpu.step = step
+        if name == "trust load+save":
+            m.load("github.com")
+            m.stage(TS.rec("anything", TS.SPKI_1).pack())
+            if m.save():
+                raise A.Unavailable("trust flow: the save failed in the model")
+            out_dos = dos
+        else:
+            c, a = m.load("github.com")
+            if c:
+                raise A.Unavailable("trust flow: the reload failed in the model")
+        out.append((name, log))
+    return out
+
+
+#: uci_dos.s's own reads (labels in src/net/uci/uci_dos.s): they keep
+#: their `jsr uci_settle` on every image, and must.
+DOS_OWN = ("uci_dos_rd_part", "uci_dos_rd_data", "uci_dos_rd_state")
+
+
 def _fenced_image():
     stamp = base.LABELS.parent / "flags.stamp"
     for line in stamp.read_text().splitlines():
@@ -135,13 +202,19 @@ def main(argv) -> int:
     try:
         fenced = _fenced_image() if expect is None else expect
         traces, labels = flows()
+        trust = trust_flows()
     except (A.Unavailable, FileNotFoundError) as exc:
         print("COULD NOT RUN: %s" % exc)
         return 2
+    if trust is None:
+        print("(no trust store in this image: trust flows not applicable)")
+    else:
+        traces += trust
     keep = labels.get("uci_poll_stage_fence")
     if keep is None:
         print("COULD NOT RUN: uci_poll_stage_fence is not in labels.txt")
         return 2
+    own = {labels[n] for n in DOS_OWN if n in labels}
     fails = 0
     for name, log in traces:
         ev = log.events
@@ -152,14 +225,19 @@ def main(argv) -> int:
             bad = [e for e in reads if not e[2]]
             what = "unfenced read(s) in an UCI_READ_FENCE=1 image"
         else:
-            bad = [e for e in reads if any(pc != keep for pc in e[2])]
+            bad = [e for e in reads if e[3] not in own
+                   and any(pc != keep for pc in e[2])]
             what = "fenced read(s) in the default image"
-        ok = len(writes) > 3 and not bare and not bad
+        own_bare = [e for e in reads if e[3] in own and not e[2]]
+        dos_missing = name.startswith("trust") and not any(e[3] in own for e in reads)
+        ok = len(writes) > 3 and not bare and not bad and not own_bare and not dos_missing
         fails += not ok
         print("%s %-13s %3d writes, %4d reads; %s%s" % (
             "PASS" if ok else "FAIL", name, len(writes), len(reads),
             "%d write(s) with no fence after" % len(bare) if bare else "writes fenced",
-            "; %d %s, first $%04X" % (len(bad), what, bad[0][1]) if bad else ""))
+            "; %d %s, first $%04X" % (len(bad), what, bad[0][1]) if bad else "")
+              + ("; %d of uci_dos.s's own read(s) unfenced" % len(own_bare) if own_bare else "")
+              + ("; the DOS path never ran" if dos_missing else ""))
     print("\n%d/%d flows pass (%s image)" % (len(traces) - fails, len(traces),
                                             "fenced" if fenced else "default"))
     return 1 if fails else 0

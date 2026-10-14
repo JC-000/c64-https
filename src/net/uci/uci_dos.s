@@ -113,7 +113,8 @@ dos_finish:
         jsr uci_check_err
         bcs dos_reject          ; push rejected (interface not idle)
 dos_part:
-        lda UCI_STATUS
+uci_dos_rd_part:                ; uci_dos.s's own reads keep their fence on
+        lda UCI_STATUS          ;  every image (check_uci_read_pacing.py)
         jsr uci_settle
         bpl dos_status             ; DATA_AV clear
         lda dos_cap                ; not a read (dos_hdr zeroed the cap):
@@ -126,6 +127,7 @@ dos_part:
         cmp dos_cap+1
         beq dos_reject          ; one byte more than asked for
 @store:
+uci_dos_rd_data:
         lda UCI_RESP_DATA
         jsr uci_settle
 dos_store:
@@ -140,6 +142,7 @@ dos_store:
 dos_status:
         jsr uci_drain_status
         bcs dos_rts
+uci_dos_rd_state:
         lda UCI_STATUS
         jsr uci_settle
         and #UCI_STAT_STATE

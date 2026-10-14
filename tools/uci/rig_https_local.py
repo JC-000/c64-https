@@ -76,6 +76,7 @@ re-runs the server-side criteria against that run's server_result.json.
 from __future__ import annotations
 
 import base64
+import hashlib
 import datetime
 import json
 import os
@@ -1453,6 +1454,9 @@ def main() -> int:
         return 2
 
     prg = PRG_PATH.read_bytes()
+    # The provenance of THIS run: the bytes it loads, hashed once here, so a
+    # later rebuild of build/ cannot be mistaken for what ran.
+    print(f"PRG sha256      : {hashlib.sha256(prg).hexdigest()} ({PRG_PATH})")
 
     lock = DeviceLock(HOST)
     try:
