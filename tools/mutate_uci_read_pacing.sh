@@ -27,6 +27,7 @@ mut status-wait-fenced src/net/uci/uci_cmd.s "@wr_loop:\n        lda UCI_STATUS\
 mut statline-fenced src/net/uci/uci_cmd.s "        lda UCI_STATUS_DATA\n.ifdef UCI_READ_FENCE\n        jsr uci_settle\n.endif" "        lda UCI_STATUS_DATA\n        jsr uci_settle"
 mut dos-own-unfenced src/net/uci/uci_dos.s "uci_dos_rd_data:\n        lda UCI_RESP_DATA\n        jsr uci_settle\n" "uci_dos_rd_data:\n        lda UCI_RESP_DATA\n"
 mut check-err-fenced src/net/uci/uci_cmd.s "uci_check_err:\n        lda UCI_STATUS\n.ifdef UCI_READ_FENCE\n        jsr uci_settle               ; settle before testing error bit\n.endif" "uci_check_err:\n        lda UCI_STATUS\n        jsr uci_settle"
+mut drain-resp-fenced src/net/uci/uci_cmd.s "@drn_have:\n        lda UCI_RESP_DATA\n.ifdef UCI_READ_FENCE\n        jsr uci_settle\n.endif" "@drn_have:\n        lda UCI_RESP_DATA\n        jsr uci_settle"
 rm -rf build; make $PROFILE >/dev/null 2>&1
 python3 tools/check_uci_read_pacing.py >/dev/null || fails=1
 echo "control $(shasum -a 256 build/c64-https.prg | cut -c1-8): $(python3 tools/check_uci_read_pacing.py | tail -1)"

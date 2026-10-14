@@ -14,11 +14,12 @@ On a TRUST_STORE=1 image it also runs the trust store's DOS traffic
 (trust_store_load on an empty medium, a stage + save, a reload) on
 test_trust_store_6502.py's DOS model: the path every 'G' takes in the
 shipped products (trust_pre). uci_dos.s keeps the fences after its own
-four reads, but it goes through the same primitives as the network path
+three reads, but it goes through the same primitives as the network path
 (uci_wait_idle, uci_wait_reply, uci_check_err, uci_drain_resp,
 uci_drain_status), so on the default image those reads are unfenced too,
-and they are held to the same rule; uci_dos.s's own four are listed by
-address in DOS_FENCED and must stay fenced on every image.
+and they are held to the same rule; uci_dos.s's own three reads are
+labelled (uci_dos_rd_part / _data / _state, in DOS_OWN) and must stay
+fenced on every image.
 
   every image   each WRITE to $DF1C/$DF1D is followed by a fence before
                 the next UCI access.
@@ -111,7 +112,11 @@ def flows():
     for name, reply in (("poll data", (b"\x40\x00" + bytes(range(64)), A.OK)),
                         ("poll idle", (b"\xff\xff", b"02,NO DATA: 11")),
                         ("poll EOF", (b"\x00\x00", b"01,CONNECTION CLOSED BY HOST")),
-                        ("poll reset", (b"\xff\xff", b"02,NO DATA: 104"))):
+                        ("poll reset", (b"\xff\xff", b"02,NO DATA: 104")),
+                        # header 600 over a 512 B request: the copy stops at
+                        # the request and uci_drain_resp reads the other 88
+                        # (its @drn_have data read; no other flow reaches it)
+                        ("poll overclaim", (b"\x58\x02" + bytes(600), A.OK))):
         log = Log()
         cpu, mem, labels, uci = _machine([reply], log)
         mem.write(labels["uci_socket_id"], 1)
