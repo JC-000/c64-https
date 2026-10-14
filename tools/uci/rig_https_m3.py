@@ -270,8 +270,8 @@ REU_BODY = 0x100000                     # HTTPS_BODY_TO_REU's region
 #: After a reset (BASIC idle, no program), REU -> C64 staging for readback.
 STAGE = 0x0800
 STAGE_LEN = 0x8000
-#: MediaWiki per-render values. A difference counts as metadata only if one
-#: of these keys is in the 120 bytes before it, on the same line.
+#: MediaWiki per-render values. A changed run counts as metadata only if it
+#: lies wholly inside the 120 bytes after one of these keys, on its line.
 RENDER_KEYS = re.compile(
     rb"wgRequestId|wgBackendResponseTime|wgHostname|wgPageParseReport|"
     rb"cputime|walltime|timestamp|\"ttl\"|transientcontent|cachereport|"
@@ -328,10 +328,11 @@ def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
     """("equal" | "metadata-only" | "DIFFERENT" | "no-reference", facts).
 
     "metadata-only": a line diff, then a token diff inside each changed
-    line; every changed token run either has a RENDER_KEYS key within the
-    120 bytes before it on its line, or lies inside a parser report
-    (report_spans); and no line was added or dropped on its own.
-    That is two renders of one revision, not a short or damaged body."""
+    line; every changed token run, start AND end, lies wholly inside a
+    parser report (report_spans) or inside the 120 bytes after a
+    RENDER_KEYS key on its line; and no line was added or dropped on its
+    own. That is two renders of one revision, not a short or damaged body.
+    The body's own length is pinned separately, by the response framing."""
     facts = {"sha256": hashlib.sha256(body).hexdigest(),
              "crc32": f"{zlib.crc32(body) & 0xFFFFFFFF:08X}", "len": len(body)}
     if ref is None:
@@ -340,6 +341,10 @@ def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
     if body == ref:
         return "equal", facts
     spans = report_spans(body)
+    for m in RENDER_KEYS.finditer(body):
+        eol = body.find(b"\n", m.end())
+        eol = len(body) if eol < 0 else eol
+        spans.append((m.end(), min(m.end() + 120, eol)))
     a, b = body.split(b"\n"), ref.split(b"\n")
     starts = [0]
     for ln in a:
@@ -363,10 +368,8 @@ def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
                     continue
                 runs += 1
                 at = pos[k1]
-                absolute = starts[li] + at
-                if RENDER_KEYS.search(la[max(0, at - 120):at]):
-                    continue
-                if any(lo <= absolute < hi for lo, hi in spans):
+                lo_run, hi_run = starts[li] + at, starts[li] + pos[k2]
+                if any(lo <= lo_run and hi_run <= hi for lo, hi in spans):
                     continue
                 unexplained.append(la[max(0, at - 60):at + 60].decode("latin-1"))
     facts.update(diff_runs=runs, unexplained=len(unexplained),

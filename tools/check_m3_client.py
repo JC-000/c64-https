@@ -556,6 +556,18 @@ def _read_fence(labels=None):
     raise Unavailable("%s has no CA65FLAGS line" % stamp)
 
 
+def _refuse_trace(labels=None):
+    """An M3_TRACE=1 image runs m3_tr_end after net_poll's last register
+    access, which test_read_pacing's READ_GAP_BUDGET would count as a delay
+    after a read. The model rules are the plain image's: refuse, like the
+    mutator does."""
+    stamp = Path(labels or LABELS).parent / "flags.stamp"
+    if stamp.is_file() and "-D M3_TRACE" in stamp.read_text():
+        raise Unavailable("%s is an M3_TRACE=1 image (a measurement build): "
+                          "the model checks are written against images built "
+                          "without M3_TRACE" % stamp)
+
+
 def _fence_sbc():
     """SBC #1 executions in one uci_fence (OUTER x INNER, uci_regs.inc)."""
     text = (REPO / "src" / "net" / "uci" / "uci_regs.inc").read_text()
@@ -1575,7 +1587,9 @@ def test_read_pacing(prg=None, labels=None):
       - a write with no uci_fence after it, seen by execution: fewer SBC #1
         opcode fetches than 0.9 x OUTER x INNER before the next UCI access;
       - default image: any SBC #1 after a read, AND more instructions after
-        a read than READ_GAP_BUDGET allows, whatever the delay's shape;
+        a read than READ_GAP_BUDGET allows, whatever the delay's shape --
+        except a delay made of UCI register accesses (e.g. a loop of
+        status reads), since each access restarts the gap;
       - M3_READ_FENCE=1 image: a read with no uci_fence after it."""
     fenced = _read_fence(labels)
     need = _fence_sbc() * 9 // 10       # SBC #1 with C=0 takes 2 first
@@ -1786,6 +1800,7 @@ VIEWER_TESTS = (
 def run(prg=None, labels=None, only=None, quiet=False):
     """Run TESTS (or `only`, names) on one image. Returns {name: error|None}."""
     results = {}
+    _refuse_trace(labels)
     tests = TESTS + (VIEWER_TESTS if _body_to_reu(labels) else ())
     for fn in tests:
         if only and fn.__name__ not in only:
@@ -1807,6 +1822,7 @@ def main():
         _labels()
         if not PRG.is_file():
             raise Unavailable("no PRG")
+        _refuse_trace()
     except Unavailable as exc:
         return cannot_run(str(exc), executed=0, total=len(TESTS),
                           certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV)
