@@ -35,6 +35,8 @@ M3_FLAG_TLS13_ONLY  = $01       ; REQUIRE_TLS13; bits 1-7 must be 0 (82)
 M3_HOST_MAX         = 253       ; host 1..253 bytes, no $00 (S 1.1 tail grammar)
 M3_WRITE_MAX        = 892       ; WRITE_SOCKET plaintext per command
 M3_READ_MAX         = 893       ; one response block: 2-byte header + 893
+M3_READ_MORE        = 895       ; a continuation block: payload only
+M3_READ_TOTAL       = 1472      ; one READ, over Data More (S:2012-2013)
 M3_STATUS_MAX       = 40        ; every M3 status line is <= 40 B (ER-8)
 M3_SWEEP_HANDLES    = 16        ; this firmware's handle range 0..15 (ER-9)
 
@@ -81,6 +83,22 @@ M3_B_HTTP_IDLE      = 6000      ; http_recv_body: 60 s with no byte arrived
 ;   +8  bytes put into the ring (16-bit)
 ;   +10 m3_poll_result
 ;   +11 $DF1C read right after that READ's PUSH and its fence
+; --- READ size (M3_READ_ONE_BLOCK) ----------------------------------------
+; A READ asks for up to M3_READ_TOTAL: the first block holds the header and
+; 893 bytes, the rest comes in ONE continuation block over Data More, which
+; the client data-accepts after reading the first block to its end (S:2013,
+; errata ER-1 N-1 and ER-5; firmware network_target.cc start_read_reply /
+; get_more_data). A continuation is taken only after a FULL block and only
+; while the header still owes bytes; anything else stays a hole (ER-5).
+; `M3_READ_ONE_BLOCK=1` (and M3_READ_FENCE=1, the pre-change client) asks
+; for at most one block and takes every Data More as a hole, as before.
+.if .defined(M3_READ_FENCE) .or .defined(M3_READ_ONE_BLOCK)
+M3_READ_REQ         = M3_READ_MAX
+.else
+M3_READ_REQ         = M3_READ_TOTAL
+M3_MULTI_BLOCK      = 1
+.endif
+
 M3_TR_BASE          = $6000
 M3_TR_REC           = 12
 M3_TR_CAP           = ($A000 - M3_TR_BASE) / M3_TR_REC

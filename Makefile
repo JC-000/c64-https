@@ -50,10 +50,12 @@ $(error M3_ALLOW_TLS12 must be 1 (offer TLS 1.3 and hardened 1.2) or 0/unset (TL
 endif
 # M3_READ_FENCE=1: a uci_fence after every UCI register READ too, as before
 # (src/net/uci-m3/m3.inc, "Read pacing"): the A/B arm and the fallback.
+# M3_READ_ONE_BLOCK=1: READs of one block (893 B), no Data More continuation
+# (m3.inc, "READ size"): the stage-1 client, an A/B arm.
 # M3_TRACE=1: per-net_poll timing records, a measurement build only.
-$(foreach k,M3_READ_FENCE M3_TRACE,$(if $(filter-out 0 1,$($(k))),$(error $(k) must be 1 or 0/unset)))
+$(foreach k,M3_READ_FENCE M3_READ_ONE_BLOCK M3_TRACE,$(if $(filter-out 0 1,$($(k))),$(error $(k) must be 1 or 0/unset)))
 else
-$(foreach k,M3_READ_FENCE M3_TRACE,$(if $(filter-out 0,$($(k))),$(error $(k)=$($(k)) applies only to BACKEND=uci-m3)))
+$(foreach k,M3_READ_FENCE M3_READ_ONE_BLOCK M3_TRACE,$(if $(filter-out 0,$($(k))),$(error $(k)=$($(k)) applies only to BACKEND=uci-m3)))
 endif
 
 # X25519 is always the libs/x25519 sibling (issue #245 retired the in-tree
@@ -124,6 +126,9 @@ CA65FLAGS += -D M3_ALLOW_TLS12=1
 endif
 ifeq ($(M3_READ_FENCE),1)
 CA65FLAGS += -D M3_READ_FENCE=1
+endif
+ifeq ($(M3_READ_ONE_BLOCK),1)
+CA65FLAGS += -D M3_READ_ONE_BLOCK=1
 endif
 ifeq ($(M3_TRACE),1)
 CA65FLAGS += -D M3_TRACE=1

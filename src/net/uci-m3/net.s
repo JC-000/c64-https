@@ -82,6 +82,9 @@
 .import m3_status_seen
 .import m3_code
 .import m3_wedged
+.ifdef M3_MULTI_BLOCK
+.import m3_next_block
+.endif
 .ifdef M3_TRACE
 .import m3_tr_sample
 .import m3_tr_delta
@@ -708,14 +711,19 @@ m3_status_number:
 ; =============================================================================
 ; net_poll — one READ into the rx ring.
 ;
-; Request min(ring free - 1, 893): one response block, no Data More (S 1.5).
+; Request min(ring free - 1, M3_READ_REQ): 1472 over a first block and one
+; Data More continuation, or 893 and one block under M3_READ_ONE_BLOCK /
+; M3_READ_FENCE (m3.inc, "READ size"; S 1.5, S:2013).
 ; Then, by header and status (S 1.6, Appendix A, ER-5/7/12):
 ;   no header (bit 7 clear)  an empty reply (81/82): a READ of ours that
 ;                            the firmware refused. ERROR, still owned.
 ;   n > 0                    data into the ring. A block that is not read
-;                            to its end (short, over-long, Data More)
-;                            leaves a hole in the stream: ERROR, owned,
-;                            so the CLOSE that follows is sent (ER-5).
+;                            to its end, a short one, an over-long one, or
+;                            a Data More the header does not owe, leaves a
+;                            hole in the stream: ERROR, owned, so the CLOSE
+;                            that follows is sent (ER-5). A continuation
+;                            that does not come within 12 s of its accept
+;                            is ABORTed: $89, ERROR, owned.
 ;   $FFFF + 02,..: 11        nothing yet (M3_POLL_IDLE).
 ;   $FFFF + anything else    the number is not ours ("02,NO DATA: 9", ER-7):
 ;                            stop, and do NOT CLOSE it. ERROR, not owned.
@@ -773,13 +781,13 @@ net_poll:
         rts
 :
         lda m3_req
-        cmp #<M3_READ_MAX
+        cmp #<M3_READ_REQ
         lda m3_req+1
-        sbc #>M3_READ_MAX           ; C=1 iff req >= MAX
+        sbc #>M3_READ_REQ           ; C=1 iff req >= MAX
         bcc :+
-        lda #<M3_READ_MAX
+        lda #<M3_READ_REQ
         sta m3_req
-        lda #>M3_READ_MAX
+        lda #>M3_READ_REQ
         sta m3_req+1
 :
         lda #M3_POLL_END
@@ -908,6 +916,16 @@ net_poll:
         lda tcp_recv_tail+1
         adc #>tcp_recv_buf
         sta @p_store+2
+.ifdef M3_MULTI_BLOCK
+        lda tcp_recv_tail+0         ; where this READ's bytes start
+        sta m3_cp0
+        lda tcp_recv_tail+1
+        sta m3_cp0+1
+        lda #<M3_READ_MAX           ; the first block ends after 893
+        sta m3_blk_end
+        lda #>M3_READ_MAX
+        sta m3_blk_end+1
+.endif
 @p_copy:
         lda UCI_STATUS              ; ER-12: DATA_AV before EVERY byte, or a
         bpl @p_short                ;  short block reads as $00s (bit 7)
@@ -929,6 +947,38 @@ net_poll:
         bne @p_copy
         beq @p_tail                 ; always
 @p_short:
+.ifdef M3_MULTI_BLOCK
+        ; A = $DF1C, bit 7 clear: this block is read to its end and the
+        ; header still owes bytes. Take the continuation only on Data More
+        ; ("11") after a FULL block; anything else is a hole (ER-5).
+        and #UCI_STAT_STATE
+        cmp #UCI_STAT_STATE
+        bne @p_hole
+        stx m3_left
+        sty m3_left+1
+        lda @p_store+1              ; bytes so far = store - start, mod ring
+        sec
+        sbc m3_cp0
+        sta m3_got
+        lda @p_store+2              ; (>tcp_recv_buf is 0 under the mask)
+        sbc m3_cp0+1
+        and #>TCP_RECV_MASK
+        cmp m3_blk_end+1
+        bne @p_hole
+        lda m3_got
+        cmp m3_blk_end
+        bne @p_hole
+        jsr m3_next_block           ; data-accept, <= 12 s from it (ER-1)
+        bcc :+
+        jmp @p_dead_owned           ; ABORTed: $89, the bytes are lost
+:       ldx m3_left                 ; m3_blk_end stays 893: a second
+        ldy m3_left+1               ;  Data More never matches it (ER-5)
+        jmp @p_copy
+@p_hole:
+.assert (>tcp_recv_buf & >TCP_RECV_MASK) = 0, error, "@p_short drops >tcp_recv_buf by masking"
+.assert M3_READ_TOTAL <= M3_READ_MAX + M3_READ_MORE, error, "a READ is at most two blocks"
+.assert M3_READ_TOTAL <= TCP_RECV_MASK, error, "bytes so far are counted mod the ring"
+.endif
         lda #UCI_ERR_SHORT_READ     ; short of its header: a hole (ER-5)
         sta m3_bad
 @p_tail:
@@ -1364,6 +1414,12 @@ m3_rem:             .res 2
 m3_piece:           .res 2
 m3_cnt:             .res 2
 m3_wresp:           .res 2
+.ifdef M3_MULTI_BLOCK
+m3_cp0:             .res 2      ; ring tail where this READ's bytes start
+m3_blk_end:         .res 2      ; bytes in the READ when block 1 is full
+m3_left:            .res 2      ; the copy's X/Y over a continuation
+m3_got:             .res 1
+.endif
 .ifdef M3_TRACE
 m3_tr_zero:                     ; net_init zeroes these
 m3_tr_count:        .res 2      ; CONNECTED net_poll calls since net_init

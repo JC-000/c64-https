@@ -113,7 +113,7 @@ MUTANTS = [
     ("write-max-1024", "S 1.5 WRITE <= 892 B", INC,
      "M3_WRITE_MAX        = 892", "M3_WRITE_MAX        = 1024",
      ["test_long_write_is_split_at_892"]),
-    ("read-max-1472", "S 1.5 one block: READ <= 893 B", INC,
+    ("read-max-1472", "S 1.5 a first block holds 893 B", INC,
      "M3_READ_MAX         = 893", "M3_READ_MAX         = 1472",
      ["test_http_content_length_end_to_end"]),
     ("05-unframed-trusted", "S 1.6 05: trust only framed data", HTTP,
@@ -322,6 +322,26 @@ MUTANTS = [
      "        lda UCI_STATUS_DATA\n.ifdef M3_READ_FENCE\n        jsr m3_settle\n.endif\n",
      "        lda UCI_STATUS_DATA\n.repeat 40\n        nop\n.endrep\n",
      ["test_read_pacing"]),
+    # READs of 1472 B over a Data More continuation (m3.inc, "READ size")
+    ("more-never-taken", "S:2013 a READ continues over Data More", NET,
+     "        and #UCI_STAT_STATE\n        cmp #UCI_STAT_STATE\n        bne @p_hole\n",
+     "        jmp @p_hole\n", ["test_read_continues_over_data_more"]),
+    ("more-after-short-block", "ER-5 a continuation only after a FULL block", NET,
+     "        cmp m3_blk_end+1\n        bne @p_hole\n        lda m3_got\n        cmp m3_blk_end\n        bne @p_hole\n",
+     "", ["test_continuation_after_short_block_is_a_hole"]),
+    ("more-no-wait", "wait for the continuation to be validated", CMD,
+     "        lda #UCI_STAT_REPLY_VALID\n        jsr m3_wait_set\n        bcs :+\n        rts                         ; C=0\n:",
+     "        clc\n        rts\n:", ["test_read_continues_over_data_more"]),
+    ("more-bound-short", "ER-1 N-1: 12 s from the accept", CMD,
+     "        jsr m3_accept\n        lda #<M3_B_TLS\n        ldx #>M3_B_TLS",
+     "        jsr m3_accept\n        lda #10\n        ldx #0",
+     ["test_continuation_timeout_aborts"]),
+    ("more-lost-not-89", "a lost continuation is $89 + CLOSE", NET,
+     "        jmp @p_dead_owned           ; ABORTed: $89, the bytes are lost",
+     "        jmp @p_hole", ["test_continuation_timeout_aborts"]),
+    ("request-893", "READs ask for 1472 B (S:2012)", INC,
+     "M3_READ_REQ         = M3_READ_TOTAL", "M3_READ_REQ         = M3_READ_MAX",
+     ["test_read_continues_over_data_more"]),
 ]
 
 
@@ -341,7 +361,7 @@ def _stamp():
         # and the rules here are the plain image's.
         raise SystemExit("build/ is an HTTPS_BODY_TO_REU image: the mutants "
                          "are written against plain `make BACKEND=uci-m3`")
-    for knob in ("M3_READ_FENCE", "M3_TRACE"):
+    for knob in ("M3_READ_FENCE", "M3_READ_ONE_BLOCK", "M3_TRACE"):
         # The pacing mutants target the default image's code; the fenced
         # copy loop is not assembled there, and the trace moves timings.
         if "-D " + knob in vals.get("CA65FLAGS", ""):

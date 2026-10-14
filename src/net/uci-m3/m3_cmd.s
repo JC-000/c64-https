@@ -54,6 +54,9 @@
 .export m3_code
 .export m3_wedged
 .export m3_dl
+.ifdef M3_MULTI_BLOCK
+.export m3_next_block
+.endif
 .ifdef M3_TRACE
 .export m3_tr_sample
 .export m3_tr_delta
@@ -464,6 +467,35 @@ m3_accept:
         lda #UCI_CTRL_DATA_ACC
         sta UCI_CONTROL
         jmp m3_settle
+
+.ifdef M3_MULTI_BLOCK
+; =============================================================================
+; m3_next_block — data-accept a Data More block (read to its end) and wait for
+; the next one, up to 12 s from the accept (errata ER-1, N-1: the Nios serves
+; it from its buffer). The accept drops the interface to state "01" until
+; the next block is validated (command_protocol.vhd).
+; Out: C=0 the next block is staged. C=1 ABORTed at the bound (net_last_error
+;      $89, m3_wedged if bit 2 never cleared): its bytes are lost.
+; Clobbers: A, X, Y
+; =============================================================================
+m3_next_block:
+        jsr m3_accept
+        lda #<M3_B_TLS
+        ldx #>M3_B_TLS
+        ldy #M3_DL_CMD
+        jsr m3_dl_arm               ; the accept + 12 s
+        lda #UCI_STAT_REPLY_VALID
+        jsr m3_wait_set
+        bcs :+
+        rts                         ; C=0
+:       lda #UCI_ERR_WAIT_TIMEOUT
+        sta net_last_error
+        lda #<M3_B_POST_ABORT
+        ldx #>M3_B_POST_ABORT
+        jsr m3_abort_wait
+        sec
+        rts
+.endif
 
 ; m3_finish — drop the rest of the block, read the status line, accept.
 ; The status is read BEFORE the accept, which empties both queues.

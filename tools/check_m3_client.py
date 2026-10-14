@@ -115,6 +115,17 @@ class Unavailable(Exception):
     pass
 
 
+def _read_blocks(payload):
+    """A READ reply as the firmware blocks it (network_target.cc
+    start_read_reply / get_more_data @3a1ff9ff): the header and up to 893
+    bytes, then continuation blocks of up to 895 bytes, payload only."""
+    n = len(payload)
+    blocks = [bytes([n & 0xFF, n >> 8]) + payload[:893]]
+    for i in range(893, n, 895):
+        blocks.append(payload[i:i + 895])
+    return blocks
+
+
 class M3Device:
     """$DF1B-$DF1F + an M3 Nios, driven by the CPU's reads and writes."""
 
@@ -151,6 +162,8 @@ class M3Device:
         self.next_handle = 5
         self.release_delays = []        # per-`03 25` delays, then FAST
         self.abort_never = False        # an ABORT that is never serviced
+        self.more_delay = 0             # units from a Data More accept to the
+        self.more_due = None            #  next block (inf: it never comes)
         # observation
         self.log = []                   # (units, command bytes)
         self.ctrl_writes = []           # (units, value)
@@ -166,6 +179,9 @@ class M3Device:
     # ---------------------------------------------------------------- time --
     def _advance(self):
         now = self.clock()
+        if self.more_due is not None and now >= self.more_due:
+            self.more_due = None
+            self._load_block()
         if self.done_at is not None and now >= self.done_at:
             self.done_at = None
             blocks, status = self.pending
@@ -206,8 +222,8 @@ class M3Device:
             if self.state & 2:
                 if self.rp < len(self.response):
                     bits |= DATA_AV
-                if self.sp < len(self.status):
-                    bits |= STAT_AV
+                if self.sp < len(self.status) and self.state == ST_LAST:
+                    bits |= STAT_AV     # the status rides the LAST block
             if self.error_busy:
                 bits |= ERROR_BIT
             if self.abort_pending:
@@ -223,7 +239,7 @@ class M3Device:
             self.rp += 1
             return self.response[self.rp - 1]
         if addr == 0xDF1F:
-            if not self.state & 2 or self.sp >= len(self.status):
+            if self.state != ST_LAST or self.sp >= len(self.status):
                 return 0x00
             self.sp += 1
             return self.status[self.sp - 1]
@@ -256,7 +272,13 @@ class M3Device:
                 self.accepts += 1
                 if self.state == ST_MORE:
                     self.accepts_on_more += 1
-                    self._load_block()
+                    if self.more_delay:     # "01" until the Nios validates
+                        self.state = ST_BUSY
+                        self.response = b""
+                        self.rp = 0
+                        self.more_due = now + self.more_delay
+                    else:
+                        self._load_block()
                 else:
                     self.state = ST_IDLE
                     self.response = self.status = b""
@@ -402,7 +424,7 @@ class M3Device:
                     s["rx"][0] = ("data", rest)
                 else:
                     s["rx"].pop(0)
-                return [bytes([len(chunk) & 0xFF, len(chunk) >> 8]) + chunk], OK, d
+                return _read_blocks(chunk), OK, d
             if ev[0] == "idle":
                 s["rx"].pop(0)
                 return [b"\xff\xff"], IDLE, d
@@ -566,6 +588,19 @@ def _refuse_trace(labels=None):
         raise Unavailable("%s is an M3_TRACE=1 image (a measurement build): "
                           "the model checks are written against images built "
                           "without M3_TRACE" % stamp)
+
+
+def _one_block(labels=None):
+    """True when READs ask for one block (893 B): M3_READ_ONE_BLOCK=1 or
+    M3_READ_FENCE=1 (m3.inc, "READ size"). Else 1472 over Data More."""
+    stamp = Path(labels or LABELS).parent / "flags.stamp"
+    if not stamp.is_file():
+        raise Unavailable("%s is missing: cannot tell the READ size" % stamp)
+    for line in stamp.read_text().splitlines():
+        if line.startswith("CA65FLAGS="):
+            return ("-D M3_READ_ONE_BLOCK" in line
+                    or "-D M3_READ_FENCE" in line)
+    raise Unavailable("%s has no CA65FLAGS line" % stamp)
 
 
 def _fence_sbc():
@@ -997,7 +1032,7 @@ def _http_fetch(m, response_events):
 
 def test_http_content_length_end_to_end(prg=None, labels=None):
     """The whole path: OPEN, GET, a 2,000 B Content-Length body over several
-    READs (each at most 893 B), C=0, then CLOSE."""
+    READs (each at most 1472 B, or 893 on a one-block image), C=0, CLOSE."""
     m = _connected(Machine(prg, labels))
     body = bytes((i * 7) & 0x7F | 0x20 for i in range(2000))
     resp = b"HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n" + body
@@ -1008,8 +1043,9 @@ def test_http_content_length_end_to_end(prg=None, labels=None):
     _check(status == 200, "http_status %d" % status)
     _check(total == 2000, "http_body_total %d, expected 2000" % total)
     reads = [c for c in m.dev.commands() if c[1] == 0x10]
-    _check(all((c[3] | c[4] << 8) <= 893 for c in reads),
-           "a READ asked for more than 893 B (one block, S 1.5)")
+    cap = 893 if _one_block(labels) else 1472
+    _check(all((c[3] | c[4] << 8) <= cap for c in reads),
+           "a READ asked for more than %d B (S 1.5, S:2012)" % cap)
     m.call("net_tcp_close")
     m.no_violations()
 
@@ -1212,7 +1248,7 @@ def test_block_tail_is_dead(prg=None, labels=None):
 
 def test_overclaimed_header_is_dead(prg=None, labels=None):
     """ER-5: a header over the request (not $FFFF): the excess is dropped."""
-    _block_case([bytes([0x00, 0x04]) + bytes(1024)], "over-claimed header")(prg, labels)
+    _block_case([bytes([0x00, 0x06]) + bytes(1536)], "over-claimed header")(prg, labels)
 
 
 def test_rejected_push_is_not_a_reply(prg=None, labels=None):
@@ -1569,6 +1605,132 @@ def _pacing_flows(prg, labels):
     return traces
 
 
+def _multi_case(prg, labels, payload, more_delay=0):
+    m = _connected(Machine(prg, labels))
+    m.dev.more_delay = more_delay
+    m.dev.sessions[5]["rx"] = [("data", payload)]
+    m.call("net_poll", budget=80_000_000)
+    return m
+
+
+def test_read_continues_over_data_more(prg=None, labels=None):
+    """S:2012-2013, errata ER-1 N-1: a READ asks for up to 1472 B; a reply
+    over 893 B comes as the first block plus a Data More continuation, which
+    the client data-accepts once the first block is read to its end, then
+    reads to the end, then the status line. On a one-block image (893 B,
+    M3_READ_ONE_BLOCK / M3_READ_FENCE) no READ asks for a continuation."""
+    payload = bytes((i * 29 + 3) & 0xFF for i in range(1472))
+    m = _multi_case(prg, labels, payload, more_delay=SECOND // 2)
+    reads = [c for c in m.dev.commands() if c[1] == 0x10]
+    asked = reads[-1][3] | reads[-1][4] << 8
+    _check(m.peek("net_tcp_state") == NET_TCP_CONNECTED,
+           "the READ ended the connection (net_last_error $%02X)"
+           % m.peek("net_last_error"))
+    if _one_block(labels):
+        _check(asked == 893, "a one-block image asked for %d B" % asked)
+        _check(m.dev.accepts_on_more == 0, "a one-block image data-accepted "
+               "a Data More block")
+        _check(m.ring() == payload[:893], "the ring does not hold the block")
+    else:
+        _check(asked == 1472, "the READ asked for %d B, expected 1472" % asked)
+        _check(m.dev.accepts_on_more == 1, "%d Data More accepts, expected 1"
+               % m.dev.accepts_on_more)
+        _check(m.ring() == payload, "the ring does not hold both blocks, in "
+               "order (%d B of 1472)" % len(m.ring()))
+        _check(m.peek("m3_poll_result") == 0, "m3_poll_result is not DATA")
+    m.no_violations()
+
+
+def _continuation_dead(prg, labels, blocks, note, want):
+    m = _connected(Machine(prg, labels))
+    m.dev.more_delay = FAST
+    m.dev.forced_blocks = (blocks, OK)
+    m.call("net_poll", budget=80_000_000)
+    _check(m.peek("net_tcp_state") == NET_TCP_ERROR, "%s: net_tcp_state $%02X, "
+           "expected ERROR (ER-5)" % (note, m.peek("net_tcp_state")))
+    _code(m, want, note)
+    m.call("net_tcp_close")
+    _check(m.dev.commands()[-1] == b"\x03\x09\x05",
+           "%s: the handle was not CLOSEd" % note)
+    m.no_violations()
+    return m
+
+
+def test_continuation_after_short_block_is_a_hole(prg=None, labels=None):
+    """ER-5: the first block ends before 893 B with Data More behind it.
+    The firmware never sends that; taking the continuation would join the
+    stream over a hole. No accept on the Data More block."""
+    if _one_block(labels):
+        return
+    m = _continuation_dead(prg, labels, [bytes([0xD0, 0x03]) + bytes(500),
+                                         bytes(476)], "short first block",
+                           ERR_SHORT_READ)
+    _check(m.dev.accepts_on_more == 0, "a short block's Data More was accepted")
+
+
+def test_short_continuation_is_a_hole(prg=None, labels=None):
+    """ER-5: header 1000, the continuation (the LAST block) holds 50 of the
+    107 bytes still owed: short."""
+    if _one_block(labels):
+        return
+    _continuation_dead(prg, labels, [bytes([0xE8, 0x03]) + bytes(893),
+                                     bytes(50)], "short continuation",
+                       ERR_SHORT_READ)
+
+
+def test_long_continuation_is_a_hole(prg=None, labels=None):
+    """ER-5: header 900, the continuation holds 10 bytes, not 7: the bytes
+    past the header are dropped and flagged."""
+    if _one_block(labels):
+        return
+    _continuation_dead(prg, labels, [bytes([0x84, 0x03]) + bytes(893),
+                                     bytes(10)], "over-long continuation",
+                       ERR_BAD_READ_HDR)
+
+
+def test_unowed_continuation_is_a_hole(prg=None, labels=None):
+    """ER-5: header 1000, but a third block follows the continuation (Data
+    More again once the header is paid): never accepted, ABORT."""
+    if _one_block(labels):
+        return
+    m = _continuation_dead(prg, labels, [bytes([0xE8, 0x03]) + bytes(893),
+                                         bytes(107), bytes(20)],
+                           "a continuation the header does not owe",
+                           ERR_BAD_READ_HDR)
+    _check(m.dev.accepts_on_more == 1, "%d Data More accepts, expected only "
+           "the one the header owed" % m.dev.accepts_on_more)
+    m = _continuation_dead(prg, labels, [bytes([0xE8, 0x03]) + bytes(893),
+                                         bytes(50), bytes(57)],
+                           "a second continuation after a short one",
+                           ERR_SHORT_READ)
+    _check(m.dev.accepts_on_more == 1, "a second Data More was accepted")
+
+
+def test_continuation_timeout_aborts(prg=None, labels=None):
+    """Errata ER-1 N-1: a continuation that does not come within 12 s of the
+    accept is ABORTed; its bytes are lost, so ERROR, owned, CLOSE, $89. And
+    not before: one that comes at 11 s is taken."""
+    if _one_block(labels):
+        return
+    payload = bytes(range(256)) * 3 + bytes(232)        # 1000 B
+    m = _multi_case(prg, labels, payload, more_delay=11 * SECOND)
+    _check(m.peek("net_tcp_state") == NET_TCP_CONNECTED and m.ring() == payload,
+           "a continuation at accept + 11 s was not taken (net_last_error $%02X)"
+           % m.peek("net_last_error"))
+    m.no_violations()
+    m = _connected(Machine(prg, labels))
+    m.dev.more_delay = float("inf")
+    m.dev.sessions[5]["rx"] = [("data", payload)]
+    m.call("net_poll", budget=80_000_000)
+    _check(m.peek("net_tcp_state") == NET_TCP_ERROR, "net_tcp_state $%02X "
+           "after a continuation that never came" % m.peek("net_tcp_state"))
+    _code(m, ERR_WAIT_TIMEOUT, "a continuation that never came")
+    _check(m.dev.aborts >= 1, "no ABORT for a continuation that never came")
+    m.call("net_tcp_close")
+    _check(m.dev.commands()[-1] == b"\x03\x09\x05", "the handle was not "
+           "CLOSEd after a lost continuation")
+    m.no_violations()
+
 #: Default image: the most instructions that may run between a READ of
 #: this register and the next UCI access, on the traced flows. Measured
 #: maxima at 4464886: $DF1C 49, $DF1D 10, $DF1E 35, $DF1F 7. A delay of
@@ -1788,6 +1950,12 @@ TESTS = (
     test_read_pacing,
     test_ring_wraps_in_one_block,
     test_copy_counts_at_page_edges,
+    test_read_continues_over_data_more,
+    test_continuation_after_short_block_is_a_hole,
+    test_short_continuation_is_a_hole,
+    test_long_continuation_is_a_hole,
+    test_unowed_continuation_is_a_hole,
+    test_continuation_timeout_aborts,
 )
 
 # Need `make BACKEND=uci-m3 HTTPS_BODY_TO_REU=1` (flags.stamp says so); main
