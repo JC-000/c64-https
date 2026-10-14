@@ -116,7 +116,7 @@ net_init:
         php
 
         lda UCI_ID
-        uci_fence                   ; settle before comparing ID
+        uci_read_fence                   ; settle before comparing ID
         cmp #UCI_ID_VALUE
         beq @present
 
@@ -273,17 +273,18 @@ net_poll:
         ; SMC dst. Loop style matches uci_read_resp_bytes — tight-poll
         ; DATA_AV and read UCI_RESP_DATA; the firmware FIFO auto-advances
         ; on read (Phase 2 finding), so NO per-byte DATA_ACC.
+uci_poll_stage_fence:           ; kept: the one fence after a read that is
         uci_fence             ; give firmware time to stage response
         ldy #$00
 @hdr_loop:
         lda UCI_STATUS
-        uci_fence                   ; settle before testing DATA_AV
+        uci_read_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
         bne @hdr_got                ; branch past trampoline
         jmp @hdr_done_short         ; long branch: fence too wide for BEQ
 @hdr_got:
         lda UCI_RESP_DATA
-        uci_fence                   ; settle before storing header byte
+        uci_read_fence                   ; settle before storing header byte
         sta uci_read_hdr,y
         iny
         cpy #2
@@ -415,7 +416,7 @@ net_poll:
         ; FIFO drained mid-record we bail (shouldn't happen if firmware
         ; honored actual_len but we defend anyway).
         lda UCI_STATUS
-        uci_fence                   ; settle before testing DATA_AV
+        uci_read_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
         bne @have_byte
         jmp @done_data
@@ -431,7 +432,7 @@ net_poll:
         sta @rb_store+2
 
         lda UCI_RESP_DATA
-        uci_fence                   ; settle before storing data byte
+        uci_read_fence                   ; settle before storing data byte
 @rb_store:
         sta $ffff               ; SMC: patched each byte
 
