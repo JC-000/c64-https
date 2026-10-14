@@ -51,6 +51,7 @@ Exit: 0 pass, 1 fail, 2 fatal, 3 DeviceLock timeout, 4 device prep / load.
 """
 from __future__ import annotations
 
+import bisect
 import difflib
 import hashlib
 import json
@@ -270,8 +271,8 @@ REU_BODY = 0x100000                     # HTTPS_BODY_TO_REU's region
 #: After a reset (BASIC idle, no program), REU -> C64 staging for readback.
 STAGE = 0x0800
 STAGE_LEN = 0x8000
-#: MediaWiki per-render values. A changed run counts as metadata only if it
-#: lies wholly inside the 120 bytes after one of these keys, on its line.
+#: MediaWiki per-render values: the value after one of these keys is an
+#: excusable region (report_spans, key_window_end).
 RENDER_KEYS = re.compile(
     rb"wgRequestId|wgBackendResponseTime|wgHostname|wgPageParseReport|"
     rb"cputime|walltime|timestamp|\"ttl\"|transientcontent|cachereport|"
@@ -307,31 +308,54 @@ def reu_read(client, off: int, n: int) -> bytes:
 REPORT_COMMENT = re.compile(rb"<!--(?:(?!-->).)*?(?:NewPP limit report|"
                             rb"Transclusion expansion time report|"
                             rb"Saved in parser cache|cache key).*?-->", re.S)
+PARSE_REPORT = re.compile(rb'"wgPageParseReport":\{')
+KEY_WINDOW = 120
+VALUE_END = re.compile(rb"[,}\]<\n]")
 
 
-def report_spans(body: bytes) -> list[tuple[int, int]]:
-    """REPORT_COMMENT matches, plus the "wgPageParseReport":{...} object
-    (braces matched; its JSON holds no brace inside a string here)."""
-    spans = [(m.start(), m.end()) for m in REPORT_COMMENT.finditer(body)]
-    for m in re.finditer(rb'"wgPageParseReport":\{', body):
-        depth, i = 0, m.end() - 1
-        while i < len(body):
-            depth += {123: 1, 125: -1}.get(body[i], 0)
-            i += 1
+def key_window_end(page: bytes, at: int) -> int:
+    """End of the value that starts at `at`: the first , } ] < or newline,
+    and never more than KEY_WINDOW bytes on."""
+    m = VALUE_END.search(page, at, at + KEY_WINDOW)
+    return m.start() if m else min(at + KEY_WINDOW, len(page))
+
+
+def report_spans(page: bytes) -> list[tuple[int, int, int, int]]:
+    """Excusable regions of `page`: (start, end, opening delimiter length,
+    closing delimiter length). The REPORT_COMMENT comments (<!-- / -->),
+    the "wgPageParseReport":{...} object (braces matched), and the
+    value after each RENDER_KEYS key, up to the first , } ] < or newline and
+    at most KEY_WINDOW bytes (the key is the opening delimiter; a window has
+    no closing one)."""
+    out = [(m.start(), m.end(), 4, 3) for m in REPORT_COMMENT.finditer(page)]
+    for m in PARSE_REPORT.finditer(page):
+        depth, k = 0, m.end() - 1
+        while k < len(page):
+            depth += {123: 1, 125: -1}.get(page[k], 0)
+            k += 1
             if depth == 0:
                 break
-        spans.append((m.start(), i))
-    return spans
+        out.append((m.start(), k, m.end() - m.start(), 1))
+    for m in RENDER_KEYS.finditer(page):
+        out.append((m.start(), key_window_end(page, m.end()),
+                    m.end() - m.start(), 0))
+    return out
 
 
 def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
     """("equal" | "metadata-only" | "DIFFERENT" | "no-reference", facts).
 
-    "metadata-only": a line diff, then a token diff inside each changed
-    line; every changed token run, start AND end, lies wholly inside a
-    parser report (report_spans) or inside the 120 bytes after a
-    RENDER_KEYS key on its line; and no line was added or dropped on its
-    own. That is two renders of one revision, not a short or damaged body.
+    A line diff, then a token diff inside each changed line pair, gives the
+    changed runs and an alignment of the bytes the two share. The excusable
+    regions are taken from the REFERENCE (report_spans(ref)), never from
+    the body under test, and a region counts only if its delimiters are
+    unchanged bytes of that alignment, which also places it in the body.
+    "metadata-only" = every changed run lies wholly inside one such region
+    on BOTH sides (ref extent inside the ref region, body extent inside the
+    same region as mapped into the body), and no line was added or dropped
+    on its own. So a corruption cannot widen its own excuse: breaking a
+    `-->` or the report's closing `}` voids that region. What stays
+    accepted is a change inside a region whose delimiters survived.
     The body's own length is pinned separately, by the response framing."""
     facts = {"sha256": hashlib.sha256(body).hexdigest(),
              "crc32": f"{zlib.crc32(body) & 0xFFFFFFFF:08X}", "len": len(body)}
@@ -340,41 +364,68 @@ def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
     facts.update(ref_len=len(ref), ref_sha256=hashlib.sha256(ref).hexdigest())
     if body == ref:
         return "equal", facts
-    spans = report_spans(body)
-    for m in RENDER_KEYS.finditer(body):
-        eol = body.find(b"\n", m.end())
-        eol = len(body) if eol < 0 else eol
-        spans.append((m.end(), min(m.end() + 120, eol)))
     a, b = body.split(b"\n"), ref.split(b"\n")
-    starts = [0]
+    sa, sb = [0], [0]
     for ln in a:
-        starts.append(starts[-1] + len(ln) + 1)
-    runs, unexplained = 0, []
+        sa.append(sa[-1] + len(ln) + 1)
+    for ln in b:
+        sb.append(sb[-1] + len(ln) + 1)
+    same = []           # (ref_lo, ref_hi, body_lo): bytes the two share
+    changed = []        # (ref_lo, ref_hi, body_lo, body_hi, text)
+    unexplained = []
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
             None, a, b, autojunk=False).get_opcodes():
         if tag == "equal":
+            same.append((sb[j1], sb[j2], sa[i1]))
             continue
         if tag != "replace" or i2 - i1 != j2 - j1:
             unexplained.append(f"lines {i1}-{i2} vs {j1}-{j2}: {tag}")
             continue
-        for li, (la, lb) in enumerate(zip(a[i1:i2], b[j1:j2]), i1):
-            ta, tb = TOKEN.findall(la), TOKEN.findall(lb)
-            pos = [0]
+        for li, lj in zip(range(i1, i2), range(j1, j2)):
+            ta, tb = TOKEN.findall(a[li]), TOKEN.findall(b[lj])
+            pa, pb = [sa[li]], [sb[lj]]
             for t in ta:
-                pos.append(pos[-1] + len(t))
-            for t2, k1, k2, _, _ in difflib.SequenceMatcher(
+                pa.append(pa[-1] + len(t))
+            for t in tb:
+                pb.append(pb[-1] + len(t))
+            for t2, k1, k2, m1, m2 in difflib.SequenceMatcher(
                     None, ta, tb, autojunk=False).get_opcodes():
                 if t2 == "equal":
-                    continue
-                runs += 1
-                at = pos[k1]
-                lo_run, hi_run = starts[li] + at, starts[li] + pos[k2]
-                if any(lo <= lo_run and hi_run <= hi for lo, hi in spans):
-                    continue
-                unexplained.append(la[max(0, at - 60):at + 60].decode("latin-1"))
-    facts.update(diff_runs=runs, unexplained=len(unexplained),
+                    same.append((pb[m1], pb[m2], pa[k1]))
+                else:
+                    changed.append((pb[m1], pb[m2], pa[k1], pa[k2],
+                                    a[li][pa[k1] - sa[li]:pa[k1] - sa[li] + 60]))
+            same.append((sb[lj + 1] - 1, sb[lj + 1], sa[li + 1] - 1))  # "\n"
+    same.sort()
+    starts = [x[0] for x in same]
+
+    def to_body(lo, hi):
+        """Body offset of ref [lo, hi) if it is one shared stretch, else None."""
+        k = bisect.bisect_right(starts, lo) - 1
+        if k >= 0 and same[k][0] <= lo and hi <= same[k][1]:
+            return same[k][2] + (lo - same[k][0])
+        return None
+
+    regions = []        # (ref_lo, ref_hi, body_lo, body_hi)
+    for r0, r1, d_open, d_close in report_spans(ref):
+        b0 = to_body(r0, r0 + d_open)
+        if b0 is None:
+            continue
+        if d_close:
+            bc = to_body(r1 - d_close, r1)
+            if bc is None:
+                continue
+            b1 = bc + d_close
+        else:                               # a key window, in the body too
+            b1 = key_window_end(body, b0 + d_open)
+        regions.append((r0, r1, b0, b1))
+    for r0, r1, b0, b1, text in changed:
+        if not any(g0 <= r0 and r1 <= g1 and h0 <= b0 and b1 <= h1
+                   for g0, g1, h0, h1 in regions):
+            unexplained.append(text.decode("latin-1"))
+    facts.update(diff_runs=len(changed), unexplained=len(unexplained),
                  first_unexplained=unexplained[:3])
-    return ("metadata-only" if runs and not unexplained else "DIFFERENT"), facts
+    return ("metadata-only" if changed and not unexplained else "DIFFERENT"), facts
 
 
 def read_trace(client, lab) -> dict | None:
