@@ -1733,10 +1733,11 @@ def test_continuation_timeout_aborts(prg=None, labels=None):
 
 #: Default image: the most instructions that may run between a READ of
 #: this register and the next UCI access, on the traced flows. Measured
-#: maxima at 4464886: $DF1C 49, $DF1D 10, $DF1E 35, $DF1F 7. A delay of
-#: any shape (a fence, a NOP sled, a loop) past these is caught; one that
-#: fits under them is not -- that is the detector's resolution.
-READ_GAP_BUDGET = {0xDF1C: 64, 0xDF1D: 16, 0xDF1E: 40, 0xDF1F: 16}
+#: maxima at 4464886: $DF1C 49, $DF1D 10, $DF1E 35, $DF1F 7; the 1472 B
+#: READ image adds 8 to $DF1E (43: the continuation set-up before the copy
+#: loop). A delay of any shape (a fence, a NOP sled, a loop) past these is
+#: caught; one that fits under them is not -- the detector's resolution.
+READ_GAP_BUDGET = {0xDF1C: 64, 0xDF1D: 16, 0xDF1E: 48, 0xDF1F: 16}
 
 
 def test_read_pacing(prg=None, labels=None):
