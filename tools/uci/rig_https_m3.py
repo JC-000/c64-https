@@ -534,6 +534,17 @@ def timed_attempt(client, name, bdir: Path, page: str, run_dir: Path) -> dict:
     rec["http_status"] = le(client, lab["http_status"], 2)
     rec["body_total"] = le(client, lab["http_body_total"], 3)
     rec["net_last_error"] = f"${bytes(client.read_mem(lab['net_last_error'], 1))[0]:02X}"
+    # The client's own framing facts (tools/http_body_checks.py), so a
+    # short body says whether the client or the server ended it.
+    from http_body_checks import SYMBOLS, check_body_complete, decode_body_state
+    state = decode_body_state({n: bytes(client.read_mem(lab[n], w))
+                               for n, w in SYMBOLS.items()})
+    rec["framing"] = {"chunked": state.chunked, "cl_valid": state.cl_valid,
+                      "content_length": state.content_length,
+                      "chunk_state": state.chunk_state,
+                      "parse_state": state.parse_state,
+                      "client_verdict": str(check_body_complete(state)),
+                      "m3_eof_code": bytes(client.read_mem(lab["m3_eof_code"], 1))[0]}
     tr = read_trace(client, lab)
     if tr is not None:
         (run_dir / f"trace-{name}-{page}-{rec['start']}.json").write_text(json.dumps(tr))

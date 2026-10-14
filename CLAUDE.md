@@ -119,7 +119,9 @@ Variables:
     `$(error)`s, not in `PACKAGE_VARIANTS`. `HTTPS_PIN_SPKI_SHA256` = trust
     PIN, `M3_ALLOW_TLS12=1` offers hardened 1.2. UCI reads are unfenced
     (writes keep `uci_fence`); `M3_READ_FENCE=1` restores the old client
-    byte for byte, `M3_TRACE=1` = per-READ timing records (measurement only;
+    byte for byte; READs ask 1472 B over one Data More continuation,
+    `M3_READ_ONE_BLOCK=1` = 893 B one-block READs (the previous default);
+    `M3_TRACE=1` = per-READ timing records (measurement only;
     `rig_https_m3.py timed`). Model + mutants:
     `tools/check_m3_client.py`, `tools/mutate_m3_client.py` (standalone,
     need an m3 build); hardware: `rig_https_banner.py`, `rig_https_m3.py`.
