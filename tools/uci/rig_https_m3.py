@@ -310,12 +310,19 @@ REPORT_COMMENT = re.compile(rb"<!--(?:(?!-->).)*?(?:NewPP limit report|"
                             rb"Saved in parser cache|cache key).*?-->", re.S)
 PARSE_REPORT = re.compile(rb'"wgPageParseReport":\{')
 KEY_WINDOW = 120
-VALUE_END = re.compile(rb"[,}\]<\n]")
+VALUE_END = re.compile(rb"[,}\]<\n]|-->")
+#: A region's body side may differ in length from its reference side by at
+#: most this. Measured over the 33 complete saved large bodies against their
+#: references (2026-10-13): every region was 0 or +1 B longer in the body.
+#: Re-render values are numbers, timestamps, ids and host names whose
+#: lengths move by a few bytes each; 64 B is generous for that and still
+#: stops a payload hidden inside a delimited region.
+REGION_SLACK = 64
 
 
 def key_window_end(page: bytes, at: int) -> int:
-    """End of the value that starts at `at`: the first , } ] < or newline,
-    and never more than KEY_WINDOW bytes on."""
+    """End of the value that starts at `at`: the first , } ] < newline or
+    -->, and never more than KEY_WINDOW bytes on."""
     m = VALUE_END.search(page, at, at + KEY_WINDOW)
     return m.start() if m else min(at + KEY_WINDOW, len(page))
 
@@ -324,9 +331,9 @@ def report_spans(page: bytes) -> list[tuple[int, int, int, int]]:
     """Excusable regions of `page`: (start, end, opening delimiter length,
     closing delimiter length). The REPORT_COMMENT comments (<!-- / -->),
     the "wgPageParseReport":{...} object (braces matched), and the
-    value after each RENDER_KEYS key, up to the first , } ] < or newline and
-    at most KEY_WINDOW bytes (the key is the opening delimiter; a window has
-    no closing one)."""
+    value after each RENDER_KEYS key, up to the first , } ] < newline or -->
+    and at most KEY_WINDOW bytes (the key is the opening delimiter; a window
+    has no closing one)."""
     out = [(m.start(), m.end(), 4, 3) for m in REPORT_COMMENT.finditer(page)]
     for m in PARSE_REPORT.finditer(page):
         depth, k = 0, m.end() - 1
@@ -352,8 +359,10 @@ def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
     unchanged bytes of that alignment, which also places it in the body.
     "metadata-only" = every changed run lies wholly inside one such region
     on BOTH sides (ref extent inside the ref region, body extent inside the
-    same region as mapped into the body), and no line was added or dropped
-    on its own. So a corruption cannot widen its own excuse: breaking a
+    same region as mapped into the body), the region's body side is within
+    REGION_SLACK bytes of its reference length, and no line was added or
+    dropped on its own. tools/check_m3_oracle.py pins each of these rules
+    (its --mutants mode breaks them one at a time). So a corruption cannot widen its own excuse: breaking a
     `-->` or the report's closing `}` voids that region. What stays
     accepted is a change inside a region whose delimiters survived.
     The body's own length is pinned separately, by the response framing."""
@@ -418,6 +427,8 @@ def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
             b1 = bc + d_close
         else:                               # a key window, in the body too
             b1 = key_window_end(body, b0 + d_open)
+        if abs((b1 - b0) - (r1 - r0)) > REGION_SLACK:
+            continue                        # grew or shrank past a re-render
         regions.append((r0, r1, b0, b1))
     for r0, r1, b0, b1, text in changed:
         if not any(g0 <= r0 and r1 <= g1 and h0 <= b0 and b1 <= h1
