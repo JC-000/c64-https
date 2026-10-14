@@ -309,6 +309,19 @@ MUTANTS = [
      "        lda @p_store+1              ; the tail is where the store points\n"
      "        sta tcp_recv_tail+0\n", "",
      ["test_http_content_length_end_to_end", "test_ring_wraps_in_one_block"]),
+    # adv-296
+    ("count-always-iny", "the copy runs exactly n times at n = k*256", NET,
+     "        txa\n        beq :+\n        iny\n:\n        clc\n        lda tcp_recv_tail+0",
+     "        iny\n        clc\n        lda tcp_recv_tail+0",
+     ["test_copy_counts_at_page_edges"]),
+    ("rejected-clr-unfenced", "a fence after the rejected path's CLR_ERR write", CMD,
+     "        lda #UCI_CTRL_CLR_ERR\n        sta UCI_CONTROL\n        jsr m3_settle\n        lda #M3_EXEC_REJECTED",
+     "        lda #UCI_CTRL_CLR_ERR\n        sta UCI_CONTROL\n        lda #M3_EXEC_REJECTED",
+     ["test_read_pacing"]),
+    ("statline-nopsled", "no delay of any shape after a READ", CMD,
+     "        lda UCI_STATUS_DATA\n.ifdef M3_READ_FENCE\n        jsr m3_settle\n.endif\n",
+     "        lda UCI_STATUS_DATA\n.repeat 40\n        nop\n.endrep\n",
+     ["test_read_pacing"]),
 ]
 
 
