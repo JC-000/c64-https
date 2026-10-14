@@ -33,7 +33,7 @@ verdicts that need more than one image or a failure:
                      A dynamic page that differs only in per-render metadata
                      lines is reported as such, never as equal. An M3_TRACE
                      build's per-net_poll records are read before 'Q' and
-                     summarised. TURBO_MHZ=0 runs with turbo off (1 MHz).
+                     summarised. TURBO_OFF=1 runs with turbo off (1 MHz).
                      One JSON line per attempt to $UCI_DEBUG_DIR/<run>/
                      timed.jsonl. Exit 1 if any attempt is not complete.
 
@@ -83,6 +83,7 @@ REPO = Path(__file__).resolve().parents[2]
 PRG_A = REPO / "build" / "c64-https.prg"
 LABELS_A = REPO / "build" / "labels.txt"
 TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
+TURBO_OFF = os.environ.get("TURBO_OFF") == "1"   # timed: prep, then turbo off
 INIT_WAIT = float(os.environ.get("C64_INIT_WAIT", "120"))
 FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "900"))
 RUN_DIR = Path(os.environ.get("UCI_DEBUG_DIR", "/tmp/uci_https_debug"))
@@ -302,12 +303,34 @@ def reu_read(client, off: int, n: int) -> bytes:
     return bytes(out)
 
 
+#: MediaWiki's parser reports: HTML comments re-written on every render.
+REPORT_COMMENT = re.compile(rb"<!--(?:(?!-->).)*?(?:NewPP limit report|"
+                            rb"Transclusion expansion time report|"
+                            rb"Saved in parser cache|cache key).*?-->", re.S)
+
+
+def report_spans(body: bytes) -> list[tuple[int, int]]:
+    """REPORT_COMMENT matches, plus the "wgPageParseReport":{...} object
+    (braces matched; its JSON holds no brace inside a string here)."""
+    spans = [(m.start(), m.end()) for m in REPORT_COMMENT.finditer(body)]
+    for m in re.finditer(rb'"wgPageParseReport":\{', body):
+        depth, i = 0, m.end() - 1
+        while i < len(body):
+            depth += {123: 1, 125: -1}.get(body[i], 0)
+            i += 1
+            if depth == 0:
+                break
+        spans.append((m.start(), i))
+    return spans
+
+
 def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
     """("equal" | "metadata-only" | "DIFFERENT" | "no-reference", facts).
 
     "metadata-only": a line diff, then a token diff inside each changed
-    line; every changed token run has a RENDER_KEYS key within the 120 bytes
-    before it on its line, and no line was added or dropped on its own.
+    line; every changed token run either has a RENDER_KEYS key within the
+    120 bytes before it on its line, or lies inside a parser report
+    (report_spans); and no line was added or dropped on its own.
     That is two renders of one revision, not a short or damaged body."""
     facts = {"sha256": hashlib.sha256(body).hexdigest(),
              "crc32": f"{zlib.crc32(body) & 0xFFFFFFFF:08X}", "len": len(body)}
@@ -316,7 +339,11 @@ def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
     facts.update(ref_len=len(ref), ref_sha256=hashlib.sha256(ref).hexdigest())
     if body == ref:
         return "equal", facts
+    spans = report_spans(body)
     a, b = body.split(b"\n"), ref.split(b"\n")
+    starts = [0]
+    for ln in a:
+        starts.append(starts[-1] + len(ln) + 1)
     runs, unexplained = 0, []
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
             None, a, b, autojunk=False).get_opcodes():
@@ -325,7 +352,7 @@ def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
         if tag != "replace" or i2 - i1 != j2 - j1:
             unexplained.append(f"lines {i1}-{i2} vs {j1}-{j2}: {tag}")
             continue
-        for la, lb in zip(a[i1:i2], b[j1:j2]):
+        for li, (la, lb) in enumerate(zip(a[i1:i2], b[j1:j2]), i1):
             ta, tb = TOKEN.findall(la), TOKEN.findall(lb)
             pos = [0]
             for t in ta:
@@ -336,8 +363,12 @@ def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
                     continue
                 runs += 1
                 at = pos[k1]
-                if not RENDER_KEYS.search(la[max(0, at - 120):at]):
-                    unexplained.append(la[max(0, at - 60):at + 60].decode("latin-1"))
+                absolute = starts[li] + at
+                if RENDER_KEYS.search(la[max(0, at - 120):at]):
+                    continue
+                if any(lo <= absolute < hi for lo, hi in spans):
+                    continue
+                unexplained.append(la[max(0, at - 60):at + 60].decode("latin-1"))
     facts.update(diff_runs=runs, unexplained=len(unexplained),
                  first_unexplained=unexplained[:3])
     return ("metadata-only" if runs and not unexplained else "DIFFERENT"), facts
@@ -481,7 +512,7 @@ def run_timed(client, sched, arms, run_dir: Path) -> int:
             lab = labels(arms[name] / "labels.txt")
             guard_socket_teardown(client.read_mem, lab["net_tcp_state"])
             raise
-        rec["turbo_mhz"] = TURBO_MHZ
+        rec["turbo_mhz"] = 1 if TURBO_OFF else TURBO_MHZ
         with out.open("a") as f:
             f.write(json.dumps(rec) + "\n")
         short = {k: rec.get(k) for k in ("arm", "page", "verdict", "oracle",
@@ -579,12 +610,12 @@ def main(argv) -> int:
         run_dir = _create_run_dir(RUN_DIR)
         print(f"run dir: {run_dir} (device_state.json)")
         try:
-            prepare_device(client, prep_labels, turbo_mhz=TURBO_MHZ or 48,
+            prepare_device(client, prep_labels, turbo_mhz=TURBO_MHZ,
                            artifact_dir=run_dir)
         except DevicePrepError as exc:
             print(str(exc), file=sys.stderr)
             return 4
-        if timed and TURBO_MHZ == 0:            # stock 1 MHz: turbo off
+        if timed and TURBO_OFF:                 # stock 1 MHz: turbo off
             from c64_test_harness.backends.ultimate64_helpers import set_turbo_mhz
             set_turbo_mhz(client, None)
             time.sleep(3.0)
