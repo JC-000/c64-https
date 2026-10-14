@@ -455,12 +455,33 @@ class Memory:
         self.ram[0xFFE4:0xFFE8] = bytes([0xAD, 0x01, 0xFE, 0x60])
         self.screen = bytearray()
         self.keys = bytearray()
+        # Fence trace (test_read_pacing): None, or one [steps, "r"/"w",
+        # addr, SBC #1 executions before the next UCI access] per access.
+        self.uci_trace = None
+        self.sbc1 = 0
+
+    def _uci_access(self, kind, addr):
+        if self.uci_trace is not None and 0xDF1C <= addr <= 0xDF1F:
+            if self.uci_trace:
+                self.uci_trace[-1][3] = self.sbc1
+            self.uci_trace.append([self.cpu.steps, kind, addr, None])
+            self.sbc1 = 0
+
+    def uci_trace_close(self):
+        if self.uci_trace:
+            self.uci_trace[-1][3] = self.sbc1
 
     def units(self):
         return (self.cpu.steps // STEPS_PER_UNIT) if self.cpu else 0
 
     def read(self, addr):
         addr &= 0xFFFF
+        if self.uci_trace is not None:
+            # An opcode fetch of SBC #$01: uci_fence's inner loop.
+            if (addr == self.cpu.pc and self.ram[addr] == 0xE9
+                    and self.ram[(addr + 1) & 0xFFFF] == 0x01):
+                self.sbc1 += 1
+            self._uci_access("r", addr)
         if 0xDF00 <= addr <= 0xDFFF:
             return self.dev.read(addr)
         if addr == 0xFE01:
@@ -475,6 +496,8 @@ class Memory:
 
     def write(self, addr, value):
         addr &= 0xFFFF
+        if self.uci_trace is not None:
+            self._uci_access("w", addr)
         if 0xDF00 <= addr <= 0xDFFF:
             self.dev.write(addr, value & 0xFF)
             return
@@ -518,6 +541,42 @@ def _body_to_reu(labels=None):
         if line.startswith("CA65FLAGS="):
             return "-D HTTPS_BODY_TO_REU" in line
     raise Unavailable("%s has no CA65FLAGS line" % stamp)
+
+
+def _read_fence(labels=None):
+    """True for an M3_READ_FENCE=1 image (read off flags.stamp, as
+    _body_to_reu does): every UCI READ fenced, the pre-change client."""
+    stamp = Path(labels or LABELS).parent / "flags.stamp"
+    if not stamp.is_file():
+        raise Unavailable("%s is missing: cannot tell whether the image "
+                          "fences its UCI reads" % stamp)
+    for line in stamp.read_text().splitlines():
+        if line.startswith("CA65FLAGS="):
+            return "-D M3_READ_FENCE" in line
+    raise Unavailable("%s has no CA65FLAGS line" % stamp)
+
+
+def _refuse_trace(labels=None):
+    """An M3_TRACE=1 image runs m3_tr_end after net_poll's last register
+    access, which test_read_pacing's READ_GAP_BUDGET would count as a delay
+    after a read. The model rules are the plain image's: refuse, like the
+    mutator does."""
+    stamp = Path(labels or LABELS).parent / "flags.stamp"
+    if stamp.is_file() and "-D M3_TRACE" in stamp.read_text():
+        raise Unavailable("%s is an M3_TRACE=1 image (a measurement build): "
+                          "the model checks are written against images built "
+                          "without M3_TRACE" % stamp)
+
+
+def _fence_sbc():
+    """SBC #1 executions in one uci_fence (OUTER x INNER, uci_regs.inc)."""
+    text = (REPO / "src" / "net" / "uci" / "uci_regs.inc").read_text()
+    val = {}
+    for name in ("UCI_FENCE_OUTER", "UCI_FENCE_INNER"):
+        for line in text.splitlines():
+            if line.startswith(name):
+                val[name] = int(line.split("=")[1].split(";")[0])
+    return val["UCI_FENCE_OUTER"] * val["UCI_FENCE_INNER"]
 
 
 def _labels(path=None):
@@ -1460,6 +1519,221 @@ def test_held_session_message(prg=None, labels=None):
     _code(m, ERR_CONNECT_FAIL, "an Open refused over a held session")
 
 
+def _pacing_flows(prg, labels):
+    """Every UCI access of four sessions, with the SBC #1 count after it:
+    a whole fetch (init, Open, the GET's drain READ and WRITE, a 2,000 B
+    body over full and partial blocks, an idle READ, 01, CLOSE), a CLOSE
+    whose PUSH is refused once (the rejected path's CLR_ERR write), a block
+    longer than its header (the discard path), and a Data More block (the
+    ABORT path)."""
+    traces = []
+    m = Machine(prg, labels)
+    m.mem.uci_trace = []
+    _connected(m)
+    body = bytes((i * 7) & 0x7F | 0x20 for i in range(2000))
+    resp = b"HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n" + body
+    carry, status, total = _http_fetch(
+        m, [("data", resp[:1500]), ("idle",), ("data", resp[1500:]),
+            ("end", CLOSED_BY_HOST)])
+    _check(carry is False and status == 200 and total == 2000,
+           "the traced fetch failed: C=%s, HTTP %d, %d B" % (carry, status, total))
+    m.call("net_tcp_close")
+    m.mem.uci_trace_close()
+    m.no_violations()
+    traces.append(("fetch", m.mem.uci_trace))
+    # A CLOSE whose PUSH the FPGA refuses once: m3_exec's CLR_ERR write on
+    # the rejected path, then the retry.
+    m = Machine(prg, labels)
+    m.mem.uci_trace = []
+    _connected(m)
+    _reject_ops(m, 0x09, 1)
+    m.call("net_tcp_close")
+    m.mem.uci_trace_close()
+    _check(m.dev.pushes_rejected == 1 and not m.dev.sessions,
+           "rejected: the refused CLOSE was not retried to the end")
+    m.no_violations()
+    traces.append(("rejected", m.mem.uci_trace))
+    for name, blocks in (("tail", [b"\x03\x00abcdefgh"]),
+                         ("more", [b"\x03\x00abc", b"\x02\x00de"])):
+        m = Machine(prg, labels)
+        m.mem.uci_trace = []
+        _connected(m)
+        m.dev.forced_blocks = (blocks, OK)
+        m.call("net_poll")
+        m.call("net_tcp_close")
+        m.mem.uci_trace_close()
+        _check(m.peek("net_tcp_state") != NET_TCP_CONNECTED,
+               "%s: the bad block was accepted" % name)
+        m.no_violations()
+        traces.append((name, m.mem.uci_trace))
+    return traces
+
+
+#: Default image: the most instructions that may run between a READ of
+#: this register and the next UCI access, on the traced flows. Measured
+#: maxima at 4464886: $DF1C 49, $DF1D 10, $DF1E 35, $DF1F 7. A delay of
+#: any shape (a fence, a NOP sled, a loop) past these is caught; one that
+#: fits under them is not -- that is the detector's resolution.
+READ_GAP_BUDGET = {0xDF1C: 64, 0xDF1D: 16, 0xDF1E: 40, 0xDF1F: 16}
+
+
+def test_read_pacing(prg=None, labels=None):
+    """Read pacing (m3.inc): a uci_fence after EVERY write to $DF1C/$DF1D,
+    and no delay after any read of $DF1C-$DF1F -- unless the image is
+    M3_READ_FENCE=1, where every read is fenced too (the pre-change
+    client). The body copy must cost a handful of instructions per byte.
+
+    What it detects, on the four traced flows only (_pacing_flows):
+      - a write with no uci_fence after it, seen by execution: fewer SBC #1
+        opcode fetches than 0.9 x OUTER x INNER before the next UCI access;
+      - default image: any SBC #1 after a read, AND more instructions after
+        a read than READ_GAP_BUDGET allows, whatever the delay's shape --
+        except a delay made of UCI register accesses (e.g. a loop of
+        status reads), since each access restarts the gap;
+      - M3_READ_FENCE=1 image: a read with no uci_fence after it."""
+    fenced = _read_fence(labels)
+    need = _fence_sbc() * 9 // 10       # SBC #1 with C=0 takes 2 first
+    for name, trace in _pacing_flows(prg, labels):
+        writes = [e for e in trace if e[1] == "w"]
+        reads = [e for e in trace if e[1] == "r"]
+        _check(len(writes) > 10 and len(reads) > 100,
+               "%s: only %d writes / %d reads traced" % (name, len(writes), len(reads)))
+        bare = [e for e in writes if e[3] < need]
+        _check(not bare, "%s: %d write(s) with no fence before the next UCI "
+               "access, first $%04X at step %d (%d SBC #1, need %d): the FPGA "
+               "needs the gap after a WRITE" % (name, len(bare), bare[0][2],
+                                                bare[0][0], bare[0][3], need)
+               if bare else "")
+        if fenced:
+            bad = [e for e in reads[:-1] if e[3] < need]
+            what = "unfenced read(s) in an M3_READ_FENCE=1 image"
+        else:
+            bad = [e for e in reads[:-1] if e[3] != 0]
+            what = "fenced read(s) in the default image (M3_READ_FENCE is off)"
+        _check(not bad, "%s: %d %s, first $%04X at step %d (%d SBC #1)"
+               % (name, len(bad), what, bad[0][2], bad[0][0], bad[0][3])
+               if bad else "")
+        if not fenced:
+            slow = [(trace[i], trace[i + 1][0] - trace[i][0])
+                    for i in range(len(trace) - 1) if trace[i][1] == "r"
+                    and trace[i + 1][0] - trace[i][0] > READ_GAP_BUDGET[trace[i][2]]]
+            _check(not slow, "%s: %d read(s) followed by a delay before the "
+                   "next UCI access, first $%04X at step %d: %d instructions, "
+                   "budget %d" % (name, len(slow), slow[0][0][2], slow[0][0][0],
+                                  slow[0][1], READ_GAP_BUDGET[slow[0][0][2]])
+                   if slow else "")
+        if name != "fetch":
+            continue
+        # The copy loop: consecutive $DF1E reads with one $DF1C between.
+        gaps = [trace[i + 2][0] - trace[i][0] for i in range(len(trace) - 2)
+                if trace[i][2] == 0xDF1E and trace[i + 1][2] == 0xDF1C
+                and trace[i + 2][2] == 0xDF1E]
+        _check(len(gaps) > 1900, "fetch: only %d copy-loop byte pairs seen"
+               % len(gaps))
+        gaps.sort()
+        median = gaps[len(gaps) // 2]
+        if fenced:
+            _check(median >= 2 * need, "fetch: %d instructions per body byte "
+                   "in an M3_READ_FENCE=1 image: its two read fences are gone"
+                   % median)
+        else:
+            _check(median <= 10, "fetch: %d instructions per body byte, "
+                   "expected <= 10 (the unfenced copy loop is 8)" % median)
+
+
+def _ring_case(m, tail, head, blocks):
+    for name, v in (("tcp_recv_head", head), ("tcp_recv_tail", tail)):
+        m.poke(name, v & 0xFF)
+        m.poke(name, v >> 8, 1)
+    m.dev.forced_blocks = (blocks, OK)
+    m.call("net_poll")
+    return m.peek("tcp_recv_tail") | (m.peek("tcp_recv_tail", 1) << 8)
+
+
+def test_copy_counts_at_page_edges(prg=None, labels=None):
+    """The copy's X/Y page count (@p_copy_init) and ring wrap, at the byte
+    counts where a page counter goes wrong -- 1, 255, 256, 257, 512, 768,
+    893 -- and at ring tails $0000, $0E7D, $0F00 and $0FFF: every byte in
+    order, the tail where it belongs, still CONNECTED, nothing stored past
+    the copy or at $D000+. Then, per count, a short block ($8F), a header
+    that is exactly the request, and an over-claim ($8B), at the edges."""
+    pattern = bytes((i * 13 + 7) & 0xFF for i in range(893))
+    m = _connected(Machine(prg, labels))
+    for tail in (0x0000, 0x0E7D, 0x0F00, 0x0FFF):
+        for n in (1, 255, 256, 257, 512, 768, 893):
+            data = pattern[:n]
+            for a in range(0xC000, 0xD000):
+                m.mem.ram[a] = 0xA5
+            got = _ring_case(m, tail, tail, [bytes([n & 0xFF, n >> 8]) + data])
+            note = "n=%d from tail $%04X" % (n, tail)
+            _check(m.peek("net_tcp_state") == NET_TCP_CONNECTED,
+                   "%s: the session died (net_last_error $%02X)"
+                   % (note, m.peek("net_last_error")))
+            _check(got == (tail + n) & 0x0FFF, "%s: tail $%04X, expected $%04X"
+                   % (note, got, (tail + n) & 0x0FFF))
+            _check(bytes(m.mem.ram[0xC000 + ((tail + i) & 0x0FFF)]
+                         for i in range(n)) == data, "%s: ring bytes differ" % note)
+            _check(m.mem.ram[0xC000 + got] == 0xA5, "%s: a byte stored past "
+                   "the copy" % note)
+            _check(not any(m.mem.ram[0xD000:0xD400]), "%s: a byte stored at "
+                   "$D000+" % note)
+    m.no_violations()
+    for n in (1, 255, 256, 257, 512, 768):
+        for tail in (0x0F00, 0x0FFF):
+            note = "n=%d from tail $%04X" % (n, tail)
+            # short: the header says n + 1, the block holds n
+            m = _connected(Machine(prg, labels))
+            _ring_case(m, tail, tail, [bytes([(n + 1) & 0xFF, (n + 1) >> 8])
+                                       + pattern[:n]])
+            _check(m.peek("net_tcp_state") == NET_TCP_ERROR, "%s, short: still "
+                   "CONNECTED" % note)
+            _code(m, ERR_SHORT_READ, note + ", short")
+            # exactly the request: free - 1 == n
+            m = _connected(Machine(prg, labels))
+            head = (tail + n + 1) & 0x0FFF
+            got = _ring_case(m, tail, head, [bytes([n & 0xFF, n >> 8])
+                                             + pattern[:n]])
+            reads = [c for c in m.dev.commands() if c[1] == 0x10]
+            _check((reads[-1][3] | reads[-1][4] << 8) == n, "%s: asked for %d, "
+                   "expected the ring's free - 1" % (note, reads[-1][3]
+                                                     | reads[-1][4] << 8))
+            _check(m.peek("net_tcp_state") == NET_TCP_CONNECTED
+                   and got == (tail + n) & 0x0FFF, "%s, exact request: state "
+                   "$%02X tail $%04X" % (note, m.peek("net_tcp_state"), got))
+            # over-claim: header n + 1 over a request of n; n are kept
+            m = _connected(Machine(prg, labels))
+            got = _ring_case(m, tail, head, [bytes([(n + 1) & 0xFF, (n + 1) >> 8])
+                                             + pattern[:n] + b"\x77"])
+            _check(m.peek("net_tcp_state") == NET_TCP_ERROR
+                   and got == (tail + n) & 0x0FFF, "%s, over-claim: state $%02X "
+                   "tail $%04X" % (note, m.peek("net_tcp_state"), got))
+            _code(m, ERR_BAD_READ_HDR, note + ", over-claim")
+
+
+def test_ring_wraps_in_one_block(prg=None, labels=None):
+    """One 893 B block that crosses the end of the 4 KB ring: every byte
+    lands in order across $CFFF -> $C000, the tail wraps, and nothing is
+    stored at $D000 (VIC-II, on hardware) or past it."""
+    m = _connected(Machine(prg, labels))
+    for name in ("tcp_recv_head", "tcp_recv_tail"):
+        m.poke(name, 0x80)
+        m.poke(name, 0x0F, 1)
+    data = bytes((i * 13 + 5) & 0xFF for i in range(893))
+    m.dev.sessions[5]["rx"] = [("data", data)]
+    m.call("net_poll")
+    _check(m.peek("net_tcp_state") == NET_TCP_CONNECTED,
+           "a wrapping block ended the connection (net_last_error $%02X)"
+           % m.peek("net_last_error"))
+    tail = m.peek("tcp_recv_tail") | (m.peek("tcp_recv_tail", 1) << 8)
+    _check(tail == (0x0F80 + 893) & 0x0FFF, "tail $%04X after 893 B from "
+           "$0F80, expected $%04X" % (tail, (0x0F80 + 893) & 0x0FFF))
+    _check(m.ring() == data, "the ring does not hold the block in order "
+           "across the wrap")
+    _check(not any(m.mem.ram[0xD000:0xD400]), "bytes stored at $D000+: the "
+           "copy ran off the end of the ring")
+    m.no_violations()
+
+
 TESTS = (
     test_startup_sequence,
     test_no_uci_writes_nothing,
@@ -1511,6 +1785,9 @@ TESTS = (
     test_data_more_wedge_keeps_89,
     test_held_session_message,
     test_boot_reu_dma_only_for_the_sink,
+    test_read_pacing,
+    test_ring_wraps_in_one_block,
+    test_copy_counts_at_page_edges,
 )
 
 # Need `make BACKEND=uci-m3 HTTPS_BODY_TO_REU=1` (flags.stamp says so); main
@@ -1523,6 +1800,7 @@ VIEWER_TESTS = (
 def run(prg=None, labels=None, only=None, quiet=False):
     """Run TESTS (or `only`, names) on one image. Returns {name: error|None}."""
     results = {}
+    _refuse_trace(labels)
     tests = TESTS + (VIEWER_TESTS if _body_to_reu(labels) else ())
     for fn in tests:
         if only and fn.__name__ not in only:
@@ -1544,6 +1822,7 @@ def main():
         _labels()
         if not PRG.is_file():
             raise Unavailable("no PRG")
+        _refuse_trace()
     except Unavailable as exc:
         return cannot_run(str(exc), executed=0, total=len(TESTS),
                           certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV)

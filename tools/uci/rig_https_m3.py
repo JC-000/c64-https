@@ -18,6 +18,24 @@ verdicts that need more than one image or a failure:
                      CRC-32 of the bytes both keep in http_resp_buf (the
                      whole body when it is <= 512 B, else its first 512 B)
                      must match.
+  timed SCHEDULE NAME=DIR [NAME=DIR ...]
+                     Timed A/B of M3 builds (each DIR holds c64-https.prg,
+                     labels.txt and flags.stamp of a `make BACKEND=uci-m3
+                     HTTPS_BODY_TO_REU=1` link), e.g. M3_READ_FENCE=1 vs the
+                     default. SCHEDULE is PAGE:NAMES[,PAGE:NAMES], e.g.
+                     small:FSSFFS,large:FSSFFS (ABBA order); PAGE is small
+                     (en.wikipedia.org /robots.txt) or large (/wiki/
+                     Commodore_64). Per attempt: reset, verified load, 'I',
+                     then the clock starts at 'G' and stops when the REU
+                     viewer opens (the whole body sunk); 'Q' closes; the
+                     body is read back out of REU $10:0000 and compared with
+                     a host fetch made just before (curl, the client's UA).
+                     A dynamic page that differs only in per-render metadata
+                     lines is reported as such, never as equal. An M3_TRACE
+                     build's per-net_poll records are read before 'Q' and
+                     summarised. TURBO_OFF=1 runs with turbo off (1 MHz).
+                     One JSON line per attempt to $UCI_DEBUG_DIR/<run>/
+                     timed.jsonl. Exit 1 if any attempt is not complete.
 
 Both drive the MENU the way an operator does ('I', 'G', the typed target),
 take the harness DeviceLock, set 48 MHz and the REU through
@@ -27,13 +45,19 @@ firmware socket poisons the lease (CLAUDE.md "Device gotchas").
 
     U64_HOST=10.43.23.81 tools/uci/rig_https_m3.py refuse wrong.host.badssl.com 94
     U64_HOST=10.43.23.81 tools/uci/rig_https_m3.py ab en.wikipedia.org / B.prg B.labels
+    U64_HOST=10.43.23.81 tools/uci/rig_https_m3.py timed small:FSSF F=bf S=bs
 
 Exit: 0 pass, 1 fail, 2 fatal, 3 DeviceLock timeout, 4 device prep / load.
 """
 from __future__ import annotations
 
+import bisect
+import difflib
+import hashlib
+import json
 import os
 import re
+import subprocess
 import sys
 import time
 import zlib
@@ -60,6 +84,7 @@ REPO = Path(__file__).resolve().parents[2]
 PRG_A = REPO / "build" / "c64-https.prg"
 LABELS_A = REPO / "build" / "labels.txt"
 TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
+TURBO_OFF = os.environ.get("TURBO_OFF") == "1"   # timed: prep, then turbo off
 INIT_WAIT = float(os.environ.get("C64_INIT_WAIT", "120"))
 FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "900"))
 RUN_DIR = Path(os.environ.get("UCI_DEBUG_DIR", "/tmp/uci_https_debug"))
@@ -234,15 +259,380 @@ def verdict_ab(rows) -> None:
     print(f"PASS: same status, same length ({ta:,} B), same CRC-32 over {whole}")
 
 
+# --- timed ------------------------------------------------------------------
+
+PAGES = {"small": ("en.wikipedia.org", "/robots.txt"),
+         "large": ("en.wikipedia.org", "/wiki/Commodore_64")}
+PAGE_BUDGET = {"small": 900.0, "large": 3600.0}
+UA = "c64-https/0.1"                    # src/http.s's User-Agent
+#: The REU viewer's status line: OOOOOO/TTTTTT (decode_screen lowercases).
+VIEWER = re.compile(r"^\s*[0-9a-f]{6}/[0-9a-f]{6}", re.I)
+REU_BODY = 0x100000                     # HTTPS_BODY_TO_REU's region
+#: After a reset (BASIC idle, no program), REU -> C64 staging for readback.
+STAGE = 0x0800
+STAGE_LEN = 0x8000
+#: MediaWiki per-render values: the value after one of these keys is an
+#: excusable region (report_spans, key_window_end).
+RENDER_KEYS = re.compile(
+    rb"wgRequestId|wgBackendResponseTime|wgHostname|wgPageParseReport|"
+    rb"cputime|walltime|timestamp|\"ttl\"|transientcontent|cachereport|"
+    rb"limitreport|timingprofile|ppvisitednodes|postexpandincludesize|"
+    rb"Parsed by|Cached time|Cache expiry|CPU time usage|Real time usage|"
+    rb"Saved in parser cache|Render ID|Transclusion expansion time report|"
+    rb"Rendering was triggered")
+TOKEN = re.compile(rb"\w+|\W")
+
+
+def host_reference(host: str, path: str) -> bytes | None:
+    r = subprocess.run(["curl", "-s", "--http1.1", "-A", UA, "--max-time",
+                        "60", f"https://{host}{path}"], capture_output=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def reu_read(client, off: int, n: int) -> bytes:
+    """REU [off, off+n) through STAGE, a chunk at a time (C64 reset first)."""
+    out = bytearray()
+    for o in range(0, n, STAGE_LEN):
+        k = min(STAGE_LEN, n - o)
+        a = off + o
+        client.write_mem(0xDF02, bytes([STAGE & 0xFF, STAGE >> 8, a & 0xFF,
+                                        (a >> 8) & 0xFF, (a >> 16) & 0xFF,
+                                        k & 0xFF, (k >> 8) & 0xFF, 0, 0]))
+        client.write_mem(0xDF01, bytes([0x91]))     # execute, REU -> C64
+        time.sleep(0.05)
+        out += bytes(client.read_mem(STAGE, k))
+    return bytes(out)
+
+
+#: MediaWiki's parser reports: HTML comments re-written on every render.
+REPORT_COMMENT = re.compile(rb"<!--(?:(?!-->).)*?(?:NewPP limit report|"
+                            rb"Transclusion expansion time report|"
+                            rb"Saved in parser cache|cache key).*?-->", re.S)
+PARSE_REPORT = re.compile(rb'"wgPageParseReport":\{')
+KEY_WINDOW = 120
+VALUE_END = re.compile(rb"[,}\]<\n]|-->")
+#: A region's body side may differ in length from its reference side by at
+#: most this. Measured over the 33 complete saved large bodies against their
+#: references (2026-10-13): every region was 0 or +1 B longer in the body.
+#: Re-render values are numbers, timestamps, ids and host names whose
+#: lengths move by a few bytes each; 64 B is generous for that and still
+#: stops a payload hidden inside a delimited region.
+REGION_SLACK = 64
+
+
+def key_window_end(page: bytes, at: int) -> int:
+    """End of the value that starts at `at`: the first , } ] < newline or
+    -->, and never more than KEY_WINDOW bytes on."""
+    m = VALUE_END.search(page, at, at + KEY_WINDOW)
+    return m.start() if m else min(at + KEY_WINDOW, len(page))
+
+
+def report_spans(page: bytes) -> list[tuple[int, int, int, int]]:
+    """Excusable regions of `page`: (start, end, opening delimiter length,
+    closing delimiter length). The REPORT_COMMENT comments (<!-- / -->),
+    the "wgPageParseReport":{...} object (braces matched), and the
+    value after each RENDER_KEYS key, up to the first , } ] < newline or -->
+    and at most KEY_WINDOW bytes (the key is the opening delimiter; a window
+    has no closing one)."""
+    out = [(m.start(), m.end(), 4, 3) for m in REPORT_COMMENT.finditer(page)]
+    for m in PARSE_REPORT.finditer(page):
+        depth, k = 0, m.end() - 1
+        while k < len(page):
+            depth += {123: 1, 125: -1}.get(page[k], 0)
+            k += 1
+            if depth == 0:
+                break
+        out.append((m.start(), k, m.end() - m.start(), 1))
+    for m in RENDER_KEYS.finditer(page):
+        out.append((m.start(), key_window_end(page, m.end()),
+                    m.end() - m.start(), 0))
+    return out
+
+
+def body_oracle(body: bytes, ref: bytes | None) -> tuple[str, dict]:
+    """("equal" | "metadata-only" | "DIFFERENT" | "no-reference", facts).
+
+    A line diff, then a token diff inside each changed line pair, gives the
+    changed runs and an alignment of the bytes the two share. The excusable
+    regions are taken from the REFERENCE (report_spans(ref)), never from
+    the body under test, and a region counts only if its delimiters are
+    unchanged bytes of that alignment, which also places it in the body.
+    "metadata-only" = every changed run lies wholly inside one such region
+    on BOTH sides (ref extent inside the ref region, body extent inside the
+    same region as mapped into the body), the region's body side is within
+    REGION_SLACK bytes of its reference length, and no line was added or
+    dropped on its own. tools/check_m3_oracle.py pins each of these rules
+    (its --mutants mode breaks them one at a time). So a corruption cannot widen its own excuse: breaking a
+    `-->` or the report's closing `}` voids that region. What stays
+    accepted is a change inside a region whose delimiters survived.
+    The body's own length is pinned separately, by the response framing."""
+    facts = {"sha256": hashlib.sha256(body).hexdigest(),
+             "crc32": f"{zlib.crc32(body) & 0xFFFFFFFF:08X}", "len": len(body)}
+    if ref is None:
+        return "no-reference", facts
+    facts.update(ref_len=len(ref), ref_sha256=hashlib.sha256(ref).hexdigest())
+    if body == ref:
+        return "equal", facts
+    a, b = body.split(b"\n"), ref.split(b"\n")
+    sa, sb = [0], [0]
+    for ln in a:
+        sa.append(sa[-1] + len(ln) + 1)
+    for ln in b:
+        sb.append(sb[-1] + len(ln) + 1)
+    same = []           # (ref_lo, ref_hi, body_lo): bytes the two share
+    changed = []        # (ref_lo, ref_hi, body_lo, body_hi, text)
+    unexplained = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, a, b, autojunk=False).get_opcodes():
+        if tag == "equal":
+            same.append((sb[j1], sb[j2], sa[i1]))
+            continue
+        if tag != "replace" or i2 - i1 != j2 - j1:
+            unexplained.append(f"lines {i1}-{i2} vs {j1}-{j2}: {tag}")
+            continue
+        for li, lj in zip(range(i1, i2), range(j1, j2)):
+            ta, tb = TOKEN.findall(a[li]), TOKEN.findall(b[lj])
+            pa, pb = [sa[li]], [sb[lj]]
+            for t in ta:
+                pa.append(pa[-1] + len(t))
+            for t in tb:
+                pb.append(pb[-1] + len(t))
+            for t2, k1, k2, m1, m2 in difflib.SequenceMatcher(
+                    None, ta, tb, autojunk=False).get_opcodes():
+                if t2 == "equal":
+                    same.append((pb[m1], pb[m2], pa[k1]))
+                else:
+                    changed.append((pb[m1], pb[m2], pa[k1], pa[k2],
+                                    a[li][pa[k1] - sa[li]:pa[k1] - sa[li] + 60]))
+            same.append((sb[lj + 1] - 1, sb[lj + 1], sa[li + 1] - 1))  # "\n"
+    same.sort()
+    starts = [x[0] for x in same]
+
+    def to_body(lo, hi):
+        """Body offset of ref [lo, hi) if it is one shared stretch, else None."""
+        k = bisect.bisect_right(starts, lo) - 1
+        if k >= 0 and same[k][0] <= lo and hi <= same[k][1]:
+            return same[k][2] + (lo - same[k][0])
+        return None
+
+    regions = []        # (ref_lo, ref_hi, body_lo, body_hi)
+    for r0, r1, d_open, d_close in report_spans(ref):
+        b0 = to_body(r0, r0 + d_open)
+        if b0 is None:
+            continue
+        if d_close:
+            bc = to_body(r1 - d_close, r1)
+            if bc is None:
+                continue
+            b1 = bc + d_close
+        else:                               # a key window, in the body too
+            b1 = key_window_end(body, b0 + d_open)
+        if abs((b1 - b0) - (r1 - r0)) > REGION_SLACK:
+            continue                        # grew or shrank past a re-render
+        regions.append((r0, r1, b0, b1))
+    for r0, r1, b0, b1, text in changed:
+        if not any(g0 <= r0 and r1 <= g1 and h0 <= b0 and b1 <= h1
+                   for g0, g1, h0, h1 in regions):
+            unexplained.append(text.decode("latin-1"))
+    facts.update(diff_runs=len(changed), unexplained=len(unexplained),
+                 first_unexplained=unexplained[:3])
+    return ("metadata-only" if changed and not unexplained else "DIFFERENT"), facts
+
+
+def read_trace(client, lab) -> dict | None:
+    """An M3_TRACE build's records (src/net/uci-m3/m3.inc, "Timing trace")."""
+    if "m3_tr_count" not in lab:
+        return None
+    unit = 10227                        # M3_UNIT_CYCLES
+    n = le(client, lab["m3_tr_n"], 2)
+    raw = bytes(client.read_mem(0x6000, n * 12)) if n else b""
+
+    def ticks(b, o):
+        dtb = b[o] | b[o + 1] << 8
+        dta = b[o + 2] | b[o + 3] << 8
+        return dtb * unit + (dta - 0x10000 if dta & 0x8000 else dta)
+    recs = []
+    for i in range(n):
+        r = raw[12 * i:12 * i + 12]
+        recs.append({"rtt": ticks(r, 0) if any(r[0:4]) else None,
+                     "total": ticks(r, 4), "bytes": r[8] | r[9] << 8,
+                     "result": r[10], "post": r[11]})
+    return {"count": le(client, lab["m3_tr_count"], 2), "kept": n,
+            "pushes": le(client, lab["m3_tr_pushes"], 2),
+            "bit3": le(client, lab["m3_tr_bit3"], 2),
+            "or": bytes(client.read_mem(lab["m3_tr_or"], 1))[0],
+            "records": recs}
+
+
+def _dist(xs):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    return {"n": len(xs), "min": xs[0], "median": xs[len(xs) // 2],
+            "max": xs[-1]}
+
+
+def summarise_trace(tr: dict) -> dict:
+    """CIA ticks are PHI2 cycles at the real bus clock (~1.0227 MHz NTSC):
+    ms = ticks / 1022.7. Distributions over READs that returned data, over
+    idle READs, and per byte."""
+    ms = lambda t: round(t / 1022.7, 3)     # noqa: E731
+    data = [r for r in tr["records"] if r["result"] == 0 and r["rtt"] is not None]
+    idle = [r for r in tr["records"] if r["result"] == 1 and r["rtt"] is not None]
+    return {
+        "net_poll_calls": tr["count"], "records_kept": tr["kept"],
+        "pushes": tr["pushes"], "pushes_with_bit3": tr["bit3"],
+        "post_push_status_or": f"${tr['or']:02X}",
+        "post_push_status_values": sorted({f"${r['post']:02X}" for r in tr["records"] if r["rtt"] is not None}),
+        "data_reads": len(data), "idle_reads": len(idle),
+        "data_rtt_ms": _dist([ms(r["rtt"]) for r in data]),
+        "data_total_ms": _dist([ms(r["total"]) for r in data]),
+        "idle_rtt_ms": _dist([ms(r["rtt"]) for r in idle]),
+        "bytes_per_data_read": _dist([r["bytes"] for r in data]),
+        "full_893_reads": sum(1 for r in data if r["bytes"] == 893),
+    }
+
+
+def timed_attempt(client, name, bdir: Path, page: str, run_dir: Path) -> dict:
+    lab = labels(bdir / "labels.txt")
+    host, path = PAGES[page]
+    rec = {"arm": name, "dir": str(bdir), "page": page, "host": host,
+           "path": path, "start": time.strftime("%Y-%m-%dT%H:%M:%S"),
+           "prg_sha256": hashlib.sha256((bdir / "c64-https.prg").read_bytes()).hexdigest()}
+    ref = host_reference(host, path)
+    client.reset()
+    time.sleep(2.5)
+    load_verified_and_run(client, (bdir / "c64-https.prg").read_bytes())
+    m, lines = wait_for(client, ["Q=QUIT"], INIT_WAIT)
+    if not m:
+        dump(lines, "boot")
+        raise Fail(f"{name}: menu never appeared")
+    press_init(client)
+    t0 = time.monotonic()
+    client.send_text("G", finish_with_return=False)
+    push_keys(client, target_keys(f"{host}\r{path}\r"))
+    t_hs = None
+    end = t0 + PAGE_BUDGET[page]
+    while True:
+        lines, text = screen(client)
+        now = time.monotonic()
+        if t_hs is None and "TLS HANDSHAKE OK" in text:
+            t_hs = now
+        if VIEWER.match(lines[0]):
+            outcome = "VIEWER"
+            break
+        hit = [e for e in ENDS + ["BODY INCOMPLETE"] if e in text]
+        if hit:
+            outcome = hit[0]
+            break
+        if now > end:
+            outcome = "TIMEOUT"
+            break
+        time.sleep(0.5)
+    rec.update(outcome=outcome, t_body=round(time.monotonic() - t0, 2),
+               t_handshake=round(t_hs - t0, 2) if t_hs else None)
+    rec["http_status"] = le(client, lab["http_status"], 2)
+    rec["body_total"] = le(client, lab["http_body_total"], 3)
+    rec["net_last_error"] = f"${bytes(client.read_mem(lab['net_last_error'], 1))[0]:02X}"
+    tr = read_trace(client, lab)
+    if tr is not None:
+        (run_dir / f"trace-{name}-{page}-{rec['start']}.json").write_text(json.dumps(tr))
+        rec["trace"] = summarise_trace(tr)
+    rec["screen_at_end"] = [x for x in lines if x.strip()]
+    if outcome != "VIEWER":
+        dump(lines, f"{name} final screen")
+        rec["verdict"] = f"INCOMPLETE: {outcome}"
+        if outcome not in SETTLED:
+            guard_socket_teardown(client.read_mem, lab["net_tcp_state"],
+                                  nudge=lambda: client.send_text("Q", finish_with_return=False))
+        return rec
+    client.send_text("Q", finish_with_return=False)
+    m, lines = wait_for(client, ["CONNECTION CLOSED"], 60)
+    if not m:
+        dump(lines, f"{name} after Q")
+        guard_socket_teardown(client.read_mem, lab["net_tcp_state"])
+        raise Fail(f"{name}: no CONNECTION CLOSED after Q")
+    client.reset()                      # the socket is closed: safe
+    time.sleep(3.0)
+    body = reu_read(client, REU_BODY, rec["body_total"]) if rec["body_total"] else b""
+    (run_dir / f"body-{name}-{page}-{rec['start']}.bin").write_bytes(body)
+    if ref is not None:
+        (run_dir / f"ref-{page}-{rec['start']}.bin").write_bytes(ref)
+    oracle, facts = body_oracle(body, ref)
+    rec.update(oracle=oracle, body=facts)
+    ok = rec["http_status"] == 200 and oracle in ("equal", "metadata-only")
+    rec["verdict"] = "PASS" if ok else "FAIL"
+    return rec
+
+
+def run_timed(client, sched, arms, run_dir: Path) -> int:
+    out = run_dir / "timed.jsonl"
+    bad = 0
+    for page, name in sched:
+        print(f"=== {name} {page} {time.strftime('%H:%M:%S')}", flush=True)
+        try:
+            rec = timed_attempt(client, name, arms[name], page, run_dir)
+        except BaseException:
+            # #234: never leave this attempt's socket live behind the lock.
+            lab = labels(arms[name] / "labels.txt")
+            guard_socket_teardown(client.read_mem, lab["net_tcp_state"])
+            raise
+        rec["turbo_mhz"] = 1 if TURBO_OFF else TURBO_MHZ
+        with out.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+        short = {k: rec.get(k) for k in ("arm", "page", "verdict", "oracle",
+                 "t_handshake", "t_body", "http_status", "body_total",
+                 "net_last_error")}
+        print("  " + json.dumps(short), flush=True)
+        if "trace" in rec:
+            print("  trace: " + json.dumps(rec["trace"]), flush=True)
+        if rec["verdict"] != "PASS":
+            bad += 1
+            if rec["verdict"].startswith("INCOMPLETE"):
+                print("stopping: an incomplete fetch leaves the device state unknown")
+                break
+    print(f"results: {out}")
+    return 1 if bad else 0
+
+
+def parse_timed(argv):
+    sched = [(page, n) for item in argv[2].split(",")
+             for page, names in [item.split(":")] for n in names]
+    arms = {}
+    for a in argv[3:]:
+        n, d = a.split("=", 1)
+        arms[n] = Path(d)
+    for page, n in sched:
+        if page not in PAGES or n not in arms:
+            raise ValueError(f"schedule names {page}:{n}, not a page/arm")
+    for n, d in arms.items():
+        lab = labels(d / "labels.txt")
+        if "m3_wedged" not in lab or "http_sink_full" not in lab:
+            raise ValueError(f"{d} is not a BACKEND=uci-m3 HTTPS_BODY_TO_REU=1 build")
+    return sched, arms
+
+
 def main(argv) -> int:
-    if (len(argv) < 2 or argv[1] not in ("refuse", "ab")
+    timed = len(argv) >= 4 and argv[1] == "timed"
+    if timed:
+        try:
+            sched, arms = parse_timed(argv)
+        except (ValueError, OSError) as exc:
+            print(f"[fatal] {exc}", file=sys.stderr)
+            return 2
+        prep_labels = next(iter(arms.values())) / "labels.txt"
+    elif (len(argv) < 2 or argv[1] not in ("refuse", "ab")
             or len(argv) != {"refuse": 4, "ab": 6}[argv[1]]):
         print(__doc__)
         return 2
-    if not PRG_A.is_file() or "m3_wedged" not in labels(LABELS_A):
+    else:
+        prep_labels = LABELS_A
+    if not timed and (not PRG_A.is_file() or "m3_wedged" not in labels(LABELS_A)):
         print("[fatal] build/ is not a BACKEND=uci-m3 build", file=sys.stderr)
         return 2
-    if argv[1] == "refuse":
+    if timed:
+        runs = []
+    elif argv[1] == "refuse":
         host, path = argv[2], "/"
         runs = [("A (uci-m3)", PRG_A, LABELS_A)]
     else:
@@ -273,21 +663,44 @@ def main(argv) -> int:
         client = Ultimate64Client(host=HOST, timeout=20.0)
         info = client.get_info()
         print(f"device: {info.get('product')} fw {info.get('firmware_version')} "
-              f"git {info.get('git_commit_hash')} core {info.get('core_version')}")
+              f"git {info.get('git_commit_hash')} fpga {info.get('fpga_version')} "
+              f"core {info.get('core_version')}")
+        want_git = os.environ.get("M3_EXPECT_GIT")
+        if want_git and info.get("git_commit_hash") != want_git:
+            print(f"[fatal] firmware git {info.get('git_commit_hash')}, "
+                  f"expected {want_git} (M3_EXPECT_GIT): not benching",
+                  file=sys.stderr)
+            return 2
         enable_uci(client)
         run_dir = _create_run_dir(RUN_DIR)
         print(f"run dir: {run_dir} (device_state.json)")
         try:
-            prepare_device(client, LABELS_A, turbo_mhz=TURBO_MHZ,
+            prepare_device(client, prep_labels, turbo_mhz=TURBO_MHZ,
                            artifact_dir=run_dir)
         except DevicePrepError as exc:
             print(str(exc), file=sys.stderr)
             return 4
+        if timed and TURBO_OFF:                 # stock 1 MHz: turbo off
+            from c64_test_harness.backends.ultimate64_helpers import set_turbo_mhz
+            set_turbo_mhz(client, None)
+            time.sleep(3.0)
+            print("turbo: " + str(client.get_config_value(
+                "U64 Specific Settings", "Turbo Control")))
         try:
-            preflight_reu(client, LABELS_A)     # the backstop behind the prep
+            preflight_reu(client, prep_labels)  # the backstop behind the prep
         except ReuPreflightError as exc:
             print(str(exc), file=sys.stderr)
             return 4
+        if timed:
+            (run_dir / "device_info.json").write_text(json.dumps(info))
+            try:
+                return run_timed(client, sched, arms, run_dir)
+            except PrgLoadError as exc:
+                print(f"[fatal] {exc}", file=sys.stderr)
+                return 4
+            except Fail as exc:
+                print(f"FAIL: {exc}", file=sys.stderr)
+                return 1
         rows = []
         try:
             for name, prg, lab_path in runs:

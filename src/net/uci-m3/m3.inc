@@ -61,6 +61,34 @@ M3_B_READY          = 3000      ; ER-10 ready-bit polling budget: 30 s
 M3_B_READY_POLL     = 100       ; ...polled once a second
 M3_B_HTTP_IDLE      = 6000      ; http_recv_body: 60 s with no byte arrived
 
+; --- Read pacing (M3_READ_FENCE) ------------------------------------------
+; uci_fence's gap stays after every WRITE to $DF1C/$DF1D. READS of $DF1C-$DF1F
+; are unfenced: the 1541ultimate firmware side says back-to-back reads need
+; no gap, only correct state polling (DATA_AV is still tested before every
+; byte, ER-12), and the U64E A/B that came with this change is the evidence.
+; Two fences per body byte were most of a large fetch's time.
+; `make BACKEND=uci-m3 M3_READ_FENCE=1` puts a fence back after every read
+; and assembles the pre-change client byte for byte: the A/B arm, and the
+; fallback if some device turns out to need it.
+
+; --- Timing trace (M3_TRACE, a measurement build only) ---------------------
+; net_poll appends one M3_TR_REC-byte record per call made while CONNECTED
+; to M3_TR_BASE (the MAIN tail, link-asserted free), up to M3_TR_CAP;
+; m3_tr_count keeps counting past it. Each delta is (dTB, dTA): CIA2 timer B units and timer
+; A cycles, ticks = dTB * M3_UNIT_CYCLES + (signed) dTA. Record layout:
+;   +0  rtt   PUSH of the READ to REPLY_VALID seen (0/0: no READ was run)
+;   +4  total the whole net_poll call
+;   +8  bytes put into the ring (16-bit)
+;   +10 m3_poll_result
+;   +11 $DF1C read right after that READ's PUSH and its fence
+M3_TR_BASE          = $6000
+M3_TR_REC           = 12
+M3_TR_CAP           = ($A000 - M3_TR_BASE) / M3_TR_REC
+M3_TS_PUSH          = 0         ; m3_tr_t slots
+M3_TS_REPLY         = 4
+M3_TS_START         = 8
+M3_TS_END           = 12
+
 ; Deadline slots (offsets into m3_dl).
 M3_DL_CMD           = 0
 M3_DL_APP           = 4

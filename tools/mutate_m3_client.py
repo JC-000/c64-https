@@ -234,8 +234,8 @@ MUTANTS = [
      "        bne @p_dead_code            ; the reason the block was refused\n        lda #0",
      ["test_empty_read_reply_is_not_eof"]),
     ("short-not-8f", "finding 7: $8F on a block short of its header", NET,
-     "        lda #UCI_ERR_SHORT_READ     ; the block ended short of its header",
-     "        lda #UCI_ERR_BAD_READ_HDR   ; the block ended short of its header",
+     "        lda #UCI_ERR_SHORT_READ     ; short of its header: a hole (ER-5)",
+     "        lda #UCI_ERR_BAD_READ_HDR   ; short of its header: a hole (ER-5)",
      ["test_short_block_is_dead"]),
     ("tail-no-code", "finding 7: $8B on bytes past the header", NET,
      "        lda #UCI_ERR_BAD_READ_HDR   ; bytes past the header: dropped\n        sta m3_bad",
@@ -276,6 +276,52 @@ MUTANTS = [
      ["test_held_session_message"]),
     ("tls12-offered", "S 1.1/1.7 flags: TLS 1.3 only by default", NET,
      "M3_FLAGS = M3_FLAG_TLS13_ONLY", "M3_FLAGS = 0", ["test_open_layout"]),
+    # read pacing (m3.inc): fence every write, no read; the fast copy loop
+    ("copy-read-fenced", "no fence after a READ (copy loop)", NET,
+     "        lda UCI_RESP_DATA\n@p_store:\n        sta $FFFF                   ; SMC: tcp_recv_buf + tail, advanced here",
+     "        lda UCI_RESP_DATA\n        uci_fence\n@p_store:\n        sta $FFFF",
+     ["test_read_pacing"]),
+    ("status-read-fenced", "no fence after a READ (status polls)", CMD,
+     ".ifdef M3_READ_FENCE\n        jmp m3_settle\n.else\n        rts\n.endif",
+     ".ifdef M3_READ_FENCE\n        jmp m3_settle\n.else\n        jmp m3_settle\n.endif",
+     ["test_read_pacing"]),
+    ("put-unfenced", "a fence after every command-byte WRITE", CMD,
+     "m3_put:\n        sta UCI_CMD_DATA\n        jmp m3_settle",
+     "m3_put:\n        sta UCI_CMD_DATA\n        rts", ["test_read_pacing"]),
+    ("push-unfenced", "a fence after the PUSH WRITE", CMD,
+     "        jsr m3_tr_sample\n.endif\n        jsr m3_settle\n",
+     "        jsr m3_tr_sample\n.endif\n", ["test_read_pacing"]),
+    ("accept-unfenced", "a fence after the data-accept WRITE", CMD,
+     "        lda #UCI_CTRL_DATA_ACC\n        sta UCI_CONTROL\n        jmp m3_settle",
+     "        lda #UCI_CTRL_DATA_ACC\n        sta UCI_CONTROL\n        rts",
+     ["test_read_pacing"]),
+    ("copy-blind", "ER-12: DATA_AV before every body byte", NET,
+     "        lda UCI_STATUS              ; ER-12: DATA_AV before EVERY byte, or a\n"
+     "        bpl @p_short                ;  short block reads as $00s (bit 7)\n", "",
+     ["test_short_block_is_dead"]),
+    ("copy-no-wrap", "the copy wraps at the ring's end", NET,
+     "        cmp #>(tcp_recv_buf + TCP_RECV_MASK + 1)", "        cmp #$D1",
+     ["test_ring_wraps_in_one_block"]),
+    ("copy-count-pages", "the copy runs exactly n times", NET,
+     "        txa\n        beq :+\n        iny\n:\n", "",
+     ["test_http_content_length_end_to_end"]),
+    ("copy-tail-stale", "the ring tail follows the copy", NET,
+     "        lda @p_store+1              ; the tail is where the store points\n"
+     "        sta tcp_recv_tail+0\n", "",
+     ["test_http_content_length_end_to_end", "test_ring_wraps_in_one_block"]),
+    # adv-296
+    ("count-always-iny", "the copy runs exactly n times at n = k*256", NET,
+     "        txa\n        beq :+\n        iny\n:\n        clc\n        lda tcp_recv_tail+0",
+     "        iny\n        clc\n        lda tcp_recv_tail+0",
+     ["test_copy_counts_at_page_edges"]),
+    ("rejected-clr-unfenced", "a fence after the rejected path's CLR_ERR write", CMD,
+     "        lda #UCI_CTRL_CLR_ERR\n        sta UCI_CONTROL\n        jsr m3_settle\n        lda #M3_EXEC_REJECTED",
+     "        lda #UCI_CTRL_CLR_ERR\n        sta UCI_CONTROL\n        lda #M3_EXEC_REJECTED",
+     ["test_read_pacing"]),
+    ("statline-nopsled", "no delay of any shape after a READ", CMD,
+     "        lda UCI_STATUS_DATA\n.ifdef M3_READ_FENCE\n        jsr m3_settle\n.endif\n",
+     "        lda UCI_STATUS_DATA\n.repeat 40\n        nop\n.endrep\n",
+     ["test_read_pacing"]),
 ]
 
 
@@ -295,6 +341,13 @@ def _stamp():
         # and the rules here are the plain image's.
         raise SystemExit("build/ is an HTTPS_BODY_TO_REU image: the mutants "
                          "are written against plain `make BACKEND=uci-m3`")
+    for knob in ("M3_READ_FENCE", "M3_TRACE"):
+        # The pacing mutants target the default image's code; the fenced
+        # copy loop is not assembled there, and the trace moves timings.
+        if "-D " + knob in vals.get("CA65FLAGS", ""):
+            raise SystemExit("build/ is a %s=1 image: the mutants are "
+                             "written against plain `make BACKEND=uci-m3`"
+                             % knob)
     return vals
 
 

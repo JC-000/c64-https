@@ -117,7 +117,10 @@ Variables:
     (M3 firmware; M3-SPEC v1 + errata v1.1/v1.2), `src/net/uci-m3/` +
     `cfg/c64-https-uci-m3.cfg`, no 6510 TLS/crypto linked, every crypto knob
     `$(error)`s, not in `PACKAGE_VARIANTS`. `HTTPS_PIN_SPKI_SHA256` = trust
-    PIN, `M3_ALLOW_TLS12=1` offers hardened 1.2. Model + mutants:
+    PIN, `M3_ALLOW_TLS12=1` offers hardened 1.2. UCI reads are unfenced
+    (writes keep `uci_fence`); `M3_READ_FENCE=1` restores the old client
+    byte for byte, `M3_TRACE=1` = per-READ timing records (measurement only;
+    `rig_https_m3.py timed`). Model + mutants:
     `tools/check_m3_client.py`, `tools/mutate_m3_client.py` (standalone,
     need an m3 build); hardware: `rig_https_banner.py`, `rig_https_m3.py`.
   - `USE_NISTCURVES_ONCHIP=1` — libs/nistcurves FP_ONCHIP_MUL profile: no

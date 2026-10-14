@@ -163,9 +163,10 @@ What it needs
   - Its WiFi module up (the ESP32 does the TLS), the network connected, and
     the clock set by SNTP (certificate dates are checked).
   - The Ultimate's Command Interface enabled.
-  - No REU. Turbo is optional but recommended: the client paces every UCI
-    register access for the FPGA, so large pages are slow at 1 MHz (not
-    measured there; see the measured 48 MHz times below).
+  - No REU. Turbo is optional. The same client source, in its REU-sink
+    build, fetched en.wikipedia.org /robots.txt (28,275 B) in 16 s from G
+    at 1 MHz (turbo off) and in 6 s at 48 MHz (U64E, 2026-10-13); large
+    pages were not timed at 1 MHz.
   Interface implemented: $SPEC.
 
 How to run it
@@ -197,10 +198,10 @@ Three URLs to try
 Measured with THIS image (PRG sha256 above), validated on an Ultimate 64
 Elite (U64E), firmware 3.15 git 3a1ff9ff, 48 MHz, REU disabled, the .d64
 mounted on drive 8 and loaded with LOAD"*",8,1
-(tools/uci/rig_https_m3_demo.py), 2026-10-06:
-  1. HTTP 200, 751,848 B, complete by its chunked framing, 207 s from G to
+(tools/uci/rig_https_m3_demo.py), 2026-10-13:
+  1. HTTP 200, 751,823 B consumed == Content-Length, 18 s from G to
      CONNECTION CLOSED (the page size changes as the article is edited).
-  2. HTTP 200, 16,739 B consumed == Content-Length, 9 s.
+  2. HTTP 200, 16,739 B consumed == Content-Length, 4 s.
   3. Refused: 94,CERTIFICATE NAME MISMATCH: 0x00000004.
   Other Ultimate models, and other clock speeds, have not been tested.
 
