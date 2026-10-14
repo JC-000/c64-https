@@ -442,6 +442,7 @@ def timed_attempt(client, name, bdir: Path, page: str, run_dir: Path) -> dict:
     if tr is not None:
         (run_dir / f"trace-{name}-{page}-{rec['start']}.json").write_text(json.dumps(tr))
         rec["trace"] = summarise_trace(tr)
+    rec["screen_at_end"] = [x for x in lines if x.strip()]
     if outcome != "VIEWER":
         dump(lines, f"{name} final screen")
         rec["verdict"] = f"INCOMPLETE: {outcome}"
@@ -452,6 +453,7 @@ def timed_attempt(client, name, bdir: Path, page: str, run_dir: Path) -> dict:
     client.send_text("Q", finish_with_return=False)
     m, lines = wait_for(client, ["CONNECTION CLOSED"], 60)
     if not m:
+        dump(lines, f"{name} after Q")
         guard_socket_teardown(client.read_mem, lab["net_tcp_state"])
         raise Fail(f"{name}: no CONNECTION CLOSED after Q")
     client.reset()                      # the socket is closed: safe

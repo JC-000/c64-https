@@ -732,6 +732,9 @@ m3_status_number:
 ; =============================================================================
 .ifdef M3_TRACE
 net_poll:
+        lda net_tcp_state           ; the menu loop polls with no session:
+        cmp #NET_TCP_CONNECTED      ;  untraced, or it fills the records
+        bne m3_poll
         lda #0
         sta m3_tr_got
         sta m3_tr_post
@@ -1363,7 +1366,7 @@ m3_cnt:             .res 2
 m3_wresp:           .res 2
 .ifdef M3_TRACE
 m3_tr_zero:                     ; net_init zeroes these
-m3_tr_count:        .res 2      ; net_poll calls since net_init
+m3_tr_count:        .res 2      ; CONNECTED net_poll calls since net_init
 m3_tr_n:            .res 2      ; records kept (<= M3_TR_CAP)
 m3_tr_zero_end:
 m3_tr_ptr:          .res 2

@@ -72,9 +72,9 @@ M3_B_HTTP_IDLE      = 6000      ; http_recv_body: 60 s with no byte arrived
 ; fallback if some device turns out to need it.
 
 ; --- Timing trace (M3_TRACE, a measurement build only) ---------------------
-; net_poll appends one M3_TR_REC-byte record per call to M3_TR_BASE (the
-; MAIN tail, link-asserted free), up to M3_TR_CAP; m3_tr_count keeps
-; counting past it. Each delta is (dTB, dTA): CIA2 timer B units and timer
+; net_poll appends one M3_TR_REC-byte record per call made while CONNECTED
+; to M3_TR_BASE (the MAIN tail, link-asserted free), up to M3_TR_CAP;
+; m3_tr_count keeps counting past it. Each delta is (dTB, dTA): CIA2 timer B units and timer
 ; A cycles, ticks = dTB * M3_UNIT_CYCLES + (signed) dTA. Record layout:
 ;   +0  rtt   PUSH of the READ to REPLY_VALID seen (0/0: no READ was run)
 ;   +4  total the whole net_poll call
