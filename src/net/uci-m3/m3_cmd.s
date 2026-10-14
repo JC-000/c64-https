@@ -54,6 +54,17 @@
 .export m3_code
 .export m3_wedged
 .export m3_dl
+.ifdef M3_TRACE
+.export m3_tr_sample
+.export m3_tr_delta
+.export m3_tr_t
+.export m3_tr_d
+.export m3_tr_got
+.export m3_tr_post
+.export m3_tr_pushes
+.export m3_tr_bit3
+.export m3_tr_or
+.endif
 
 CIA2_TA_LO  = $DD04
 CIA2_TA_HI  = $DD05
@@ -139,10 +150,14 @@ m3_settle:
         uci_fence
         rts
 
-; m3_get_status — A = $DF1C, read and settled.
+; m3_get_status — A = $DF1C. Unfenced unless M3_READ_FENCE (m3.inc).
 m3_get_status:
         lda UCI_STATUS
+.ifdef M3_READ_FENCE
         jmp m3_settle
+.else
+        rts
+.endif
 
 ; =============================================================================
 ; m3_wait_clear / m3_wait_set — A = mask. Spin until ($DF1C & mask) is zero
@@ -282,7 +297,14 @@ m3_exec:
         jsr m3_settle
         lda #UCI_CTRL_PUSH_CMD
         sta UCI_CONTROL
+.ifdef M3_TRACE
+        ldy #M3_TS_PUSH
+        jsr m3_tr_sample
+.endif
         jsr m3_settle
+.ifdef M3_TRACE
+        jsr m3_tr_post_push
+.endif
         lda m3_tmp2
         ldx m3_tmp2+1
         ldy #M3_DL_CMD
@@ -290,6 +312,12 @@ m3_exec:
         lda #(UCI_STAT_REPLY_VALID | UCI_STAT_ERROR)
         jsr m3_wait_set
         bcs @x_timeout
+.ifdef M3_TRACE
+        ldy #M3_TS_REPLY
+        jsr m3_tr_sample
+        lda #1
+        sta m3_tr_got
+.endif
         jsr m3_get_status
         and #UCI_STAT_ERROR
         beq @x_reply
@@ -337,7 +365,9 @@ m3_read_data:
         and #UCI_STAT_DATA_AV
         beq @rd_done
         lda UCI_RESP_DATA
+.ifdef M3_READ_FENCE
         jsr m3_settle
+.endif
 @rd_store:
         sta $FFFF,y                 ; SMC: m3_rd_dst
         iny
@@ -361,7 +391,9 @@ m3_discard_data:
         and #UCI_STAT_DATA_AV
         beq @dd_done
         lda UCI_RESP_DATA
+.ifdef M3_READ_FENCE
         jsr m3_settle
+.endif
         lda #1
         sta m3_discarded
         dey
@@ -387,7 +419,9 @@ m3_read_status:
         and #UCI_STAT_STAT_AV
         beq @rs_done
         lda UCI_STATUS_DATA
+.ifdef M3_READ_FENCE
         jsr m3_settle
+.endif
         cpy #M3_STATUS_MAX
         bcs @rs_skip
         sta m3_status,y
@@ -438,6 +472,76 @@ m3_finish:
         jsr m3_read_status
         jmp m3_accept
 
+.ifdef M3_TRACE
+; =============================================================================
+; M3_TRACE only (m3.inc, "Timing trace"): never in a default build.
+; m3_tr_sample — Y = slot (M3_TS_*): CIA2 timer B (2) then timer A (2) into
+; m3_tr_t+Y, a consistent set (read again until neither timer moved between
+; its bytes). Clobbers: A. Preserves X, Y.
+; =============================================================================
+m3_tr_sample:
+        lda CIA2_TB_HI
+        sta m3_tr_t+1,y
+        lda CIA2_TB_LO
+        sta m3_tr_t+0,y
+        lda CIA2_TA_HI
+        sta m3_tr_t+3,y
+        lda CIA2_TA_LO
+        sta m3_tr_t+2,y
+        lda CIA2_TA_HI
+        cmp m3_tr_t+3,y
+        bne m3_tr_sample
+        lda CIA2_TB_LO
+        cmp m3_tr_t+0,y
+        bne m3_tr_sample
+        lda CIA2_TB_HI
+        cmp m3_tr_t+1,y
+        bne m3_tr_sample
+        rts
+
+; m3_tr_delta — X = earlier slot, Y = later slot: m3_tr_d = (dTB, dTA), each
+; 16-bit little-endian; both timers count down, so earlier - later.
+; Clobbers: A.
+m3_tr_delta:
+        sec
+        lda m3_tr_t+0,x
+        sbc m3_tr_t+0,y
+        sta m3_tr_d+0
+        lda m3_tr_t+1,x
+        sbc m3_tr_t+1,y
+        sta m3_tr_d+1
+        sec
+        lda m3_tr_t+2,x
+        sbc m3_tr_t+2,y
+        sta m3_tr_d+2
+        lda m3_tr_t+3,x
+        sbc m3_tr_t+3,y
+        sta m3_tr_d+3
+        rts
+
+; m3_tr_post_push — $DF1C as the PUSH left it (after its fence): kept for
+; the READ record, OR-ed into m3_tr_or, and bit 3 (the FPGA's error_busy,
+; a refused push) counted. Clobbers: A.
+m3_tr_post_push:
+        lda UCI_STATUS
+.ifdef M3_READ_FENCE
+        jsr m3_settle
+.endif
+        sta m3_tr_post
+        ora m3_tr_or
+        sta m3_tr_or
+        inc m3_tr_pushes
+        bne :+
+        inc m3_tr_pushes+1
+:       lda m3_tr_post
+        and #UCI_STAT_ERROR
+        beq :+
+        inc m3_tr_bit3
+        bne :+
+        inc m3_tr_bit3+1
+:       rts
+.endif
+
 .segment "UCI_BSS"
 
 m3_dl:          .res 8          ; two deadline slots: start(2), length(2)
@@ -453,3 +557,12 @@ m3_status:      .res M3_STATUS_MAX
 m3_status_len:  .res 1
 m3_status_seen: .res 1
 m3_code:        .res 1
+.ifdef M3_TRACE
+m3_tr_t:        .res 16         ; M3_TS_* slots: TB (2), TA (2)
+m3_tr_d:        .res 4
+m3_tr_got:      .res 1          ; 1: the last m3_exec saw its reply (rtt valid)
+m3_tr_post:     .res 1
+m3_tr_pushes:   .res 2
+m3_tr_bit3:     .res 2
+m3_tr_or:       .res 1
+.endif

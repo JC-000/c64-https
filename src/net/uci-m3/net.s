@@ -82,6 +82,21 @@
 .import m3_status_seen
 .import m3_code
 .import m3_wedged
+.ifdef M3_TRACE
+.import m3_tr_sample
+.import m3_tr_delta
+.import m3_tr_d
+.import m3_tr_got
+.import m3_tr_post
+.import m3_tr_pushes
+.import m3_tr_bit3
+.import m3_tr_or
+.export m3_tr_count
+.export m3_tr_n
+; The records live in MAIN's unused tail: the image must end below them.
+.import __MAIN_LAST__
+.assert __MAIN_LAST__ <= M3_TR_BASE, lderror, "M3_TRACE: the image reaches M3_TR_BASE"
+.endif
 
 .import tcp_recv_head
 .import tcp_recv_tail
@@ -129,6 +144,22 @@ net_init:
         sta m3_status_len
         sta net_tcp_state           ; NET_TCP_CLOSED
         sta net_last_error
+.ifdef M3_TRACE
+        ldx #(m3_tr_zero_end - m3_tr_zero - 1)
+:       sta m3_tr_zero,x
+        dex
+        bpl :-
+        sta m3_tr_pushes
+        sta m3_tr_pushes+1
+        sta m3_tr_bit3
+        sta m3_tr_bit3+1
+        sta m3_tr_or
+        lda #<M3_TR_BASE
+        sta m3_tr_ptr
+        lda #>M3_TR_BASE
+        sta m3_tr_ptr+1
+        lda #0
+.endif
         ldx #3
 @zero_ip:
         sta net_local_ip,x
@@ -140,7 +171,9 @@ net_init:
         ; so do not ABORT and do not wait (ER-2). $49 = $C9 with the UCI
         ; IRQ active.
         lda UCI_ID
+.ifdef M3_READ_FENCE
         jsr m3_settle
+.endif
         and #$7F
         cmp #(UCI_ID_VALUE & $7F)
         beq @present
@@ -697,7 +730,23 @@ m3_status_number:
 ; handle is CLOSEd by the caller (ERROR, owned).
 ; Clobbers: A, X, Y
 ; =============================================================================
+.ifdef M3_TRACE
 net_poll:
+        lda #0
+        sta m3_tr_got
+        sta m3_tr_post
+        ldy #M3_TS_START
+        jsr m3_tr_sample
+        lda tcp_recv_tail+0
+        sta m3_tr_tail0
+        lda tcp_recv_tail+1
+        sta m3_tr_tail0+1
+        jsr m3_poll
+        jmp m3_tr_end
+m3_poll:
+.else
+net_poll:
+.endif
         lda net_tcp_state
         cmp #NET_TCP_CONNECTED
         beq @p_go
@@ -758,7 +807,9 @@ net_poll:
         sta m3_bad                  ; 0, or the code a bad block earns
         ; ER-12: test bit 7 before the header. No data = an empty reply.
         lda UCI_STATUS
+.ifdef M3_READ_FENCE
         jsr m3_settle
+.endif
         and #UCI_STAT_DATA_AV
         bne :+
         jsr m3_finish
@@ -802,6 +853,7 @@ net_poll:
         lda m3_req+1
         sta m3_hdr+1
 @p_copy_init:
+.ifdef M3_READ_FENCE
 @p_copy:
         lda m3_hdr+0
         ora m3_hdr+1
@@ -836,6 +888,56 @@ net_poll:
         dec m3_hdr+1
 :       dec m3_hdr+0
         jmp @p_copy
+.else
+        ; n > 0 here: $0000 went to @p_0000, and a capped n is the request,
+        ; which is >= 1. X = n's low byte, Y = its pages, one more when the
+        ; low byte is not 0: dex/bne then dey/bne runs exactly n times.
+        ldx m3_hdr+0
+        ldy m3_hdr+1
+        txa
+        beq :+
+        iny
+:
+        clc
+        lda tcp_recv_tail+0
+        adc #<tcp_recv_buf
+        sta @p_store+1
+        lda tcp_recv_tail+1
+        adc #>tcp_recv_buf
+        sta @p_store+2
+@p_copy:
+        lda UCI_STATUS              ; ER-12: DATA_AV before EVERY byte, or a
+        bpl @p_short                ;  short block reads as $00s (bit 7)
+        lda UCI_RESP_DATA
+@p_store:
+        sta $FFFF                   ; SMC: tcp_recv_buf + tail, advanced here
+        inc @p_store+1
+        bne @p_next
+        inc @p_store+2              ; a new page: wrap at the ring's end
+        lda @p_store+2
+        cmp #>(tcp_recv_buf + TCP_RECV_MASK + 1)
+        bne @p_next
+        lda #>tcp_recv_buf
+        sta @p_store+2
+@p_next:
+        dex
+        bne @p_copy
+        dey
+        bne @p_copy
+        beq @p_tail                 ; always
+@p_short:
+        lda #UCI_ERR_SHORT_READ     ; short of its header: a hole (ER-5)
+        sta m3_bad
+@p_tail:
+        lda @p_store+1              ; the tail is where the store points
+        sta tcp_recv_tail+0
+        lda @p_store+2
+        sec
+        sbc #>tcp_recv_buf
+        sta tcp_recv_tail+1
+.assert UCI_STAT_DATA_AV = $80, error, "@p_copy tests DATA_AV with bpl"
+.assert <tcp_recv_buf = 0 && <TCP_RECV_MASK = $FF, error, "@p_copy wraps the ring by pages"
+.endif
 @p_copied:
         ; Bytes left in this block, or a Data More block behind it, are a
         ; hole in the TLS stream: the session cannot be trusted (ER-5).
@@ -848,7 +950,9 @@ net_poll:
         sta m3_bad
 :
         lda UCI_STATUS
+.ifdef M3_READ_FENCE
         jsr m3_settle
+.endif
         and #UCI_STAT_STATE
         cmp #UCI_STAT_STATE         ; "11": Data More
         bne @p_last
@@ -938,6 +1042,80 @@ net_poll:
         lda #NET_TCP_ERROR
         sta net_tcp_state
         rts
+
+.ifdef M3_TRACE
+; m3_tr_end — close the trace record net_poll opened (m3.inc, "Timing
+; trace"): count the call; below M3_TR_CAP, append its record.
+; Clobbers: A, X, Y
+m3_tr_end:
+        ldy #M3_TS_END
+        jsr m3_tr_sample
+        inc m3_tr_count
+        bne :+
+        inc m3_tr_count+1
+:       lda m3_tr_n
+        cmp #<M3_TR_CAP
+        lda m3_tr_n+1
+        sbc #>M3_TR_CAP
+        bcc :+
+        jmp @te_out                 ; full: counted, not kept
+:       ldy #3
+        lda #0
+:       sta m3_tr_rec,y             ; rtt 0/0: no READ reply in this call
+        dey
+        bpl :-
+        lda m3_tr_got
+        beq @te_total
+        ldx #M3_TS_PUSH
+        ldy #M3_TS_REPLY
+        jsr m3_tr_delta
+        ldy #3
+:       lda m3_tr_d,y
+        sta m3_tr_rec,y
+        dey
+        bpl :-
+@te_total:
+        ldx #M3_TS_START
+        ldy #M3_TS_END
+        jsr m3_tr_delta
+        ldy #3
+:       lda m3_tr_d,y
+        sta m3_tr_rec+4,y
+        dey
+        bpl :-
+        lda tcp_recv_tail+0
+        sec
+        sbc m3_tr_tail0
+        sta m3_tr_rec+8
+        lda tcp_recv_tail+1
+        sbc m3_tr_tail0+1
+        and #>TCP_RECV_MASK
+        sta m3_tr_rec+9
+        lda m3_poll_result
+        sta m3_tr_rec+10
+        lda m3_tr_post              ; the post-PUSH $DF1C of this call's READ
+        sta m3_tr_rec+11            ;  (0: no PUSH in this call)
+        lda m3_tr_ptr
+        sta @te_st+1
+        lda m3_tr_ptr+1
+        sta @te_st+2
+        ldy #M3_TR_REC - 1
+:       lda m3_tr_rec,y
+@te_st: sta $FFFF,y                 ; SMC: m3_tr_ptr
+        dey
+        bpl :-
+        lda m3_tr_ptr
+        clc
+        adc #M3_TR_REC
+        sta m3_tr_ptr
+        bcc :+
+        inc m3_tr_ptr+1
+:       inc m3_tr_n
+        bne @te_out
+        inc m3_tr_n+1
+@te_out:
+        rts
+.endif
 
 ; =============================================================================
 ; net_tcp_send — A/X = data, net_send_len = length.
@@ -1183,3 +1361,12 @@ m3_rem:             .res 2
 m3_piece:           .res 2
 m3_cnt:             .res 2
 m3_wresp:           .res 2
+.ifdef M3_TRACE
+m3_tr_zero:                     ; net_init zeroes these
+m3_tr_count:        .res 2      ; net_poll calls since net_init
+m3_tr_n:            .res 2      ; records kept (<= M3_TR_CAP)
+m3_tr_zero_end:
+m3_tr_ptr:          .res 2
+m3_tr_tail0:        .res 2
+m3_tr_rec:          .res M3_TR_REC
+.endif
