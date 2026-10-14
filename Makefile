@@ -55,6 +55,19 @@ else
 $(foreach k,M3_READ_FENCE M3_TRACE,$(if $(filter-out 0,$($(k))),$(error $(k)=$($(k)) applies only to BACKEND=uci-m3)))
 endif
 
+# UCI_READ_FENCE=1 (BACKEND=uci): a uci_fence after every UCI register READ
+# in src/net/uci too, as before (src/net/uci/uci_regs.inc, uci_read_fence):
+# the A/B arm and the fallback. Refused on the other backends; uci-m3 has
+# its own M3_READ_FENCE.
+ifneq ($(filter-out 0 1,$(UCI_READ_FENCE)),)
+$(error UCI_READ_FENCE must be 1 or 0/unset)
+endif
+ifneq ($(BACKEND),uci)
+ifeq ($(UCI_READ_FENCE),1)
+$(error UCI_READ_FENCE=1 applies only to BACKEND=uci)
+endif
+endif
+
 # X25519 is always the libs/x25519 sibling (issue #245 retired the in-tree
 # src/crypto/{x25519,fe25519}.s). The old opt-in knob is refused rather than
 # ignored, so a stale command line cannot believe it selected something.
@@ -120,6 +133,9 @@ CA65FLAGS += -D BACKEND_UCI=1
 # patience), so the check has the least to do exactly where it does not fit.
 # Documented in README and tracked on #135 rather than left to be discovered.
 CA65FLAGS += -D X509_VERIFY_NAME=1
+ifeq ($(UCI_READ_FENCE),1)
+CA65FLAGS += -D UCI_READ_FENCE=1
+endif
 else ifeq ($(BACKEND),uci-m3)
 # A UCI build (the typed-target prompt, the REU body sink and the viewer
 # come with BACKEND_UCI) plus the M3 switch. -I src/net/uci after the

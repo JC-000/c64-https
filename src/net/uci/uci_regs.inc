@@ -114,6 +114,19 @@ UCI_FENCE_INNER = 217   ; inner loop iterations
     pla                         ; restore A
 .endmacro
 
+; uci_read_fence — the fence after a READ of $DF1C-$DF1F in src/net/uci.
+; The FPGA's gap is needed after a WRITE (above); reads are unfenced: the
+; queues advance on the read itself and DATA_AV / STAT_AV are polled before
+; every byte. `make BACKEND=uci UCI_READ_FENCE=1` puts the fence back and
+; assembles the previous products byte for byte (the A/B arm and the
+; fallback). Sites that fence through `jsr uci_settle` use .ifdef directly.
+; uci-m3 has its own knob (M3_READ_FENCE, src/net/uci-m3/m3.inc).
+.macro uci_read_fence
+.ifdef UCI_READ_FENCE
+    uci_fence
+.endif
+.endmacro
+
 ; =============================================================================
 ; Command IDs (issued as the first command byte after selecting the target)
 ; Phase 2+ will use these; Phase 1b keeps them here purely as equates.

@@ -368,9 +368,11 @@ can catch a regression here — the guard is `tools/uci/boot_check.py`.
 
 ### Firmware quirk — FPGA register timing (delay-loop fence)
 
-The UCI FPGA needs a minimum gap between register accesses regardless of
-CPU clock. `uci_fence` (`uci_regs.inc`, OUTER=5, INNER=217, ~85 us at
-64 MHz) follows every access to `$DF1C-$DF1F`. INNER=217 covers both the
+The UCI FPGA needs a minimum gap after register WRITES regardless of CPU
+clock. `uci_fence` (`uci_regs.inc`, OUTER=5, INNER=217, ~85 us at 64 MHz)
+follows every write to `$DF1C`/`$DF1D`; reads are unfenced on both UCI
+backends (`uci_read_fence`; `UCI_READ_FENCE=1` / `M3_READ_FENCE=1` restore
+the old images byte for byte; the trust store's `uci_dos.s` still fences). INNER=217 covers both the
 U64E (~38 us floor) and the C64 Ultimate (floor bracketed 51.6 FAIL /
 62.9 PASS us at 64 MHz; the symptom below the floor is a silently lost
 TCP_CONNECT push → `NO_SOCKET`). 48 MHz (U64E) and 64 MHz (C64U) verified.

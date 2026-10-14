@@ -219,7 +219,7 @@ uci_wait_idle:
         sta @wi_elapsed
 @wi_loop:
         lda UCI_STATUS
-        uci_fence                   ; settle read before testing bits
+        uci_read_fence                   ; settle read before testing bits
         and #(UCI_STAT_STATE | UCI_STAT_ABORT_PENDING | UCI_STAT_CMD_BUSY) ; $35
         beq @idle_done
 
@@ -269,7 +269,7 @@ uci_wait_not_busy:
         sta @wnb_elapsed
 @wnb_loop:
         lda UCI_STATUS
-        uci_fence                   ; settle read before testing bits
+        uci_read_fence                   ; settle read before testing bits
         and #UCI_STAT_CMD_BUSY
         beq @wnb_done
 
@@ -393,7 +393,7 @@ uci_wait_reply:
         sta @wr_elapsed
 @wr_loop:
         lda UCI_STATUS
-        uci_fence                   ; settle read before testing bits
+        uci_read_fence                   ; settle read before testing bits
         and #(UCI_STAT_REPLY_VALID | UCI_STAT_ERROR)   ; $28
         bne @wr_done
 
@@ -425,7 +425,9 @@ uci_wait_reply:
 ; =============================================================================
 uci_check_err:
         lda UCI_STATUS
+.ifdef UCI_READ_FENCE
         jsr uci_settle               ; settle before testing error bit
+.endif
         and #UCI_STAT_ERROR
         bne @has_err
         clc
@@ -537,11 +539,11 @@ uci_read_resp_bytes:
         cpy uci_resp_max
         bcs @rd_done
         lda UCI_STATUS
-        uci_fence                   ; settle before testing DATA_AV
+        uci_read_fence                   ; settle before testing DATA_AV
         and #UCI_STAT_DATA_AV
         beq @rd_done                ; reply shorter than max: it is final
         lda UCI_RESP_DATA
-        uci_fence                   ; settle before storing/looping
+        uci_read_fence                   ; settle before storing/looping
 @rd_store:
         sta $FFFF,y             ; SMC: dst low/high patched above
         iny
@@ -589,14 +591,18 @@ uci_drain_resp:
         sta @drn_elapsed
 @drn_loop:
         lda UCI_STATUS
+.ifdef UCI_READ_FENCE
         jsr uci_settle               ; settle before testing DATA_AV
+.endif
         and #UCI_STAT_DATA_AV
         bne @drn_have
         clc
         rts
 @drn_have:
         lda UCI_RESP_DATA
+.ifdef UCI_READ_FENCE
         jsr uci_settle
+.endif
         ; NO PER-BYTE ACK — see the header. The read advanced the FIFO.
 
         ; Check TOD for elapsed tenths. Latch (HOUR) then read TENTHS.
@@ -671,7 +677,9 @@ uci_drain_status:
         sta @dst_elapsed
 @dst_loop:
         lda UCI_STATUS
+.ifdef UCI_READ_FENCE
         jsr uci_settle               ; settle before testing STAT_AV
+.endif
         and #UCI_STAT_STAT_AV
         bne @dst_have
         jsr @dst_commit
@@ -679,7 +687,9 @@ uci_drain_status:
         rts
 @dst_have:
         lda UCI_STATUS_DATA
+.ifdef UCI_READ_FENCE
         jsr uci_settle
+.endif
         ; Last two bytes seen, non-sticky: net_poll reads the errno of a
         ; "02,NO DATA: n" line off them (#253).
         ldx uci_status_tail+1
