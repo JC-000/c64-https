@@ -201,7 +201,7 @@ mounted on drive 8 and loaded with LOAD"*",8,1
 (tools/uci/rig_https_m3_demo.py), 2026-10-13:
   1. HTTP 200, 751,823 B consumed == Content-Length, 18 s from G to
      CONNECTION CLOSED (the page size changes as the article is edited).
-  2. HTTP 200, 16,739 B consumed == Content-Length, 4 s.
+  2. HTTP 200, 16,739 B consumed == Content-Length, 5 s.
   3. Refused: 94,CERTIFICATE NAME MISMATCH: 0x00000004.
   Other Ultimate models, and other clock speeds, have not been tested.
 
