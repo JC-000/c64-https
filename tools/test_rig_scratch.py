@@ -386,7 +386,7 @@ def _called_names(path: Path) -> set[str]:
 
 def allocating_rigs() -> list[str]:
     """Every tools/uci script that builds a scratch policy itself. Wrappers
-    that run another rig's main() (print_body, local_p384) inherit it."""
+    that run another rig's main() (print_body) inherit it."""
     return sorted(
         p.stem for p in UCI.glob("*.py")
         if not p.name.startswith("_")

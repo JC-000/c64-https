@@ -16,7 +16,6 @@
 ;   1. mul_tables_init          (shared 8x8 sqtab)         [Phase C.0: stub]
 ;   2. poly1305_shoup_init      (Profile A Shoup r_tab)    [Phase C.2]
 ;   3. ec_precompute_256        (P-256 scalar precompute)  [Phase C.3]
-;   4. ec_precompute_384        (P-384 scalar precompute)  [Phase C.3]
 ; =============================================================================
 
         .include "constants.inc"        ; reu_* register equates

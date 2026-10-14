@@ -53,8 +53,8 @@ def default_vice_config(
     every ``fp_mul`` returns ``a*255*b mod p`` (the bank fetch silently
     no-ops and ``mul_dma_lo/hi`` at $BA00/$BB00 stays stuck at
     ``reu_mul_init``'s final-iteration residue, a=255). The same trap
-    applies to any test that touches the X25519 sibling, the P-384 overlay
-    images, or boot-time REU stashes.
+    applies to any test that touches the X25519 sibling or boot-time REU
+    stashes.
 
     Any caller-supplied ``extra_args`` are **appended** to the mandatory
     REU flags rather than replacing them, so callers can pass other VICE

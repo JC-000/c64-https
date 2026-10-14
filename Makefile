@@ -40,9 +40,8 @@ CFG       := cfg/c64-https-$(BACKEND).cfg
 # PACKAGE_VARIANTS, and it changes no byte of any other profile.
 ifeq ($(BACKEND),uci-m3)
 M3_REFUSED_KNOBS := USE_NISTCURVES_ONCHIP USE_NISTCURVES_ONCHIP_COMB \
-    ENABLE_P384_VERIFY USE_OVERLAY_P384_EMBED EMBED_P256_OVERLAY \
-    USE_OVERLAY_P256_EMBED COLD_BANK TRUST_STORE TLS_STREAM_DEFRAME \
-    KEEP_CRYPTO_SWAP KEEP_X509_PARSE_CERT KEEP_WORD32_ALL HTTPS_PIN_WARN \
+    COLD_BANK TRUST_STORE TLS_STREAM_DEFRAME \
+    KEEP_X509_PARSE_CERT KEEP_WORD32_ALL HTTPS_PIN_WARN \
     HTTPS_SNI VIC_BLANK
 $(foreach k,$(M3_REFUSED_KNOBS),$(if $(strip $($(k))),$(error $(k)=$($(k)) does not apply to BACKEND=uci-m3: it links no 6510 TLS or crypto (the ESP32 does the TLS); drop the variable)))
 ifneq ($(filter-out 0 1,$(M3_ALLOW_TLS12)),)
@@ -62,6 +61,14 @@ endif
 ifneq ($(origin USE_X25519_SIBLING),undefined)
 $(error USE_X25519_SIBLING is retired (issue #245): every build links the libs/x25519 sibling; drop the variable)
 endif
+
+# P-384 is retired: the client verifies P-256 only, and every other curve is
+# a clean reject. Its knobs, and the overlay machinery that existed only to
+# page P-384 (and the retired P-256 embed) into CRYPTO_OVERLAY, are refused
+# rather than ignored. EMBED_P256_OVERLAY was already retired (issue #118).
+RETIRED_P384_KNOBS := ENABLE_P384_VERIFY USE_OVERLAY_P384_EMBED KEEP_CRYPTO_SWAP \
+    EMBED_P256_OVERLAY USE_OVERLAY_P256_EMBED
+$(foreach k,$(RETIRED_P384_KNOBS),$(if $(filter-out undefined,$(origin $(k))),$(error $(k) is retired with the P-384 lane: only P-256 is verified, and the CRYPTO_OVERLAY swap machinery is gone; drop the variable)))
 
 IP65_DIR     := ip65
 IP65_BUILD   := ip65-build
@@ -332,8 +339,7 @@ else ifneq ($(filter-out 0,$(TRUST_BUNDLE)),)
 $(error TRUST_BUNDLE must be 1 (link the signed bundle) or 0/unset)
 endif
 
-# Sibling-lib archive set. Phase C.3's nistcurves-p384 archive remains an
-# external overlay image (see below), not linked into the main PRG.
+# Sibling-lib archive set.
 # Phase C.4 adds nistcurves-p256.a which IS linked in, always-resident,
 # for BOTH backends (replaces the in-tree ecdsa_{curve,fp,mod,points}.s).
 #
@@ -354,12 +360,6 @@ ifeq ($(USE_NISTCURVES_ONCHIP_COMB),1)
 USE_NISTCURVES_ONCHIP := 1
 endif
 ifeq ($(USE_NISTCURVES_ONCHIP),1)
-ifeq ($(USE_OVERLAY_P384_EMBED),1)
-$(error USE_NISTCURVES_ONCHIP places LIB_NISTCURVES_MUL_CODE in CRYPTO_OVERLAY - mutually exclusive with USE_OVERLAY_P384_EMBED)
-endif
-ifeq ($(EMBED_P256_OVERLAY),1)
-$(error USE_NISTCURVES_ONCHIP places LIB_NISTCURVES_MUL_CODE in CRYPTO_OVERLAY - mutually exclusive with EMBED_P256_OVERLAY)
-endif
 CA65FLAGS += -D USE_NISTCURVES_ONCHIP=1
 
 ifeq ($(USE_NISTCURVES_ONCHIP_COMB),1)
@@ -414,84 +414,17 @@ SIBLING_LIB_ARCHIVES += build/lib/x25519.a
 
 CRYPTO_SRCS_EFFECTIVE := $(CRYPTO_SRCS_ALL)
 
-# ENABLE_P384_VERIFY=1 — re-arms the P-384 verify arm in
-# src/crypto/ecdsa_verify.s. OFF BY DEFAULT AND UNSAFE ON ITS OWN.
-#
-# The arm calls crypto_swap_to_p384_sha384, which DMAs $1E00 bytes from REU
-# banks that only reu_p384_overlay_init writes — and that routine is itself
-# `.ifdef USE_OVERLAY_P384_EMBED`, which no shipped build sets and which
-# cannot currently be built at all (the SHA-384 table overflows OVERLAY_REGION
-# by 1,536 B; see "Known issues"). Setting this flag WITHOUT a working overlay
-# reproduces the c64-https#128-era hazard on purpose: live resident code
-# overwritten, machine hung.
-#
-# It exists so the guard can be mutation-tested — a safety gate nobody can
-# switch off is a gate nobody can prove is load-bearing. Turning it on is
-# expected to make tools/test_p384_overlay_hazard.py FAIL.
-#
-# TOP LEVEL ON PURPOSE. This block used to sit inside
-# `ifeq ($(USE_NISTCURVES_ONCHIP),1)`, so the two REU-profile builds — plain
-# `make` and `make BACKEND=uci` — dropped the -D silently and the flag did
-# nothing at all. Measured at the previous commit, PRG sha256, ip65 REU
-# profile:
-#
-#   make BACKEND=ip65                       d780f719fac82e07…
-#   make BACKEND=ip65 ENABLE_P384_VERIFY=1  d780f719fac82e07…   <- identical
-#
-# and the same for BACKEND=uci (7c79a4e00a19685d… both ways). The mutation
-# test that proves this gate is load-bearing was a no-op on two of the five
-# configurations. The three onchip profiles were unaffected and their armed
-# PRGs are byte-identical across this move.
-#
-# The two P-384-only objects are gated on the SAME flag, so the lane is one
-# switch and not two half-switches:
-#
-#   src/crypto/ecdsa_verify_384.s  the TLS-side P-384 dispatcher. Its only
-#                                  export is ecdsa_verify_384_tls, and the
-#                                  only `.import` of that symbol anywhere is
-#                                  the one inside ecdsa_verify.s's
-#                                  `.ifdef ENABLE_P384_VERIFY`. ca65 emits no
-#                                  import record for an .import nothing
-#                                  references, so with the flag off the object
-#                                  was linked and UNREACHABLE: it appears in
-#                                  no Imports-list entry of any of the five
-#                                  build/c64-https.map files, and od65
-#                                  --dump-imports on ecdsa_verify.o does not
-#                                  list it. It cost 299 B of CRYPTO_AUX_CODE +
-#                                  33 B of CRYPTO_RODATA + 2 B of BSS in every
-#                                  shipped image.
-#   src/crypto/p384_force_link.s   already inert: its entire body is
-#                                  `.ifdef USE_NISTCURVES_P384`, and nothing
-#                                  defines that symbol today (the CA65FLAGS
-#                                  line for it is commented out below). Zero
-#                                  bytes either way; gated here so the lane's
-#                                  file set lives in one place.
-#
-# What this does NOT do: it does not delete the P-384 lane. Both files stay in
-# tree, as does every other piece of P-384 plumbing, on the same policy the
-# retired EMBED_P256_OVERLAY follows. `ENABLE_P384_VERIFY=1` restores the
-# previous link line; the three onchip profiles' armed PRGs are byte-identical
-# to the pre-gating ones (b9f03169…, 3c271262…, cc555c19…).
-P384_SRCS := src/crypto/ecdsa_verify_384.s src/crypto/p384_force_link.s
-ifeq ($(ENABLE_P384_VERIFY),1)
-CA65FLAGS += -D ENABLE_P384_VERIFY=1
-else
-CRYPTO_SRCS_EFFECTIVE := $(filter-out $(P384_SRCS),$(CRYPTO_SRCS_EFFECTIVE))
-endif
-
 # #155 phase 2 memory reclaims: code no shipped image reaches is assembled
 # out by default. Nothing is deleted; each knob re-arms its piece, and with
-# all four set the PRG is byte-identical to the pre-reclaim one on every
+# the knobs set the PRG is byte-identical to the pre-reclaim one on every
 # profile. Each rides CA65FLAGS as a -D, so flags.stamp sees a flip.
-#   KEEP_CRYPTO_SWAP=1      src/crypto/shared/crypto_swap.s (no importer
-#                           unless ENABLE_P384_VERIFY or an overlay embed
-#                           is on; those re-arm it by themselves)
+# (KEEP_CRYPTO_SWAP left with the P-384 lane: crypto_swap.s is deleted.)
 #   KEEP_X509_PARSE_CERT=1  x509_parse_cert + der_match_oid + OID table +
 #                           cert_* BSS in src/der_decode.s (tools/test_x509.py)
 #   KEEP_VIEWER=1           src/viewer.s + its boot.s hook on UCI; also
 #                           re-armed by HTTPS_BODY_TO_REU / VIEWER_TEST_HELPERS
 #   KEEP_WORD32_ALL=1       the uncalled routines in src/crypto/word32.s
-RECLAIM_KNOBS := KEEP_CRYPTO_SWAP KEEP_X509_PARSE_CERT KEEP_VIEWER KEEP_WORD32_ALL
+RECLAIM_KNOBS := KEEP_X509_PARSE_CERT KEEP_VIEWER KEEP_WORD32_ALL
 $(foreach k,$(RECLAIM_KNOBS),$(if $(filter-out 0 1,$($(k))),$(error $(k)=$($(k)): expected 1 (re-arm) or 0/unset)))
 CA65FLAGS += $(foreach k,$(RECLAIM_KNOBS),$(if $(filter 1,$($(k))),-D $(k)=1))
 # The viewer's only entry is the boot.s hook behind http_body_sink, which
@@ -510,98 +443,6 @@ else ifeq ($(BACKEND),uci)
 NET_SRCS := $(UCI_SRCS)
 CRYPTO_SRCS := $(CRYPTO_SRCS_EFFECTIVE)
 
-# --- W3 (RETIRED, see the guard below): EMBED_P256_OVERLAY=1 was meant
-# to stage the P-256 verify .bin as a .incbin into CRYPTO_OVERLAY at
-# PRG-load time, mutually exclusive with USE_OVERLAY_P384_EMBED (same
-# slot at $4200).  The user-visible flag is `EMBED_P256_OVERLAY`; the
-# ca65-level symbol `USE_OVERLAY_P256_EMBED` gates the .incbin in
-# src/crypto/shared/p256_overlay_blobs.s and the boot stash in boot.s.
-# Both default to 0 so the un-flagged UCI build is unchanged.
-EMBED_P256_OVERLAY ?= 0
-USE_OVERLAY_P256_EMBED ?= $(EMBED_P256_OVERLAY)
-
-# Issue #118: the W3 P-256 overlay embed cannot be built and, if it could,
-# would corrupt the running image. Fail here rather than three rules later
-# with an error that names a library segment (c64-lib-contract §6.3: a knob
-# naming an axis selects it or fails loudly; §6.3 was retired at contract
-# v1.0.0 and resolves at tag v0.17.1). Two independent reasons,
-# both measured at libs/nistcurves v0.11.2:
-#   1. LIB_NISTCURVES_P256_CODE is 8,324 B; OVERLAY_REGION is 7,680 B.
-#      The 644 B shortfall survived every pin from v0.7.0 to v0.11.2, so
-#      it is structural, not drift.
-#   2. CRYPTO_OVERLAY ($4200-$5FFF) is no longer a free paging slot: every
-#      UCI build keeps TLS_DEFRAME_CODE, CERT_BUF_BSS, X509_NAME_CODE and
-#      HTTPS_TARGET_RODATA resident there (~5 KB). crypto_swap_to_p256_verify
-#      DMAs $1E00 bytes over that span - the same hazard class as the
-#      P-384 overlay corruption fixed in v0.4.1.
-# The resident P-256 verify in CRYPTO_HOT is what every shipped product
-# uses; the overlay plumbing stays in tree for a future memory-map rework.
-ifeq ($(EMBED_P256_OVERLAY),1)
-$(error EMBED_P256_OVERLAY=1 is retired (issue #118): the P-256 verify image is 644 B larger than OVERLAY_REGION, and CRYPTO_OVERLAY now holds resident deframer/cert_buf/name-check code that the swap would overwrite. The resident verify in CRYPTO_HOT is the supported path)
-endif
-ifeq ($(USE_OVERLAY_P256_EMBED),1)
-$(error USE_OVERLAY_P256_EMBED=1 is the ca65-level half of EMBED_P256_OVERLAY, which is retired (issue #118))
-endif
-
-# Phase 3: embed the two P-384 split overlay blobs in the PRG so boot
-# can populate REU banks 6/7 at startup.  Gated to UCI (ip65 has no
-# room for the SHA blob in main RAM).  Adds a build-order dep on the .bin
-# files; a missing .bin causes the .incbin to fail, so we extend PRG_DEPS
-# below.
-# Phase 5 Fix D: respect a command-line USE_OVERLAY_P384_EMBED=0 so the
-# bootstrap rule below can do a no-overlay-embed prelim link to break
-# the overlay-bin <-> labels.txt cycle on a clean tree.  Default is
-# still 1 unless the operator explicitly disables it.  W3: also
-# auto-turn-off when EMBED_P256_OVERLAY=1 (mutually-exclusive slot).
-ifeq ($(EMBED_P256_OVERLAY),1)
-USE_OVERLAY_P384_EMBED ?= 0
-else
-# W5 / libs/nistcurves cfa9085+ bump: PR #25's SHA-384 rotr LUTs
-# (LIB_NISTCURVES_SHA384_TABLES, 3 KB page-aligned) push the SHA-384
-# overlay-half archive above the 7.5 KB CRYPTO_OVERLAY slot limit by
-# ~1.5 KB. Default flips to 0 until the SHA-384 LUTs are either:
-#   - relocated out of the overlay slot (consumer-side path: route
-#     LIB_NISTCURVES_SHA384_TABLES to a separate resident region and
-#     teach the standalone overlay cfg to omit them from the .bin), or
-#   - shrunk on the library side (eg by sharing rotr LUTs across the
-#     8 shift amounts, or runtime-generating them at boot).
-# Set USE_OVERLAY_P384_EMBED=1 explicitly to attempt the embed (will
-# fail at link with an overflow until the SHA-384 LUTs are dealt with).
-USE_OVERLAY_P384_EMBED ?= 0
-endif
-ifeq ($(USE_OVERLAY_P384_EMBED),1)
-CA65FLAGS += -D USE_OVERLAY_P384_EMBED=1
-endif
-
-# W3: propagate USE_OVERLAY_P256_EMBED to ca65 (the .incbin in
-# src/crypto/shared/p256_overlay_blobs.s is gated on this).  The
-# default-derivation from EMBED_P256_OVERLAY happens above.
-ifeq ($(USE_OVERLAY_P256_EMBED),1)
-CA65FLAGS += -D USE_OVERLAY_P256_EMBED=1
-endif
-# Phase C.3: add c64-nist-curves P-384 primitives as a REU overlay.
-# Variable-base P-384 point ops (double/add/jacobian-to-affine) only —
-# see tools/integration/build_nistcurves_p384.sh for the scope rationale.
-# `USE_NISTCURVES_P384` toggles the `.ifdef` guard in
-# src/crypto/p384_force_link.s so ld65 pulls the archive members into
-# the final PRG. P-256 ECDSA stays in-tree under both backends.
-# Phase C.3 is BLOCKED at the cfg level: the current CRYPTO_OVERLAY region
-# (7.5 KB at $4200) can only hold one of OVERLAY_X25519 (3.4 KB) and
-# OVERLAY_P384 (5.7 KB) at a time; ld65 lays them out sequentially and
-# overflows by 1.6 KB. Architecturally max(x25519,p384)=5.7 KB ≤ 7.5 KB,
-# so the slot is large enough — what's missing is the `run=CRYPTO_OVERLAY,
-# load=<separate staging>` cfg plumbing plus a boot-time stash for both
-# images. That restructure is out of scope for Phase C.3 and is gated on
-# a supervisor OK. The archive + force-link stub are in place so the
-# integration can be re-enabled by uncommenting the two lines below once
-# the cfg is extended.
-#CA65FLAGS += -D USE_NISTCURVES_P384=1
-# Phase 1.5 split the monolithic nistcurves-p384.a into two halves
-# (nistcurves-p384-sha384.a + nistcurves-p384-curve.a) since the
-# combined image overflowed the live 7.5 KB CRYPTO_OVERLAY slot.
-# Either-of approach for the production wire-up will be Phase 4a.
-#SIBLING_LIB_ARCHIVES += build/lib/nistcurves-p384-sha384.a
-#SIBLING_LIB_ARCHIVES += build/lib/nistcurves-p384-curve.a
 else ifeq ($(BACKEND),uci-m3)
 # The M3 variant's whole link: no src/crypto, no sibling archives, and only
 # the top-level files that have nothing to do with the 6510 TLS. boot.s
@@ -647,28 +488,6 @@ else
 PRG_DEPS := $(ALL_OBJS)
 endif
 
-# Phase 3: when USE_OVERLAY_P384_EMBED is on, add the two .bin files
-# to PRG_DEPS so make builds them before the .incbin in
-# src/crypto/shared/p384_overlay_blobs.s tries to read them.
-ifeq ($(USE_OVERLAY_P384_EMBED),1)
-PRG_DEPS += build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin
-PRG_DEPS += build/p384_overlay_equates.inc
-build/crypto/shared/p384_overlay_blobs.o: build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin
-endif
-
-# W3: when USE_OVERLAY_P256_EMBED is on, add the P-256 verify .bin to
-# PRG_DEPS so make builds it before the .incbin in
-# src/crypto/shared/p256_overlay_blobs.s tries to read it.  The .bin
-# rule below also has an order-only dep on build/labels.txt for the
-# main-PRG label lookup (same bootstrap cycle as P-384).  Gated on the
-# ca65-level USE_OVERLAY_P256_EMBED rather than EMBED_P256_OVERLAY so
-# the bootstrap prelim link (with USE_OVERLAY_P256_EMBED=0) skips the
-# .bin dep cleanly.
-ifeq ($(USE_OVERLAY_P256_EMBED),1)
-PRG_DEPS += build/lib/nistcurves-p256-verify.bin
-build/crypto/shared/p256_overlay_blobs.o: build/lib/nistcurves-p256-verify.bin
-endif
-
 # Issue #128: the recipe removes the old image BEFORE linking. ld65 writes
 # nothing when a memory area overflows, so without this a failed link silently
 # leaves the PREVIOUS build/c64-https.prg on disk — and every rig loads that
@@ -700,23 +519,6 @@ $(PRG): $(PRG_DEPS)
 ifeq ($(TRUST_RELEASE)$(TRUST_BUNDLE),11)
 	@python3 tools/check_release_key.py $@ || { rm -f $@; exit 1; }
 endif
-
-# Phase 5 Fix D: $(LABELS) is normally a side-effect of the $(PRG)
-# link recipe; we don't add an explicit rule.  The overlay-bin rule
-# below has an order-only dep on $(LABELS) so its lookup_label()
-# resolves the main PRG's runtime mul_dma_lo / mul_dma_hi /
-# mul_cached_a / reu_fetch_mul_row to real addresses (was: silent
-# $0000 fallback that produced a curve overlay whose fp_mul_384
-# read/wrote $0000 and silently corrupted downstream state).
-#
-# Bootstrap workflow (clean tree under USE_OVERLAY_P384_EMBED=1):
-#   make BACKEND=uci USE_OVERLAY_P384_EMBED=0    # produce labels.txt
-#   make BACKEND=uci                              # real link with overlays
-# After this two-step bootstrap, plain `make BACKEND=uci` rebuilds
-# incrementally without intervention.  The script
-# tools/integration/build_nistcurves_p384_bin.sh prints a clear error
-# pointing at this two-step procedure if it runs without labels.txt
-# (vs the old silent $0000 stub fallback).
 
 
 link: $(PRG)
@@ -1027,8 +829,8 @@ $(eval $(call SIBLING_SRC_CHECK,build/lib/x25519.src.stamp,libs/x25519,\
     tools/integration/build_x25519.sh,\
     build/lib/x25519.a build/lib/x25519.sizes.txt build/lib/x25519_staging))
 $(eval $(call SIBLING_SRC_CHECK,build/lib/nistcurves.src.stamp,libs/nistcurves,\
-    tools/integration/build_nistcurves_p256.sh tools/integration/build_nistcurves_p384.sh,\
-    build/lib/nistcurves-* build/lib/overlay-p384-*))
+    tools/integration/build_nistcurves_p256.sh,\
+    build/lib/nistcurves-*))
 endif
 
 # src/boot.s pulls the HTTPS target hostname from this generated include
@@ -1130,14 +932,6 @@ build/trust_key.inc: $(TRUST_BUNDLE_KEY_INC)
 	cp '$<' $@
 endif
 
-# Phase C.3: c64-nist-curves sibling archive (libs/nistcurves/ submodule).
-# Phase 1.5 split: produces TWO archives, one per overlay half. The
-# script writes both with a single invocation; the second target is a
-# pseudo-rule that piggybacks on the first.
-build/lib/nistcurves-p384-sha384.a build/lib/nistcurves-p384-curve.a:
-	@mkdir -p build/lib
-	bash tools/integration/build_nistcurves_p384.sh
-
 # Phase C.4: c64-nist-curves P-256 archive — replaces the in-tree ECDSA
 # P-256 primitives (ecdsa_{curve,fp,mod,points}.s) with the sibling's
 # variable-base scalar mul + packaged ecdsa_verify_256. Always-resident;
@@ -1167,79 +961,6 @@ build/lib/nistcurves-p256-onchip-comb.a:
 build/lib/x25519.a: tools/integration/build_x25519.sh $(FLAGS_STAMP)
 	@mkdir -p build/lib
 	bash tools/integration/build_x25519.sh
-
-# Phase C.3b / Phase 1.5 split: P-384 overlay IMAGES + labels for
-# harness-time use only.  The production PRG does NOT link
-# nistcurves-p384-{sha384,curve}.a — these are smoke-test infrastructure.
-# A future Phase 3 / Phase 4a harness will load both .bins into REU at
-# test time, then DMA them into the live slot via two new swap entry
-# points (crypto_swap_to_p384_sha384 / crypto_swap_to_p384_curve);
-# the existing crypto_swap_to_p384 entry point is now stale -- see the
-# comment block at the top of src/crypto/shared/crypto_swap.s.
-#
-# All four outputs (two .bins + two labels files) are produced by a
-# single script invocation; the rule lists all four targets so make
-# only runs the script once even when several are stale.
-#
-# Phase 5 Fix D: build/labels.txt is an ORDER-ONLY dependency.  The
-# overlay-bin script's lookup_label() reads build/labels.txt to resolve
-# mul_dma_lo / mul_dma_hi / mul_cached_a / reu_fetch_mul_row to the
-# main PRG's runtime addresses (so the curve overlay's fp_mul_384
-# reads/writes the right $BA00 / $BB00 / etc. cells).  On a clean
-# build, build/labels.txt doesn't exist yet when this rule runs and the
-# script falls back to $0000 stubs - silently producing an overlay
-# image whose fp_mul_384 reads from $0000.  Order-only ('|') ensures
-# labels.txt exists before the script runs but doesn't trigger an
-# overlay rebuild on every main-PRG link.
-build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin build/labels-p384-sha384.txt build/labels-p384-curve.txt: \
-		build/lib/nistcurves-p384-sha384.a build/lib/nistcurves-p384-curve.a \
-		cfg/p384-overlay-sha384.cfg cfg/p384-overlay-curve.cfg \
-		tools/integration/build_nistcurves_p384_bin.sh \
-		| build/labels.txt
-	bash tools/integration/build_nistcurves_p384_bin.sh
-
-.PHONY: p384-overlay
-p384-overlay: build/lib/overlay-p384-sha384.bin build/lib/overlay-p384-curve.bin \
-              build/labels-p384-sha384.txt build/labels-p384-curve.txt
-
-# W3: P-256 verify overlay .bin (library-ingestion architecture).
-# Mirrors the P-384 overlay .bin rule: depends on the P-256 sibling
-# archive (build/lib/nistcurves-p256.a, already a default PRG dep) +
-# the standalone overlay cfg.  Order-only dep on build/labels.txt for
-# the lookup_label() fallback (same pattern as P-384 — see Fix D
-# comment block above).
-build/lib/nistcurves-p256-verify.bin build/labels-p256-verify.txt: \
-		build/lib/nistcurves-p256.a \
-		cfg/p256-overlay-verify.cfg \
-		tools/integration/build_nistcurves_p256_bin.sh \
-		| build/labels.txt
-	bash tools/integration/build_nistcurves_p256_bin.sh
-
-.PHONY: p256-overlay
-p256-overlay: build/lib/nistcurves-p256-verify.bin build/labels-p256-verify.txt
-
-# Phase 5 Fix C: regenerate the P-384 overlay-resident symbol equates
-# (build/p384_overlay_equates.inc) from the overlay labels files so the
-# TLS-side dispatcher (src/crypto/ecdsa_verify_384.s) picks up address
-# changes via .include, with .assert pins catching drift.  Whenever
-# either labels file is rebuilt, the .inc regenerates and the
-# dispatcher .o is forced to rebuild.
-build/p384_overlay_equates.inc: build/labels-p384-sha384.txt build/labels-p384-curve.txt \
-                                tools/integration/gen_p384_overlay_equates.sh
-	bash tools/integration/gen_p384_overlay_equates.sh \
-	    build/labels-p384-sha384.txt build/labels-p384-curve.txt $@
-
-# The dispatcher .o now depends on the generated equates file (via
-# .include) AND on the overlay .bin files (PRG_DEPS already lists those
-# under USE_OVERLAY_P384_EMBED).  Phase 5 Fix D: gate the .inc dep on
-# USE_OVERLAY_P384_EMBED so the bootstrap rule for $(LABELS) (which
-# sub-makes with USE_OVERLAY_P384_EMBED=0) can skip rebuilding the .inc
-# from labels-p384-* (those depend on overlay-bins which depend on
-# $(LABELS) -- cycle).  The bootstrap pre-creates a placeholder .inc
-# before sub-making.
-ifeq ($(USE_OVERLAY_P384_EMBED),1)
-build/crypto/ecdsa_verify_384.o: build/p384_overlay_equates.inc
-endif
 
 # Build ip65 object libraries from the submodule. Required once per fresh
 # clone — the submodule ships sources, and the ip65-blob link below needs

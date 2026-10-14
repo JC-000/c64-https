@@ -36,12 +36,14 @@ packaged listener mint identical material:
   - `tools/uci/rig_https_local.py`, which inlines its own listener
     (this one used to fail with `ERROR: cert/key not found` instead --
     issue #93)
-  - `tools/uci/rig_https_local_p384.py`, same, P-384 profile
 
 Generation needs nothing beyond the Python standard library: PR #96
 reimplemented `gen_certs.py` in pure Python (curve arithmetic, a
 minimal DER encoder, ECDSA) so the packaged listener has no
 third-party dependency, and the P-384 profile rides on the same code.
+(The client verifies P-256 only -- P-384 is retired -- so nothing in the
+tree serves the P-384 pair today; it is kept as the fixture a hardware
+refusal test would need.)
 No pip, no venv.
 
 Under `EXTERNAL_LISTENER=1` no repo cert is loaded or generated at

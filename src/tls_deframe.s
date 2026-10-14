@@ -58,10 +58,8 @@
 ; Memory: code in its own TLS_DEFRAME_CODE segment, routed to the
 ; CRYPTO_OVERLAY region by both UCI cfgs — CRYPTO_HOT cannot absorb it
 ; under the plain-uci cfg (446 B short with the REU-profile archive).
-; CRYPTO_OVERLAY is free in every default build; the overlay-embed
-; flags (EMBED_P256_OVERLAY / USE_OVERLAY_P384_EMBED) that stage
-; runtime-swapped images there are mutually exclusive with a resident
-; deframer, exactly as they already are with LIB_NISTCURVES_MUL_CODE.
+; CRYPTO_OVERLAY is plain resident RAM in every build (the runtime overlay
+; swap that once paged images into it was retired with P-384).
 ; State + carry buffer live in the NET_BSS_TAIL region, whose tail is
 ; small (tools/measure_margins.py).
 ; The whole module is gated on TLS_STREAM_DEFRAME (UCI-only for now:

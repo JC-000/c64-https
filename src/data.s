@@ -28,7 +28,7 @@ drbg_buf_idx:           .byte 32        ; Buffer index (32 = empty, forces first
 ecdsa_hash_len:         .byte 32        ; hash length default (P-256)
 
 .export ecdsa_sig_len
-ecdsa_sig_len:          .byte 32        ; component length default (32 or 48)
+ecdsa_sig_len:          .byte 32        ; component length: 32 (P-256, the only curve)
 
 ; =============================================================================
 ; BSS — zero-initialized mutable state
@@ -490,9 +490,7 @@ mul_src2_buf:   .res 35         ; 32 bytes + 3 zero pad (see above)
 .export ecdsa_sig_s
 .export ecdsa_pubkey_x
 .export ecdsa_pubkey_y
-.export ecdsa_pubkey_x_384
-.export ecdsa_pubkey_y_384
-ecdsa_curve_id: .res 1          ; 0=P-256, 1=P-384
+ecdsa_curve_id: .res 1          ; 0=P-256; any other value is refused
 
 ; Phase C.4: for P-256, these five 32-byte BE buffers are laid out
 ; contiguously in memory (r|s|h|Qx|Qy) so the dispatcher can hand
@@ -507,24 +505,13 @@ ecdsa_hash:     .res 32         ; message hash            (BE, struct +64)
 ecdsa_pubkey_x: .res 32         ; public key Q.x          (BE, struct +96)
 ecdsa_pubkey_y: .res 32         ; public key Q.y          (BE, struct +128)
 
-; Phase 5 Fix B: separate 48 B P-384 pubkey slots.  The P-256 packed
-; struct above (r|s|h|Qx|Qy contiguous 32 B each) is read verbatim by
-; the sibling ecdsa_verify_256, so we can't widen the existing
-; ecdsa_pubkey_{x,y} to 48 B without breaking P-256.  The cert handler
-; (src/tls_cert.s) targets ecdsa_pubkey_{x,y}_384 when ecdsa_curve_id=1
-; and the P-384 dispatcher (src/crypto/ecdsa_verify_384.s) reads from
-; the _384 slots.  96 B total in CRYPTO_BSS — well within the slack
-; reclaimed by Phase 6's tls_hs_buf removal.
-ecdsa_pubkey_x_384: .res 48     ; P-384 public key Q.x  (BE, dispatcher input)
-ecdsa_pubkey_y_384: .res 48     ; P-384 public key Q.y  (BE, dispatcher input)
-
 ; --- Legacy in-tree ECDSA scratch (ecdsa_verify_tmp, ev_u1, ev_u2,
 ;     ev_point_save, ev_u1_384, ev_u2_384, ev_point_save_384) was
 ;     reclaimed in Phase C.4.  The sibling c64-nist-curves
 ;     `ecdsa_verify_256` now owns its own scratch inside the archive's
 ;     BSS (ecdsa_w/u1/u2/u1_be/u2_be/u1g_x/u1g_y, fp_rev_buf), so the
-;     legacy ev_* labels are unused.  Phase G can reclaim the matching
-;     P-384 slots when ecdsa_verify_384 is re-integrated the same way.
+;     legacy ev_* labels are unused.  (Their P-384 counterparts left
+;     with the P-384 lane, which is retired.)
 
 ; --- DER parsing temporaries ---
 .export ev_der_int_len

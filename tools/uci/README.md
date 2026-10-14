@@ -21,7 +21,6 @@ deliberate — see "Why not pytest" below.
 | `rig_https_bad_finished.py` | the negative path: the client must ABORT on a forged server Finished |
 | `rig_https_print_body.py` | issue #28 — the decrypted body renders correctly on screen |
 | `rig_https_refetch.py` | several menu-driven HTTPS fetches in ONE boot — per-connection state a second `tls_connect` would inherit |
-| `rig_https_local_p384.py` | the P-384 cert profile (blocked: no P-384 PRG builds today) |
 | `rig_trust_store.py` | the trust store's UCI DOS I/O against a real volume (#155) |
 | `rig_trust_policy.py` | the trust policy end to end through the menu (#155) |
 | `bench_ecdsa_u64e.py` | ECDSA-P256 verify wall-clock across a clock sweep |
@@ -36,10 +35,9 @@ Files with a leading underscore are helper modules, not entry points:
 python3 tools/uci/_sni_precondition.py --selftest
 ```
 
-Three of the rigs delegate rather than duplicate: `rig_https_print_body.py`
-and `rig_https_local_p384.py` both import `rig_https_local` and override a
-narrow slice of it (the response body, and the cert/key pair
-respectively), so a change to the shared flow lands in all three.
+`rig_https_print_body.py` delegates rather than duplicates: it imports
+`rig_https_local` and overrides a narrow slice of it (the response body), so
+a change to the shared flow lands in both.
 
 ## Device prep, and the two failure policies (#197, #187, #212)
 
@@ -183,8 +181,7 @@ concurrent sessions from clobbering each other.
 
 ### Queueing for the device — `C64_DEVICE_LOCK_TIMEOUT`
 
-Every script here, plus `tests/rig_ip65_rrnet_hw.py` and
-`tools/test_ecdsa_p384_kat.py`'s U64 arm, takes the lock through
+Every script here, plus `tests/rig_ip65_rrnet_hw.py`, takes the lock through
 `acquire_device_lock()` in `_device_lock_helper.py` (or passes
 `lock_timeout_s()` where the harness takes the lock for you), which owns
 the one acquire budget: **`C64_DEVICE_LOCK_TIMEOUT` seconds, default

@@ -601,10 +601,5 @@ sig_algs_ext_data:
         .byte $00, $04                  ; extension data length = 4
         .byte $00, $02                  ; supported_signature_algorithms length = 2
         .byte $04, $03                  ; ecdsa_secp256r1_sha256
-        ; ecdsa_secp384r1_sha384 (0x0503) is NOT advertised. It was, and the
-        ; client cannot perform it: the P-384 verify path swaps in an overlay
-        ; image no shipped build ever stages, corrupting live resident code
-        ; (see the gate in src/crypto/ecdsa_verify.s). Advertising a scheme we
-        ; answer destructively hands a server the choice of breaking us.
-        ; Parked as roadmap work; restore this line together with
-        ; ENABLE_P384_VERIFY and a P-384 overlay that builds.
+        ; Only P-256 is verified (P-384 is retired), so 0x0403 is the one
+        ; scheme offered; tls_handle_cert_verify refuses any other.

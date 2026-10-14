@@ -164,7 +164,7 @@ anywhere in `src/crypto/`.
 - **AEAD:** ChaCha20-Poly1305 — in-tree `src/crypto/{chacha20,poly1305,aead}.s`, originally from [c64-wireguard](https://github.com/JC-000/c64-wireguard)
 - **Hash:** SHA-256 — in-tree `src/crypto/sha256.s`, originally from [c64-aes256-ecdsa](https://github.com/JC-000/c64-aes256-ecdsa)
 - **Key exchange:** ECDHE with X25519 only — `supported_groups` and `key_share` carry the single group 0x001D (`src/tls_handshake.s`, grep `group = x25519`); the vendored `libs/x25519` sibling, built on-chip (no REU) on every profile
-- **Certificate signatures:** ECDSA P-256 (`ecdsa_secp256r1_sha256`, 0x0403) from the [c64-nist-curves](https://github.com/JC-000/c64-nist-curves) submodule at `libs/nistcurves`, via the thin dispatcher `src/crypto/ecdsa_verify.s`. P-384 (0x0503) is **no longer advertised** and is rejected — parked as roadmap work, see Known Issues.
+- **Certificate signatures:** ECDSA P-256 (`ecdsa_secp256r1_sha256`, 0x0403) from the [c64-nist-curves](https://github.com/JC-000/c64-nist-curves) submodule at `libs/nistcurves`, via the thin dispatcher `src/crypto/ecdsa_verify.s`. P-384 (0x0503) is **retired**: not advertised, and refused — see Known Issues.
 - **Key derivation:** HKDF-SHA256, built from HMAC-SHA256 (`src/hkdf.s`)
 - **PRNG:** HMAC-DRBG seeded from SID voice 3 noise + CIA timer entropy (`src/entropy.s`, `src/crypto/hmac_drbg.s`)
 
@@ -348,8 +348,6 @@ $A000-$BFFF  CRYPTO_COLD_SHADOW  8 KB BSS (same tenants as ip65, less
                                  1,536 B)
 $C000-$DFFF  OVERLAY_FILE_PAD    zero-pad in the PRG; at runtime the
                                  4 KB TCP_BUF ring lives at $C000
-$E000-$FDFF  OVERLAY_BLOB_CURVE_RAM  P-384 curve overlay blob slot (empty
-                                 by default — P-384 is not built)
 ```
 
 `CRYPTO_OVERLAY` is not empty in any shipped UCI image — it holds the
@@ -434,9 +432,9 @@ The knobs, all read straight from the Makefile:
 | `VIC_BLANK=0` | degrade `vic_blank`/`vic_unblank` to `RTS`. A/B measurement control. |
 | `CA65`, `LD65`, `VICE` | toolchain overrides. |
 
-`ENABLE_P384_VERIFY`, `EMBED_P256_OVERLAY` and `USE_OVERLAY_P384_EMBED` also
-exist; all three are guarded, retired or broken, and none of them belongs in a
-build you intend to run. See Known Issues.
+`ENABLE_P384_VERIFY`, `USE_OVERLAY_P384_EMBED`, `KEEP_CRYPTO_SWAP`,
+`EMBED_P256_OVERLAY` and `USE_OVERLAY_P256_EMBED` are retired: the Makefile
+refuses any value. See Known Issues.
 
 **A flag change no longer needs `make clean` (#159).** make tracks source
 timestamps rather than the command line, so switching `BACKEND=` or a
@@ -528,7 +526,7 @@ Progress:
 - [x] ECDHE x25519 key exchange — generate keypair, compute shared secret
 - [x] TLS 1.3 key schedule integration testing — all 9 HKDF steps verified against RFC 8448 + Finished MAC
 - [x] Entropy/DRBG initialization — SID voice 3 noise + CIA timer seeding at boot, DRBG fills for TLS random values
-- [x] X.509 certificate parsing — DER parser extracts TBS, public key, signature (r,s), curve ID for P-256 and P-384
+- [x] X.509 certificate parsing — DER parser extracts TBS, public key, signature (r,s), curve ID (the live TLS path accepts P-256 only)
 - [x] ECDSA P-256 signature verification — supplied by the `libs/nistcurves` submodule (`ecdsa_verify_256`), always resident under both backends; `src/crypto/ecdsa_verify.s` is a thin dispatcher that packs the big-endian input struct. P-384 verify is **not** built — see Known Issues.
 - [x] HTTP/1.1 GET request — build GET, parse response (status + headers + body), plain HTTP end-to-end
 - [x] **End-to-end HTTPS GET demo (both backends)** — TLS 1.3 handshake + HTTP GET completes against a local Python TLS listener (ECDSA-P256 cert). Returns `http_status=200`, body `"HELLO FROM TLS SERVER"`.
@@ -542,7 +540,7 @@ Progress:
 ### Known Issues
 
 - **The handshake is slow, and the ECDSA P-256 verify dominates it.** Every figure here is quoted from the measurement record in `CLAUDE.md`. Except where noted they were taken at the **`libs/nistcurves` v0.6.0 pin**, and the pin is now v0.14.0, so treat them as a baseline rather than as current. The one profile re-measured since is comb, at the v0.11.2 pin: 46.986 / 24.440 / 16.402 s verify at 16 / 32 / 48 MHz (U64E, n=3, VIC blanking active). End-to-end handshake + GET against the local listener, U64E, master 2ceb5b1: **80.8 s** (REU profile, 48 MHz), **45.5 s** (onchip profile, 48 MHz), **1,157.7 s** (REU, stock 1 MHz). One point of that sweep has been carried forward: 48 MHz REU measures **82.1 s** at v0.9.1 and **82.4 s** at v0.10.1 (n=1 each, so the 0.4% step between them is noise; the 1.6% from v0.6.0 is the FIPS 186-5 public-key validation gate v0.7.0 added). No other clock or profile has been re-measured. On the REU-less stock-C64 path (ip65 + onchip, no REU, honest 1 MHz in VICE) the whole run measured **2,159.7 s = 36.0 min**, of which the verify stretch alone was 1,416.7 s. That is fine for the local listener, which holds the connection open; it exceeds a typical 10-30 s real-world server handshake window.
-- **P-384 is parked, and doubly gated — it is not merely "stubbed".** An earlier version of this entry said the dispatcher "advertises `ecdsa_secp384r1_sha384` (0x0503)". It does not, and has not since v0.4.1: `sig_algs_ext_data` in `src/tls_handshake.s` carries exactly one scheme, `ecdsa_secp256r1_sha256` (0x0403), and `src/crypto/ecdsa_verify.s` compiles its P-384 arm to a `sec` reject unless `ENABLE_P384_VERIFY=1`. Both gates matter, because the curve comes from the certificate rather than from what we advertised — that combination is what closed the v0.4.0 hang in which a P-384 certificate made the overlay swap DMA over live resident code. Separately, **no P-384 build target has ever completed**: `make p384-overlay` from a clean tree stops at `No rule to make target 'build/labels.txt'`, and once a main build has produced that file it stops at `Segment 'LIB_NISTCURVES_SHA384_TABLES' overflows memory area 'OVERLAY_REGION' by 1536 bytes`. Certificates requiring P-384 are rejected, not verified. From the v0.14.0 pin the lane is gated at the **link line** as well: `src/crypto/ecdsa_verify_384.s` and `src/crypto/p384_force_link.s` link only under `ENABLE_P384_VERIFY=1`. They used to be in every shipped image and reachable from none of it — ca65 emits no import record for an `.import` nothing references, so the wildcard pulled them in — at a cost of 332 B (299 B of `CRYPTO_AUX_CODE` + 33 B of `CRYPTO_RODATA`), which is the space that made the v0.14.0 bump fit on ip65 at all. `ENABLE_P384_VERIFY=1` now also applies on all five profiles: it used to be silently dropped by the two REU-profile builds, which is issue #207 — the mutation control that was supposed to fail under it passed vacuously there.
+- **P-384 is retired.** The client verifies ECDSA P-256 only: the ClientHello offers `ecdsa_secp256r1_sha256` (0x0403) alone, and a P-384, RSA or Ed25519 certificate, or a 0x0503 CertificateVerify, is refused (`tools/test_curve_refusal.py`). One caveat, because the key extractor scans rather than parses: a leaf that also carries a P-256 public-key pattern later in its bytes has THAT key extracted, and CertificateVerify is checked against it.
 - **Real-server reach is UCI/comb + turbo only, and has size limits.** The public-internet HTTPS above works on the comb profile at turbo; the stock-C64 ip65 path is far too slow for a real server's connection window (~36 min/handshake). Among real leaves, en.wikipedia.org's 1636 B leaf needs the 2048 B UCI `cert_buf` (fits); anything larger, or a server that ignores `max_fragment_length` and sends >548 B records (e.g. Cloudflare), is out of scope. Cloudflare additionally enforces a ~15 s connect-to-first-request deadline the C64 cannot meet and is deliberately unsupported.
 - **The wikipedia stall was a client bug, now fixed.** Historical note for anyone bisecting: TLS flights larger than the ~4 KB UCI receive ring used to stall permanently, because `net_poll` requested a fixed 512 B and its fill loop dropped bytes past the ring's current free space (discarded as "delivered"). Fixed by clamping the `SOCKET_READ` request to ring free space (`src/net/uci/net.s`). It was never a firmware bug; github/browserleaks/lwn flights are under 4 KB and were unaffected.
 - **VICE 3.9** previously appeared to crash on chained HMAC-SHA256 calls (backend-independent — affects the crypto-only test suites), but this was caused by hardcoded port numbers bypassing the test harness port allocator. With proper `ViceInstanceManager` usage (no hardcoded ports), all N=1..10 chained calls succeed reliably.
@@ -839,8 +837,8 @@ make clean && make BACKEND=uci USE_NISTCURVES_ONCHIP=1
 
 Every script that exercises the crypto path (`rig_https_local.py`,
 `rig_https_live.py`, `rig_https_wiki.py`, `rig_https_bad_finished.py`,
-`bench_ecdsa_u64e.py`, and the `rig_https_print_body.py` /
-`rig_https_local_p384.py` wrappers, which inherit it by importing
+`bench_ecdsa_u64e.py`, and the `rig_https_print_body.py` wrapper,
+which inherits it by importing
 `rig_https_local`) now **preflights this in one
 REST call and exits 4 in seconds** if a REU-profile build meets a device with no
 REU. It **also exits 4 when it cannot read the setting at all** — the read

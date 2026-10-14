@@ -28,10 +28,10 @@ COLD_E_TB_CHECK = 6             ; trust_bundle            (COLD_G_UI, TRUST_BUND
 
 ; Where the images live in the REU: bank 2 from $A000, laid out as the PRG
 ; carries them at COLD_IMAGE. Bank 2 $0000-$3FFF is comb's P-256 Lim-Lee
-; table and $4000-$9F9F the P-384 one (parked, not deleted: libs/nistcurves
-; API.md's REU map, "$9FA0-$FFFF safe for consumer use"). reu_layout.inc's
-; $20100/$22100/$24100 overlay slots sit inside the P-256 table and are
-; never used here. cold_bank.s asserts at link time that the images miss
+; table and $4000-$9F9F the library's P-384 one (libs/nistcurves API.md's
+; REU map, "$9FA0-$FFFF safe for consumer use"; c64-https retired P-384 and
+; never builds it, but the library still declares it, so it is avoided).
+; cold_bank.s asserts at link time that the images miss
 ; the LINKED library's tables (its exported bank/offset symbols) and stay
 ; below the HTTP body sink's banks.
 COLD_REU        = $02A000

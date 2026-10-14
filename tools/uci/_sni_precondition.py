@@ -64,7 +64,7 @@ The expected name is **derived**, never pinned. ``dns_names_from_cert()`` reads
 the SAN dNSNames out of the certificate the listener will actually present, and
 ``sni_string_from_prg()`` reads the name actually embedded in the PRG. Both
 sides come from the artifacts under test, so there is no third copy to drift:
-a regenerated cert, a sibling rig that swaps ``CERT_PATH`` (p384), or a build
+a regenerated cert, a sibling rig that swaps ``CERT_PATH``, or a build
 left over from some other experiment (``HTTPS_SNI=en.wikipedia.org``) are all
 caught by the same comparison.
 

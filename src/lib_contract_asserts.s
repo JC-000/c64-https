@@ -200,7 +200,8 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ;   exporting them produced `ld65: Duplicate external identifier` in any
 ;   two-library link. Replaced by the prefixed OUTPUT counterparts
 ;   LIB_NISTCURVES_SHARED_REU_MUL_* (#105), which c64-https also does not
-;   import — it owns its REU layout in src/crypto/shared/reu_layout.inc.
+;   import — its REU use is the multiply rows, comb's bank 2 and the HTTP
+;   body sink (src/http.s, src/cold_bank.inc).
 ;
 ;   Everything else in the wave is ADDITIVE at the default gate: the §6.5
 ;   rename window (#107) adds canonical `nistcurves_zp_*` /
@@ -254,17 +255,15 @@ APP_OWNED = LIB_SHARED_PRIMITIVES_SQTAB | LIB_SHARED_PRIMITIVES_REU_MUL | LIB_SH
 ; =====================================================================
 ; §3 — REU bank budget
 ; =====================================================================
-; c64-https reserves REU banks 6 and 7 for the P-384 overlay images
-; (src/boot.s:840-841 stashes the SHA-384 blob to bank 6 and the curve
-; blob to bank 7). No vendored library may claim them. The library's own
-; claim is $07 (banks 0/1 mul table + bank 2 Lim-Lee comb) under the REU
-; profile and $04 under FP_ONCHIP_MUL, both of which pass; this assert
-; exists to catch an upstream expansion into our reserved pair, which
-; would otherwise corrupt the overlay images at first swap-in with no
-; diagnostic at all.
+; Banks 6-7 were reserved for the P-384 overlay images until P-384 was
+; retired. What remains is the HTTP body sink's floor: banks 0..2 belong to
+; the multiply rows, the comb Lim-Lee table and the cold bank, and the sink
+; starts at bank 3 (src/http.s SINK_FLOOR_BANK), so a library claim at or
+; above bank 3 would sit in the body region. The import is also what keeps
+; LIB_NISTCURVES_REU_BANKS_USED in build/labels.txt, where the REU
+; preflight (tools/uci/_reu_preflight.py) and the rigs' memory policy read it.
 .import LIB_NISTCURVES_REU_BANKS_USED
-.assert (LIB_NISTCURVES_REU_BANKS_USED & $C0) = 0, lderror, "libs/nistcurves claims REU bank 6 and/or 7 — reserved by c64-https for the P-384 overlay images (src/boot.s:840)"
-
+.assert (LIB_NISTCURVES_REU_BANKS_USED & $FFF8) = 0, lderror, "libs/nistcurves claims an REU bank at or above 3 - the HTTP body sink's floor (src/http.s SINK_FLOOR_BANK)"
 
 ; =====================================================================
 ; §8.0 — shared-primitive ownership, DECLARED rather than surgical
