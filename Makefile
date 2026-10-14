@@ -516,6 +516,11 @@ $(PRG): $(PRG_DEPS)
 	@grep -q '^al C:BC00 \.sqtab_lo' $(LABELS) || \
 		{ echo 'ERROR: sqtab_lo is not at $$BC00 — TABLES_BSS layout drifted; realign LIB_SHARED_SQTAB_BASE in tools/integration/build_x25519.sh and build_nistcurves_p256.sh'; \
 		  grep ' \.sqtab_lo$$' $(LABELS); exit 1; }
+	@la=$$(od -An -tu1 -N2 $@ | awk 'NR==1 {print $$1 + 256 * $$2}'); \
+	 end=$$(( la + $$(wc -c < $@) - 3 )); \
+	 if [ $$end -ge 53248 ] && [ $$la -le 57343 ]; then \
+	   echo "ERROR: $@ loads $$(printf '$$%04X-$$%04X' $$la $$end), into the I/O page at \$$D000-\$$DFFF: a KERNAL LOAD would store into the chip registers (#288, tools/check_prg_io_range.py)"; \
+	   rm -f $@; exit 1; fi
 ifeq ($(TRUST_RELEASE)$(TRUST_BUNDLE),11)
 	@python3 tools/check_release_key.py $@ || { rm -f $@; exit 1; }
 endif

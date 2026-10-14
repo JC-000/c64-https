@@ -229,6 +229,67 @@ def test_parse_build_info_records(tmp_lines: list[str] = None) -> None:
     check("FAILED record result", recs[1]["result"], "FAILED")
 
 
+# ---------------------------------------------------------------------------
+# #288: the boot gate loads under true drive emulation, and every dist PRG
+# stays off the I/O page
+# ---------------------------------------------------------------------------
+
+def test_boot_gate_drive_setup() -> None:
+    print("\n-- boot gate: TDE flags, and the resources read back --")
+    check("TDE on, traps off, autostart leaves TDE alone",
+          set(vr.TDE_ARGS) >= {"-drive8truedrive", "+trapdevice8",
+                               "+autostart-handle-tde"}, True)
+    check("no trap-load flag", set(vr.TDE_ARGS) & {"+drive8truedrive",
+                                                   "-trapdevice8"}, set())
+    import inspect
+    src = inspect.getsource(vr.check_d64_boots)
+    check("the gate launches with TDE_ARGS", "extra_args=list(TDE_ARGS)" in src, True)
+    check("the gate reads the resources back",
+          "tde_resource_problems(inst.transport.resource_get)" in src, True)
+    good = dict(vr.TDE_RESOURCES)
+    check("held resources pass", vr.tde_resource_problems(good.__getitem__), [])
+    trap = {"Drive8TrueEmulation": 0, "TrapDevice8": 1,
+            "AutostartHandleTrueDriveEmulation": 0}
+    check("the old trap setup fails",
+          len(vr.tde_resource_problems(trap.__getitem__)), 2)
+    handled = dict(good, AutostartHandleTrueDriveEmulation=1)
+    check("autostart disabling TDE fails",
+          len(vr.tde_resource_problems(handled.__getitem__)), 1)
+
+    def boom(name):
+        raise RuntimeError("monitor gone")
+    check("an unreadable resource fails",
+          len(vr.tde_resource_problems(boom)), len(vr.TDE_RESOURCES))
+
+
+def test_prg_range_check() -> None:
+    print("\n-- dist PRGs: load range off the I/O page --")
+    import tempfile
+    def prg(last):
+        return bytes([0x01, 0x08]) + bytes(last - 0x0801 + 1)
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "old.prg").write_bytes(prg(0xDFFF))
+        (d / "new.prg").write_bytes(prg(0xBFFF))
+        saved_dist, saved_results = vr.DIST, list(vr.results)
+        vr.DIST, vr.results[:] = d, []
+        try:
+            vr.check_prg_ranges([{"prg": "old.prg", "result": "OK"},
+                                 {"prg": "new.prg", "result": "OK"},
+                                 {"prg": "gone.prg", "result": "FAILED"}])
+            got = [(n, ok) for n, ok, _ in vr.results]
+            vr.results[:] = []
+            vr.check_prg_ranges([])
+            empty = [(n, ok) for n, ok, _ in vr.results]
+        finally:
+            vr.DIST = saved_dist
+            vr.results[:] = saved_results
+    check("a $DFFF image fails, a $BFFF one passes, unbuilt skipped", got,
+          [("old.prg load range", False), ("new.prg load range", True)])
+    check("nothing to check is a failure", empty,
+          [("dist PRGs to range-check", False)])
+
+
 def main() -> int:
     print("=== release-gate verdict regression tests ===")
     test_verdict_empty_run_is_a_failure()
@@ -243,6 +304,8 @@ def main() -> int:
     test_expected_images_empty_when_nothing_built()
     test_expected_images_tolerate_old_build_info()
     test_parse_build_info_records(SAMPLE_BUILD_INFO)
+    test_boot_gate_drive_setup()
+    test_prg_range_check()
     print(f"\n{'=' * 60}")
     print(f"{PASSED} passed, {FAILED} failed")
     from _skip_policy import verdict

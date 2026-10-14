@@ -49,6 +49,29 @@ BACKEND_BANNERS = {"uci": "UCI NETWORKING", "ip65": "RR-NET (CS8900A) ETHERNET"}
 
 results: list[tuple[str, bool, str]] = []
 
+# The boot gate's drive setup (#288): a real serial LOAD under true drive
+# emulation, never the KERNAL traps. The flags are what VICE is told; the
+# resources are what it ended up with, read back from the running instance
+# so a reverted or overridden flag fails the gate instead of quietly
+# loading through the traps again.
+TDE_ARGS = ("-drive8truedrive", "+trapdevice8", "+autostart-handle-tde")
+TDE_RESOURCES = {"Drive8TrueEmulation": 1, "TrapDevice8": 0,
+                 "AutostartHandleTrueDriveEmulation": 0}
+
+
+def tde_resource_problems(resource_get) -> list[str]:
+    """Each TDE_RESOURCES entry the instance does not hold, as text."""
+    out = []
+    for name, want in TDE_RESOURCES.items():
+        try:
+            got = resource_get(name)
+        except Exception as exc:                            # noqa: BLE001
+            out.append(f"{name}: unreadable ({type(exc).__name__})")
+            continue
+        if got != want:
+            out.append(f"{name}={got!r}, want {want}")
+    return out
+
 
 def record(name: str, ok: bool, detail: str = "") -> bool:
     results.append((name, ok, detail))
@@ -111,6 +134,26 @@ def check_reproducible(variants: list[dict]) -> None:
         record(f"{rec['key']} reproduces",
                again == rec["sha256"],
                f"{again[:16]}… vs {rec['sha256'][:16]}…")
+
+
+def check_prg_ranges(variants: list[dict]) -> None:
+    """No dist PRG may load into the $D000-$DFFF I/O page (#288)."""
+    print("\n=== 1b. PRG load ranges stay off the I/O page ===")
+    from check_prg_io_range import prg_io_violation, prg_range
+    prgs = [DIST / rec["prg"] for rec in variants if rec.get("result") == "OK"]
+    if not prgs:
+        record("dist PRGs to range-check", False,
+               "no variant built, so nothing was checked")
+        return
+    for prg in prgs:
+        if not prg.is_file():
+            record(f"{prg.name} load range", False, "absent from dist/")
+            continue
+        data = prg.read_bytes()
+        lo, hi = prg_range(data)
+        bad = prg_io_violation(data)
+        record(f"{prg.name} load range", bad is None,
+               bad or f"${lo:04X}-${hi:04X}")
 
 
 # ---------------------------------------------------------------------------
@@ -200,14 +243,24 @@ def check_d64_contents(variants: list[dict]) -> None:
 def check_d64_boots(variants: list[dict]) -> None:
     """Autostart every disk image in VICE and assert the boot banner.
 
-    Two flags are load-bearing, and both were found the hard way:
+    The load is a real KERNAL serial LOAD under true drive emulation
+    (-drive8truedrive, +trapdevice8, +autostart-handle-tde), which is what
+    a .d64 on a real 1541 does: every byte is a CPU store, so an image that
+    reaches the I/O page writes the chip registers (#288; the build-side
+    guard is tools/test_prg_io_range.py). It used to load through the
+    KERNAL traps because "the TDE load never finishes". Two causes, both
+    measured for #288: the poll below halted the machine for its whole
+    sleep (every binary-monitor command halts the 6510 until resume(), and
+    the loop read AFTER resuming), and the UCI images then ran to $DFFF and
+    froze the load with its pointer in CIA1's page ($DC06, $DC09 and
+    $DC0A observed). With the loop resuming after the read and the pad gone,
+    each image loads under TDE in ~20 s. The drive setup is read back from
+    the instance (TDE_RESOURCES) and a mismatch fails the image.
 
-      -trapdevice8 +drive8truedrive — use the KERNAL load traps instead of
-        true drive emulation. Under TDE the ~250-block serial load of a 63 KB
-        PRG does not finish inside any budget worth waiting for, and the
-        symptom (a screen frozen on LOADING) reads as a corrupt image rather
-        than a slow one. The image's contents are byte-compared separately in
-        2a, so nothing is lost by loading it fast.
+    What this gate can and cannot see: it catches an image whose I/O writes
+    HANG the load. One that writes the registers and still loads would pass
+    here; the PRG load-range check (check_prg_ranges, and the Makefile's
+    post-link check, both tools/check_prg_io_range.py) is what catches that.
 
     The pass criterion is the BANNER, not the menu. Two reasons, both
     measured. The ip65 images print NETWORK INIT FAILED with no network
@@ -249,22 +302,34 @@ def check_d64_boots(variants: list[dict]) -> None:
         # -autostart on a .d64 loads and runs the first program on the disk.
         config = default_vice_config(prg_path=str(image), warp=True,
                                      ntsc=True, sound=False,
-                                     extra_args=["-trapdevice8",
-                                                 "+drive8truedrive"])
+                                     extra_args=list(TDE_ARGS))
         seen: dict[str, float] = {}
         needles = [COMMON_BANNER, expected, MENU_MARKER] + list(foreign_banners.values())
         try:
             with ViceInstanceManager(config=config) as mgr:
                 inst = mgr.acquire()
+                bad_drive = tde_resource_problems(inst.transport.resource_get)
+                if bad_drive:
+                    mgr.release(inst)
+                    record(f"{image.name} boots under true drive emulation",
+                           False, "; ".join(bad_drive))
+                    continue
                 start = time.monotonic()
+                inst.transport.resume()
                 while time.monotonic() - start < timeout:
                     time.sleep(5.0)
+                    # Read, THEN resume: the read halts the 6510, and the
+                    # machine must run through the next sleep.
                     try:
-                        inst.transport.resume()
                         text = ScreenGrid.from_transport(
                             inst.transport).continuous_text().upper()
                     except Exception:                       # noqa: BLE001
                         continue
+                    finally:
+                        try:
+                            inst.transport.resume()
+                        except Exception:                   # noqa: BLE001
+                            pass
                     for needle in needles:
                         if needle in text and needle not in seen:
                             seen[needle] = time.monotonic() - start
@@ -411,6 +476,7 @@ def main() -> int:
         print("\n=== 1. PRG reproducibility SKIPPED (SKIP_REBUILD=1) ===")
         skipped.append("reproducibility")
 
+    check_prg_ranges(variants)
     check_d64_contents(variants)
     if os.environ.get("SKIP_VICE") != "1":
         check_d64_boots(variants)

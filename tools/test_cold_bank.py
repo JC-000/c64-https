@@ -96,28 +96,29 @@ CFG_EDITS = [
     # The ladder's placement comment: the cold cfg speaks for the shipped
     # TRUST_STORE products, which the comb cfg (COLD_BANK=0) cannot link.
     (
-     '    # Sibling ladder (x25519.s, x25519_init.s). This cfg links only\n'
-     '    # COLD_BANK=0 comb images, which cannot hold TRUST_STORE (the Makefile\n'
-     '    # refuses it), so neither shipped product is built here; whether\n'
+     "    # Sibling ladder (x25519.s, x25519_init.s). This cfg links only\n"
+     "    # COLD_BANK=0 comb images, which cannot hold TRUST_STORE (the Makefile\n"
+     "    # refuses it), so neither shipped product is built here; whether\n"
      "    # CRYPTO_HOT could take the ladder is a question for this cfg's own\n"
      "    # build, measured, not for the cold cfg's figures.\n"
      '    LIB_X25519_CODE: load = CRYPTO_OVERLAY, type = ro;\n',
-     '    # Sibling ladder (x25519.s, x25519_init.s). It is here for the comb\n'
-     '    # DEMO build (HTTPS_BODY_TO_REU=1), whose CRYPTO_HOT cannot hold it.\n'
-     '    # The shipped product (TRUST_STORE=1, no viewer) has CRYPTO_HOT room to\n'
+     "    # Sibling ladder (x25519.s, x25519_init.s). It is here for the comb\n"
+     "    # DEMO build (HTTPS_BODY_TO_REU=1), whose CRYPTO_HOT cannot hold it.\n"
+     "    # The shipped product (TRUST_STORE=1, no viewer) has CRYPTO_HOT room to\n"
      '    # spare, so "no room" is a demo constraint, not a product one: compare\n'
-     '    # the uci-comb-store and uci-comb-demo-store rows of\n'
-     '    # tools/measure_margins.py before moving it, never a figure here.\n'
+     "    # the uci-comb-store and uci-comb-demo-store rows of\n"
+     "    # tools/measure_margins.py before moving it, never a figure here.\n"
      '    LIB_X25519_CODE: load = CRYPTO_OVERLAY, type = ro;\n'),
-    ("    OVERLAY_FILE_PAD: start = $C000, size = $2000, file = %O, define = yes, fill = yes, fillval = $00;\n",
+    ("    # The PRG ends at $BFFF, CRYPTO_COLD_SHADOW's last byte (#288).\n",
      "    # Cold bank: the PRG's copy of the cold groups (src/net/uci/cold_bank.s),\n"
-     "    # back to back; boot stashes it into the REU. The head of what was\n"
-     "    # OVERLAY_FILE_PAD, and of the TCP ring's range.\n"
+     "    # back to back; boot stashes it into the REU before the first connect\n"
+     "    # reuses the range as the TCP ring.\n"
      "    COLD_IMAGE:       start = $C000, size = $1000, file = %O, define = yes, fill = yes, fillval = $00;\n"
-     "    OVERLAY_FILE_PAD: start = $D000, size = $1000, file = %O, define = yes, fill = yes, fillval = $00;\n"
      "    # Where each cold group runs: cert_buf, pinned below. Not file-backed.\n"
      "    COLD_RUN_UI:      start = $4200, size = $0800, type = rw, define = yes;\n"
-     "    COLD_RUN_TRUST:   start = $4200, size = $0800, type = rw, define = yes;\n"),
+     "    COLD_RUN_TRUST:   start = $4200, size = $0800, type = rw, define = yes;\n"
+     "\n"
+     "    # The PRG ends at $CFFF, COLD_IMAGE's last byte (#288).\n"),
     ("    TARGET_PROMPT_CODE: load = LOADER,    type = ro,  optional = yes;\n"
      "    # #155 phase 2 (L3): the signed bundle's check (TRUST_BUNDLE=1).\n"
      "    TRUST_BUNDLE_CODE:  load = LOADER,    type = ro,  optional = yes;\n",

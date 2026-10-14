@@ -16,7 +16,7 @@ This document proposes a structural refactor of c64-https so that future library
 | CRYPTO_OVERLAY | 49 ($6000, **0 B alias**) | 47 ($4200, **7.5 KB**, $1E00) | ip65 has no overlay slot. UCI's slot is the only spare for X25519_RODATA/BSS under USE_X25519_SIBLING=1 |
 | CRYPTO_RESIDENT | 43 ($6000, **24 KB**) | 48 (identical) | The pressure point — Phase C.4 already moved TLS_CODE + sha256/hmac_drbg out to fit P-256 sibling. CLAUDE.md:570 records "**CRYPTO is 100% full**" |
 | SHADOW_BSS | folded into CRYPTO_RESIDENT (43) | folded into CRYPTO_RESIDENT (48) | ip65 cfg comment line 6: "covers old CRYPTO + SHADOW_BSS span" |
-| TCP_BUF | 60 ($C000, 4 KB) | repurposed as OVERLAY_FILE_PAD (62); runtime equate-only | UCI fills $C000–$DFFF with zeros at PRG load only to make the under-KERNAL CURVE_RAM image land at $E000 |
+| TCP_BUF | 60 ($C000, 4 KB) | repurposed as OVERLAY_FILE_PAD (62); runtime equate-only | (historical) UCI filled $C000–$DFFF with zeros at PRG load only to make the under-KERNAL CURVE_RAM image land at $E000; the pad was dropped by #288 and no image loads above $BFFF ($CFFF for the comb cold bank) |
 | OVERLAY_BLOB_CURVE_RAM | 58 (zero-size alias) | 68 ($E000, 7.5 KB; DMA'd to REU bank 7 at boot) | P-384 staging — ip65 has no room for the embedded blob |
 
 Already-existing fragility points the bot would hit:
@@ -24,7 +24,7 @@ Already-existing fragility points the bot would hit:
 - **CRYPTO_OVERLAY** is *simultaneously* the P-384 SHA-384/Curve overlay-paging slot (Phase 5), the test-time scratch slot for `tools/test_p384_symbols.py`, AND the resident home for sibling X25519 rodata under USE_X25519_SIBLING=1. The collision is documented in `cfg/c64-https-uci.cfg:127-128` and `src/crypto/shared/crypto_swap.s:166-171`: once a P-384 swap occurs, the X25519 sibling rodata is *gone* (no stash). c64-https gets away with it today only because the production TLS path never uses P-384.
 - **ip65 backend** is structurally incapable of holding the X25519 sibling: `cfg/c64-https-ip65.cfg:100-109` and `CLAUDE.md:400-402` confirm the 1 KB overflow.
 - **CRYPTO_RESIDENT is 100% full** today (CLAUDE.md:569-570), and any upstream bump that adds bytes — even a 10-byte defensive REU register init — will overflow. The nistcurves v0.2.0 → v0.3.0 bump triggered exactly this on 2026-05-19.
-- The MEMORY layout has historic dead zones (`$C000-$DFFF` zero-filled into the PRG just for the file offset) that the Phase 6 commit explicitly defers as "follow-up".
+- The MEMORY layout had historic dead zones (`$C000-$DFFF` zero-filled into the PRG just for the file offset) that the Phase 6 commit deferred as "follow-up"; #288 removed them.
 
 ### 1.2 Integration friction — the sed problem
 

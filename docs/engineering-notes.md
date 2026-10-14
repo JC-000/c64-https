@@ -2568,7 +2568,9 @@ UCI layout (W1 reference — `cfg/c64-https-uci.cfg`):
                                   BSS chunks (BSS, CRYPTO_BSS,
                                   TABLES_BSS, BSS_TAIL).
   $C000-$DFFF  OVERLAY_FILE_PAD   Zero-pad in the PRG; runtime: TCP_BUF
-                                  ring at $C000.
+                                  ring at $C000. (Dropped by #288: the
+                                  PRG now ends at $BFFF, comb at $CFFF
+                                  — see Packaging for why it mattered.)
   $E000-$FDFF  OVERLAY_BLOB_CURVE_RAM
                                   P-384 CURVE overlay blob; boot DMAs
                                   it to REU bank 7 then this region is
@@ -2816,10 +2818,55 @@ byte-compares, boots every image in VICE asserting the banner, and runs
 the listener selftest. `SKIP_REBUILD` / `SKIP_VICE` / `SKIP_LISTENER`
 narrow it.
 
-Booting a .d64 in VICE needs `-trapdevice8 +drive8truedrive`: under true
-drive emulation the ~250-block load never completes inside any sane
-budget, and the symptom is a screen stuck on `LOADING` that looks like a
-bad image rather than a slow one. `verify_release.py` passes both flags.
+Booting a .d64 in VICE used to need `-trapdevice8 +drive8truedrive`:
+under true drive emulation (TDE) the load "never completed", the screen
+stuck on `LOADING`. **Superseded by #288 (2026-10-12): `verify_release.py`
+now boots every image through a real serial LOAD under TDE
+(`-drive8truedrive +trapdevice8 +autostart-handle-tde`).** The old
+statement had two causes, separated by measurement:
+
+  - **The poll halted the machine.** Every binary-monitor command halts
+    the 6510 until `resume()`, and the loop did `sleep; resume; read`, so
+    VICE sat stopped through every sleep (0.0% CPU in `ps`) and ran only
+    in the gap between resume and read. A KERNAL trap load finishes in one
+    such slice; a TDE load crawled at ~0.5 B/s ($AE/$AF sampled every 15 s:
+    $0B54 → $0BF8 in 377 s) on every image, the ip65 control included.
+    The loop now reads, then resumes.
+  - **The UCI images loaded into I/O.** With the machine running
+    (read-then-resume probe, 10 s samples, VICE via c64-test-harness,
+    NTSC, warp, REU on), every 55,297 B image ending at $DFFF froze with
+    the load pointer inside CIA1's page, and every image ending at or
+    below $CFFF loaded. Which register write stops it was not isolated.
+    Store builds = `BACKEND=uci USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1
+    TRUST_RELEASE=1` (onchip) and `... USE_NISTCURVES_ONCHIP_COMB=1 ...`
+    (comb); TRUST_RELEASE does not move these hashes.
+
+    | tree | image | PRG | TDE result |
+    |---|---|---|---|
+    | 3f420f2 (nistcurves v0.14.0), pad | onchip-store | `a3fdc772…` | frozen at $DC06, 900 s |
+    | 3f420f2, pad | comb-store | `6a5a2993…` | frozen at $DC09, 600 s |
+    | b4a88b1 (pad dropped, v0.14.0) | onchip-store | `5571c41c…` | banner 21 s |
+    | b4a88b1 | comb-store | `4c23bc3d…` | banner 21 s |
+    | b4a88b1 | ip65-onchip | `b262f3f9…` | menu 21 s |
+    | 17654bf (v0.15.0), pad | onchip-store | `7059930a…` | frozen at $DC0A, 300 s |
+    | 17654bf, pad | comb-store | `936884e9…` | frozen at $DC0A, 300 s |
+    | this branch (v0.15.0) | onchip-store | `fd37600b…` | banner 21 s |
+    | this branch | comb-store | `025af934…` | banner 21 s |
+
+    `make package-verify` with the new boot step, on this branch's
+    images (`810f1158…`, `fd37600b…`, `025af934…`), on the #288 branch's
+    final commit: 14/14 checks (3 reproducibility, 3 dist-PRG load
+    ranges in step 1b, 3 d64 contents, 3 boots under TDE with the drive
+    setup read back, 2 listener), RELEASE ARTIFACTS VERIFIED; banners at
+    10 s each. The pre-rebase images do not reproduce at the rebased
+    commits (the nistcurves pin moved), which is why both sets are listed.
+
+The hypothesis filed with #288 named CIA2 ($DD00/$DD02, the IEC lines);
+the measured stops are in CIA1's page ($DC06, $DC09, $DC0A), before $DD00
+is reached. On a U64 the DMA load (`Ultimate64Client.load_prg`) of the
+old image left $D020/$D021/$DC02/$DC03/$DD02 unchanged (measured in
+review), so there only RAM changes. Probe scripts were scratch
+(`probe2.py`), not committed.
 
 **The comb profile now SHIPS** (`uci-comb`). It was excluded from the
 lineup while its costs — REU bank 2 residency plus the boot precompute —

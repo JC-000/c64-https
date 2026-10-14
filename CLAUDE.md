@@ -778,7 +778,13 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
                                    at $BA00 so sqtab lands at $BC00
                                    (LIB_SHARED_SQTAB_BASE, asserted
                                    post-link)
-  $C000-$DFFF  OVERLAY_FILE_PAD    zero-pad; runtime TCP ring at $C000
+  $C000-$CFFF  (no region)         TCP ring by equate; not in the PRG,
+                                   except comb's COLD_IMAGE (cold bank)
+                                   — the PRG ends $BFFF; comb with the
+                                   cold bank (COLD_BANK=1) ends $CFFF
+  $D000-$DFFF  I/O                 never in the PRG: a KERNAL LOAD would
+                                   store into the registers (#288,
+                                   `tools/test_prg_io_range.py`)
 
 ip65 (`cfg/c64-https-ip65.cfg`):
 
@@ -847,9 +853,10 @@ is LibreSSL and cannot serve this client) and `--selftest` proves the path
 with `openssl s_client -ciphersuites TLS_CHACHA20_POLY1305_SHA256`.
 
 `make package-verify` rebuilds and compares **PRG** hashes, reads each PRG
-back out of its .d64 with `c1541`, boots each image in VICE
-(`-trapdevice8 +drive8truedrive`, or the load never finishes), and runs the
-listener selftest. A failed variant yields a partial release with an
+back out of its .d64 with `c1541`, boots each image in VICE through a
+real serial LOAD under true drive emulation (#288 — a poll that halts the
+6510 between reads must `resume()` AFTER reading, or the load "never
+finishes"), and runs the listener selftest. A failed variant yields a partial release with an
 `!! INCOMPLETE RELEASE !!` MANIFEST block, and the gate cannot pass
 vacuously (zero checks = fail; any `SKIP_*` = `PARTIAL VERIFICATION`).
 
