@@ -50,11 +50,18 @@ MAKE_ARGS=(BACKEND=uci-m3 "HTTPS_HOST=$DEMO_HOST" "HTTPS_PATH=$DEMO_PATH")
 # What the firmware side published; quoted in the README, checked nowhere
 # here (the device is not involved in a build).
 # The requirement is the interface; the build named is only where it was
-# validated. UPSTREAM_PRS overrides the upstream status (one line is fine);
-# set it, or change the default, once an upstream PR implements $21-$25.
+# validated.
 FIRMWARE="M3-SPEC v1 + errata v1.1/v1.2 firmware (validated on esp-tls/m3-master 3a1ff9ff, a development branch that is not public: fw 3.15, FPGA 126, ESP 1.309)"
-UPSTREAM_PRS="${UPSTREAM_PRS:-The firmware this demo needs is not yet public or upstream.
-      GideonZ/1541ultimate#952 is the proposal issue; this demo follows its
+# Where the firmware this demo needs can be had. Replace both once it is
+# published: FIRMWARE_SOURCE with the public branch URL and commit,
+# FIRMWARE_IMAGE_SHA with the sha256 of the attached image (its line is
+# printed only when set). Plain constants, not env knobs, so the README
+# stays a function of the commit.
+FIRMWARE_SOURCE="not yet public, and not upstream"
+FIRMWARE_IMAGE_SHA=""
+# UPSTREAM_PRS overrides the upstream status (one line is fine); set it, or
+# change the default, once an upstream PR implements $21-$25.
+UPSTREAM_PRS="${UPSTREAM_PRS:-GideonZ/1541ultimate#952 is the proposal issue; this demo follows its
       proposed command numbering (\$21 OPEN_TLS, \$23 TLS_INFO, \$25
       TLS_RELEASE). No upstream PR implements these commands yet (#953 is
       GET_RANDOM only).}"
@@ -199,7 +206,9 @@ What it needs
 -------------
   - An Ultimate 64 (Elite) running firmware with the M3 TLS sockets:
     $FIRMWARE.
-    Upstream status:
+    Firmware source: $FIRMWARE_SOURCE
+${FIRMWARE_IMAGE_SHA:+    Firmware image sha256: $FIRMWARE_IMAGE_SHA
+}    Upstream status:
       $UPSTREAM_PRS
     $UPSTREAM_RUN
   - Its WiFi module up (the ESP32 does the TLS), the network connected, and
