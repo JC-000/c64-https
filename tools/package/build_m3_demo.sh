@@ -60,7 +60,8 @@ FIRMWARE="M3-SPEC v1 + errata v1.1/v1.2 firmware (validated on esp-tls/m3-master
 # FIRMWARE_IMAGE_SHA and links the fork prerelease tls-preview-f3df8261,
 # with the new figures.
 FIRMWARE_SOURCE="https://github.com/JC-000/1541ultimate/tree/pr/3-tls-r1
-      (f3df8261). Not upstream; proposed on GideonZ/1541ultimate#952.
+      (f3df8261). Not upstream; the series it implements is proposed on
+      GideonZ/1541ultimate#952.
       This demo image has NOT been run on a build of it."
 FIRMWARE_IMAGE_SHA=""
 # Change it once an upstream PR implements $21-$25.
@@ -155,18 +156,23 @@ prg_sha="$(sha "$OUT/$NAME.prg")"
 d64_sha="$(sha "$OUT/$NAME.d64")"
 prg_bytes="$(wc -c < "$OUT/$NAME.prg" | tr -d ' ')"
 
-# The M3 adapter's sources: every file ca65 read for the objects in
+# The M3 adapter's sources: everything under src/net/uci-m3/ (some of it,
+# m3_https_get.inc and net_tuning.inc, is included from boot.s/exports.s,
+# not from the adapter's objects), every file ca65 read for the objects in
 # build/net/uci-m3/ (their .d files: the .s files and every .include, such
-# as src/net/uci/uci_regs.inc), plus the backend's cfg. Derived from this
-# build, not listed by hand.
+# as src/net/uci/uci_regs.inc), and the backend's cfg. Derived from git and
+# this build, not listed by hand. The directory itself is also a pathspec,
+# so a file deleted from it since the measured commit counts too.
 shopt -s nullglob
 adapter_deps=(build/net/uci-m3/*.d)
 shopt -u nullglob
 [ "${#adapter_deps[@]}" -gt 0 ] || die "no build/net/uci-m3/*.d: cannot list the adapter's sources"
 adapter_files=()
 while IFS= read -r f; do adapter_files+=("$f"); done < <(
-    { sed -n 's/^build\/[^:]*:[[:space:]]*//p' "${adapter_deps[@]}" | tr ' \t' '\n\n'
+    { git ls-files -- src/net/uci-m3
+      sed -n 's/^build\/[^:]*:[[:space:]]*//p' "${adapter_deps[@]}" | tr ' \t' '\n\n'
       echo cfg/c64-https-uci-m3.cfg; } | grep -v -e '^$' -e '^build/' | sort -u)
+[ "${#adapter_files[@]}" -gt 1 ] || die "cannot list the adapter's sources"
 
 if [ "$prg_sha" = "$MEASURED_PRG_SHA" ]; then
     measured_with="Measured with THIS image (PRG sha256 above)"
@@ -177,12 +183,14 @@ else
     if ! git cat-file -e "$MEASURED_COMMIT^{commit}" 2>/dev/null; then
         adapter="whether the M3 adapter's sources changed since is unknown here"
     else
-        changed="$(git diff --name-only "$MEASURED_COMMIT" HEAD -- "${adapter_files[@]}" | tr '\n' ' ')"
+        changed="$(git diff --name-only "$MEASURED_COMMIT" HEAD -- src/net/uci-m3 "${adapter_files[@]}" \
+            | sort -u | sed 's/^/    /')"
         if [ -z "$changed" ]; then
             adapter="the M3 adapter's ${#adapter_files[@]} source files (src/net/uci-m3/, what its
 objects include, and its cfg) are unchanged since"
         else
-            adapter="changed since in the M3 adapter's sources: ${changed% }"
+            adapter="changed since in the M3 adapter's sources:
+$changed"
         fi
     fi
     measured_with="NOT measured with this image. Measured with PRG sha256
