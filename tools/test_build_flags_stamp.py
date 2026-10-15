@@ -829,7 +829,8 @@ def test_cfg_edit_relinks_every_link_output():
                 f"{cfg}: an unchanged cfg relinked:\n" + proc.stdout)
             assert all(farm.path(o).stat().st_mtime_ns == old[o]
                        for o in LINK_OUTPUTS), f"{cfg}: unchanged cfg touched outputs"
-            time.sleep(1.1)
+            # No sleep, on purpose: a same-second edit is invisible to an
+            # mtime prerequisite on make 3.81, so only a content stamp passes.
             farm.append_comment(cfg)
             proc = farm.make(*flags)
             assert "ld65 " in proc.stdout, (
@@ -839,6 +840,25 @@ def test_cfg_edit_relinks_every_link_output():
                 assert farm.path(o).stat().st_mtime_ns != old[o], (
                     f"{cfg}: {o} is stale after a cfg edit")
             assert farm.sha() == before, f"{cfg}: a comment edit moved the PRG"
+
+
+def test_ip65_cfg_edit_changes_the_stamp_and_clears_outputs():
+    """The ip65 cfg, without an ip65 link: the goal is build/flags.stamp."""
+    _require_toolchain()
+    with CfgFarm() as farm:
+        farm.make(*UCI)
+        farm.make("BACKEND=ip65", STAMP, check=False)
+        line = lambda: [l for l in farm.path(STAMP).read_text().splitlines()
+                        if l.startswith("CFG_SHA256=")]
+        before = line()
+        assert len(before) == 1 and len(before[0]) > len("CFG_SHA256=") + 8
+        for o in LINK_OUTPUTS:
+            farm.path(o).write_text("planted")
+        farm.append_comment("cfg/c64-https-ip65.cfg")
+        farm.make("BACKEND=ip65", STAMP, check=False)
+        assert line() != before, "ip65 cfg edit did not move CFG_SHA256"
+        for o in LINK_OUTPUTS:
+            assert not farm.exists(o), f"{o} survived an ip65 cfg edit"
 
 
 def test_unchanged_flags_rebuild_nothing():

@@ -609,7 +609,8 @@ build/net/ip65/ip65_blob.o: $(IP65_BIN)
 # hand-kept list of knob names: every flag that reaches the toolchain does so
 # through CA65FLAGS or LD65FLAGS (which carries $(CFG), hence BACKEND and the
 # onchip/comb cfg variants), so a new knob added at the top of this file is
-# covered on the day it is written. The archive list and the three exported
+# covered on the day it is written. The cfg's CONTENT is stamped too (an edit
+# to the file moves no command line). The archive list and the three exported
 # X25519 segment names are added because they steer build inputs without
 # appearing on either command line.
 #
