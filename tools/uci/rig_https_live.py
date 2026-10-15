@@ -100,6 +100,7 @@ from _prg_load import PrgLoadError, load_verified_and_run
 from _memory_policy import build_policy_and_low_ram_arbiter
 from _rig_lifecycle import guard_socket_teardown, tls_evidence_addrs
 from _device_prep import DevicePrepError, prepare_device
+from _trust_mode import tp_mode_prologue
 from _reu_preflight import ReuPreflightError, preflight_reu
 
 # Pure helpers shared with the local rig (all side-effect free; importing
@@ -280,6 +281,7 @@ def build_live_routine(labels: dict[str, int], *,
     emit_lda_imm((port >> 8) & 0xFF)
     emit_sta_abs(http_port + 1)
 
+    code.extend(tp_mode_prologue(labels))   # TRUST_STORE=1, see _trust_mode.py
     emit_progress(0x03)
 
     # Call http_get — the REAL TLS 1.3 + HTTP code path.

@@ -36,6 +36,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
+from tools.uci._trust_mode import tp_mode_prologue  # noqa: E402
 
 # Reuse the existing harness's helpers by importing the module as-is.
 # We override a narrow slice: the stub-building function and the body.
@@ -172,6 +173,7 @@ def _build_routine(labels, port):
     emit_lda_imm((port >> 8) & 0xFF)
     emit_sta_abs(http_port + 1)
 
+    code.extend(tp_mode_prologue(labels))   # TRUST_STORE=1, see _trust_mode.py
     emit_progress(0x03)
     emit_jsr(http_get)
 

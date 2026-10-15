@@ -120,6 +120,7 @@ from _prg_load import PrgLoadError, load_verified_and_run  # noqa: E402
 from _memory_policy import build_policy_and_low_ram_arbiter  # noqa: E402
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
+from _trust_mode import tp_mode_prologue  # noqa: E402
 from _sni_precondition import enforce_sni_precondition  # noqa: E402
 from _rig_lifecycle import (  # noqa: E402
     guard_socket_teardown, start_listener, tls_evidence_addrs,
@@ -275,6 +276,7 @@ def _build_http_routine(labels: dict[str, int], port: int) -> tuple[bytes, int]:
     emit_lda_imm((port >> 8) & 0xFF)
     emit_sta_abs(labels["http_port"] + 1)
 
+    code.extend(tp_mode_prologue(labels))   # TRUST_STORE=1, see _trust_mode.py
     emit_progress(0x03)
     emit_jsr(labels["http_get"])
 

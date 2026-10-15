@@ -121,6 +121,7 @@ from _device_lock_helper import (
 from _prg_load import PrgLoadError, load_verified_and_run
 from _memory_policy import build_policy, build_policy_and_low_ram_arbiter
 from _device_prep import REQUIRED_REU_SIZE, DevicePrepError, prepare_device
+from _trust_mode import tp_mode_prologue
 from _rig_lifecycle import (
     guard_socket_teardown, teardown_warning, tls_evidence_addrs,
 )
@@ -309,6 +310,7 @@ def build_wiki_routine(labels: dict[str, int], *,
     emit_lda_imm((port >> 8) & 0xFF)
     emit_sta_abs(http_port + 1)
 
+    code.extend(tp_mode_prologue(labels))   # TRUST_STORE=1, see _trust_mode.py
     emit_progress(0x03)
 
     # The REAL TLS 1.3 + HTTP + body-sink code path.

@@ -116,6 +116,7 @@ from _memory_policy import (
     build_policy_and_low_ram_arbiter,
 )
 from _device_prep import DevicePrepError, prepare_device
+from _trust_mode import tp_mode_prologue
 from _reu_preflight import ReuPreflightError, preflight_reu
 from _rig_lifecycle import (
     guard_socket_teardown, start_listener, tls_evidence_addrs,
@@ -607,6 +608,8 @@ def _build_http_routine(labels: dict[str, int], port: int) -> tuple[bytes, int]:
     emit_sta_abs(http_port)
     emit_lda_imm((port >> 8) & 0xFF)
     emit_sta_abs(http_port + 1)
+
+    code.extend(tp_mode_prologue(labels))   # TRUST_STORE=1 builds, see _trust_mode.py
 
     emit_progress(0x03)
 
