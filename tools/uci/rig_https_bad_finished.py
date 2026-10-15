@@ -93,8 +93,6 @@ Exit codes: 0 pass, 1 fail, 2 setup error, 3 device wedged.
 """
 from __future__ import annotations
 
-from _trust_mode import tp_mode_prologue
-
 import datetime
 import json
 import os
@@ -122,6 +120,7 @@ from _prg_load import PrgLoadError, load_verified_and_run  # noqa: E402
 from _memory_policy import build_policy_and_low_ram_arbiter  # noqa: E402
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
+from _trust_mode import tp_mode_prologue  # noqa: E402
 from _sni_precondition import enforce_sni_precondition  # noqa: E402
 from _rig_lifecycle import (  # noqa: E402
     guard_socket_teardown, start_listener, tls_evidence_addrs,

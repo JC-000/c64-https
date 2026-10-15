@@ -77,8 +77,6 @@ Offline structural check (no hardware, no DeviceLock):
 """
 from __future__ import annotations
 
-from _trust_mode import tp_mode_prologue
-
 import os
 import sys
 import time
@@ -102,6 +100,7 @@ from _prg_load import PrgLoadError, load_verified_and_run
 from _memory_policy import build_policy_and_low_ram_arbiter
 from _rig_lifecycle import guard_socket_teardown, tls_evidence_addrs
 from _device_prep import DevicePrepError, prepare_device
+from _trust_mode import tp_mode_prologue
 from _reu_preflight import ReuPreflightError, preflight_reu
 
 # Pure helpers shared with the local rig (all side-effect free; importing

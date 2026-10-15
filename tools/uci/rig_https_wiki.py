@@ -97,8 +97,6 @@ Offline structural check (no hardware, no DeviceLock):
 """
 from __future__ import annotations
 
-from _trust_mode import tp_mode_prologue
-
 import os
 import socket
 import ssl
@@ -123,6 +121,7 @@ from _device_lock_helper import (
 from _prg_load import PrgLoadError, load_verified_and_run
 from _memory_policy import build_policy, build_policy_and_low_ram_arbiter
 from _device_prep import REQUIRED_REU_SIZE, DevicePrepError, prepare_device
+from _trust_mode import tp_mode_prologue
 from _rig_lifecycle import (
     guard_socket_teardown, teardown_warning, tls_evidence_addrs,
 )

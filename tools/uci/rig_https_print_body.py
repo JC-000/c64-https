@@ -30,14 +30,13 @@ screen-code sequence is present at the expected row).  Exit 1 = FAIL.
 """
 from __future__ import annotations
 
-from _trust_mode import tp_mode_prologue
-
 import os
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
+from tools.uci._trust_mode import tp_mode_prologue  # noqa: E402
 
 # Reuse the existing harness's helpers by importing the module as-is.
 # We override a narrow slice: the stub-building function and the body.

@@ -17,9 +17,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools" / "uci"))
+sys.path.insert(0, str(ROOT))
 
 import _trust_mode  # noqa: E402
 import rig_https_local as rig  # noqa: E402
+import tools.uci.rig_https_local as pkg_rig  # noqa: E402  (the module print_body reads)
 import rig_https_print_body as print_body  # noqa: E402
 import rig_https_live as live  # noqa: E402
 import rig_https_wiki as wiki  # noqa: E402
@@ -32,7 +34,7 @@ LABELS = {
     "net_init": 0x2000, "tcp_recv_head": 0x7200, "tcp_recv_tail": 0x7202,
     "print_resp_body": 0x7400, "viewer_enter": 0x7500,
 }
-TP_MODE = 0x7300
+TP_MODE = 0x9F43       # >= $8000: a high-byte & $7F mutant must not pass
 KW = dict(routine_addr=0x035F, host_str_addr=0x0337, path_str_addr=0x0357,
           sentinel_addr=0x0334, progress_addr=0x0335, carry_flag_addr=0x0336,
           host_len=4, port=4433)
@@ -47,6 +49,7 @@ def _set_globals(mod):
 
 def _builders():
     _set_globals(rig)
+    _set_globals(pkg_rig)
     _set_globals(bad)
     return {
         "local": lambda l: rig._build_http_routine(l, 4433)[0],
@@ -70,6 +73,20 @@ def test_store_build_sets_mode_before_http_get():
         code = bytes(build({**LABELS, "tp_mode": TP_MODE}))
         assert seq in code, name
         assert code.index(seq) < code.index(jsr), name
+
+
+def test_print_body_is_base_plus_print_resp_body():
+    """print_body keeps a copy of the base routine; it must not drift."""
+    b = _builders()
+    for extra in ({}, {"tp_mode": TP_MODE}):
+        labels = {**LABELS, **extra}
+        base = bytes(b["local"](labels))
+        pb = bytes(b["print_body"](labels))
+        k = base.index(bytes([0xA9, 0x04, 0x8D, 0x35, 0x03])) + 5  # progress=4
+        jsr = bytes([0x20, 0x00, 0x74])
+        park = 0x035F + len(base) - 3 + 3        # jmp * target moves by the jsr
+        want = base[:k] + jsr + base[k:-2] + bytes([park & 0xFF, park >> 8])
+        assert pb == want
 
 
 def test_non_store_build_unchanged():
