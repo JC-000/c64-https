@@ -52,7 +52,9 @@ PR for the exact one.
 
 WHAT A MISSING UCI BUILD MEANS (issue #165)
 
-This module reads whatever PRG happens to be sitting in ``build/``.  On a
+Standalone, this module reads whatever PRG happens to be sitting in
+``build/`` (or the build dir named by ``C64_UCI_BUILD_DIR``); under pytest,
+conftest.py gives it a fresh private UCI build instead (#302).  On a
 ``BACKEND=ip65`` build — or a stale tree — the ``uci_*`` labels are absent
 and none of the three checks can run.  That is an **involuntary** skip: the
 suite did not choose it, the environment forced it, and it certifies

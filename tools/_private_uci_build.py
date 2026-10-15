@@ -13,6 +13,7 @@ into a test failure (or, only under C64_UCI_TESTS_OPTIONAL=1, a loud skip).
 """
 import atexit
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -96,6 +97,28 @@ def uci_build_dir() -> Path:
     return _cached[0]
 
 
+PREFIX = "c64-https-pytest-uci-"
+_DIR_RE = re.compile(r"^" + re.escape(PREFIX) + r"(\d+)-[^/]+$")
+
+
+def _sweep(parent: Path):
+    """Remove dirs a killed run left behind: exactly PREFIX<pid>-*, dead pid."""
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return
+    for d in entries:
+        m = _DIR_RE.match(d.name)
+        if not m or not d.is_dir() or d.is_symlink():
+            continue
+        try:
+            os.kill(int(m.group(1)), 0)
+        except ProcessLookupError:
+            shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass            # alive (or not ours to signal): leave it
+
+
 def _build() -> Path:
     """A per-process private tree, so concurrent pytest runs in one checkout
     never delete each other's build/. Removed at exit."""
@@ -103,7 +126,8 @@ def _build() -> Path:
                   or tempfile.gettempdir())
     try:
         parent.mkdir(parents=True, exist_ok=True)
-        root = Path(tempfile.mkdtemp(prefix="c64-https-pytest-uci-",
+        _sweep(parent)
+        root = Path(tempfile.mkdtemp(prefix=f"{PREFIX}{os.getpid()}-",
                                      dir=parent))
     except OSError as exc:
         raise Unavailable(f"cannot create a private build dir: {exc}")
@@ -148,6 +172,9 @@ class BuildFile:
         if "pytest" in sys.modules:
             return Path(f"<{ENV} unset under pytest>") / self.name
         return REPO / "build" / self.name
+
+    def __fspath__(self):
+        return str(self.path())
 
     def __getattr__(self, attr):
         return getattr(self.path(), attr)

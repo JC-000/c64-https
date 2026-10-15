@@ -262,6 +262,38 @@ def test_runner_runs_the_ip65_export_gate_only_on_ip65() -> None:
         "skipped_suites)")
 
 
+def test_private_build_file_is_a_pathlike_and_dead_dirs_are_swept() -> None:
+    """BuildFile works with open()/os.fspath; a killed run's dir is swept."""
+    import os
+    import subprocess
+    import tempfile
+    sys.path.insert(0, str(REPO / "tools"))
+    import _private_uci_build as pub
+    old = os.environ.get(pub.ENV)
+    os.environ[pub.ENV] = "/x"
+    try:
+        f = pub.BuildFile("labels.txt")
+        assert os.fspath(f) == "/x/labels.txt" == str(f)
+        assert pub.Path(f) == pub.Path("/x/labels.txt")
+    finally:
+        if old is None:
+            os.environ.pop(pub.ENV, None)
+        else:
+            os.environ[pub.ENV] = old
+    with tempfile.TemporaryDirectory() as parent:
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()                                  # a pid that is now dead
+        dead = Path(parent) / f"{pub.PREFIX}{p.pid}-abc"
+        live = Path(parent) / f"{pub.PREFIX}{os.getpid()}-abc"
+        other = Path(parent) / f"keep-{p.pid}-abc"
+        odd = Path(parent) / f"{pub.PREFIX}{p.pid}"      # no suffix: not ours
+        for d in (dead, live, other, odd):
+            d.mkdir()
+        pub._sweep(Path(parent))
+        assert not dead.exists()
+        assert live.exists() and other.exists() and odd.exists()
+
+
 # ---------------------------------------------------------------------------
 # 5. The involuntary-skip rule (issue #178, part 2)
 # ---------------------------------------------------------------------------
