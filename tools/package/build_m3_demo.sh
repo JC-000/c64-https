@@ -62,7 +62,7 @@ FIRMWARE="TLS client sockets for the Ultimate 64 / U64 Elite, from
       on branch pr/3-tls-r1, the head of draft PR GideonZ/1541ultimate#997.
       Not upstream; proposed on GideonZ/1541ultimate#952."
 # The image's own source. The branch pr/3-tls-r1 has moved on since.
-FIRMWARE_SOURCE="https://github.com/JC-000/1541ultimate/tree/f3df8261"
+FIRMWARE_SOURCE="https://github.com/JC-000/1541ultimate/tree/f3df8261b59ea5883cc5b6d9bb1eb4c79f8f0fd4"
 FIRMWARE_PRERELEASE="https://github.com/JC-000/1541ultimate/releases/tag/tls-preview-f3df8261"
 FIRMWARE_IMAGE_SHA="15e9ff7cd8a11daf1f4698d574480381d475db7754e1d276d9aa95e8013ded3c"
 # The build the "Measured" figures were taken on (the image above).
