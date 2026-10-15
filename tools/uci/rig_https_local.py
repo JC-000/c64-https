@@ -205,6 +205,7 @@ def _ensure_certs_or_fail() -> int:
 # (tools/uci/_memory_policy.py) over a MemoryPolicy built from this build's
 # labels.txt, and the transport's policy catches any stray write into a
 # c64-https segment before the byte crosses the wire.
+TP_M_FIRST = 2             # src/trust_policy.inc
 ROUTINE_ADDR: int = -1     # arbiter.alloc(<routine length>, "trampoline")
 HOST_STR_ADDR: int = -1    # arbiter.alloc(HOST_STR_BYTES, "host_str")
 PATH_STR_ADDR: int = -1    # arbiter.alloc(PATH_STR_BYTES, "path_str")
@@ -607,6 +608,15 @@ def _build_http_routine(labels: dict[str, int], port: int) -> tuple[bytes, int]:
     emit_sta_abs(http_port)
     emit_lda_imm((port >> 8) & 0xFF)
     emit_sta_abs(http_port + 1)
+
+    # TRUST_STORE=1 builds (#301): the hook in cert_pin.s refuses the client
+    # Finished while tp_mode is TP_M_NONE, which is what trust_pre (run by
+    # do_https_get, not by http_get) leaves behind. Enter in TP_M_FIRST, the
+    # policy's first-contact mode: it accepts, and since trust_post is never
+    # called here nothing is recorded, so the real store is left untouched.
+    if "tp_mode" in labels:
+        emit_lda_imm(TP_M_FIRST)
+        emit_sta_abs(labels["tp_mode"])
 
     emit_progress(0x03)
 
