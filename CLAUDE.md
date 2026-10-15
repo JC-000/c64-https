@@ -915,9 +915,11 @@ Both rig dirs (`tests/`, `tools/uci/`)
 are `rig_*.py` and in `norecursedirs`, and each exits 5 on its own. A bare
 `pytest` at the root is green; the total is not quotable, because it tracks
 `testpaths` *and* the build state. Run it rather than citing a number, and
-**build `BACKEND=uci` first**: `test_uci_data_acc.py` does not *skip*
-without a UCI PRG in `build/`, it **fails** 3 cases (#178's gap, not a
-regression).
+**build `BACKEND=uci` first**: six `test_uci_*` modules do not *skip*
+without a UCI PRG in `build/`, they **fail** (#178's gap, not a
+regression). A UCI build is the only one needed (#302): the ip65-only
+label-export check is `tools/check_ip65_build_exports.py`, run by
+`run_all_tests.py` on an ip65 build, not by pytest.
 
 Negative-path coverage exists because an audit found the Finished-mismatch
 abort had no test: `test_finished_verify.py` (VICE, carry-latching stub)

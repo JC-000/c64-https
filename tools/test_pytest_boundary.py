@@ -207,6 +207,27 @@ def test_testpaths_lists_nothing_pytest_cannot_run() -> None:
     )
 
 
+def test_testpaths_needs_only_a_uci_build() -> None:
+    """One build must make a bare `pytest` green (#302).
+
+    The six UCI modules read a BACKEND=uci build/, so testpaths can hold no
+    case that needs an ip65 one. The only such check, the RR-Net rig's
+    label exports, is `tools/check_ip65_build_exports.py` and rides
+    `run_all_tests.py` ("ip65_exports"). Both halves are pinned: the check
+    stays out of testpaths, and stays wired where it runs.
+    """
+    for rel in _testpaths():
+        src = (REPO / rel).read_text()
+        assert "not an ip65" + " one" not in src, (
+            f"{rel} refuses a UCI build; a bare pytest cannot be green on "
+            "one build if it does. Move the check next to "
+            "tools/check_ip65_build_exports.py (#302).")
+    chk = REPO / "tools" / "check_ip65_build_exports.py"
+    assert chk.exists() and "tools/check_ip65_build_exports.py" not in _testpaths()
+    assert '"ip65_exports"' in (REPO / "tools" / "run_all_tests.py").read_text(), (
+        "check_ip65_build_exports.py is wired nowhere: it would never run")
+
+
 # ---------------------------------------------------------------------------
 # 5. The involuntary-skip rule (issue #178, part 2)
 # ---------------------------------------------------------------------------

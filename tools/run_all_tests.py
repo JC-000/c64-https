@@ -406,6 +406,21 @@ def main():
                 print(f"  [{status}] {name}: {passed}/{passed+failed} "
                       f"({duration:.1f}s)")
 
+    # Host-side gate, not a VICE suite (was a pytest case until #302): the
+    # ip65 build's labels.txt exports what the RR-Net rig reads. A UCI build
+    # is an accounted SKIP, like net above.
+    if backend is None or backend == "ip65":
+        import check_ip65_build_exports
+        t0 = time.time()
+        rc = check_ip65_build_exports.check()
+        results.append(("ip65_exports", int(rc == 0), int(rc != 0),
+                        time.time() - t0))
+    else:
+        skipped_suites.append((
+            "ip65_exports",
+            f"BACKEND={backend} build -- the rig's exports are ip65's "
+            "(rerun with BACKEND=ip65)"))
+
     # Summary
     total_passed = sum(r[1] for r in results)
     total_failed = sum(r[2] for r in results)
