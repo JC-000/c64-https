@@ -55,19 +55,20 @@ MAKE_ARGS=(BACKEND=uci-m3 "HTTPS_HOST=$DEMO_HOST" "HTTPS_PATH=$DEMO_PATH")
 # UPSTREAM_PRS are plain constants, not env knobs, so the README is a
 # function of the commit: a later commit swaps them.
 FIRMWARE="TLS client sockets for the Ultimate 64 / U64 Elite, from
-      JC-000/1541ultimate branch pr/3-tls-r1 (f3df8261), prebuilt image in
-      prerelease tls-preview-f3df8261. Not upstream; proposed on
-      GideonZ/1541ultimate#952."
+      JC-000/1541ultimate branch pr/3-tls-r1; the prebuilt image, in
+      prerelease tls-preview-f3df8261, is built from f3df8261. Not
+      upstream; proposed on GideonZ/1541ultimate#952."
 FIRMWARE_SOURCE="https://github.com/JC-000/1541ultimate/tree/pr/3-tls-r1"
 FIRMWARE_PRERELEASE="https://github.com/JC-000/1541ultimate/releases/tag/tls-preview-f3df8261"
 FIRMWARE_IMAGE_SHA="15e9ff7cd8a11daf1f4698d574480381d475db7754e1d276d9aa95e8013ded3c"
 # The build the "Measured" figures were taken on (the image above).
 MEASURED_FW="firmware 3.15 git f3df8261 (the image above, ESP module 1.8)"
-# Change it once an upstream PR implements $21-$25.
+# Change it once an upstream PR implementing $21-$25 is merged.
 UPSTREAM_PRS="not upstream yet. GideonZ/1541ultimate#952 is the proposal issue;
       this demo follows its proposed command numbering (\$21 OPEN_TLS,
-      \$23 TLS_INFO, \$25 TLS_RELEASE). No upstream PR implements these
-      commands yet (GideonZ/1541ultimate#953 adds GET_RANDOM only)."
+      \$23 TLS_INFO, \$25 TLS_RELEASE). The commands are open upstream as
+      issue #995 and draft PR #997, which builds on draft PR #996 (ESP-IDF
+      6.0.3, issue #994); none is merged. #953 adds GET_RANDOM only."
 # Earlier demo images (this script's history, JC-000/c64-https 82a549a to
 # 9eabd50) were validated on these builds; neither is public.
 EARLIER_RUNS="esp-tls/m3 f2e46946 and esp-tls/m3-master 3a1ff9ff"
