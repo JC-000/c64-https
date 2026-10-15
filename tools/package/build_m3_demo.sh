@@ -52,21 +52,22 @@ MAKE_ARGS=(BACKEND=uci-m3 "HTTPS_HOST=$DEMO_HOST" "HTTPS_PATH=$DEMO_PATH")
 # The requirement is the interface; the build named is only where it was
 # validated.
 FIRMWARE="M3-SPEC v1 + errata v1.1/v1.2 firmware (validated on esp-tls/m3-master 3a1ff9ff, a development branch that is not public: fw 3.15, FPGA 126, ESP 1.309)"
-# Where source for the firmware this demo needs is public, and (once a
-# built image is published) that image's sha256; its line is printed only
-# when set. Plain constants, not env knobs, so the README stays a function
-# of the commit: a later commit swaps in a newer branch or image.
-FIRMWARE_SOURCE="public, not upstream: JC-000/1541ultimate branch
-      esp32-tls-offload (tip 72f33796 on 2026-10-14), linked from
-      GideonZ/1541ultimate#952. This demo has NOT been run on a build of
-      that branch."
+# Where the firmware this demo needs comes from, and (once a prebuilt
+# image is published) that image's sha256; its line is printed only when
+# set. These and UPSTREAM_PRS are plain constants, not env knobs, so the
+# README is a function of the commit: a later commit swaps them. After a
+# demo-rig run on a build of this branch, that commit also sets
+# FIRMWARE_IMAGE_SHA and links the fork prerelease tls-preview-f3df8261,
+# with the new figures.
+FIRMWARE_SOURCE="https://github.com/JC-000/1541ultimate/tree/pr/3-tls-r1
+      (f3df8261). Not upstream; proposed on GideonZ/1541ultimate#952.
+      This demo image has NOT been run on a build of it."
 FIRMWARE_IMAGE_SHA=""
-# UPSTREAM_PRS overrides the upstream status (one line is fine); set it, or
-# change the default, once an upstream PR implements $21-$25.
-UPSTREAM_PRS="${UPSTREAM_PRS:-not upstream yet. GideonZ/1541ultimate#952 is the proposal issue;
+# Change it once an upstream PR implements $21-$25.
+UPSTREAM_PRS="not upstream yet. GideonZ/1541ultimate#952 is the proposal issue;
       this demo follows its proposed command numbering (\$21 OPEN_TLS,
       \$23 TLS_INFO, \$25 TLS_RELEASE). No upstream PR implements these
-      commands yet (GideonZ/1541ultimate#953 adds GET_RANDOM only).}"
+      commands yet (GideonZ/1541ultimate#953 adds GET_RANDOM only)."
 # Earlier demo images (this script's history, JC-000/c64-https 82a549a to
 # b54fcb6) were validated on these builds; neither is public.
 EARLIER_RUNS="esp-tls/m3 f2e46946 and esp-tls/m3-master 3a1ff9ff"
