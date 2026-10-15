@@ -55,10 +55,13 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             write(line)
 
 
-# Six modules execute the shipped UCI bytes. Point them at a UCI build that
-# is not necessarily build/, so a bare pytest is green on an ip65 build too
-# (#302). A build that cannot be produced raises here -> pytest ERROR, never
-# a skip (#178). Lazy: only a run that selects one of them pays for it.
+# Six modules execute the shipped UCI bytes. Point them at a fresh private
+# UCI build (tools/_private_uci_build.py) so a bare pytest is green on any
+# build/ (#302). A build that fails raises here, once, with make's error as the
+# reason -> pytest ERROR on every selected test, never a skip (#178).
+# C64_UCI_TESTS_OPTIONAL=1 (the modules' own opt-out) is the one exception:
+# a failed private build then leaves their paths alone, and they announce the
+# skip themselves.
 _UCI_BYTES_MODULES = {
     "test_uci_data_acc", "test_uci_timeout_recovery",
     "test_uci_reply_valid_wait", "test_uci_abort_recovery",
@@ -69,8 +72,10 @@ _uci_retargeted = False
 
 def pytest_runtest_setup(item):
     global _uci_retargeted
-    if _uci_retargeted or item.module.__name__ not in _UCI_BYTES_MODULES:
+    mod = getattr(item, "module", None)
+    if _uci_retargeted or mod is None or mod.__name__ not in _UCI_BYTES_MODULES:
         return
+    import os
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent / "tools"))
@@ -79,12 +84,11 @@ def pytest_runtest_setup(item):
     import test_uci_timeout_recovery
     try:
         build = pub.uci_build_dir()
-    except pub.Unavailable as exc:
-        # Each module's own Unavailable keeps the opt-out semantics
-        # (C64_UCI_TESTS_OPTIONAL) -- leave its paths alone and say why.
-        print(f"conftest: private UCI build unavailable: {exc}")
-        return
-    for mod in (test_uci_data_acc, test_uci_timeout_recovery):
-        mod.PRG = build / "c64-https.prg"
-        mod.LABELS = build / "labels.txt"
+    except pub.Unavailable:
+        if os.environ.get("C64_UCI_TESTS_OPTIONAL") == "1":
+            return
+        raise
+    for m in (test_uci_data_acc, test_uci_timeout_recovery):
+        m.PRG = build / "c64-https.prg"
+        m.LABELS = build / "labels.txt"
     _uci_retargeted = True

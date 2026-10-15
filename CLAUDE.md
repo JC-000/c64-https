@@ -915,11 +915,15 @@ Both rig dirs (`tests/`, `tools/uci/`)
 are `rig_*.py` and in `norecursedirs`, and each exits 5 on its own. A bare
 `pytest` at the root is green; the total is not quotable, because it tracks
 `testpaths` *and* the build state. Run it rather than citing a number, and
-**build `BACKEND=uci` first**: six `test_uci_*` modules do not *skip*
-without a UCI PRG in `build/`, they **fail** (#178's gap, not a
-regression). A UCI build is the only one needed (#302): the ip65-only
-label-export check is `tools/check_ip65_build_exports.py`, run by
-`run_all_tests.py` on an ip65 build, not by pytest.
+the six `test_uci_*` modules ignore `build/`: `conftest.py` points them at
+a fresh private `BACKEND=uci` build (#302), so bare `pytest` is green on any
+`build/` and sees source edits `build/` has not. It lives in
+`$TMPDIR/c64-https-pytest-uci-<hash>` (override `C64_PRIVATE_BUILD_ROOT`;
+persistent, incremental, safe to delete; copied from `git ls-files`, needs
+`git` and a toolchain). A failed build is one pytest ERROR carrying make's
+output; `C64_UCI_TESTS_OPTIONAL=1` still opts out of that failure only. The
+ip65-only label-export check is `tools/check_ip65_build_exports.py`, run by
+`run_all_tests.py` on an ip65 build.
 
 Negative-path coverage exists because an audit found the Finished-mismatch
 abort had no test: `test_finished_verify.py` (VICE, carry-latching stub)

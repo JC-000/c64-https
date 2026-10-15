@@ -28,12 +28,19 @@ CERTIFIES = "whether the build exports the symbols the hardware rig reads"
 
 def check(build_dir: Path = REPO / "build") -> int:
     """0 pass / 1 fail / 2 could not run, for the labels.txt in build_dir."""
+    return run(build_dir)[0]
+
+
+def run(build_dir: Path = REPO / "build"):
+    """(exit code, executed). executed is False when nothing was verified,
+    which includes a 0 returned by the C64_ALLOW_NO_BUILD opt-out (#178)."""
     labels_path = build_dir / "labels.txt"
     if not labels_path.exists():
-        return cannot_run(
+        return (cannot_run(
             f"{labels_path} is absent -- build first "
             "(`make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1`)",
-            executed=0, total=1, certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV)
+            executed=0, total=1, certifies=CERTIFIES,
+            opt_out_env=OPT_OUT_ENV), False)
     # A UCI build lacks the ip65 adapter's symbols by design: that is "did
     # not run", not "missing export". Decided from flags.stamp, only on
     # positive evidence -- an unreadable stamp falls through to the real check.
@@ -44,10 +51,10 @@ def check(build_dir: Path = REPO / "build") -> int:
             if line.startswith("BACKEND="):
                 backend = line.split("=", 1)[1].strip()
     if backend not in (None, "ip65"):
-        return cannot_run(
+        return (cannot_run(
             f"build/ holds a BACKEND={backend} build, not an ip65 one -- "
             "rebuild (`make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1`)",
-            executed=0, total=1, certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV)
+            executed=0, total=1, certifies=CERTIFIES, opt_out_env=OPT_OUT_ENV), False)
     labels = {}
     for line in labels_path.read_text().splitlines():
         parts = line.split()
@@ -56,7 +63,7 @@ def check(build_dir: Path = REPO / "build") -> int:
     v = hw.resolve_symbols(labels, hw.DIAG_SYMBOLS)
     if not v.ok:
         print(f"FAIL: {v.reason}")
-    return verdict(int(v.ok), int(not v.ok), certifies=CERTIFIES)
+    return verdict(int(v.ok), int(not v.ok), certifies=CERTIFIES), True
 
 
 if __name__ == "__main__":

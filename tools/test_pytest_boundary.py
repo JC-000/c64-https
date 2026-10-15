@@ -207,25 +207,52 @@ def test_testpaths_lists_nothing_pytest_cannot_run() -> None:
     )
 
 
-def test_testpaths_needs_only_a_uci_build() -> None:
-    """One build must make a bare `pytest` green (#302).
+def test_testpaths_has_no_ip65_only_refusal_wording() -> None:
+    """Tripwire (#302), NOT proof: no testpaths module carries the wording
+    the ip65-only check used to refuse a UCI build with.
 
-    The six UCI modules read a BACKEND=uci build/, so testpaths can hold no
-    case that needs an ip65 one. The only such check, the RR-Net rig's
-    label exports, is `tools/check_ip65_build_exports.py` and rides
-    `run_all_tests.py` ("ip65_exports"). Both halves are pinned: the check
-    stays out of testpaths, and stays wired where it runs.
+    What this cannot see: an ip65-only case worded differently. That class is
+    only caught by running bare `pytest` on a UCI build (the 484 in the PR),
+    so do that when adding a build-reading case. The build-dir half is
+    enforced in conftest.py: the six UCI modules always get a private build.
     """
     for rel in _testpaths():
         src = (REPO / rel).read_text()
         assert "not an ip65" + " one" not in src, (
-            f"{rel} refuses a UCI build; a bare pytest cannot be green on "
-            "one build if it does. Move the check next to "
+            f"{rel} refuses a UCI build; move the check next to "
             "tools/check_ip65_build_exports.py (#302).")
-    chk = REPO / "tools" / "check_ip65_build_exports.py"
-    assert chk.exists() and "tools/check_ip65_build_exports.py" not in _testpaths()
-    assert '"ip65_exports"' in (REPO / "tools" / "run_all_tests.py").read_text(), (
-        "check_ip65_build_exports.py is wired nowhere: it would never run")
+    assert "tools/check_ip65_build_exports.py" not in _testpaths()
+
+
+def test_runner_runs_the_ip65_export_gate_only_on_ip65() -> None:
+    """Behavioural: drive run_all_tests.host_side_gates, not grep it."""
+    sys.path.insert(0, str(REPO / "tools"))
+    import run_all_tests as ra
+
+    def gate(backend, ret):
+        results, skipped = [], []
+        ra.host_side_gates(backend, results, skipped, check=lambda: ret)
+        return results, skipped
+
+    r, s = gate("ip65", (0, True))
+    assert [x[:3] for x in r] == [("ip65_exports", 1, 0)] and not s
+    r, s = gate(None, (1, True))
+    assert [x[:3] for x in r] == [("ip65_exports", 0, 1)]
+    r, s = gate("ip65", (2, False))          # could not run: a failure
+    assert [x[:3] for x in r] == [("ip65_exports", 0, 1)]
+    r, s = gate("ip65", (0, False))          # opt-out 0: a SKIP, never 1/1
+    assert not r and s and s[0][0] == "ip65_exports"
+    r, s = gate("uci", (0, True))            # other backend: accounted SKIP
+    assert not r and s and s[0][0] == "ip65_exports"
+    # ...and main() calls it unconditionally (a top-level statement, so an
+    # `if False:` wrapped around the call is not accepted).
+    import ast
+    tree = ast.parse((REPO / "tools" / "run_all_tests.py").read_text())
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    assert any(isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+               and getattr(n.value.func, "id", "") == "host_side_gates"
+               for n in main.body), "main() does not call host_side_gates"
 
 
 # ---------------------------------------------------------------------------

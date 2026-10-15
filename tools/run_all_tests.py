@@ -406,20 +406,7 @@ def main():
                 print(f"  [{status}] {name}: {passed}/{passed+failed} "
                       f"({duration:.1f}s)")
 
-    # Host-side gate, not a VICE suite (was a pytest case until #302): the
-    # ip65 build's labels.txt exports what the RR-Net rig reads. A UCI build
-    # is an accounted SKIP, like net above.
-    if backend is None or backend == "ip65":
-        import check_ip65_build_exports
-        t0 = time.time()
-        rc = check_ip65_build_exports.check()
-        results.append(("ip65_exports", int(rc == 0), int(rc != 0),
-                        time.time() - t0))
-    else:
-        skipped_suites.append((
-            "ip65_exports",
-            f"BACKEND={backend} build -- the rig's exports are ip65's "
-            "(rerun with BACKEND=ip65)"))
+    host_side_gates(backend, results, skipped_suites)
 
     # Summary
     total_passed = sum(r[1] for r in results)
@@ -449,6 +436,32 @@ def main():
     print(f"{'='*60}")
 
     sys.exit(aggregate_exit(results))
+
+
+def host_side_gates(backend, results, skipped_suites, check=None):
+    """Non-VICE gates (was a pytest case until #302), appended to `results`.
+
+    The ip65 build's labels.txt exports what the RR-Net rig reads. A UCI
+    build, or a 0 that came from the C64_ALLOW_NO_BUILD opt-out, is an
+    accounted SKIP and never a 1/1 pass (#178). `check` is a seam for tests.
+    """
+    if backend is not None and backend != "ip65":
+        skipped_suites.append((
+            "ip65_exports",
+            f"BACKEND={backend} build -- the rig's exports are ip65's "
+            "(rerun with BACKEND=ip65)"))
+        return
+    if check is None:
+        import check_ip65_build_exports
+        check = check_ip65_build_exports.run
+    t0 = time.time()
+    rc, executed = check()
+    if rc == 0 and not executed:
+        skipped_suites.append((
+            "ip65_exports", "opted out (C64_ALLOW_NO_BUILD=1): not verified"))
+        return
+    results.append(("ip65_exports", int(rc == 0), int(rc != 0),
+                    time.time() - t0))
 
 
 def aggregate_exit(results):
