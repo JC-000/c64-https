@@ -267,8 +267,10 @@ endif
 # Paths come from LINK_OUTPUTS' variables below (lazy =, so they may follow).
 LD65FLAGS = -C $(CFG) -Ln $(LABELS) -m $(LINK_MAP) --dbgfile $(LINK_DBG)
 
-# Source inventory.
-TOP_SRCS    := $(wildcard src/*.s)
+# Source inventory. Every wildcard here is wrapped in $(sort): make 3.81 returns
+# wildcard hits in locale-collation order, and the list is the link order, so
+# an unsorted one made the PRG depend on LANG (#301). $(sort) is byte order.
+TOP_SRCS    := $(sort $(wildcard src/*.s))
 # Crypto sources: wildcard-discovered. In-tree src/crypto/x25519.s +
 # src/crypto/fe25519.s are used under both backends; the Phase C.1
 # libs/x25519/ overlay integration was rolled back after it broke the
@@ -279,11 +281,11 @@ TOP_SRCS    := $(wildcard src/*.s)
 # (build/lib/nistcurves-p256.a). The now-unused files were physically
 # deleted in Phase G. ecdsa_verify.s stays — rewritten as a thin
 # dispatcher that packs the BE struct + calls ecdsa_verify_256.
-CRYPTO_SRCS_ALL := $(wildcard src/crypto/*.s)
+CRYPTO_SRCS_ALL := $(sort $(wildcard src/crypto/*.s))
 # Shared crypto infrastructure introduced in Phase C.0: canonical ZP map,
 # overlay swap dispatcher, init orchestrator, shared sqtab stub. Always
 # linked; sibling-lib integration (Phase C.3) hangs off these.
-CRYPTO_SHARED_SRCS := $(wildcard src/crypto/shared/*.s)
+CRYPTO_SHARED_SRCS := $(sort $(wildcard src/crypto/shared/*.s))
 IP65_SRCS   := src/net/ip65/ip65_blob.s src/net/ip65/net.s src/net/ip65/net_banner.s src/net/ip65/exports.s src/net/ip65/net_manifest.s
 UCI_SRCS    := src/net/uci/net.s src/net/uci/uci_cmd.s src/net/uci/net_manifest.s
 

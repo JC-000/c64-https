@@ -1059,6 +1059,48 @@ def test_stamp_records_the_whole_command_line():
     )
 
 
+def test_prg_is_independent_of_the_build_locale():
+    """The PRG must not depend on LANG/LC_ALL (#301).
+
+    GNU make 3.81 returns `$(wildcard)` hits in the locale's collation order
+    (en_US ignores the underscore: tls_record_io, tls_record, tls13; C is
+    byte order: tls13, tls_record, tls_record_io), and the wildcard lists are
+    the ld65 object order. Unsorted, v0.5.1's three wildcard-built products
+    each had two PRG hashes. `$(sort)` is byte order, so the link order -- and
+    the bytes -- are now locale-free.
+
+    The probe first proves the two locales really do order `src/*.s`
+    differently under the make in use (4.x re-sorts wildcard results, so it
+    may not); without that, equal hashes would prove nothing about the fix.
+    """
+    _require_toolchain()
+    with Farm() as farm:
+        probe = farm.path("probe.mk")
+        probe.write_text("all:\n\t@echo $(wildcard src/*.s)\n")
+        orders = {}
+        for loc in ("C", "en_US.UTF-8"):
+            proc = subprocess.run(
+                ["make", "-f", str(probe)], cwd=farm.dir, text=True,
+                env=dict(os.environ, LC_ALL=loc),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            assert proc.returncode == 0, proc.stdout
+            orders[loc] = proc.stdout.split()
+        assert sorted(orders["C"]) == sorted(orders["en_US.UTF-8"])
+        if orders["C"] == orders["en_US.UTF-8"]:
+            require(False,
+                    "this make/locale pair does not reorder $(wildcard); "
+                    "the cross-locale comparison would be vacuous",
+                    executed=0, total=1, certifies=CERTIFIES,
+                    opt_out_env="C64_ALLOW_SKIP")
+    shas = {}
+    for loc in ("C", "en_US.UTF-8"):
+        with Farm() as farm:
+            farm.make(*UCI, env={"LC_ALL": loc})
+            shas[loc] = farm.sha()
+    assert shas["C"] == shas["en_US.UTF-8"], (
+        f"PRG depends on the build locale: {shas}")
+
+
 def main() -> int:
     print("=== build/flags.stamp ===")
     tests = [(name, fn) for name, fn in sorted(globals().items())
