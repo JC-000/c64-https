@@ -11,11 +11,11 @@ wrappers hard-code build/ next to themselves), re-synced and
 cold-built every run. Any failure raises Unavailable -- the callers turn that
 into a test failure (or, only under C64_UCI_TESTS_OPTIONAL=1, a loud skip).
 """
-import fcntl
-import hashlib
+import atexit
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -38,8 +38,11 @@ def _backend(build_dir: Path):
 
 
 def _ls(*args):
-    r = subprocess.run(["git", "ls-files", "-z", *args], cwd=REPO,
-                       capture_output=True)
+    try:
+        r = subprocess.run(["git", "ls-files", "-z", *args], cwd=REPO,
+                           capture_output=True)
+    except OSError as exc:
+        raise Unavailable(f"cannot run git: {exc}")
     if r.returncode != 0:
         raise Unavailable("git ls-files %s failed (rc=%d): %s"
                           % (" ".join(args), r.returncode,
@@ -94,24 +97,60 @@ def uci_build_dir() -> Path:
 
 
 def _build() -> Path:
-    tag = hashlib.sha1(str(REPO).encode()).hexdigest()[:8]
-    root = Path(os.environ.get("C64_PRIVATE_BUILD_ROOT")
-                or tempfile.gettempdir()) / f"c64-https-pytest-uci-{tag}"
-    root.parent.mkdir(parents=True, exist_ok=True)
-    with open(f"{root}.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        root.mkdir(exist_ok=True)
-        _sync(root)
-        # Always a cold build (~1 s): no mtime state to get wrong.
-        shutil.rmtree(root / "build", ignore_errors=True)
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("BACKEND", "MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+    """A per-process private tree, so concurrent pytest runs in one checkout
+    never delete each other's build/. Removed at exit."""
+    parent = Path(os.environ.get("C64_PRIVATE_BUILD_ROOT")
+                  or tempfile.gettempdir())
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        root = Path(tempfile.mkdtemp(prefix="c64-https-pytest-uci-",
+                                     dir=parent))
+    except OSError as exc:
+        raise Unavailable(f"cannot create a private build dir: {exc}")
+    atexit.register(shutil.rmtree, root, True)
+    _sync(root)
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("BACKEND", "MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+    try:
         m = subprocess.run(["make", "BACKEND=uci"], cwd=root, env=env,
                            capture_output=True, text=True)
-        if m.returncode != 0:
-            raise Unavailable("private `make BACKEND=uci` in %s failed:\n%s"
-                              % (root, (m.stderr or m.stdout)[-2000:]))
+    except OSError as exc:
+        raise Unavailable(f"cannot run make: {exc}")
+    if m.returncode != 0:
+        raise Unavailable("private `make BACKEND=uci` in %s failed:\n%s"
+                          % (root, (m.stderr or m.stdout)[-2000:]))
     out = root / "build"
     if _backend(out) != "uci" or not (out / "c64-https.prg").is_file():
         raise Unavailable(f"{out} is not a BACKEND=uci build after make")
     return out
+
+
+ENV = "C64_UCI_BUILD_DIR"
+
+
+class BuildFile:
+    """A path into the UCI build, resolved at use, not at import.
+
+    conftest.py exports ENV (this process's private build) before any of the
+    six UCI modules runs, whatever pytest's import mode names them. Under
+    pytest with ENV unset the path points at a directory that cannot exist, so
+    the module fails closed instead of reading a stale build/. Standalone
+    (`python3 tools/test_uci_*.py`) it is build/, as before.
+    """
+
+    def __init__(self, name):
+        self.name = name
+
+    def path(self) -> Path:
+        d = os.environ.get(ENV)
+        if d:
+            return Path(d) / self.name
+        if "pytest" in sys.modules:
+            return Path(f"<{ENV} unset under pytest>") / self.name
+        return REPO / "build" / self.name
+
+    def __getattr__(self, attr):
+        return getattr(self.path(), attr)
+
+    def __str__(self):
+        return str(self.path())

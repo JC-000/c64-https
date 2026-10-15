@@ -77,10 +77,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _skip_policy import VoluntarySkip, cannot_run, require, verdict  # noqa: E402
+from _private_uci_build import BuildFile  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
-PRG = REPO / "build" / "c64-https.prg"
-LABELS = REPO / "build" / "labels.txt"
+PRG = BuildFile("c64-https.prg")      # resolved at use: see _private_uci_build
+LABELS = BuildFile("labels.txt")
 
 # The one deliberate, announced way to skip this suite.  Anything else that
 # stops it running is a failure (#165).

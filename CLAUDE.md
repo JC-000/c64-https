@@ -918,8 +918,8 @@ are `rig_*.py` and in `norecursedirs`, and each exits 5 on its own. A bare
 the six `test_uci_*` modules ignore `build/`: `conftest.py` points them at
 a fresh private `BACKEND=uci` build (#302), so bare `pytest` is green on any
 `build/` and sees source edits `build/` has not. It lives in
-`$TMPDIR/c64-https-pytest-uci-<hash>` (override `C64_PRIVATE_BUILD_ROOT`;
-persistent, safe to delete; the working tree copied via `git ls-files`
+a per-process `$TMPDIR/c64-https-pytest-uci-*` (parent override
+`C64_PRIVATE_BUILD_ROOT`; removed at exit, so parallel runs are safe; the working tree copied via `git ls-files`
 (tracked + untracked-unignored), cold `make` every run, needs `git` and a
 toolchain). A failed build is a pytest ERROR carrying make's output;
 `C64_UCI_TESTS_OPTIONAL=1` makes it a loud skip, never a `build/` fallback. The

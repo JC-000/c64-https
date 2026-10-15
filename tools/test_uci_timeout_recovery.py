@@ -108,10 +108,11 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-PRG = REPO / "build" / "c64-https.prg"
-LABELS = REPO / "build" / "labels.txt"
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _private_uci_build import BuildFile  # noqa: E402
+
+PRG = BuildFile("c64-https.prg")      # resolved at use: see _private_uci_build
+LABELS = BuildFile("labels.txt")
 from test_uci_data_acc import CPU, CPUError          # noqa: E402  (the interpreter)
 from _skip_policy import VoluntarySkip, cannot_run, require, verdict  # noqa: E402
 

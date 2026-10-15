@@ -15,6 +15,8 @@ pytest: it must stay inert for anyone who does not have pytest installed,
 and the repo declares no pytest dependency.
 """
 
+from pathlib import Path
+
 _BOUNDARY = [
     "c64-https: pytest runs ONLY the pure-logic host-side modules pinned in",
     "pytest.ini `testpaths`. It does NOT run the C64 suites (those need VICE:",
@@ -55,35 +57,34 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             write(line)
 
 
-# Six modules execute the shipped UCI bytes. Point them at a fresh private
-# UCI build (tools/_private_uci_build.py) so a bare pytest is green on any
-# build/ (#302). A build that fails raises here, once, with make's error as the
-# reason -> pytest ERROR on every selected test, never a skip (#178).
+# Six modules execute the shipped UCI bytes. Give them a fresh private UCI
+# build (tools/_private_uci_build.py) so a bare pytest is green on any build/
+# (#302). The build dir reaches them through C64_UCI_BUILD_DIR, which their
+# PRG/LABELS read at use, so no import mode (default, append, importlib) can
+# leave them on a stale build/. Unset under pytest they fail closed. A build
+# that fails raises here, once per run, with make's error as the reason ->
+# pytest ERROR on every selected test, never a skip (#178).
 # C64_UCI_TESTS_OPTIONAL=1 turns that failure into a loud skip with the same
 # reason; build/ is never used as a fallback.
-_UCI_BYTES_MODULES = {
-    "test_uci_data_acc", "test_uci_timeout_recovery",
-    "test_uci_reply_valid_wait", "test_uci_abort_recovery",
-    "test_uci_resp_read_wait", "test_uci_dhcp_probe",
+_UCI_BYTES_FILES = {
+    "test_uci_data_acc.py", "test_uci_timeout_recovery.py",
+    "test_uci_reply_valid_wait.py", "test_uci_abort_recovery.py",
+    "test_uci_resp_read_wait.py", "test_uci_dhcp_probe.py",
 }
-_uci_retargeted = False
 
 
 def pytest_runtest_setup(item):
-    global _uci_retargeted
-    mod = getattr(item, "module", None)
-    if _uci_retargeted or mod is None or mod.__name__ not in _UCI_BYTES_MODULES:
+    path = getattr(item, "path", None) or getattr(item, "fspath", None)
+    if path is None or Path(str(path)).name not in _UCI_BYTES_FILES:
         return
     import os
     import sys
-    from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent / "tools"))
     import _private_uci_build as pub
-    import test_uci_data_acc
-    import test_uci_timeout_recovery
     try:
-        build = pub.uci_build_dir()
+        os.environ[pub.ENV] = str(pub.uci_build_dir())
     except pub.Unavailable as exc:
+        os.environ.pop(pub.ENV, None)
         if os.environ.get("C64_UCI_TESTS_OPTIONAL") != "1":
             raise
         # Opt-out: a loud skip carrying make's error, never build/ (which is
@@ -92,7 +93,3 @@ def pytest_runtest_setup(item):
         require(False, str(exc), executed=0, total=1,
                 certifies="the UCI 6502 bytes of this working tree",
                 opt_out_env="C64_UCI_TESTS_OPTIONAL")
-    for m in (test_uci_data_acc, test_uci_timeout_recovery):
-        m.PRG = build / "c64-https.prg"
-        m.LABELS = build / "labels.txt"
-    _uci_retargeted = True
