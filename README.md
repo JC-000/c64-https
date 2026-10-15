@@ -43,7 +43,8 @@ key. `ip65-onchip` has no prompt. The UCI images also keep a per-host key
 store on the Ultimate — see ["What this client does NOT
 authenticate"](#what-this-client-does-not-authenticate) for where. The
 packaging scripts never override the default, so an image carries whatever
-the Makefile default was when it was built — and **that default changed between v0.4.2 and v0.4.3**:
+the Makefile default was when it was built —
+and **that default changed between v0.4.2 and v0.4.3**:
 
 - **v0.4.2's images, and every release before it, carry `www.foo.bar`.**
   `.bar` is a delegated gTLD, so that is a name a third party can register. It
