@@ -59,8 +59,9 @@ to forget once. It is now an enforced invariant: `build/flags.stamp` holds
 the fully expanded `CA65FLAGS`/`LD65FLAGS` (`LD65FLAGS` carries `$(CFG)`, so
 `BACKEND=` and the profile cfg variants ride along) plus the cfg's sha256
 (#305: a cfg edit rebuilds), is content-compared **at Makefile parse
-time**, and on any change deletes every `.o` and the PRG. Absence, not an mtime — which is what macOS GNU Make 3.81's 1-second
-resolution cannot defeat. Both silent failure modes the old rule guarded
+time**, and on any change deletes every `.o` and the PRG. Absence,
+not an mtime — which is what macOS GNU Make 3.81's 1-second resolution
+cannot defeat. Both silent failure modes the old rule guarded
 against are closed, and `tools/test_build_flags_stamp.py` pins each against
 a `make clean` oracle: the mixed link (`HTTPS_SNI=` invalidating `boot.o`
 but not `http.o`, which cost a false negative on #141) and no link at all

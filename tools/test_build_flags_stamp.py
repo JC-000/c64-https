@@ -851,7 +851,8 @@ def test_ip65_cfg_edit_changes_the_stamp_and_clears_outputs():
         line = lambda: [l for l in farm.path(STAMP).read_text().splitlines()
                         if l.startswith("CFG_SHA256=")]
         before = line()
-        assert len(before) == 1 and len(before[0]) > len("CFG_SHA256=") + 8
+        assert len(before) == 1 and len(before[0]) > len("CFG_SHA256=") + 8, (
+            "flags.stamp has no CFG_SHA256 line")
         for o in LINK_OUTPUTS:
             farm.path(o).write_text("planted")
         farm.append_comment("cfg/c64-https-ip65.cfg")
