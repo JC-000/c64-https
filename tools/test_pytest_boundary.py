@@ -207,6 +207,93 @@ def test_testpaths_lists_nothing_pytest_cannot_run() -> None:
     )
 
 
+def test_testpaths_has_no_ip65_only_refusal_wording() -> None:
+    """Tripwire (#302), NOT proof: no testpaths module carries the wording
+    the ip65-only check used to refuse a UCI build with.
+
+    What this cannot see: an ip65-only case worded differently. That class is
+    only caught by running bare `pytest` on a UCI build (the 484 in the PR),
+    so do that when adding a build-reading case. The build-dir half is
+    enforced in conftest.py: the six UCI modules always get a private build.
+    """
+    for rel in _testpaths():
+        src = (REPO / rel).read_text()
+        assert "not an ip65" + " one" not in src, (
+            f"{rel} refuses a UCI build; move the check next to "
+            "tools/check_ip65_build_exports.py (#302).")
+    assert "tools/check_ip65_build_exports.py" not in _testpaths()
+
+
+def test_runner_runs_the_ip65_export_gate_only_on_ip65() -> None:
+    """Behavioural: drive run_all_tests.host_side_gates, not grep it."""
+    sys.path.insert(0, str(REPO / "tools"))
+    import run_all_tests as ra
+
+    def gate(backend, ret):
+        results, skipped = [], []
+        ra.host_side_gates(backend, results, skipped, check=lambda: ret)
+        return results, skipped
+
+    r, s = gate("ip65", (0, True))
+    assert [x[:3] for x in r] == [("ip65_exports", 1, 0)] and not s
+    r, s = gate(None, (1, True))
+    assert [x[:3] for x in r] == [("ip65_exports", 0, 1)]
+    r, s = gate("ip65", (2, False))          # could not run: a failure
+    assert [x[:3] for x in r] == [("ip65_exports", 0, 1)]
+    r, s = gate("ip65", (0, False))          # opt-out 0: a SKIP, never 1/1
+    assert not r and s and s[0][0] == "ip65_exports"
+    r, s = gate("uci", (0, True))            # other backend: accounted SKIP
+    assert not r and s and s[0][0] == "ip65_exports"
+    # ...and main() calls it as a top-level statement with exactly these
+    # arguments (a tripwire: an `if False:` wrapper or a changed call fails
+    # it; an early `return` before it would not be caught).
+    import ast
+    tree = ast.parse((REPO / "tools" / "run_all_tests.py").read_text())
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    calls = [n.value for n in main.body
+             if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+             and getattr(n.value.func, "id", "") == "host_side_gates"]
+    assert len(calls) == 1, "main() must call host_side_gates once, top level"
+    c = calls[0]
+    assert [getattr(a, "id", None) for a in c.args] == [
+        "backend", "results", "skipped_suites"] and not c.keywords, (
+        "host_side_gates must be called with (backend, results, "
+        "skipped_suites)")
+
+
+def test_private_build_file_is_a_pathlike_and_dead_dirs_are_swept() -> None:
+    """BuildFile works with open()/os.fspath; a killed run's dir is swept."""
+    import os
+    import subprocess
+    import tempfile
+    sys.path.insert(0, str(REPO / "tools"))
+    import _private_uci_build as pub
+    old = os.environ.get(pub.ENV)
+    os.environ[pub.ENV] = "/x"
+    try:
+        f = pub.BuildFile("labels.txt")
+        assert os.fspath(f) == "/x/labels.txt" == str(f)
+        assert pub.Path(f) == pub.Path("/x/labels.txt")
+    finally:
+        if old is None:
+            os.environ.pop(pub.ENV, None)
+        else:
+            os.environ[pub.ENV] = old
+    with tempfile.TemporaryDirectory() as parent:
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()                                  # a pid that is now dead
+        dead = Path(parent) / f"{pub.PREFIX}{p.pid}-abc"
+        live = Path(parent) / f"{pub.PREFIX}{os.getpid()}-abc"
+        other = Path(parent) / f"keep-{p.pid}-abc"
+        odd = Path(parent) / f"{pub.PREFIX}{p.pid}"      # no suffix: not ours
+        for d in (dead, live, other, odd):
+            d.mkdir()
+        pub._sweep(Path(parent))
+        assert not dead.exists()
+        assert live.exists() and other.exists() and odd.exists()
+
+
 # ---------------------------------------------------------------------------
 # 5. The involuntary-skip rule (issue #178, part 2)
 # ---------------------------------------------------------------------------

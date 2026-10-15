@@ -69,7 +69,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
 import ip65_hw_checks as hw  # noqa: E402
-from _skip_policy import VoluntarySkip, require, verdict  # noqa: E402
+from _skip_policy import VoluntarySkip, verdict  # noqa: E402
 
 SEED = int(os.environ.get("C64_TEST_SEED", "20260905"))
 RNG = random.Random(SEED)
@@ -1379,62 +1379,6 @@ def test_resolve_symbols_red_green() -> None:
     assert not hw.resolve_symbols(labels, ()).ok
     v = hw.resolve_symbols(labels, ("http_status", "net_local_ip"))
     assert v.ok and v.evidence["found"]["http_status"] == "$AB28"
-
-
-def test_the_build_exports_every_symbol_the_rig_reads() -> None:
-    """This build's labels.txt carries the whole diagnostic set.
-
-    NO SILENT SKIP. This used to `return` when `build/labels.txt` was
-    absent, printing PASS while verifying nothing — the exact shape
-    CLAUDE.md flags on `test_x509_name.py` and that #158/#165 spent real
-    effort removing. An absent build is a state where this check DID NOT
-    RUN, and the two must not look alike.
-
-    So: absent labels.txt is a FAILURE by default, opt-out-able with
-    `C64_ALLOW_NO_BUILD=1` for a lane that knowingly has no build — and
-    even then it says so loudly rather than passing quietly. The
-    exemplars are `test_x509.py` (missing labels counted as failures) and
-    `test_finished_verify.py` (missing label = FATAL).
-
-    The opt-out goes through `_skip_policy.require()` (#178): it used to
-    `print` and `return`, which pytest records as a PASS and whose printout
-    pytest swallows -- an opt-out that read as a green test. require()
-    makes it a pytest SKIP whose reason carries the warning.
-    """
-    labels_path = REPO / "build" / "labels.txt"
-    require(labels_path.exists(),
-            f"{labels_path} is absent -- build first "
-            "(`make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1`)",
-            executed=0, total=1,
-            certifies="whether the build exports the symbols the hardware "
-                      "rig reads",
-            opt_out_env="C64_ALLOW_NO_BUILD")
-    # A UCI build in build/ is the same state one step removed: no ip65
-    # build to read. Its labels.txt lacks the ip65 adapter's symbols by
-    # design, so the assert below would report a missing export where the
-    # truth is "this check did not run". Same verdict, same opt-out as an
-    # absent build. Decided from flags.stamp, and only on positive
-    # evidence -- an unreadable stamp falls through to the real check.
-    backend = None
-    stamp = REPO / "build" / "flags.stamp"
-    if stamp.exists():
-        for line in stamp.read_text().splitlines():
-            if line.startswith("BACKEND="):
-                backend = line.split("=", 1)[1].strip()
-    require(backend in (None, "ip65"),
-            f"build/ holds a BACKEND={backend} build, not an ip65 one -- "
-            "rebuild (`make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1`)",
-            executed=0, total=1,
-            certifies="whether the build exports the symbols the hardware "
-                      "rig reads",
-            opt_out_env="C64_ALLOW_NO_BUILD")
-    labels = {}
-    for line in labels_path.read_text().splitlines():
-        parts = line.split()
-        if len(parts) == 3 and parts[0] == "al" and parts[2].startswith("."):
-            labels[parts[2][1:]] = int(parts[1].split(":")[-1], 16)
-    v = hw.resolve_symbols(labels, hw.DIAG_SYMBOLS)
-    assert v.ok, v.reason
 
 
 def test_rig_const_reads_the_script_and_refuses_a_missing_name() -> None:
