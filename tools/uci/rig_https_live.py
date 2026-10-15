@@ -77,6 +77,8 @@ Offline structural check (no hardware, no DeviceLock):
 """
 from __future__ import annotations
 
+from _trust_mode import tp_mode_prologue
+
 import os
 import sys
 import time
@@ -280,6 +282,7 @@ def build_live_routine(labels: dict[str, int], *,
     emit_lda_imm((port >> 8) & 0xFF)
     emit_sta_abs(http_port + 1)
 
+    code.extend(tp_mode_prologue(labels))   # TRUST_STORE=1, see _trust_mode.py
     emit_progress(0x03)
 
     # Call http_get — the REAL TLS 1.3 + HTTP code path.

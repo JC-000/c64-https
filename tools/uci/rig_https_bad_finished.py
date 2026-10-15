@@ -93,6 +93,8 @@ Exit codes: 0 pass, 1 fail, 2 setup error, 3 device wedged.
 """
 from __future__ import annotations
 
+from _trust_mode import tp_mode_prologue
+
 import datetime
 import json
 import os
@@ -275,6 +277,7 @@ def _build_http_routine(labels: dict[str, int], port: int) -> tuple[bytes, int]:
     emit_lda_imm((port >> 8) & 0xFF)
     emit_sta_abs(labels["http_port"] + 1)
 
+    code.extend(tp_mode_prologue(labels))   # TRUST_STORE=1, see _trust_mode.py
     emit_progress(0x03)
     emit_jsr(labels["http_get"])
 

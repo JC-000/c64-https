@@ -30,6 +30,8 @@ screen-code sequence is present at the expected row).  Exit 1 = FAIL.
 """
 from __future__ import annotations
 
+from _trust_mode import tp_mode_prologue
+
 import os
 import sys
 from pathlib import Path
@@ -172,6 +174,7 @@ def _build_routine(labels, port):
     emit_lda_imm((port >> 8) & 0xFF)
     emit_sta_abs(http_port + 1)
 
+    code.extend(tp_mode_prologue(labels))   # TRUST_STORE=1, see _trust_mode.py
     emit_progress(0x03)
     emit_jsr(http_get)
 
