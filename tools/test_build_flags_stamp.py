@@ -71,7 +71,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _skip_policy import EXIT_CANNOT_RUN, cannot_run, require   # noqa: E402
+from _skip_policy import (   # noqa: E402
+    EXIT_CANNOT_RUN, VoluntarySkip, cannot_run, require)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -1059,6 +1060,107 @@ def test_stamp_records_the_whole_command_line():
     )
 
 
+LOCALES = ("C", "en_US.UTF-8", "cs_CZ.UTF-8")
+
+CERTIFIES_LOCALE = "whether the PRG's bytes depend on the build locale (#301)"
+CERTIFIES_STALE_ORDER = ("whether a tree linked in another object order is "
+                         "rebuilt (#301)")
+
+
+def _wildcard_orders(farm, pattern):
+    """`$(wildcard pattern)` as the make in use returns it, per locale."""
+    probe = farm.path("probe.mk")
+    probe.write_text(f"all:\n\t@echo $(wildcard {pattern})\n")
+    orders = {}
+    for loc in LOCALES:
+        proc = subprocess.run(
+            ["make", "-f", str(probe)], cwd=farm.dir, text=True,
+            env=dict(os.environ, LC_ALL=loc),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        assert proc.returncode == 0, proc.stdout
+        orders[loc] = proc.stdout.split()
+    return orders
+
+
+def test_prg_is_independent_of_the_build_locale():
+    """The PRG must not depend on LANG/LC_ALL (#301).
+
+    GNU make 3.81 returns `$(wildcard)` hits in the locale's collation order
+    and the wildcard lists are the ld65 object order. Unsorted, each of the
+    three wildcard-built products had three PRG hashes (C, en_US, cs_CZ).
+    `$(sort)` is byte order, so link order -- and the bytes -- are locale-free.
+
+    Each sorted list is pinned only if some locale pair really reorders it,
+    so the probe checks that per list and refuses a vacuous comparison:
+      * src/*.s        en_US ignores the underscore (tls_record_io before
+                       tls13); C does not.
+      * src/crypto/*.s cs_CZ sorts "ch" after "h" (chacha20 after hmac_drbg);
+                       C and en_US AGREE here, so two locales are not enough.
+      * src/crypto/shared/*.s  no locale tried reorders it (crypto_init,
+                       mul_tables), so its `$(sort)` is defensive and NOT
+                       pinned by this test.
+    """
+    _require_toolchain()
+    with Farm() as farm:
+        for pattern in ("src/*.s", "src/crypto/*.s"):
+            orders = _wildcard_orders(farm, pattern)
+            assert len({tuple(sorted(o)) for o in orders.values()}) == 1, (
+                f"{pattern}: locales disagree on the file SET: {orders}")
+            if len({tuple(o) for o in orders.values()}) == 1:
+                require(False,
+                        f"no locale in {LOCALES} reorders $(wildcard "
+                        f"{pattern}) under this make; the cross-locale "
+                        "comparison would be vacuous for that list",
+                        executed=0, total=1, certifies=CERTIFIES_LOCALE,
+                        opt_out_env="C64_ALLOW_SKIP")
+    shas = {}
+    for loc in LOCALES:
+        with Farm() as farm:
+            farm.make(*UCI, env={"LC_ALL": loc})
+            shas[loc] = farm.sha()
+    assert len(set(shas.values())) == 1, (
+        f"PRG depends on the build locale: {shas}")
+
+
+def test_stale_link_order_is_rebuilt_to_the_clean_hash():
+    """A tree linked in another object order must relink, not stay stale (#301).
+
+    The object list is a link input that was in neither flags.stamp nor any
+    prerequisite, so a build/ left by an unsorted Makefile answered "Nothing
+    to be done" and kept the old PRG. The stale tree here is built by a
+    private copy of the Makefile with the TOP_SRCS `$(sort)` removed, under a
+    locale that reorders it, then rebuilt with the real Makefile.
+    """
+    _require_toolchain()
+    loc = {"LC_ALL": "en_US.UTF-8"}
+    with Farm() as clean:
+        clean.make(*UCI, env=loc)
+        oracle = clean.sha()
+    with Farm() as farm:
+        real = REPO / "Makefile"
+        text = real.read_text()
+        old = "TOP_SRCS    := $(sort $(wildcard src/*.s))"
+        assert old in text, "TOP_SRCS line moved; re-aim this test"
+        os.unlink(farm.path("Makefile"))
+        farm.path("Makefile").write_text(
+            text.replace(old, "TOP_SRCS    := $(wildcard src/*.s)"))
+        farm.make(*UCI, env=loc)
+        stale = farm.sha()
+        os.unlink(farm.path("Makefile"))
+        os.symlink(real, farm.path("Makefile"))
+        farm.make(*UCI, env=loc)
+        if stale == oracle:
+            require(False,
+                    "this make/locale does not reorder $(wildcard src/*.s); "
+                    "the stale tree is not actually stale, so a relink to the "
+                    "clean hash would prove nothing",
+                    executed=0, total=1, certifies=CERTIFIES_STALE_ORDER,
+                    opt_out_env="C64_ALLOW_SKIP")
+        assert farm.sha() == oracle, (
+            "a changed object order did not invalidate the tree: PRG "
+            f"{farm.sha()} != clean build {oracle}")
+
+
 def main() -> int:
     print("=== build/flags.stamp ===")
     tests = [(name, fn) for name, fn in sorted(globals().items())
@@ -1081,9 +1183,14 @@ def main() -> int:
 
     failed = 0
     ran = 0
+    skipped = 0
     for name, fn in tests:
         try:
             fn()
+        except VoluntarySkip as exc:        # named before Exception
+            skipped += 1
+            print(f"  SKIP {name}\n       {exc}")
+            continue
         except Exception as exc:            # noqa: BLE001 - a crash is a fail
             failed += 1
             print(f"  FAIL {name}\n       {type(exc).__name__}: {exc}")
@@ -1101,7 +1208,9 @@ def main() -> int:
         )
 
     print(f"\n{'FAILED' if failed else 'PASSED'}: {failed} failure(s) "
-          f"({ran}/{len(tests)} executed)")
+          f"({ran}/{len(tests)} executed"
+          + (f", {skipped} skipped via C64_ALLOW_SKIP" if skipped else "")
+          + ")")
     return 1 if failed else 0
 
 
