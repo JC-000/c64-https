@@ -781,6 +781,87 @@ def test_hand_set_makeflags_is_refused_without_touching_the_tree():
                 )
 
 
+class CfgFarm(Farm):
+    """A Farm whose cfg/ is a private COPY, so a test may edit a linker cfg."""
+
+    def __init__(self):
+        super().__init__()
+        os.unlink(self.dir / "cfg")
+        shutil.copytree(REPO / "cfg", self.dir / "cfg")
+
+    def append_comment(self, rel):
+        """A comment-only edit: the cfg's text changes, the link's bytes do not."""
+        with open(self.path(rel), "a") as fh:
+            fh.write("\n# edited by test_build_flags_stamp\n")
+
+
+# Every cfg a build can select (Makefile: CFG, and the two variants it swaps
+# in), each with the flags that select it. ip65 is left out for cost, as in
+# FARM_LINKS: it needs the ip65 libs built first.
+CFG_PROFILES = (
+    ("cfg/c64-https-uci.cfg", ("BACKEND=uci",)),
+    ("cfg/c64-https-uci.cfg", UCI),         # onchip alone keeps the base cfg
+    ("cfg/c64-https-uci-onchip.cfg", UCI + ("USE_NISTCURVES_ONCHIP_COMB=1",
+                                            "COLD_BANK=0")),
+    ("cfg/c64-https-uci-onchip-cold.cfg", UCI + ("USE_NISTCURVES_ONCHIP_COMB=1",)),
+    ("cfg/c64-https-uci-m3.cfg", ("BACKEND=uci-m3",)),
+)
+
+
+def test_cfg_edit_relinks_every_link_output():
+    """Editing only the selected linker cfg must relink, without `make clean`.
+
+    The PRG's prerequisites were objects and archives; the cfg reached the
+    stamp only as the NAME in LD65FLAGS, so an edit to its contents left
+    `make` at "Nothing to be done" and the old image, map, labels and dbg in
+    place. The edit here is comment-only, so the relinked PRG must also be
+    byte-identical. The inverse is pinned in the same case: an untouched cfg
+    relinks nothing.
+    """
+    _require_toolchain()
+    for cfg, flags in CFG_PROFILES:
+        with CfgFarm() as farm:
+            farm.make(*flags)
+            before = farm.sha()
+            old = {o: farm.path(o).stat().st_mtime_ns for o in LINK_OUTPUTS}
+            proc = farm.make(*flags)
+            assert "ld65 " not in proc.stdout, (
+                f"{cfg}: an unchanged cfg relinked:\n" + proc.stdout)
+            assert all(farm.path(o).stat().st_mtime_ns == old[o]
+                       for o in LINK_OUTPUTS), f"{cfg}: unchanged cfg touched outputs"
+            # No sleep, on purpose: a same-second edit is invisible to an
+            # mtime prerequisite on make 3.81, so only a content stamp passes.
+            farm.append_comment(cfg)
+            proc = farm.make(*flags)
+            assert "ld65 " in proc.stdout, (
+                f"{cfg} edited, {flags}: make did not relink:\n" + proc.stdout)
+            for o in LINK_OUTPUTS:
+                assert farm.exists(o), f"{cfg}: {o} missing after relink"
+                assert farm.path(o).stat().st_mtime_ns != old[o], (
+                    f"{cfg}: {o} is stale after a cfg edit")
+            assert farm.sha() == before, f"{cfg}: a comment edit moved the PRG"
+
+
+def test_ip65_cfg_edit_changes_the_stamp_and_clears_outputs():
+    """The ip65 cfg, without an ip65 link: the goal is build/flags.stamp."""
+    _require_toolchain()
+    with CfgFarm() as farm:
+        farm.make(*UCI)
+        farm.make("BACKEND=ip65", STAMP, check=False)
+        line = lambda: [l for l in farm.path(STAMP).read_text().splitlines()
+                        if l.startswith("CFG_SHA256=")]
+        before = line()
+        assert len(before) == 1 and len(before[0]) > len("CFG_SHA256=") + 8, (
+            "flags.stamp has no CFG_SHA256 line")
+        for o in LINK_OUTPUTS:
+            farm.path(o).write_text("planted")
+        farm.append_comment("cfg/c64-https-ip65.cfg")
+        farm.make("BACKEND=ip65", STAMP, check=False)
+        assert line() != before, "ip65 cfg edit did not move CFG_SHA256"
+        for o in LINK_OUTPUTS:
+            assert not farm.exists(o), f"{o} survived an ip65 cfg edit"
+
+
 def test_unchanged_flags_rebuild_nothing():
     """The inverse property: the stamp must not make every build a rebuild."""
     _require_toolchain()
