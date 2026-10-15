@@ -41,9 +41,9 @@ outside `a-z 0-9 . -` in the host, an empty label, a path not starting with
 `/`) prints `INVALID TARGET` and dials nothing. Type `_` with the left-arrow
 key. `ip65-onchip` has no prompt. The UCI images also keep a per-host key
 store on the Ultimate — see ["What this client does NOT
-authenticate"](#what-this-client-does-not-authenticate) for where. The packaging scripts never override the
-default, so an image carries whatever the Makefile default was when it was
-built — and **that default changed between v0.4.2 and v0.4.3**:
+authenticate"](#what-this-client-does-not-authenticate) for where. The
+packaging scripts never override the default, so an image carries whatever
+the Makefile default was when it was built — and **that default changed between v0.4.2 and v0.4.3**:
 
 - **v0.4.2's images, and every release before it, carry `www.foo.bar`.**
   `.bar` is a delegated gTLD, so that is a name a third party can register. It
@@ -208,7 +208,8 @@ otherwise, and nothing here said it before:
   banner, and records nothing; anything else prints `NOT DIALLED` and does
   not connect. A fetch that ends in `TRUST SAVE FAIL nn` (e.g. a read-only
   `/USB1`, `0D`) or `TRUST STORE FULL` (32 hosts, no eviction) recorded
-  nothing: that host stays unpinned, with no UNPINNED banner. To keep the
+  nothing: a new host stays unpinned (no UNPINNED banner), and an accepted
+  key change is not saved, so the old key still applies. To keep the
   store elsewhere, build with the product's own arguments from
   `tools/package/_common.sh` plus `TRUST_STORE_DIR=`, e.g. `make BACKEND=uci
   USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1 TRUST_STORE_DIR=/SD` for
