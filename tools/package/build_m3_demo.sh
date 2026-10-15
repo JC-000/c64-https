@@ -236,9 +236,12 @@ What it needs
 -------------
   - An Ultimate 64 (Elite) running firmware with the M3 TLS sockets.
     Firmware: $FIRMWARE
-    Source:     $FIRMWARE_SOURCE
-    Prebuilt:   $FIRMWARE_PRERELEASE
-${FIRMWARE_IMAGE_SHA:+    Image sha256: $FIRMWARE_IMAGE_SHA
+    Source:
+      $FIRMWARE_SOURCE
+    Prebuilt image:
+      $FIRMWARE_PRERELEASE
+${FIRMWARE_IMAGE_SHA:+    Image sha256:
+      $FIRMWARE_IMAGE_SHA
 }    Upstream status:
       $UPSTREAM_PRS
     $this_run
