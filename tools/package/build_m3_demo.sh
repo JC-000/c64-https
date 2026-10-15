@@ -187,7 +187,8 @@ objects include, and its cfg) are unchanged since"
     measured_with="NOT measured with this image. Measured with PRG sha256
   $MEASURED_PRG_SHA
 reproducible from commit $MEASURED_COMMIT
-($MEASURED_COMMIT_NOTE); the measured image was built from $MEASURED_BUILT
+($MEASURED_COMMIT_NOTE);
+the measured image was built from $MEASURED_BUILT
 ($adapter)"
     this_run="This image has no recorded run on any firmware."
     echo "[m3-demo] NOTE: this PRG is not the measured one; the README says so"
@@ -231,8 +232,9 @@ What it needs
 ${FIRMWARE_IMAGE_SHA:+    Firmware image sha256: $FIRMWARE_IMAGE_SHA
 }    Upstream status:
       $UPSTREAM_PRS
-    $this_run Earlier demo images were
-    validated on the non-public builds $EARLIER_RUNS.
+    $this_run
+    Earlier demo images were validated on the non-public builds
+    $EARLIER_RUNS.
   - Its WiFi module up (the ESP32 does the TLS), the network connected, and
     the clock set by SNTP (certificate dates are checked).
   - The Ultimate's Command Interface enabled.
