@@ -49,28 +49,27 @@ MAKE_ARGS=(BACKEND=uci-m3 "HTTPS_HOST=$DEMO_HOST" "HTTPS_PATH=$DEMO_PATH")
 
 # What the firmware side published; quoted in the README, checked nowhere
 # here (the device is not involved in a build).
-# The requirement is the interface; the build named is only where it was
-# validated.
-FIRMWARE="M3-SPEC v1 + errata v1.1/v1.2 firmware (validated on esp-tls/m3-master 3a1ff9ff, a development branch that is not public: fw 3.15, FPGA 126, ESP 1.309)"
-# Where the firmware this demo needs comes from, and (once a prebuilt
-# image is published) that image's sha256; its line is printed only when
-# set. These and UPSTREAM_PRS are plain constants, not env knobs, so the
-# README is a function of the commit: a later commit swaps them. After a
-# demo-rig run on a build of this branch, that commit also sets
-# FIRMWARE_IMAGE_SHA and links the fork prerelease tls-preview-f3df8261,
-# with the new figures.
-FIRMWARE_SOURCE="https://github.com/JC-000/1541ultimate/tree/pr/3-tls-r1
-      (f3df8261). Not upstream; the series it implements is proposed on
-      GideonZ/1541ultimate#952.
-      This demo image has NOT been run on a build of it."
-FIRMWARE_IMAGE_SHA=""
+# FIRMWARE is the firmware side's own one-line description (agreed with
+# them); the source branch, the prebuilt image and its sha256 follow. The
+# image line is printed only when FIRMWARE_IMAGE_SHA is set. These and
+# UPSTREAM_PRS are plain constants, not env knobs, so the README is a
+# function of the commit: a later commit swaps them.
+FIRMWARE="TLS client sockets for the Ultimate 64 / U64 Elite, from
+      JC-000/1541ultimate branch pr/3-tls-r1 (f3df8261), prebuilt image in
+      prerelease tls-preview-f3df8261. Not upstream; proposed on
+      GideonZ/1541ultimate#952."
+FIRMWARE_SOURCE="https://github.com/JC-000/1541ultimate/tree/pr/3-tls-r1"
+FIRMWARE_PRERELEASE="https://github.com/JC-000/1541ultimate/releases/tag/tls-preview-f3df8261"
+FIRMWARE_IMAGE_SHA="15e9ff7cd8a11daf1f4698d574480381d475db7754e1d276d9aa95e8013ded3c"
+# The build the "Measured" figures were taken on (the image above).
+MEASURED_FW="firmware 3.15 git f3df8261 (the image above, ESP module 1.8)"
 # Change it once an upstream PR implements $21-$25.
 UPSTREAM_PRS="not upstream yet. GideonZ/1541ultimate#952 is the proposal issue;
       this demo follows its proposed command numbering (\$21 OPEN_TLS,
       \$23 TLS_INFO, \$25 TLS_RELEASE). No upstream PR implements these
       commands yet (GideonZ/1541ultimate#953 adds GET_RANDOM only)."
 # Earlier demo images (this script's history, JC-000/c64-https 82a549a to
-# b54fcb6) were validated on these builds; neither is public.
+# 9eabd50) were validated on these builds; neither is public.
 EARLIER_RUNS="esp-tls/m3 f2e46946 and esp-tls/m3-master 3a1ff9ff"
 
 # The image the "Measured" figures below were taken with, and its commit.
@@ -81,10 +80,10 @@ EARLIER_RUNS="esp-tls/m3 f2e46946 and esp-tls/m3-master 3a1ff9ff"
 # MEASURED_COMMIT is a commit on master that reproduces that PRG (the
 # adapter diff below runs from it); MEASURED_BUILT is where the measured
 # image itself was built.
-MEASURED_PRG_SHA="24a81766e05a9e333d14ba7c4d87e9309b90079799f9192a05d47f5c149e4e93"
-MEASURED_COMMIT="71b047e6449c42eb80f3a2bb7d1b2477d1666ac2"
-MEASURED_COMMIT_NOTE="the merge of JC-000/c64-https#296"
-MEASURED_BUILT="9eabd50 on 2026-10-13"
+MEASURED_PRG_SHA="916d41628a17b9436bbf58a71f7350c721a06e459cf5c33e5baeb1ad61af9a24"
+MEASURED_COMMIT="daaef3354ec443b0feb09dfa2900795f9fa265ce"
+MEASURED_COMMIT_NOTE="the merge of JC-000/c64-https#299"
+MEASURED_BUILT="daaef33 on 2026-10-14"
 SPEC="M3-SPEC v1 (= r7.7), sha256 c265fdfcfdd08dee989a96eee25fae66fb6650ee4be8bb24f8dd791d9ee3db9f, with errata v1.1 (f9a39ff334b34cb0e1a63d5d508675de552ac8eacb23ccd6095a7f4c72788f9a) and v1.2 (a6802f40db3229d53591ef6e0773641d723186e779dd8726abff5915cbe551a4)"
 
 die() { echo "[m3-demo] ERROR: $*" >&2; exit 1; }
@@ -235,10 +234,11 @@ $toolchain
 
 What it needs
 -------------
-  - An Ultimate 64 (Elite) running firmware with the M3 TLS sockets:
-    $FIRMWARE.
-    Firmware source: $FIRMWARE_SOURCE
-${FIRMWARE_IMAGE_SHA:+    Firmware image sha256: $FIRMWARE_IMAGE_SHA
+  - An Ultimate 64 (Elite) running firmware with the M3 TLS sockets.
+    Firmware: $FIRMWARE
+    Source:     $FIRMWARE_SOURCE
+    Prebuilt:   $FIRMWARE_PRERELEASE
+${FIRMWARE_IMAGE_SHA:+    Image sha256: $FIRMWARE_IMAGE_SHA
 }    Upstream status:
       $UPSTREAM_PRS
     $this_run
@@ -267,8 +267,8 @@ How to run it
   A body cut short of its own framing prints BODY INCOMPLETE and the
   firmware's status line before CONNECTION CLOSED.
 
-Three URLs to try
------------------
+Four URLs to try
+----------------
   1. $DEMO_HOST $DEMO_PATH   (the default)
   2. github.com /robots.txt
   3. 208-80-153-224.nip.io /              (a NEGATIVE: a Wikipedia address
@@ -278,16 +278,25 @@ Three URLs to try
      and 208.80.153.224 still serving Wikipedia. If either changes, pick
      another <ip-with-dashes>.nip.io name for a site whose certificate does
      not name it.)
+  4. badssl.com /                         (a NEGATIVE: a server without
+     TLS 1.3. Expected: TLS HANDSHAKE FAILED / 14,TLS ALERT RECEIVED: 40 /
+     THE SERVER DOES NOT DO TLS 1.3. It depends on badssl.com staying
+     TLS 1.2 only.)
 
 $measured_with, validated on an Ultimate 64
-Elite (U64E), firmware 3.15 git 3a1ff9ff, 48 MHz, REU disabled, the .d64
-mounted on drive 8 and loaded with LOAD"*",8,1
-(tools/uci/rig_https_m3_demo.py), 2026-10-13:
-  1. HTTP 200, 751,823 B consumed == Content-Length, 18 s from G to
+Elite (U64E), $MEASURED_FW,
+48 MHz, REU disabled, 2026-10-15. URLs 1-3: the .d64 mounted on drive 8
+and loaded with LOAD"*",8,1 (tools/uci/rig_https_m3_demo.py):
+  1. HTTP 200, 759,171 B consumed == Content-Length, 20 s from G to
      CONNECTION CLOSED (the page size changes as the article is edited).
-  2. HTTP 200, 16,739 B consumed == Content-Length, 4 s.
+  2. HTTP 200, 16,739 B consumed == Content-Length, 5 s.
   3. Refused: 94,CERTIFICATE NAME MISMATCH: 0x00000004.
-  Other Ultimate models, and other clock speeds, have not been tested.
+URL 4: the same PRG written into memory over the Ultimate's REST interface
+instead of loaded from the disk (tools/uci/rig_https_m3.py refuse):
+  4. Refused: 14,TLS ALERT RECEIVED: 40, then THE SERVER DOES NOT DO
+     TLS 1.3.
+  Other Ultimate models, and other clock speeds, have not been tested
+  with this image.
 
 What an unsupported device shows
 --------------------------------
