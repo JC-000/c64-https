@@ -96,9 +96,11 @@ though the name in it is not.
 Still true, and still how you prove a build: `.o` hashes are never evidence
 — ca65 stamps build time into every object; ld65 does not propagate it, so
 the PRG is deterministic and **its sha256 is the check**. The PRG is also
-locale-independent (#301: every source wildcard is `$(sort)`ed, because make 3.81
-returns them in collation order), pinned by `tools/test_build_flags_stamp.py`. One consequence
-of the stamp: `CA65FLAGS` carries two `$(abspath ...)` `.incbin` roots, so
+locale-independent (#301): make 3.81 returns `$(wildcard)` in collation
+order, so `src/*.s` and `src/crypto/*.s` are `$(sort)`ed; the test pins those
+two (C/en_US/cs_CZ). `src/crypto/shared/*.s`'s sort is defensive, unpinned.
+`flags.stamp` carries the object list, so a changed link order relinks.
+One consequence of the stamp: `CA65FLAGS` carries two `$(abspath ...)` `.incbin` roots, so
 moving a checkout forces exactly one rebuild.
 
 Also: `$(PRG)`'s recipe `rm -f`s the target first, because ld65 writes
