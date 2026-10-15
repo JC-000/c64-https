@@ -192,6 +192,21 @@ otherwise, and nothing here said it before:
   image stops connecting the day the server rotates its key (some do on every
   renewal: `tools/spki_pin.py --check-baseline`). On `ip65-onchip` a pin is
   the only certificate check there is. Issue #155.
+- **The released UCI images remember keys on first use, in `/USB1`.**
+  `uci-onchip` and `uci-comb` are built `TRUST_STORE=1`: the first time you
+  fetch a host they record its leaf-key hash in `TRUST.A` / `TRUST.B` in
+  `/USB1` on the Ultimate, and later fetches refuse a changed key unless you
+  accept it. That is trust on first use, not authentication, and a released
+  image carries no build-time pin or signed bundle (`TRUST.P`) — those need
+  your own build. If the store cannot be read — no `/USB1` volume, as on a
+  C64 Ultimate whose card is mounted as `/SD` — the image prints `TRUST FAIL
+  nn` (`02` = the path or medium does not exist) and `CONTINUE UNPINNED?
+  Y/N`. `Y` runs that one fetch with **no key check** and a `** UNPINNED: KEY NOT
+  CHECKED **` banner, and records nothing; anything else prints `NOT DIALLED` and does
+  not connect. To keep the store elsewhere, build with `make BACKEND=uci
+  USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1 TRUST_STORE_DIR=/SD/...` (an absolute
+  path of `A-Za-z0-9_.-` components, at most 48 characters including the
+  `/TRUST.` suffix).
 
 What the client *does* prove is that the peer holds the private key for the
 leaf certificate it presented (the CertificateVerify signature is genuinely
