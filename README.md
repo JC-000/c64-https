@@ -476,10 +476,14 @@ object and the PRG before make builds its file database.
 
 Two things to know anyway:
 
-- The compare runs at parse time, so on master `make -n` (and `-q`, and `-t`)
-  with different flags is **not** side-effect-free — it deletes the objects
-  without rebuilding them. That is issue #174, and a fix is in flight; check
-  whether it has landed before relying on either behaviour.
+- The compare runs at parse time. `make -n`, `-q` and `-t` still run it and
+  `$(warning)` what a real build would delete; they are exempt only from
+  writing the stamp and deleting objects (issue #174, fixed). With changed
+  flags `make -n` lists only what timestamps make stale (on an otherwise
+  fresh tree, "Nothing to be done") and `make -q` answers as if the flags
+  had not changed: both describe the old tree, so that stderr warning is
+  the only signal.
+  A command-line `MAKEFLAGS=` or `MFLAGS=` is a parse-time error.
 - `make clean` is still the right move if you want to be certain of a tree
   for any other reason, and it costs about a second.
 
