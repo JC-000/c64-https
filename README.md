@@ -19,7 +19,7 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
 ## I just want to run it
 
 Grab a release — latest is
-[**v0.5.0**](https://github.com/JC-000/c64-https/releases/tag/v0.5.0).
+[**v0.5.1**](https://github.com/JC-000/c64-https/releases/tag/v0.5.1).
 It replaces every earlier release; see its release notes for what changed.
 Every build is prebuilt, as a `.prg` and as a bootable `.d64`.
 No assembler, no cc65, no Python packages, no build step. `MANIFEST.txt` in
@@ -39,9 +39,12 @@ the default, a typed host is lowercased and gets the same name check, and an
 entry the prompt cannot take whole (over 63 / 100 characters, a character
 outside `a-z 0-9 . -` in the host, an empty label, a path not starting with
 `/`) prints `INVALID TARGET` and dials nothing. Type `_` with the left-arrow
-key. `ip65-onchip` has no prompt. The packaging scripts never override the
-default, so an image carries whatever the Makefile default was when it was
-built — and **that default changed between v0.4.2 and v0.4.3**:
+key. `ip65-onchip` has no prompt. The UCI images also keep a per-host key
+store on the Ultimate — see ["What this client does NOT
+authenticate"](#what-this-client-does-not-authenticate) for where. The
+packaging scripts never override the default, so an image carries whatever
+the Makefile default was when it was built —
+and **that default changed between v0.4.2 and v0.4.3**:
 
 - **v0.4.2's images, and every release before it, carry `www.foo.bar`.**
   `.bar` is a delegated gTLD, so that is a name a third party can register. It
@@ -192,6 +195,29 @@ otherwise, and nothing here said it before:
   image stops connecting the day the server rotates its key (some do on every
   renewal: `tools/spki_pin.py --check-baseline`). On `ip65-onchip` a pin is
   the only certificate check there is. Issue #155.
+- **The released UCI images remember keys on first use, in `/USB1`.**
+  `uci-onchip` and `uci-comb` are built `TRUST_STORE=1`: the first time you
+  fetch a host they record its leaf-key hash in `TRUST.A` / `TRUST.B` in
+  `/USB1` on the Ultimate, and later fetches refuse a changed key unless you
+  accept it. That is trust on first use, not authentication, and a released
+  image carries no build-time pin or signed bundle (`TRUST.P`) — those need
+  your own build. If the store cannot be read — for instance there is no
+  `/USB1` volume (check the Ultimate's file browser for the name your
+  storage actually has) — the image prints `TRUST FAIL nn` (`02` = the path
+  or medium does not exist) and `CONTINUE UNPINNED? Y/N`. `Y` runs that one
+  fetch with **no key check** and a `** UNPINNED: KEY NOT CHECKED **`
+  banner, and records nothing; anything else prints `NOT DIALLED` and does
+  not connect. A fetch that ends in `TRUST SAVE FAIL nn` (e.g. a read-only
+  `/USB1`, `0D`) or `TRUST STORE FULL` (32 hosts, no eviction) recorded
+  nothing: a new host stays unpinned (no UNPINNED banner), and an accepted
+  key change is not saved, so the old key still applies. To keep the
+  store elsewhere, build with the product's own arguments from
+  `tools/package/_common.sh` plus `TRUST_STORE_DIR=`, e.g. `make BACKEND=uci
+  USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1 TRUST_STORE_DIR=/SD` for
+  `uci-onchip`, or `make BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1
+  TRUST_STORE=1 TRUST_STORE_DIR=/SD` for `uci-comb`. The directory must
+  already exist (the client never creates one) and be an absolute path of
+  `A-Za-z0-9_.-` components, at most 41 characters.
 
 What the client *does* prove is that the peer holds the private key for the
 leaf certificate it presented (the CertificateVerify signature is genuinely
