@@ -101,7 +101,8 @@ order, so `src/*.s` and `src/crypto/*.s` are `$(sort)`ed; the test pins those
 two (C/en_US/cs_CZ). `src/crypto/shared/*.s`'s sort is defensive, unpinned.
 `flags.stamp` carries the object list, so a changed link order relinks.
 One consequence of the stamp: `CA65FLAGS` carries two
-`$(abspath ...)` `.incbin` roots, so moving a checkout forces exactly one rebuild.
+`$(abspath ...)` `.incbin` roots, so moving a checkout forces exactly one
+rebuild.
 
 Also: `$(PRG)`'s recipe `rm -f`s the target first, because ld65 writes
 nothing on a memory-area overflow and every rig loads the PRG by path — an

@@ -783,7 +783,7 @@ _ := $(shell mkdir -p build; \
 else
 # -n / -q / -t: compare and report, mutate nothing. See MAKE_DRY_RUN above.
 ifneq ($(shell $(FLAGS_STAMP_BODY) 2>/dev/null | cmp -s - $(FLAGS_STAMP) >/dev/null 2>&1 || echo differs),)
-$(warning DRY RUN (-$(MAKE_OPT_LETTERS)): build flags differ from $(FLAGS_STAMP).)
+$(warning DRY RUN (-$(MAKE_OPT_LETTERS)): build inputs (flags or object list) differ from $(FLAGS_STAMP).)
 $(warning   A real build would rewrite the stamp and delete every object and $(LINK_OUTPUTS))
 $(warning   at parse time. NOTHING was deleted; the tree is untouched.)
 endif

@@ -1062,8 +1062,9 @@ def test_stamp_records_the_whole_command_line():
 
 LOCALES = ("C", "en_US.UTF-8", "cs_CZ.UTF-8")
 
-CERTIFIES_LOCALE = ("that the PRG's bytes do not depend on the build locale "
-                    "(#301), and that a stale link order is rebuilt")
+CERTIFIES_LOCALE = "whether the PRG's bytes depend on the build locale (#301)"
+CERTIFIES_STALE_ORDER = ("whether a tree linked in another object order is "
+                         "rebuilt (#301)")
 
 
 def _wildcard_orders(farm, pattern):
@@ -1148,7 +1149,13 @@ def test_stale_link_order_is_rebuilt_to_the_clean_hash():
         os.unlink(farm.path("Makefile"))
         os.symlink(real, farm.path("Makefile"))
         farm.make(*UCI, env=loc)
-        assert stale != oracle, "the stale tree was not actually stale"
+        if stale == oracle:
+            require(False,
+                    "this make/locale does not reorder $(wildcard src/*.s); "
+                    "the stale tree is not actually stale, so a relink to the "
+                    "clean hash would prove nothing",
+                    executed=0, total=1, certifies=CERTIFIES_STALE_ORDER,
+                    opt_out_env="C64_ALLOW_SKIP")
         assert farm.sha() == oracle, (
             "a changed object order did not invalidate the tree: PRG "
             f"{farm.sha()} != clean build {oracle}")
@@ -1176,10 +1183,12 @@ def main() -> int:
 
     failed = 0
     ran = 0
+    skipped = 0
     for name, fn in tests:
         try:
             fn()
         except VoluntarySkip as exc:        # named before Exception
+            skipped += 1
             print(f"  SKIP {name}\n       {exc}")
             continue
         except Exception as exc:            # noqa: BLE001 - a crash is a fail
@@ -1199,7 +1208,9 @@ def main() -> int:
         )
 
     print(f"\n{'FAILED' if failed else 'PASSED'}: {failed} failure(s) "
-          f"({ran}/{len(tests)} executed)")
+          f"({ran}/{len(tests)} executed"
+          + (f", {skipped} skipped via C64_ALLOW_SKIP" if skipped else "")
+          + ")")
     return 1 if failed else 0
 
 
