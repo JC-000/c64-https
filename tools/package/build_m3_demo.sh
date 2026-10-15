@@ -252,10 +252,10 @@ ${FIRMWARE_IMAGE_SHA:+    Image sha256:
   - The Ultimate's Command Interface enabled.
   - No REU. Turbo is optional. The same M3 adapter, in its REU-sink
     build, fetched en.wikipedia.org /robots.txt (28,275 B) on the U64E:
-    body in 17.5 s at 1 MHz (turbo off), after a 5.8 s handshake (sink
-    build 146647e4, firmware f3df8261, 2026-10-15); and in 6 s at 48 MHz
-    (esp-tls/m3-master 3a1ff9ff, 2026-10-13). Large pages were not timed
-    at 1 MHz.
+    17.5 s from G to the whole body at 1 MHz (turbo off), handshake done
+    at 5.8 s (sink build 146647e4, firmware f3df8261, 2026-10-15); and 6 s
+    from G at 48 MHz (esp-tls/m3-master 3a1ff9ff, 2026-10-13). Large pages
+    were not timed at 1 MHz.
   Interface implemented: $SPEC.
 
 How to run it
