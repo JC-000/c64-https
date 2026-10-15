@@ -50,10 +50,20 @@ MAKE_ARGS=(BACKEND=uci-m3 "HTTPS_HOST=$DEMO_HOST" "HTTPS_PATH=$DEMO_PATH")
 # What the firmware side published; quoted in the README, checked nowhere
 # here (the device is not involved in a build).
 # The requirement is the interface; the build named is only where it was
-# validated. The upstream PR numbers are not known yet; the README carries a
-# marked slot for them (UPSTREAM_PRS overrides it once they exist).
+# validated. UPSTREAM_PRS overrides the upstream reference.
 FIRMWARE="M3-SPEC v1 + errata v1.1/v1.2 firmware (validated on esp-tls/m3-master 3a1ff9ff: fw 3.15, FPGA 126, ESP 1.309)"
-UPSTREAM_PRS="${UPSTREAM_PRS:-[TO BE FILLED IN: 1541ultimate upstream PR number(s)]}"
+UPSTREAM_PRS="${UPSTREAM_PRS:-TLS client sockets for the U64: GideonZ/1541ultimate#952, which links the issue and draft PR}"
+# Not yet true of any image: change it once a demo PRG has run on that PR's
+# firmware build.
+UPSTREAM_RUN="No demo image has been run on the upstream PR's firmware build yet."
+
+# The image the "Measured" figures below were taken with, and its commit.
+# The README says THIS image only when the PRG just built is that one;
+# otherwise it names the measured PRG and says this one was not run, so a
+# rebuild after an unrelated change cannot inherit the claim. Update both,
+# with the figures, after each demo-rig run.
+MEASURED_PRG_SHA="24a81766e05a9e333d14ba7c4d87e9309b90079799f9192a05d47f5c149e4e93"
+MEASURED_COMMIT="71b047e6449c42eb80f3a2bb7d1b2477d1666ac2"
 SPEC="M3-SPEC v1 (= r7.7), sha256 c265fdfcfdd08dee989a96eee25fae66fb6650ee4be8bb24f8dd791d9ee3db9f, with errata v1.1 (f9a39ff334b34cb0e1a63d5d508675de552ac8eacb23ccd6095a7f4c72788f9a) and v1.2 (a6802f40db3229d53591ef6e0773641d723186e779dd8726abff5915cbe551a4)"
 
 die() { echo "[m3-demo] ERROR: $*" >&2; exit 1; }
@@ -125,6 +135,25 @@ prg_sha="$(sha "$OUT/$NAME.prg")"
 d64_sha="$(sha "$OUT/$NAME.d64")"
 prg_bytes="$(wc -c < "$OUT/$NAME.prg" | tr -d ' ')"
 
+if [ "$prg_sha" = "$MEASURED_PRG_SHA" ]; then
+    measured_with="Measured with THIS image (PRG sha256 above)"
+else
+    # Whether the M3 adapter itself moved since the measured commit, from
+    # git rather than from prose; "unknown" if that commit is not here.
+    if ! git cat-file -e "$MEASURED_COMMIT^{commit}" 2>/dev/null; then
+        adapter="whether src/net/uci-m3/ changed since is unknown here"
+    elif git diff --quiet "$MEASURED_COMMIT" HEAD -- src/net/uci-m3; then
+        adapter="src/net/uci-m3/ is unchanged since"
+    else
+        adapter="src/net/uci-m3/ HAS changed since"
+    fi
+    measured_with="NOT measured with this image. Measured with PRG sha256
+  $MEASURED_PRG_SHA
+built from commit $MEASURED_COMMIT
+($adapter)"
+    echo "[m3-demo] NOTE: this PRG is not the measured one; the README says so"
+fi
+
 cat > "$OUT/README.txt" <<EOF
 c64-https M3 demo — HTTPS on a C64, with TLS done by the Ultimate's ESP32
 ==========================================================================
@@ -159,11 +188,13 @@ What it needs
 -------------
   - An Ultimate 64 (Elite) running firmware with the M3 TLS sockets:
     $FIRMWARE.
-    1541ultimate upstream PR(s): $UPSTREAM_PRS
+    1541ultimate upstream:
+      $UPSTREAM_PRS
+    $UPSTREAM_RUN
   - Its WiFi module up (the ESP32 does the TLS), the network connected, and
     the clock set by SNTP (certificate dates are checked).
   - The Ultimate's Command Interface enabled.
-  - No REU. Turbo is optional. The same client source, in its REU-sink
+  - No REU. Turbo is optional. The same M3 adapter, in its REU-sink
     build, fetched en.wikipedia.org /robots.txt (28,275 B) in 16 s from G
     at 1 MHz (turbo off) and in 6 s at 48 MHz (U64E, 2026-10-13); large
     pages were not timed at 1 MHz.
@@ -195,7 +226,7 @@ Three URLs to try
      another <ip-with-dashes>.nip.io name for a site whose certificate does
      not name it.)
 
-Measured with THIS image (PRG sha256 above), validated on an Ultimate 64
+$measured_with, validated on an Ultimate 64
 Elite (U64E), firmware 3.15 git 3a1ff9ff, 48 MHz, REU disabled, the .d64
 mounted on drive 8 and loaded with LOAD"*",8,1
 (tools/uci/rig_https_m3_demo.py), 2026-10-13:
