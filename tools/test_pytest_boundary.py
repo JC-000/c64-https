@@ -244,15 +244,22 @@ def test_runner_runs_the_ip65_export_gate_only_on_ip65() -> None:
     assert not r and s and s[0][0] == "ip65_exports"
     r, s = gate("uci", (0, True))            # other backend: accounted SKIP
     assert not r and s and s[0][0] == "ip65_exports"
-    # ...and main() calls it unconditionally (a top-level statement, so an
-    # `if False:` wrapped around the call is not accepted).
+    # ...and main() calls it as a top-level statement with exactly these
+    # arguments (a tripwire: an `if False:` wrapper or a changed call fails
+    # it; an early `return` before it would not be caught).
     import ast
     tree = ast.parse((REPO / "tools" / "run_all_tests.py").read_text())
     main = next(n for n in tree.body
                 if isinstance(n, ast.FunctionDef) and n.name == "main")
-    assert any(isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
-               and getattr(n.value.func, "id", "") == "host_side_gates"
-               for n in main.body), "main() does not call host_side_gates"
+    calls = [n.value for n in main.body
+             if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+             and getattr(n.value.func, "id", "") == "host_side_gates"]
+    assert len(calls) == 1, "main() must call host_side_gates once, top level"
+    c = calls[0]
+    assert [getattr(a, "id", None) for a in c.args] == [
+        "backend", "results", "skipped_suites"] and not c.keywords, (
+        "host_side_gates must be called with (backend, results, "
+        "skipped_suites)")
 
 
 # ---------------------------------------------------------------------------

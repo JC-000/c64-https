@@ -7,9 +7,9 @@ prerequisite is a failure) and a bare `pytest` was green on no single build.
 is a UCI build, because nothing proves that one is fresh.
 
 The build runs in a private COPY of the tree (the Makefile and the sibling
-wrappers hard-code build/ next to themselves), kept between runs so make
-rebuilds only what changed. Any failure raises Unavailable -- the callers
-turn that into a test failure, never a skip.
+wrappers hard-code build/ next to themselves), re-synced and
+cold-built every run. Any failure raises Unavailable -- the callers turn that
+into a test failure (or, only under C64_UCI_TESTS_OPTIONAL=1, a loud skip).
 """
 import fcntl
 import hashlib
@@ -37,34 +37,33 @@ def _backend(build_dir: Path):
     return None
 
 
-def _tracked():
-    """Tracked + untracked-unignored files, submodule contents included."""
-    r = subprocess.run(["git", "ls-files", "-z", "--cached", "--others",
-                        "--exclude-standard", "--recurse-submodules"],
-                       cwd=REPO, capture_output=True)
+def _ls(*args):
+    r = subprocess.run(["git", "ls-files", "-z", *args], cwd=REPO,
+                       capture_output=True)
     if r.returncode != 0:
-        # --others and --recurse-submodules do not combine on older git.
-        r = subprocess.run(["git", "ls-files", "-z", "--cached",
-                            "--recurse-submodules"], cwd=REPO,
-                           capture_output=True)
-    if r.returncode != 0:
-        raise Unavailable("git ls-files failed: " + r.stderr.decode()[-500:])
+        raise Unavailable("git ls-files %s failed (rc=%d): %s"
+                          % (" ".join(args), r.returncode,
+                             r.stderr.decode()[-500:]))
     return {f for f in r.stdout.decode().split("\0") if f}
 
 
+def _tracked():
+    """Working-tree files: tracked (submodule contents included) plus
+    untracked-unignored. Two calls: git refuses to combine --others with
+    --recurse-submodules. Entries whose file is gone (unstaged delete) drop."""
+    want = _ls("--cached", "--recurse-submodules")
+    want |= _ls("--others", "--exclude-standard")
+    return {f for f in want if (REPO / f).is_file()}
+
+
 def _sync(root: Path):
+    """Copy the working tree over root, unconditionally: a size+mtime skip
+    would miss a same-size edit that kept its old mtime."""
     want = _tracked()
     for rel in want:
-        src, dst = REPO / rel, root / rel
-        if not src.is_file():
-            continue
-        st = src.stat()
-        if dst.is_file():
-            dt = dst.stat()
-            if dt.st_size == st.st_size and dt.st_mtime_ns == st.st_mtime_ns:
-                continue
+        dst = root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        shutil.copy2(REPO / rel, dst)
     # A file deleted from the source must not linger (wildcard sources).
     for dirpath, dirs, files in os.walk(root):
         if Path(dirpath) == root and "build" in dirs:
@@ -79,7 +78,7 @@ def uci_build_dir() -> Path:
     """build dir of a FRESH BACKEND=uci c64-https.prg + labels.txt.
 
     Always the private copy, never build/: whatever build/ holds may predate a
-    source edit. make is incremental there. Cached, failure included, so a
+    source edit. The build there is cold every run. Cached, failure included, so a
     broken build is one error rather than one make per test.
     """
     global _cached
@@ -89,7 +88,8 @@ def uci_build_dir() -> Path:
         except Unavailable as exc:
             _cached = (None, exc)
     if _cached[1] is not None:
-        raise _cached[1]
+        # Fresh each time: re-raising the cached object grows its traceback.
+        raise Unavailable(str(_cached[1]))
     return _cached[0]
 
 
@@ -102,6 +102,8 @@ def _build() -> Path:
         fcntl.flock(lock, fcntl.LOCK_EX)
         root.mkdir(exist_ok=True)
         _sync(root)
+        # Always a cold build (~1 s): no mtime state to get wrong.
+        shutil.rmtree(root / "build", ignore_errors=True)
         env = {k: v for k, v in os.environ.items()
                if k not in ("BACKEND", "MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
         m = subprocess.run(["make", "BACKEND=uci"], cwd=root, env=env,

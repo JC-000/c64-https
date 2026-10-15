@@ -59,9 +59,8 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 # UCI build (tools/_private_uci_build.py) so a bare pytest is green on any
 # build/ (#302). A build that fails raises here, once, with make's error as the
 # reason -> pytest ERROR on every selected test, never a skip (#178).
-# C64_UCI_TESTS_OPTIONAL=1 (the modules' own opt-out) is the one exception:
-# a failed private build then leaves their paths alone, and they announce the
-# skip themselves.
+# C64_UCI_TESTS_OPTIONAL=1 turns that failure into a loud skip with the same
+# reason; build/ is never used as a fallback.
 _UCI_BYTES_MODULES = {
     "test_uci_data_acc", "test_uci_timeout_recovery",
     "test_uci_reply_valid_wait", "test_uci_abort_recovery",
@@ -84,10 +83,15 @@ def pytest_runtest_setup(item):
     import test_uci_timeout_recovery
     try:
         build = pub.uci_build_dir()
-    except pub.Unavailable:
-        if os.environ.get("C64_UCI_TESTS_OPTIONAL") == "1":
-            return
-        raise
+    except pub.Unavailable as exc:
+        if os.environ.get("C64_UCI_TESTS_OPTIONAL") != "1":
+            raise
+        # Opt-out: a loud skip carrying make's error, never build/ (which is
+        # not the working tree's build).
+        from _skip_policy import require
+        require(False, str(exc), executed=0, total=1,
+                certifies="the UCI 6502 bytes of this working tree",
+                opt_out_env="C64_UCI_TESTS_OPTIONAL")
     for m in (test_uci_data_acc, test_uci_timeout_recovery):
         m.PRG = build / "c64-https.prg"
         m.LABELS = build / "labels.txt"

@@ -919,9 +919,10 @@ the six `test_uci_*` modules ignore `build/`: `conftest.py` points them at
 a fresh private `BACKEND=uci` build (#302), so bare `pytest` is green on any
 `build/` and sees source edits `build/` has not. It lives in
 `$TMPDIR/c64-https-pytest-uci-<hash>` (override `C64_PRIVATE_BUILD_ROOT`;
-persistent, incremental, safe to delete; copied from `git ls-files`, needs
-`git` and a toolchain). A failed build is one pytest ERROR carrying make's
-output; `C64_UCI_TESTS_OPTIONAL=1` still opts out of that failure only. The
+persistent, safe to delete; the working tree copied via `git ls-files`
+(tracked + untracked-unignored), cold `make` every run, needs `git` and a
+toolchain). A failed build is a pytest ERROR carrying make's output;
+`C64_UCI_TESTS_OPTIONAL=1` makes it a loud skip, never a `build/` fallback. The
 ip65-only label-export check is `tools/check_ip65_build_exports.py`, run by
 `run_all_tests.py` on an ip65 build.
 
