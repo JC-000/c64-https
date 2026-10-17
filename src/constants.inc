@@ -260,3 +260,23 @@ CH_SECTIONED = 1
 ; through pq_mlkem_keygen / pq_mlkem_decaps_seed (src/crypto/mlkem_link.s).
 mlkem_dk_scratch        = tcp_recv_buf
 MLKEM_DK_SIZE           = 2400
+MLKEM_EK_SIZE           = 1184          ; ML-KEM-768 encapsulation key
+MLKEM_CT_SIZE           = 1088          ; ML-KEM-768 ciphertext
+MLKEM_HYB_SH_KEY        = 1120          ; 11EC ServerHello key_exchange: ct || x25519
+MLKEM_SEED_SIZE         = 64            ; d || z
+MLKEM_SS_SIZE           = 32
+
+; ServerHello refusal codes, tls_sh_err (0 = none). $01 predates the
+; streaming reader; $02-$0C are PQ_HYBRID's (src/crypto/pq_hybrid.s).
+SH_ERR_HRR      = $01   ; HelloRetryRequest random
+SH_ERR_RECTYPE  = $02   ; non-handshake or empty record mid-message
+SH_ERR_HDR      = $03   ; not a ServerHello, or message length out of range
+SH_ERR_FIXED    = $04   ; legacy_version / session id / suite / compression
+SH_ERR_EXTLEN   = $05   ; extension framing
+SH_ERR_VERSION  = $06   ; supported_versions wrong or duplicated
+SH_ERR_GROUP    = $07   ; key_share group unknown or not offered
+SH_ERR_KSLEN    = $08   ; key_share length wrong for its group, or duplicate
+SH_ERR_TRAIL    = $09   ; bytes after the ServerHello
+SH_ERR_MISSING  = $0A   ; supported_versions or key_share absent
+SH_ERR_PQ_DECAPS = $0B  ; ML-KEM Decaps refused
+SH_ERR_PQ_KEYGEN = $0C  ; ML-KEM KeyGen refused (set before the ClientHello)
