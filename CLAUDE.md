@@ -143,7 +143,10 @@ Variables:
     both exist for uci only, so there is no ip65 comb build. Confirm from
     the `ld65 -C` line, not from the profile name.
   - `PQ_HYBRID=1` — links `libs/mlkem` (c64-mlkem v0.6.0, ABI 3) for the
-    planned X25519MLKEM768 hybrid; **placement only, nothing calls it**. uci
+    X25519MLKEM768 hybrid (P4: `tls_connect` runs KeyGen and offers 11EC;
+    a 11EC ServerHello is read and Decapsed, but the **key schedule is not
+    hybrid yet** (P5), so against an 11EC server the handshake fails at the
+    first encrypted record; a 001D server completes as before). uci
     + `USE_NISTCURVES_ONCHIP=1` or `_COMB=1`, with or without `TRUST_STORE`;
     `$(error)` on ip65, uci-m3 and the uci REU profile. Unset = byte-identical
     PRG on every profile. Layout in Memory layout; asserts in
@@ -688,7 +691,9 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
 
 ### ClientHello shape
 
-UCI CH is sectioned (`CH_SECTIONED`, follows `TLS_STREAM_DEFRAME`): `tls_ch_ks_ptr/len` (16-bit, BSS, one-shot) name a bulk key-share that `tls_ch_send_sections` streams from its own buffer between the head and tail staged in `tls_rec_buf`, as ONE record; 0 = classic X25519-only hello (all builds today). Rule: arm `tls_ch_ks_ptr/len` after TCP connect, immediately before `jsr tls_connect`; the sender clears it on every exit. HRR random -> `tls_sh_err=$01` (both backends). Test: `test_tls_handshake.py` [2d-2k], [3d].
+UCI CH is sectioned (`CH_SECTIONED`, follows `TLS_STREAM_DEFRAME`): `tls_ch_ks_ptr/len` (16-bit, BSS, one-shot) name a bulk key-share that `tls_ch_send_sections` streams from its own buffer between the head and tail staged in `tls_rec_buf`, as ONE record; 0 = classic X25519-only hello (every build without PQ_HYBRID). Under PQ_HYBRID=1 `tls_connect` arms it itself (`pq_connect_prep`, `src/crypto/pq_hybrid.s`: DRBG seed, KeyGen, dk zeroed at once, ek in `cert_buf`; 11EC = ek || x25519, then 001D also offered); no caller arms anything. The sender clears it on every exit. HRR random -> `tls_sh_err=$01` (both backends). Test: `test_tls_handshake.py` [2d-2k], [3d].
+
+PQ_HYBRID ServerHello (P4): `pq_sh_feed` streams the SH across any number of plaintext records (`pq_hybrid.s`; `tls_parse_server_hello` is assembled out), 11EC needs exactly 1,120 B = ct 1,088 (into `cert_buf`) || x25519 32; ct must be Decapsed (`pq_sh_decaps`, before the X25519 mult) before anything writes `cert_buf`. unsolicited SH extensions and a malformed/oversize record header while waiting for the SH are refused (fail fast, `$0D`/`$0E`); KeyGen and Decaps end with `pq_mlkem_scrub` (polys + `$B100` window zeroed); `tls_sh_err` codes `$01-$0E` are in `src/constants.inc`; `tls_kex_group` ($1D/$EC) and `tls_mlkem_ss` are P5's inputs; seed + ss are one scrub span. Tests: `tools/test_pq_sh.py` (fast), `tools/test_pq_kem.py` (KeyGen/Decaps/tls_connect), oracle `tools/pq_keylog_check.py` (hardware, vs `openssl s_server -keylogfile`).
 
 ### VIC-II blanking — worth 6.3%, not the fleet's "20-25%"
 
@@ -788,8 +793,9 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
   $0801-$1FFF  LOADER              BASIC stub + boot + HTTP + net wrapper
   $2000-$3B65  NET_CODE            UCI adapter + LOADER_OVERFLOW + TLS_CODE
                                    + CRYPTO_AUX_CODE
-  $3B66-$41FF  NET_BSS_TAIL        NET_BSS_TAIL segment (deframer/viewer BSS),
-                                   then free. NOT `BSS_TAIL` and NOT `UCI_BSS`
+  $3B66-$41FF  NET_BSS_TAIL        NET_BSS_TAIL segment (deframer/viewer BSS;
+                                   PQ_HYBRID: `tls_pq_seed` + `tls_mlkem_ss`,
+                                   96 B, one scrub span), then free. NOT `BSS_TAIL` and NOT `UCI_BSS`
                                    — both are elsewhere (below, and
                                    CRYPTO_HOT). Read the map.
   $4200-$5FFF  CRYPTO_OVERLAY      7.5 KB. Resident tenants in every UCI

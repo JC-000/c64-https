@@ -492,7 +492,11 @@ tls_rec_decrypt_chk:
 tls_rec_frame_fail:
         jsr tls_rec_reader_reset
         lda tls_state
+.ifdef PQ_HYBRID
+        cmp #TLS_STATE_SERVER_HELLO     ; a hybrid SH is read record by record: a bad
+.else                                   ;  header while waiting for it is fatal too
         cmp #TLS_STATE_ENCRYPTED_EXT
+.endif
         bcc tls_rec_fail_ret    ; plaintext phase: resync, not fatal
         lda #$0C                ; sub-progress: bad/short header after keys
         bne tls_rec_latch       ; always
