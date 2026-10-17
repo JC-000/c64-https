@@ -4108,3 +4108,47 @@ happens at 64 MHz; and whether a slower or marginal CS8900a would survive
 where this one did. One device, one cartridge, one clock, one run. The
 shipped `c64-https-ip65-onchip.prg` is still a stock-C64 product and the
 rig still defaults to 1 MHz for that reason.
+
+## PQ_HYBRID P0: placing libs/mlkem (2026-10-16)
+
+Link-only. `PQ_HYBRID=1` links c64-mlkem v0.6.0 (ABI 3) and proves where it
+lives; nothing calls it. Measured on the uci-onchip link: code+rodata
+`$E000-$FD40` (7,489 B with alignment fill, 191 B spare in the 7,680 B
+window), `LIB_MLKEM_BSS` `$B100-$BAF0` (2,545 B, 271 B spare before the
+sqtab at `$BC00`), `LIB_MLKEM_POLY_BSS` `$D000-$DFFF` (exactly 4,096 B).
+Scrub cost: 21 B of LOADER on comb-store (61 B left), 82 -> 61.
+
+Findings that changed the plan:
+
+  - **The $E000 code is linked but not delivered.** #288 removed the only
+    file-backed way to reach `$E000` (the zero pad through the I/O page), and
+    staging 7.5 KB inside the PRG below `$D000` to copy up at boot needs file
+    bytes the images do not have: the free tails total ~2.7 KB, and
+    `$C000-$CFFF` (4 KB, free on uci, 1.7 KB free on comb) is the only
+    other file-backed area that can exist. So the cfgs put the code in a
+    `file=""` area and `mlkem_link.s` ldwarns on every link. Options for the
+    follow-up: relax #288 for DMA-only products (UCI loads by DMA), or
+    ship the code in the REU on comb, or shrink below 4 KB (not possible).
+  - **`mlkem_arith_init` builds 1 KB of reduction tables inside
+    `LIB_MLKEM_BSS`.** That window is X25519_TABLES, which X25519 rebuilds
+    per scalar mult, so every ML-KEM call group needs `mlkem_arith_init`
+    first, not "once at boot" as the library header says.
+  - **The library's sqtab image guard cannot pass `CRYPTO_COLD_SHADOW`**:
+    the window is c64-https's own table inside that area. `mlkem_link.s`
+    asserts the equivalent (the window is exactly the owner's lo+hi planes
+    and the area ends at the window's end). Every other area has the
+    library's one-line guard; `tools/test_mlkem_placement.py` fails on an
+    area with neither.
+  - **The `LIB_SHARED_SQTAB_BASE` the archive was built with is not
+    checkable.** The library never exports it (by contract) and the base is
+    baked into immediates; a wrapper edit to `0xB800` links clean. Same
+    blind spot as `build_x25519.sh` and `build_nistcurves_p256.sh`.
+  - **Dk scratch in the TCP ring.** The trust store and bundle also stage
+    their files in the ring (`TS_BUF`, `TB_BUF`), outside a connection, so
+    KeyGen must run after `trust_pre` and before the first server byte.
+    Comb's `COLD_IMAGE` sits at `$C000` but is stashed to the REU once at
+    boot and never read again (`cold_bank_init`), so it is dead by then.
+  - **NMI.** With the KERNAL out (`$01=$34`) the hardware vectors are RAM; a
+    RESTORE-key NMI during a call jumps through `$FFFA`. The scrub accepts
+    that window (it is followed by 'Q'); the real ML-KEM calls last seconds
+    and will need a vector stub in the free `$FE00-$FFFF`.

@@ -142,6 +142,13 @@ Variables:
     and an `$(error)` with `TRUST_STORE=1`) —
     both exist for uci only, so there is no ip65 comb build. Confirm from
     the `ld65 -C` line, not from the profile name.
+  - `PQ_HYBRID=1` — links `libs/mlkem` (c64-mlkem v0.6.0, ABI 3) for the
+    planned X25519MLKEM768 hybrid; **placement only, nothing calls it**. uci
+    + `USE_NISTCURVES_ONCHIP=1` or `_COMB=1`, with or without `TRUST_STORE`;
+    `$(error)` on ip65, uci-m3 and the uci REU profile. Unset = byte-identical
+    PRG on every profile. Layout in Memory layout; asserts in
+    `src/crypto/mlkem_link.s`, guard `tools/test_mlkem_placement.py`. The
+    code is **linked at $E000 but not in the PRG** (#288): not runnable yet.
   - `USE_X25519_SIBLING` — **retired, `$(error)`-guarded (#245)**: every
     build links the `libs/x25519` sibling; any value is refused.
   - `ENABLE_P384_VERIFY`, `USE_OVERLAY_P384_EMBED`, `KEEP_CRYPTO_SWAP`,
@@ -234,6 +241,19 @@ fixed buffers in crypto BSS.
     `$1E-$2F`, `fe_wide` at ZP_WIDE `$40-$7F` — all time-shared with
     per-call slots (table in `build_x25519.sh`); they are not in
     `labels.txt`.
+  - ML-KEM (`libs/mlkem`, PQ_HYBRID only) zero page `$40-$4F`
+    (`mlkem_zp_src $40`, `_dst $42`, `_len $44`, `_tmp $46`, `_mul $48-$4F`;
+    -D values in `build_mlkem.sh`, pinned in `mlkem_link.s`). Upstream's
+    `$30-$3F` default hits `tls_hs_ptr $3E-$3F` and ECDSA/nistcurves. Only
+    co-tenant is X25519's per-call `fe_wide` ($40-$7F); ML-KEM never nests
+    in X25519, fp_mul or ECDSA, nor they in it. Other users of `$40-$7F`: none.
+
+    | range | owner |
+    |---|---|
+    | `$22-$3C`, `$39/$3A/$3D` | ECDSA bignum; nistcurves fp_mul_i/j, ptr2 |
+    | `$3E-$3F` | `tls_hs_ptr` (live across handlers) |
+    | `$14-$16`,`$1C`,`$1E-$2F` | X25519 / ChaCha / Poly1305, time-shared |
+    | `$40-$7F` | X25519 `fe_wide`; ML-KEM `$40-$4F` |
   - c64-lib-contract is a **prose dependency, not a submodule** — nothing
     in `make` reads it, so a contract release can never break a build.
     Always cite a **tag** (newest: v1.1.0). v1.0.0 cut the SPEC by 7/8 and
@@ -790,13 +810,25 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
                                    at $BA00 so sqtab lands at $BC00
                                    (LIB_SHARED_SQTAB_BASE, asserted
                                    post-link)
-  $C000-$CFFF  (no region)         TCP ring by equate; not in the PRG,
+  $C000-$CFFF  (no region)         TCP ring by equate (PQ_HYBRID: first 2,400 B = ML-KEM dk scratch); not in the PRG,
                                    except comb's COLD_IMAGE (cold bank)
                                    — the PRG ends $BFFF; comb with the
                                    cold bank (COLD_BANK=1) ends $CFFF
-  $D000-$DFFF  I/O                 never in the PRG: a KERNAL LOAD would
+  $D000-$DFFF  I/O                 (PQ_HYBRID: LIB_MLKEM_POLY_BSS in the RAM
+                                   under it, $01=$34, file="")
+                                   never in the PRG: a KERNAL LOAD would
                                    store into the registers (#288,
                                    `tools/test_prg_io_range.py`)
+
+PQ_HYBRID=1 adds three `file=""` areas to the uci cfgs (`cfg/c64-https-uci.cfg`
+serves uci-onchip; `-onchip-cold.cfg` comb; `-onchip.cfg` comb COLD_BANK=0):
+`MLKEM_CODE_RAM` $E000-$FDFF (code+rodata, $E000-$FD40 = 7,489 B of 7,680; KERNAL out),
+`MLKEM_POLY_RAM` $D000-$DFFF (4,096 B polys), `MLKEM_BSS_RAM` $B100-$BBFF
+(2,545 B of 2,816, over X25519_TABLES + the $B900 hole + mul_dma). Rules:
+ML-KEM never interleaves with X25519 or fp_mul, and **every ML-KEM call group
+needs `mlkem_arith_init` first** (its 1 KB of mod-q tables live in that
+window, which X25519 rebuilds over); calls run under `sei` with `$01=$34`.
+All pinned in `src/crypto/mlkem_link.s`; scrub spans in `session_scrub.s`.
 
 ip65 (`cfg/c64-https-ip65.cfg`):
 

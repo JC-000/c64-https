@@ -80,6 +80,17 @@ PROFILES = {
                             "HTTPS_HOST=en.wikipedia.org",
                             "HTTPS_PATH=/wiki/Commodore_64",
                             "HTTPS_BODY_TO_REU=1", "TRUST_STORE=1"),
+    # PQ_HYBRID=1 (libs/mlkem linked, nothing calling it): the four UCI
+    # products it is allowed on. ip65, uci-m3 and the uci REU profile refuse
+    # the knob, so they have no row here.
+    "uci-onchip-pq":       ("BACKEND=uci", "USE_NISTCURVES_ONCHIP=1",
+                            "PQ_HYBRID=1"),
+    "uci-comb-pq":         ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1",
+                            "PQ_HYBRID=1"),
+    "uci-onchip-store-pq": ("BACKEND=uci", "USE_NISTCURVES_ONCHIP=1",
+                            "TRUST_STORE=1", "TRUST_RELEASE=1", "PQ_HYBRID=1"),
+    "uci-comb-store-pq":   ("BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1",
+                            "TRUST_STORE=1", "TRUST_RELEASE=1", "PQ_HYBRID=1"),
 }
 
 
