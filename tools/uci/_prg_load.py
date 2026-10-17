@@ -136,6 +136,27 @@ def image_span(prg: bytes, stage=None):
     return load_addr, body, verify_len
 
 
+#: LIB_MLKEM_MARK's value (src/crypto/mlkem_link.s MLKEM_MARK).
+MLKEM_MARK = 0x5C
+
+
+def bind_stage(prg: bytes, stage):
+    """Keep *stage* only if THIS PRG is the build the labels describe.
+
+    labels.txt is a separate file: a stale or foreign one must not widen what
+    a PRG may hide in $A000-$BFFF. The PRG itself must carry the tail marker
+    at the labels' marker address (the last byte of the image); otherwise no
+    span is allowed and any non-zero byte there is refused as on a knob-off
+    image."""
+    if stage is None or len(prg) < 3:
+        return None
+    off = stage[1] - 1 - (prg[0] | (prg[1] << 8))
+    body = prg[2:]
+    if 0 <= off < len(body) and body[off] == MLKEM_MARK:
+        return stage
+    return None
+
+
 def stage_bytes(prg: bytes, stage=None) -> int:
     """Bytes of the allowed stage span that are non-zero (up to the last one)."""
     if stage is None:
@@ -169,7 +190,7 @@ def load_verified_and_run(client, prg: bytes, *, retries: int = 1,
     entry = parse_basic_sys_address(prg)
     if entry is None:
         raise PrgLoadError("the PRG carries no BASIC SYS stub to start it by")
-    stage = stage_from_labels(labels_path)
+    stage = bind_stage(prg, stage_from_labels(labels_path))
     load_addr, body, verify_len = image_span(prg, stage)
     w_off, w_len = ram_window(load_addr, body)
     head = body[:2]
@@ -235,5 +256,5 @@ def load_verified_and_run(client, prg: bytes, *, retries: int = 1,
 
 
 __all__ = ["HEAD_SETTLE_S", "PrgLoadError", "RAM_WINDOW", "DEFAULT_LABELS",
-           "VERIFY_END", "stage_bytes", "stage_from_labels",
+           "VERIFY_END", "bind_stage", "stage_bytes", "stage_from_labels",
            "image_span", "load_verified_and_run", "ram_window", "read_back"]

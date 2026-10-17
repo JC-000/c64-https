@@ -62,9 +62,10 @@
 ; NMI, RESET and IRQ/BRK at one RTI (in NET_CODE, always RAM), so a
 ; RESTORE-key NMI (edge-triggered, one event) returns instead of jumping
 ; through garbage. The sei in pq_mlkem_call is LOAD-BEARING for IRQ: CIA1's
-; IRQ line is level-triggered and, with I/O banked out, nothing can
-; acknowledge it, so an IRQ that reached the RTI would re-enter at once and
-; livelock the call. No BRK is executed; its vector shares the RTI.
+; IRQ line is level-triggered and an RTI stub acknowledges nothing (with I/O
+; in or out), so an IRQ that reached the RTI would re-enter at once and
+; livelock the call. The sei is what prevents that. No BRK is executed; its
+; vector shares the RTI.
 ;
 ; ZERO PAGE (tools/integration/build_mlkem.sh has the table and reasoning):
 ; $40-$4F, inside ZP_WIDE; the only co-tenant is the X25519 sibling's
@@ -154,6 +155,13 @@ MLKEM_LOAD_BASE = $A000
 .assert __LIB_MLKEM_RODATA_LOAD__ + __LIB_MLKEM_RODATA_SIZE__ <= MLKEM_LOAD_BASE + __MLKEM_CODE_RAM_SIZE__, lderror, "the ML-KEM load image is longer than the block boot copies"
 .assert __LIB_MLKEM_RODATA_LOAD__ + __LIB_MLKEM_RODATA_SIZE__ <= __COLD_FILE_START__ + __COLD_FILE_SIZE__, lderror, "the ML-KEM load image runs past the PRG's file content"
 .assert __LIB_MLKEM_RODATA_RUN__ + __LIB_MLKEM_RODATA_SIZE__ <= __MLKEM_CODE_RAM_START__ + __MLKEM_CODE_RAM_SIZE__, lderror, "the ML-KEM run image overflows MLKEM_CODE_RAM"
+; After boot the marker's LOAD address holds live sqtab bytes (the window
+; $BC00-$BFFF), not the marker, unless the table happens to have the same
+; byte there: mlkem_boot_init case 2 would then re-copy stale RAM over a good
+; $E000 image. Keep the marker inside the table's lo/hi planes, where
+; tools/test_mlkem_placement.py computes the byte (n*n/4) and fails on a
+; collision. Image growth/shrink that moves it out of the planes fails here.
+.assert (__LIB_MLKEM_MARK_LOAD__ >= sqtab_lo) .and (__LIB_MLKEM_MARK_LOAD__ < sqtab_lo + $0400), lderror, "the tail marker's load address left the sqtab window: re-derive the collision check in tools/test_mlkem_placement.py"
 .assert __LIB_MLKEM_MARK_SIZE__ = 1, lderror, "the tail marker is not one byte"
 .assert __LIB_MLKEM_MARK_LOAD__ = __LIB_MLKEM_RODATA_LOAD__ + __LIB_MLKEM_RODATA_SIZE__, lderror, "the tail marker is not the last byte of the load image"
 .assert __LIB_MLKEM_MARK_LOAD__ - __LIB_MLKEM_CODE_LOAD__ = __LIB_MLKEM_MARK_RUN__ - __LIB_MLKEM_CODE_RUN__, lderror, "the tail marker's load and run offsets differ"
@@ -261,6 +269,7 @@ SQTAB_GUARD "COLD_RUN_TRUST",     __COLD_RUN_TRUST_START__,     __COLD_RUN_TRUST
 ; =============================================================================
 ; Code (NET_CODE via LOADER_OVERFLOW; always RAM, so the SMC below is legal)
 ; =============================================================================
+.export mlkem_copied
 .export mlkem_boot_init, pq_mlkem_call, pq_mlkem_keygen, pq_mlkem_decaps_seed
 
 .segment "LOADER_OVERFLOW"
@@ -286,6 +295,11 @@ SQTAB_GUARD "COLD_RUN_TRUST",     __COLD_RUN_TRUST_START__,     __COLD_RUN_TRUST
 ; (session_scrub has no span there).
 MLKEM_MARK = $5C
 mlkem_boot_init:
+        ldy #5                  ; the vectors first, on every path: every later
+@vec:   lda mlkem_vec_tab,y     ; $01=$34 window (this routine's, the scrub's,
+        sta $FFFA,y             ; pq_mlkem_call's) then has a valid RTI target
+        dey
+        bpl @vec
         lda mlkem_copied
         bne @done
         lda __LIB_MLKEM_MARK_LOAD__
@@ -306,11 +320,6 @@ mlkem_boot_init:
         inc @st+2
         dex
         bne @pg
-        ldy #5
-@vec:   lda mlkem_vec_tab,y
-        sta $FFFA,y
-        dey
-        bpl @vec
         inc mlkem_copied
 @done:  rts
 @resident:

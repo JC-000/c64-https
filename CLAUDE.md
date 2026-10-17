@@ -825,9 +825,9 @@ UCI (`cfg/c64-https-uci.cfg`, W1 hot/cold split — the reference):
 
 PQ_HYBRID=1 adds three `file=""` areas to the uci cfgs (`cfg/c64-https-uci.cfg`
 serves uci-onchip; `-onchip-cold.cfg` comb; `-onchip.cfg` comb COLD_BANK=0):
-`MLKEM_CODE_RAM` $E000-$FDFF (code+rodata, $E000-$FD40 = 7,489 B of 7,680; KERNAL out),
+`MLKEM_CODE_RAM` $E000-$FDFF (code+rodata; KERNAL out),
 `MLKEM_POLY_RAM` $D000-$DFFF (4,096 B polys), `MLKEM_BSS_RAM` $B100-$BBFF
-(2,545 B of 2,816, over X25519_TABLES + the $B900 hole + mul_dma). Rules:
+(over X25519_TABLES + the $B900 hole + mul_dma). Rules:
 ML-KEM never interleaves with X25519 or fp_mul, and **every ML-KEM call group
 needs `mlkem_arith_init` first** (its 1 KB of mod-q tables live in that
 window, which X25519 rebuilds over): the wrappers do both, and

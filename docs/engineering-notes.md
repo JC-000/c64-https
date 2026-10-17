@@ -4112,10 +4112,8 @@ rig still defaults to 1 MHz for that reason.
 ## PQ_HYBRID P0: placing libs/mlkem (2026-10-16)
 
 Link-only. `PQ_HYBRID=1` links c64-mlkem v0.6.0 (ABI 3) and proves where it
-lives; nothing calls it. Measured on the uci-onchip link: code+rodata
-`$E000-$FD40` (7,489 B with alignment fill, 191 B spare in the 7,680 B
-window), `LIB_MLKEM_BSS` `$B100-$BAF0` (2,545 B, 271 B spare before the
-sqtab at `$BC00`), `LIB_MLKEM_POLY_BSS` `$D000-$DFFF` (exactly 4,096 B).
+lives; nothing calls it. Measured sizes live in `tools/measure_margins.py` (the PQ profiles), not
+here.
 
 Findings that changed the plan:
 
@@ -4133,11 +4131,17 @@ Findings that changed the plan:
     returning A=$FF/C=1, not half-copied)
     runs right after `sei` in boot.s, before the zeroing that would erase its
     source; an assembler assert pins that order. 'Q' leaves `$E000` and the
-    RAM vectors alone (not secret). Re-entry: the copy runs only when a
-    PRG-data flag is clear AND `$A000` is nonzero, since the stage is zero
-    after the first boot and `tls_rec_buf` is scrubbed to zero on 'Q'.
+    RAM vectors alone (not secret). Re-entry: the copy runs only if the PRG
+    data flag is clear AND the tail marker is at the load address (the stage
+    is zero after the first boot, and after 'Q' the marker address holds live
+    sqtab bytes, so `test_mlkem_placement.py` checks the marker value never
+    equals the table byte there). Known limit: a "resident" marker at `$E000`
+    cannot tell which build left the image.
     The NMI vectors in `$FFFA-$FFFF` (RAM with the KERNAL out) point at one
-    RTI in NET_CODE; IRQ/BRK point there too, moot under `sei`.
+    RTI in NET_CODE, written first on every path of `mlkem_boot_init`. IRQ/BRK
+    point there too, which is only safe because every call runs under `sei`
+    (an RTI does not acknowledge CIA1's level-triggered IRQ; the `sei` is
+    what prevents the livelock).
   - **`mlkem_arith_init` builds 1 KB of reduction tables inside
     `LIB_MLKEM_BSS`.** That window is X25519_TABLES, which X25519 rebuilds
     per scalar mult, so every ML-KEM call group needs `mlkem_arith_init`
@@ -4160,6 +4164,6 @@ Findings that changed the plan:
   - **NMI and IRQ.** With the KERNAL out (`$01=$34`) the hardware vectors
     are RAM. `mlkem_boot_init` points all three at one RTI. That is right for
     NMI (the RESTORE key is edge-triggered, one event). For IRQ the `sei` in
-    `pq_mlkem_call` is load-bearing: CIA1's IRQ is level-triggered and, with
-    I/O banked out, nothing can acknowledge it, so an IRQ reaching the RTI
-    would re-enter at once and livelock the call.
+    `pq_mlkem_call` is load-bearing: CIA1's IRQ is level-triggered and an RTI
+    stub acknowledges nothing (I/O in or out), so an IRQ reaching it would
+    re-enter at once and livelock the call. The `sei` prevents that.

@@ -118,13 +118,16 @@ EXPORT_RE = re.compile(r"(\S+)\s+([0-9A-F]{6})\s+[RL][EL]?[A-Z]?(?:\s|$)")
 
 def rom_shadowed_symbols(map_path):
     """Names the linker puts in $E000-$FDFF (the ML-KEM run image), from the
-    map's Exports list - not a name regex, so a library addition is covered."""
+    map's Exports list - not a name regex, so a library addition is covered.
+    Nothing is exempt by prefix: __LIB_MLKEM_CODE_RUN__ is a way in too.
+
+    Known gap, accepted: a literal address (`jsr $E123`) names no symbol."""
     text = Path(map_path).read_text()
     sec = text.split("Exports list by name:")[1].split("Imports list")[0]
     out = {}
     for name, addr in EXPORT_RE.findall(sec):
         a = int(addr, 16)
-        if 0xE000 <= a <= 0xFDFF and not name.startswith(("LIB_", "__")):
+        if 0xE000 <= a <= 0xFDFF:
             out[name] = a
     return out
 
@@ -134,7 +137,7 @@ def banned_references(symbols, extra=None):
     a symbol in the run image: such a reference is an unbanked call into
     KERNAL ROM (or skips mlkem_arith_init)."""
     files = {str(p.relative_to(REPO)): p.read_text()
-             for p in (REPO / "src").rglob("*.s")
+             for pat in ("*.s", "*.inc") for p in (REPO / "src").rglob(pat)
              if p.name != "mlkem_link.s"}
     files.update(extra or {})
     hits = {}
@@ -144,6 +147,25 @@ def banned_references(symbols, extra=None):
         if found:
             hits[f] = found
     return hits
+
+
+SQTAB_BASE = 0xBC00
+
+
+def sqtab_byte_at(addr, base=SQTAB_BASE):
+    """The byte c64-https's boot leaves at *addr* inside the sqtab window
+    (lo plane base..base+511 = floor(n*n/4) & $FF, hi plane = >> 8)."""
+    n = addr - base
+    if 0 <= n < 512:
+        return ((n * n) // 4) & 0xFF
+    if 512 <= n < 1024:
+        m = n - 512
+        return ((m * m) // 4) >> 8
+    raise ValueError(f"${addr:04X} is outside the sqtab window")
+
+
+def marker_collides(addr, value=0x5C):
+    return sqtab_byte_at(addr) == value
 
 
 def run_make(args, extra_env=None, timeout=1800):
@@ -266,11 +288,24 @@ def layout_checks(t, tag):
     t.check(banned_references(syms, {"src/zz.s": "  jsr mlkem_poly_ntt\n"}) ==
             {"src/zz.s": ["mlkem_poly_ntt"]},
             f"{tag}: red: a direct jsr into the image is reported")
+    t.check("src/zz.inc" in banned_references(syms, {"src/zz.inc": ".import mlkem_poly_ntt\n"}),
+            f"{tag}: red: a reference in an .inc is reported")
+    t.check("src/zz.s" in banned_references(syms, {"src/zz.s": "  jsr __LIB_MLKEM_CODE_RUN__\n"}),
+            f"{tag}: red: a __LIB_MLKEM_* run-address reference is reported")
     t.check(set(syms) >= {"mlkem_keygen", "mlkem_decaps_seed", "mlkem_arith_init"},
             f"{tag}: red: the symbol set covers the entries, not a name regex")
     allowed = banned_references(syms, {"src/zz.s": "  jsr pq_mlkem_keygen\n  jsr pq_mlkem_decaps_seed\n  lda #<pq_mlkem_call\n"})
     t.check("src/zz.s" not in allowed,
             f"{tag}: the named wrappers are callable from anywhere")
+    labels_txt = (REPO / "build" / "labels.txt").read_text()
+    m = re.search(r"^al C:([0-9A-F]+) \.__LIB_MLKEM_MARK_LOAD__$", labels_txt, re.M)
+    maddr = int(m.group(1), 16)
+    t.check(not marker_collides(maddr),
+            f"{tag}: the tail marker's load address ${maddr:04X} holds sqtab byte "
+            f"${sqtab_byte_at(maddr):02X}, not the marker")
+    t.check(marker_collides(0xBC67) and marker_collides(0xBD99)
+            and not marker_collides(0xBD40),
+            f"{tag}: red: the known collisions $BC67/$BD99 are reported")
     prg = REPO / "build" / "c64-https.prg"
     img = prg.read_bytes()
     import _prg_load as pl

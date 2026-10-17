@@ -18,10 +18,14 @@ is THERE and works, in a VICE boot of the linked PQ_HYBRID uci-onchip PRG:
         page + the shared sqtab + the "arith_init before every call group"
         rule, all at once. (The reference is libs/mlkem/tools/mlkem_ref.py,
         the one the library's ACVP runs are checked against.)
+  [2b] a PRG whose tail marker is zeroed (a LOAD cut short) is REFUSED, on
+      uci-onchip here and, with --comb, on the comb image (the precompute's
+      border restore must not erase the red border).
   [4] mutants, each must go red: (a) boot.s without the copy call (image
       comparison fails), (b) the copy call moved after the zeroing (the
       assembler assert fires), (c) the call wrapper without mlkem_arith_init
-      (KeyGen after X25519 is wrong).
+      (KeyGen after X25519 is wrong), (d) without php/plp (the caller's I flag
+      is lost), (e) without the clc (success returns C=1).
 
 The onchip image needs no REU: set C64_VICE_NO_REU=1 to prove it (the
 default config adds -reu). ~6 min (X25519 x2 + KeyGen + Decaps under warp).
@@ -81,9 +85,9 @@ class Tally:
         return ok
 
 
-def make(extra=()):
+def make(extra=(), args=None):
     subprocess.run(["make", "clean"], cwd=REPO, capture_output=True)
-    r = subprocess.run(["make"] + MAKE_ARGS + list(extra), cwd=REPO,
+    r = subprocess.run(["make"] + (args or MAKE_ARGS) + list(extra), cwd=REPO,
                        capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 
@@ -186,12 +190,14 @@ def iflag_checks(t, transport, labels):
     print("  [3a] the I flag is restored")
     e, c = labels["mlkem_arith_init"], labels["pq_mlkem_call"]
     for name, op, want in (("clear (cli)", 0x58, 0), ("set (sei)", 0x78, 4)):
-        stub = bytes([op, 0xA9, e & 255, 0xA2, e >> 8, 0x20, c & 255, c >> 8,
+        stub = bytes([0x38, op, 0xA9, e & 255, 0xA2, e >> 8, 0x20, c & 255, c >> 8,
                       0x08, 0x68, 0x8D, RES & 255, RES >> 8, 0x60])
         write_bytes(transport, STUB, stub)
         jsr(transport, STUB, timeout=60.0)
         p = read_bytes(transport, RES, 1)[0]
         t.check(p & 4 == want, f"I flag {name} on entry -> unchanged on return",
+                f"P=${p:02X}")
+        t.check(p & 1 == 0, f"success returns C=0 (I flag {name}; C was set on entry)",
                 f"P=${p:02X}")
 
 
@@ -228,8 +234,9 @@ def kat(t, transport, labels):
     regs, dt = call(transport, labels, "mlkem_keygen")
     ek = read_bytes(transport, EK_AT, 1184)
     dk = read_bytes(transport, DK_AT, 2400)
-    t.check(regs["A"] == 0, f"mlkem_keygen returned A=0 ({dt:.0f} s)",
-            f"A={regs['A']:02X}")
+    t.check(regs["A"] == 0 and regs["P"] & 1 == 0,
+            f"mlkem_keygen returned A=0, C=0 ({dt:.0f} s)",
+            f"A={regs['A']:02X} P={regs['P']:02X}")
     t.check(ek == ek_ref, "mlkem_keygen ek == the reference's",
             f"first diff at +{next((i for i in range(1184) if ek[i] != ek_ref[i]), -1)}")
     t.check(dk == dk_ref, "mlkem_keygen dk == the reference's",
@@ -307,6 +314,46 @@ def refusal_phase(t, labels):
         mgr.release(inst)
 
 
+def comb_refusal(t):
+    """SF3: on the comb image the boot's ec_precompute block restores the
+    border AFTER mlkem_boot_init set it red; boot.s re-asserts it. Needs the
+    REU, and the precompute runs in VICE: slow, so opt-in with --comb."""
+    import tempfile
+    print("\n[2c] comb PQ image, marker zeroed: the red border survives the precompute")
+    rc, out = make(args=["BACKEND=uci", "USE_NISTCURVES_ONCHIP_COMB=1", "PQ_HYBRID=1"])
+    if not t.check(rc == 0, "the comb PQ image links", out[-300:]):
+        return
+    lab = Labels.from_file(str(LABELS))
+    prg = bytearray(PRG.read_bytes())
+    off = lab["__LIB_MLKEM_MARK_LOAD__"] - 0x0801 + 2
+    assert prg[off] == 0x5C
+    prg[off] = 0
+    tmp = Path(tempfile.mkdtemp(prefix="mlkem_comb_cut_")) / "cut.prg"
+    tmp.write_bytes(bytes(prg))
+    saved = os.environ.pop("C64_VICE_NO_REU", None)       # comb needs -reu
+    try:
+        config = default_vice_config(prg_path=str(tmp), warp=True, ntsc=True, sound=False)
+        t0 = time.monotonic()
+        with ViceInstanceManager(config=config) as mgr:
+            inst = mgr.acquire()
+            tr = inst.transport
+            if not t.check(wait_for_text(tr, "Q=QUIT", timeout=2400, verbose=False)
+                           is not None, "the comb image reached the menu "
+                           f"({time.monotonic() - t0:.0f} s)"):
+                mgr.release(inst)
+                return
+            t.check(read_bytes(tr, lab["mlkem_copied"], 1) == b"\x00",
+                    "mlkem_copied stays 0")
+            border = read_bytes(tr, 0xD020, 1)[0] & 15
+            t.check(border == 2, "the border is red after the precompute",
+                    f"$D020={border:X}")
+            mgr.release(inst)
+    finally:
+        if saved is not None:
+            os.environ["C64_VICE_NO_REU"] = saved
+        make()                                             # back to the onchip build
+
+
 def mutant(t, label, path, old, new, expect, labels_tag):
     """Build with *old* -> *new* in *path*; return (rc, output)."""
     p = REPO / path
@@ -332,6 +379,9 @@ def main():
     shape_checks(t, labels)
     ok = boot_and_run(t, labels, "green", True)
     refusal_phase(t, labels)
+    if "--comb" in sys.argv[1:]:
+        comb_refusal(t)
+        labels = Labels.from_file(str(LABELS))
 
     if "--no-mutants" not in sys.argv[1:]:
         print("\n[4] mutants")
@@ -402,6 +452,29 @@ def main():
                 mgr.release(inst)
             t.check(t4.failed > 0, "mutant (d) is RED: the I flag is not "
                     f"restored ({t4.failed} check(s) failed)")
+        # (e) pq_mlkem_call without the clc: success no longer returns C=0
+        p = REPO / "src/crypto/mlkem_link.s"
+        orig = p.read_text()
+        try:
+            m = orig.replace("@ra:    lda #0\n        clc\n", "@ra:    lda #0\n        nop\n", 1)
+            assert m != orig
+            p.write_text(m)
+            rc, out = make()
+        finally:
+            p.write_text(orig)
+        if t.check(rc == 0, "mutant (e) no clc: still links", out[-300:]):
+            lab = Labels.from_file(str(LABELS))
+            t5 = Tally()
+            config = default_vice_config(prg_path=str(PRG), warp=True,
+                                         ntsc=True, sound=False)
+            with ViceInstanceManager(config=config) as mgr:
+                inst = mgr.acquire()
+                if wait_for_text(inst.transport, "Q=QUIT",
+                                 timeout=menu_wait(60), verbose=False):
+                    iflag_checks(t5, inst.transport, lab)
+                mgr.release(inst)
+            t.check(t5.failed > 0, "mutant (e) is RED: success returns C=1 "
+                    f"({t5.failed} check(s) failed)")
         make()      # restore the green build
 
     print(f"\nRESULTS: {t.passed}/{t.passed + t.failed} passed, {t.failed} failed")

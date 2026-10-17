@@ -106,7 +106,7 @@ class Tally:
 def boot_to_basic(client, transport, prg):
     client.reset()
     time.sleep(2.5)
-    load_verified_and_run(client, prg)
+    load_verified_and_run(client, prg, labels_path=LABELS_PATH)
     deadline = time.monotonic() + BOOT_TIMEOUT
     while time.monotonic() < deadline:
         if "Q=QUIT" in screen_text(decode_screen(bytes(client.read_mem(0x0400, 1000)))):

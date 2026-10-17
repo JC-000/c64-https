@@ -187,6 +187,20 @@ def pq_labels(tmp: Path, text: str = PQ_LABELS) -> Path:
     return p
 
 
+def with_bytes(prg: bytes, **at) -> bytes:
+    """prg with bytes planted at absolute addresses: with_bytes(p, A000=0xEA)."""
+    out = bytearray(prg)
+    for addr, val in at.items():
+        out[int(addr, 16) - 0x0801 + 2] = val
+    return bytes(out)
+
+
+def pq_prg(extra: dict | None = None) -> bytes:
+    """A PQ-shaped image: first image byte at $A000, tail marker at $BD40."""
+    return with_bytes(make_prg(window=COLD), A000=0xA9, BD40=pl.MLKEM_MARK,
+                      **(extra or {}))
+
+
 def test_the_staged_ml_kem_image_span_is_allowed_only_for_a_pq_build() -> None:
     """The ML-KEM load image ([CODE load, tail marker + 1) in labels.txt)
     cannot be read back (BASIC ROM), so it is allowed, counted and named in
@@ -207,8 +221,6 @@ def test_the_staged_ml_kem_image_span_is_allowed_only_for_a_pq_build() -> None:
                 assert f"${addr:04X}" in str(exc), exc
             else:
                 raise AssertionError(f"a byte at ${addr:04X}, past the image, was accepted")
-        # a knob-off build (no pq_mlkem_call, or no labels at all): refused
-        # at $A000 exactly as before
         no_pq = pq_labels(Path(d), PQ_LABELS.replace("pq_mlkem_call", "other"))
         assert pl.stage_from_labels(no_pq) is None
         assert pl.stage_from_labels(Path(d) / "missing.txt") is None
@@ -222,21 +234,53 @@ def test_the_staged_ml_kem_image_span_is_allowed_only_for_a_pq_build() -> None:
     assert pl.stage_bytes(make_prg()) == 0
 
 
-def test_run_refuses_a_planted_byte_past_the_pq_image_and_accepts_the_image() -> None:
+def test_labels_are_bound_to_the_prg_they_describe() -> None:
+    """SF1: labels.txt is a separate file. The PRG must carry the tail marker
+    at the labels' marker address, or no span is allowed at all."""
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         lab = pq_labels(Path(d))
+        # green: a PQ image + its own labels
         ok = FakeClient()
-        run(ok, make_prg(tail_byte=0xEA, at=0xA000, window=COLD), labels_path=lab)
+        run(ok, pq_prg(), labels_path=lab)
         assert ok.typed == ["SYS2061"], ok.typed
+        # red 1: knob-off image with a planted byte + PQ labels (no marker)
+        for planted in ("A000", "B000", "BFFF"):
+            bad = FakeClient()
+            try:
+                run(bad, with_bytes(make_prg(window=COLD), **{planted: 0xEA}), labels_path=lab)
+            except pl.PrgLoadError:
+                pass
+            else:
+                raise AssertionError(f"knob-off image with ${planted} + PQ labels was accepted")
+            assert bad.typed == []
+        # red 2: labels name a marker address this PRG does not carry
+        other = pq_labels(Path(d), PQ_LABELS.replace("BD40", "BC00"))
         bad = FakeClient()
         try:
-            run(bad, make_prg(tail_byte=0xEA, at=0xBE00, window=COLD), labels_path=lab)
+            run(bad, pq_prg(), labels_path=other)
+        except pl.PrgLoadError:
+            pass
+        else:
+            raise AssertionError("labels for another image bound to this PRG")
+        # red 3: a PQ image with knob-off labels is refused (the false red the
+        # rigs avoid by passing the labels that belong to their PRG)
+        nolab = FakeClient()
+        try:
+            run(nolab, pq_prg())
+        except pl.PrgLoadError:
+            pass
+        else:
+            raise AssertionError("a staged image was accepted with no labels")
+        # red 4: a byte just past the image end, marker present
+        past = FakeClient()
+        try:
+            run(past, pq_prg({"BD41": 0xEA}), labels_path=lab)
         except pl.PrgLoadError:
             pass
         else:
             raise AssertionError("a byte past the image end was accepted")
-        assert bad.typed == [], "a run was started on an image known to be wrong"
+        assert past.typed == []
 
 
 def test_a_zeroed_head_is_rewritten_then_verified() -> None:

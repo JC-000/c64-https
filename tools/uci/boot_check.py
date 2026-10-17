@@ -307,7 +307,7 @@ def main() -> int:
 
         print("load_prg(PRG), verify, SYS (#199)...")
         try:
-            load_verified_and_run(client, prg)
+            load_verified_and_run(client, prg, labels_path=PRG_PATH.parent / "labels.txt")
         except PrgLoadError as exc:
             print(f"[fatal] {exc}", file=sys.stderr)
             return 4

@@ -144,7 +144,7 @@ SINK_PROBE = 1
         .import drbg_init_entropy
         .import sqtab_init
         .ifdef PQ_HYBRID
-        .import mlkem_boot_init
+        .import mlkem_boot_init, mlkem_copied
         .endif
         .import crypto_init
 
@@ -409,6 +409,13 @@ boot_zbss_first:
         jsr vic_unblank
         lda #BORDER_DEFAULT
         sta border_color
+.ifdef PQ_HYBRID
+        lda mlkem_copied        ; the refusal's red border (mlkem_boot_init)
+        bne @pq_ok              ; was just overwritten above: re-assert it
+        lda #2
+        sta border_color
+@pq_ok:
+.endif
         .endif
 
 .endif ; BACKEND_UCI_M3
