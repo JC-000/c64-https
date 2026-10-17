@@ -30,14 +30,14 @@
 ;
 ; WHAT IT ACCEPTS (everything else is refused with a distinct tls_sh_err,
 ; src/constants.inc): handshake type 2, total length 40..1535; legacy_version
-; 0303; an EMPTY session id echo (what we sent); suite 1303; compression 0;
-; extension block exactly filling the message; supported_versions = 0304 once;
-; key_share once, group 001D with a 32 B share, or group 11EC with a 1,120 B
-; share (ML-KEM ct 1,088 || x25519 32) and only if the hybrid was offered;
-; unknown extensions are skipped (as the single-record parser did) but must fit.
-; The HelloRetryRequest random is a refusal (SH_ERR_HRR). A zero-length record,
-; a non-handshake record mid-message and any byte after the message are
-; refusals.
+; ignored (RFC 8446 4.2.1); an EMPTY session id echo (what we sent); suite 1303;
+; compression 0; extension block exactly filling the message; supported_versions
+; = 0304 once; key_share once, group 001D with a 32 B share, or group 11EC with
+; a 1,120 B share (ML-KEM ct 1,088 || x25519 32) and only if the hybrid was
+; offered. Any OTHER extension is refused (SH_ERR_EXT): the ClientHello
+; requests no others (RFC 8446 4.2). The HelloRetryRequest random is a refusal
+; (SH_ERR_HRR). A zero-length record, a non-handshake record mid-message and any
+; byte after the message are refusals.
 ;
 ; HANDSHAKE ORDER (#152). TLS_HS_SEQ_CHECK derives the one legal type from
 ; tls_state and is wired to the post-ServerHello dispatchers; here the first
@@ -74,7 +74,7 @@
 .import tls_ch_ks_ptr, tls_ch_ks_len
 .import tls_transcript_update
 .import drbg_fill_bytes
-.import pq_mlkem_keygen, pq_mlkem_decaps_seed
+.import pq_mlkem_keygen, pq_mlkem_decaps_seed, pq_mlkem_scrub
 .import mlkem_arg_ek, mlkem_arg_dk, mlkem_arg_ct, mlkem_arg_key, mlkem_arg_seed, mlkem_arg_z
 .import __NET_BSS_TAIL_START__
 
@@ -114,8 +114,7 @@ SS_SV   = 5
 SS_KSH  = 6
 SS_CT   = 7
 SS_PUB  = 8
-SS_SKIP = 9
-SS_DONE = 10
+SS_DONE = 9
 
 SHS_MAX_HI = 6                          ; message length < 6*256 = 1536
 
@@ -197,6 +196,7 @@ pq_connect_prep:
         jsr pq_mlkem_keygen             ; C=1/A=$FF refused; C=0: A = status
         pha
         jsr pq_dk_zero                  ; BEFORE anything else, success or not
+        jsr pq_mlkem_scrub              ; s_hat in $D000 and the sponge/ring residue in the window
         pla
         bne @fail                       ; refusal ($FF) or a non-zero status
         lda #<cert_buf
@@ -229,6 +229,11 @@ pq_sh_decaps:
         bne @done
         jsr pq_set_args
         jsr pq_mlkem_decaps_seed        ; A = status; C=1/A=$FF refused
+        php
+        pha
+        jsr pq_mlkem_scrub              ; y/e1/e2 in $D000, m'/K'/r' in the window, any outcome
+        pla
+        plp
         bcs @fail
         cmp #0
         bne @fail
@@ -246,15 +251,15 @@ pq_sh_decaps:
 ; The ServerHello machine. State tables, indexed by SS_*: field length, and the
 ; destination (high byte 0 = discard).
 ; -----------------------------------------------------------------------------
-tab_cl: .byte 4, 2, 32, 6, 4, 2, 4, <MLKEM_CT_SIZE, 32, 0, 0
-tab_ch: .byte 0, 0, 0,  0, 0, 0, 0, >MLKEM_CT_SIZE, 0,  0, 0
-tab_dl: .byte <shs_f, <shs_f, <tls_server_random, <shs_f, <shs_f, <shs_f, <shs_f, <cert_buf, <tls_server_pubkey, 0, 0
-tab_dh: .byte >shs_f, >shs_f, >tls_server_random, >shs_f, >shs_f, >shs_f, >shs_f, >cert_buf, >tls_server_pubkey, 0, 0
+tab_cl: .byte 4, 2, 32, 6, 4, 2, 4, <MLKEM_CT_SIZE, 32, 0
+tab_ch: .byte 0, 0, 0,  0, 0, 0, 0, >MLKEM_CT_SIZE, 0,  0
+tab_dl: .byte <shs_f, 0, <tls_server_random, <shs_f, <shs_f, <shs_f, <shs_f, <cert_buf, <tls_server_pubkey, 0
+tab_dh: .byte >shs_f, 0, >tls_server_random, >shs_f, >shs_f, >shs_f, >shs_f, >cert_buf, >tls_server_pubkey, 0
 
 ; Handlers, entered by RTS-dispatch from shs_byte with the field complete.
 ; Out: C=0 (next state armed) or C=1, tls_sh_err set.
-hnd_l: .byte <(h_hdr-1), <(h_ver-1), <(h_rnd-1), <(h_fix-1), <(h_exh-1), <(h_sv-1), <(h_ksh-1), <(h_ct-1), <(h_pub-1), <(h_skip-1)
-hnd_h: .byte >(h_hdr-1), >(h_ver-1), >(h_rnd-1), >(h_fix-1), >(h_exh-1), >(h_sv-1), >(h_ksh-1), >(h_ct-1), >(h_pub-1), >(h_skip-1)
+hnd_l: .byte <(h_hdr-1), <(h_ver-1), <(h_rnd-1), <(h_fix-1), <(h_exh-1), <(h_sv-1), <(h_ksh-1), <(h_ct-1), <(h_pub-1)
+hnd_h: .byte >(h_hdr-1), >(h_ver-1), >(h_rnd-1), >(h_fix-1), >(h_exh-1), >(h_sv-1), >(h_ksh-1), >(h_ct-1), >(h_pub-1)
 
 ; pq_sh_init - fresh machine, clean error code.
 pq_sh_init:
@@ -344,16 +349,8 @@ h_hdr:  lda shs_f                       ; type
 @bad:   lda #SH_ERR_HDR
         jmp shs_fail
 
-h_ver:  lda shs_f
-        cmp #$03
-        bne @bad
-        lda shs_f+1
-        cmp #$03
-        bne @bad
-        lda #SS_RND
+h_ver:  lda #SS_RND                     ; legacy_version is ignored (RFC 8446 4.2.1)
         jmp shs_arm
-@bad:   lda #SH_ERR_FIXED
-        jmp shs_fail
 
 h_rnd:  jsr tls_sh_chk_hrr              ; C=1: tls_sh_err = SH_ERR_HRR
         bcs @hrr
@@ -423,17 +420,8 @@ h_exh:  lda shs_f+2                     ; D = data length
         beq @sv
         cmp #$33
         beq @ks
-@other: lda shs_d
-        ora shs_d+1
-        beq @none
-        lda #SS_SKIP
-        jsr shs_arm
-        lda shs_d
-        sta shs_cnt
-        lda shs_d+1
-        sta shs_cnt+1
-        rts                             ; C=0 from shs_arm
-@none:  jmp ext_next
+@other: lda #SH_ERR_EXT                 ; we requested only these two (RFC 8446 4.2)
+        jmp shs_fail
 @sv:    lda shs_seen
         and #1
         bne @ver
@@ -527,8 +515,6 @@ h_pub:  lda shs_seen
         ora #2
         sta shs_seen
         jmp ext_next
-
-h_skip: jmp ext_next
 
 ; -----------------------------------------------------------------------------
 ; pq_sh_feed - one plaintext record (tls_rec_buf / tls_rec_len / tls_rec_type).

@@ -74,6 +74,7 @@
 .ifndef PQ_HYBRID
 .import tls_parse_server_hello
 .else
+.import tls_sh_err
 .import pq_connect_prep, pq_sh_init, pq_sh_feed, pq_sh_decaps, pq_seed_zero
 .endif
 .ifdef CH_SECTIONED
@@ -623,6 +624,15 @@ tls_recv_server_hello:
         jsr net_poll
         jsr tls_record_recv_and_decrypt
         bcc @sh_got_record
+.ifdef PQ_HYBRID
+        bit tls_state                   ; ERROR latched: a malformed or oversize
+        bpl :+                          ;  record header while waiting for the SH
+        lda #SH_ERR_RECORD              ;  (a hybrid SH sent as ONE record does
+        sta tls_sh_err                  ;  not fit tls_rec_buf): fail now, do not
+        sec                             ;  resync through the payload for ~43 min
+        rts
+:
+.endif
         inc sh_timeout
         bne @sh_wait
         inc sh_timeout+1
@@ -639,16 +649,11 @@ tls_recv_server_hello:
         ; 512 + 154). pq_sh_feed streams this record's bytes through the
         ; ServerHello machine and folds them into the transcript (so this is
         ; the last read of tls_rec_buf for the record, as below). Z=1: the
-        ; message is complete; Z=0: wait for the next record, with a fresh
-        ; timeout budget per record.
+        ; message is complete; Z=0: wait for the next record (the failed-poll
+        ; budget is shared by the whole message, like tls_recv_encrypted's).
         jsr pq_sh_feed
         bcs @sh_error
-        beq @sh_complete
-        lda #0
-        sta sh_timeout
-        sta sh_timeout+1
-        beq @sh_wait
-@sh_complete:
+        bne @sh_wait                    ; Z=0: more records; ONE timeout budget for the whole SH
         lda #$05
         sta tls_recv_progress
 .else

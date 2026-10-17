@@ -29,7 +29,7 @@ PQ_ARGS = ["BACKEND=uci", "USE_NISTCURVES_ONCHIP=1", "PQ_HYBRID=1"]
 # tls_sh_err codes (src/constants.inc)
 E_HRR, E_RECTYPE, E_HDR, E_FIXED, E_EXTLEN = 1, 2, 3, 4, 5
 E_VERSION, E_GROUP, E_KSLEN, E_TRAIL, E_MISSING = 6, 7, 8, 9, 10
-E_DECAPS, E_KEYGEN = 11, 12
+E_DECAPS, E_KEYGEN, E_EXT, E_RECORD = 11, 12, 13, 14
 
 HRR_MAGIC = bytes.fromhex(
     "cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
@@ -60,6 +60,23 @@ def make(args=None, extra=(), clean=True):
     r = subprocess.run(["make"] + list(args or PQ_ARGS) + list(extra), cwd=REPO,
                        capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
+
+
+def require_pq_image():
+    """None if build/ holds a PQ_HYBRID P4 image, else the reason it does not
+    (callers route it to cannot_run: exit 2, never a KeyError traceback)."""
+    if not PRG.exists() or not LABELS.exists():
+        return f"{PRG} / {LABELS} missing: build with PQ_HYBRID=1 first"
+    names = set()
+    for ln in LABELS.read_text().splitlines():
+        p = ln.split()
+        if len(p) >= 3:
+            names.add(p[2].lstrip("."))
+    for n in ("pq_sh_feed", "pq_connect_prep", "pq_mlkem_scrub"):
+        if n not in names:
+            return (f"the build in build/ is not a PQ_HYBRID=1 P4 image (no {n}); "
+                    "build BACKEND=uci USE_NISTCURVES_ONCHIP=1 PQ_HYBRID=1")
+    return None
 
 
 def build_or_reuse():
@@ -231,6 +248,23 @@ class Session:
         self.call("tls_transcript_init")
         self.wr(self.L("tls_pq_offered"), [1 if offered else 0])
         self.call("pq_sh_init")
+
+    # RAM under the I/O page and the ROMs: bank to all-RAM around the access
+    def ram_rd(self, addr, n):
+        old = self.rd(1, 1)
+        self.wr(1, b"\x34")
+        try:
+            return self.rd(addr, n)
+        finally:
+            self.wr(1, old)
+
+    def ram_wr(self, addr, data):
+        old = self.rd(1, 1)
+        self.wr(1, b"\x34")
+        try:
+            self.wr(addr, data)
+        finally:
+            self.wr(1, old)
 
     def err(self):
         return self.rd(self.L("tls_sh_err"), 1)[0]

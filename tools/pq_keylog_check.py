@@ -103,8 +103,12 @@ def check_state(state, keylog_text):
         return "inconclusive", f"tls_kex_group=${state['tls_kex_group']}: the server did not choose 11EC, no ML-KEM secret to check"
     if h("tls_sh_err") != b"\x00":
         return "inconclusive", f"tls_sh_err=${state['tls_sh_err']}: the ServerHello was refused"
-    if h("tls_last_state")[0] < 3 and h("tls_state")[0] < 3:
-        return "inconclusive", "the run never got past ServerHello (tls_state/last_state < 3)"
+    # A failed run ends in ERROR ($FF) with tls_last_state = the state it failed
+    # in; only a run still in a normal state is judged by tls_state itself.
+    reached = h("tls_last_state")[0] if h("tls_state")[0] == 0xFF else h("tls_state")[0]
+    if reached < 3:
+        return "inconclusive", (f"the run never got past ServerHello (reached state {reached}: "
+                                f"tls_state=${state['tls_state']}, last_state=${state['tls_last_state']})")
     if h("tls_pq_seed") != bytes(64):
         return "inconclusive", "tls_pq_seed is not zero: Decaps did not finish and scrub (or the error exit did not run)"
     for k in ("tls_mlkem_ss", "tls_shared_secret", "tls_transcript"):
@@ -171,13 +175,12 @@ def selftest():
     expect(r is True, "state mode: a run that reached the point matches")
     for key, val, why in (("tls_kex_group", "1d", "11EC"),
                           ("tls_sh_err", "07", "refused"),
-                          ("tls_last_state", "01", "past ServerHello"),
+                          ("tls_last_state", "02", "past ServerHello, failed run (ERROR, last_state 2)"),
+                          ("tls_last_state", "01", "past ServerHello, failed run (ERROR, last_state 1)"),
                           ("tls_pq_seed", "11" * 64, "seed"),
                           ("tls_mlkem_ss", "00" * 32, "all zero")):
         bad = dict(good)
         bad[key] = val
-        if key == "tls_last_state":
-            bad["tls_state"] = "01"
         r, m = check_state(bad, log)
         expect(r == "inconclusive", f"state mode: gate ({why}) -> inconclusive, not a verdict")
     bad = dict(good)

@@ -4192,11 +4192,12 @@ Decisions and findings:
     the two comb cfgs, because comb-store-pq has 55 B of CRYPTO_OVERLAY and
     243 B of NET_CODE. Margins: `tools/measure_margins.py`.
   - **Stricter than the single-record parser, on purpose**: an EMPTY session id
-    echo (what we send), legacy_version 0303, the extension block must fill the
-    message exactly, supported_versions and key_share at most once each,
-    group 11EC only if it was offered. Unknown extensions are still skipped.
-    `tls_sh_err` codes `$01-$0C` (`src/constants.inc`); `$01` (HRR) keeps its
-    meaning.
+    echo (what we send), the extension block must fill the message exactly,
+    supported_versions and key_share exactly once each, group 11EC only if it
+    was offered, and EVERY other extension refused (`SH_ERR_EXT $0D`; RFC 8446
+    4.2: we requested only those two). legacy_version is ignored (RFC 8446
+    4.2.1). `tls_sh_err` codes `$01-$0E` (`src/constants.inc`); `$01` (HRR)
+    keeps its meaning. Hardware: OpenSSL 3.6.5 sends nothing else in either SH.
   - **Handshake order (#152)**: `TLS_HS_SEQ_CHECK` is not reused. It derives the
     one legal type from `tls_state` for the post-ServerHello dispatchers; the
     machine's header state checks type 2 and its length bound plus DONE refuse
@@ -4211,17 +4212,27 @@ Decisions and findings:
     right after the record's bytes were parsed (so the fold precedes X25519
     scratch reuse of `tls_rec_buf`), then the drain, then `pq_sh_decaps`, then
     the X25519 mult (its `_fresh` entries rebuild the tables ML-KEM overwrote).
-    Each record gets a fresh timeout budget.
+    The failed-poll budget is ONE for the whole SH (like `tls_recv_encrypted`);
+    a fresh budget per record let 1-byte records stall ~1,500 x 65,536 polls.
   - **Secrets**: the dk (2,400 B in the ring) is zeroed straight after KeyGen
     even when KeyGen was refused; the seed is zeroed after Decaps and by
     `tls_connect`'s error exit; `tls_mlkem_ss` is KEPT on error (like
     `tls_shared_secret`; the hardware oracle reads it) and is scrubbed by 'Q'
     (one 96 B span) or the next connection's prep.
-  - **Known gaps**: KeyGen leaves `s_hat` in `$D000-$DFFF` and Decaps leaves
-    y/e1/e2 there until 'Q'. A server that ignores max_fragment_length and sends
-    the 1,178 B ServerHello in ONE record cannot be read (`tls_rec_buf` is
-    548 B; OpenSSL honours MFL). A ChangeCipherSpec record between ServerHello
-    fragments is skipped by the record layer, as before.
+  - **Residue**: `pq_mlkem_scrub` (next to `pq_mlkem_call`, same sei / `$01=$34`
+    discipline) zeroes the polynomial area (`$D000-$DFFF`: s_hat after KeyGen,
+    y/e1/e2 after Decaps) and the whole rest-BSS window (`$B100-$BBFF`: m', K',
+    r', the Keccak state; X25519_TABLES and mul_dma share it and their owners
+    rebuild) after KeyGen and after Decaps, on every outcome. ~7,000 stores,
+    ~80K cycles. Without it zeroing the seed bought nothing: the same secret
+    lived on in kem_hb until 'Q'.
+  - **A hybrid SH sent as ONE record** (a server that ignores
+    max_fragment_length; `tls_rec_buf` is 548 B) used to be resynced through
+    byte by byte and time out after ~43 min. A malformed or oversize header
+    while waiting for the SH is now fatal (`tls_rec_frame_fail`, PQ only) and
+    `tls_recv_server_hello` fails at once with `SH_ERR_RECORD $0E`. It still
+    cannot READ such a hello. A ChangeCipherSpec record between SH fragments
+    is skipped by the record layer, as before.
 
 Oracle (hardware): the C64 cannot read the first encrypted record yet, so
 `tools/pq_keylog_check.py` runs the RFC 8446 schedule offline on the C64's

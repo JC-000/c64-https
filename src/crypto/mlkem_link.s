@@ -270,7 +270,7 @@ SQTAB_GUARD "COLD_RUN_TRUST",     __COLD_RUN_TRUST_START__,     __COLD_RUN_TRUST
 ; Code (NET_CODE via LOADER_OVERFLOW; always RAM, so the SMC below is legal)
 ; =============================================================================
 .export mlkem_copied
-.export mlkem_boot_init, pq_mlkem_call, pq_mlkem_keygen, pq_mlkem_decaps_seed
+.export mlkem_boot_init, pq_mlkem_call, pq_mlkem_keygen, pq_mlkem_decaps_seed, pq_mlkem_scrub
 
 .segment "LOADER_OVERFLOW"
 
@@ -389,6 +389,41 @@ pq_mlkem_decaps_seed:
         lda #<mlkem_decaps_seed
         ldx #>mlkem_decaps_seed
         jmp pq_mlkem_call
+
+; pq_mlkem_scrub - zero everything ML-KEM leaves secret: the eight polynomials
+; ($D000-$DFFF: s_hat after KeyGen, y/e1/e2 after Decaps) and the whole rest-BSS
+; window ($B100-$BBFF: m', K', r', the Keccak state; X25519_TABLES and mul_dma
+; share it and are rebuilt by their owners). Same banking discipline as
+; pq_mlkem_call: sei, $01 = $34, restored. ~7,000 stores, ~80K cycles.
+; Clobbers A, X, Y, zp_ptr. Preserves the caller's I flag.
+pq_mlkem_scrub:
+        php
+        sei
+        lda $01
+        pha
+        lda #$34
+        sta $01
+        lda #>__MLKEM_POLY_RAM_START__
+        ldx #>__MLKEM_POLY_RAM_SIZE__
+        jsr @zero
+        lda #>__MLKEM_BSS_RAM_START__
+        ldx #>__MLKEM_BSS_RAM_SIZE__
+        jsr @zero
+        pla
+        sta $01
+        plp
+        rts
+@zero:  sta zp_ptr+1
+        ldy #0
+        sty zp_ptr
+        tya
+:       sta (zp_ptr),y
+        iny
+        bne :-
+        inc zp_ptr+1
+        dex
+        bne :-
+        rts
 
 .segment "LIB_MLKEM_MARK"
 mlkem_mark:

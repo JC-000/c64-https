@@ -20,6 +20,7 @@ until killed. Group selection is the server's whole policy: under
 import argparse
 import os
 import pty
+import select
 import termios
 import shutil
 import signal
@@ -81,13 +82,25 @@ def main(argv=None):
         proc.terminate()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    for _ in range(100):
-        try:
-            socket.create_connection(("127.0.0.1", a.port), timeout=0.2).close()
-            break
-        except OSError:
-            time.sleep(0.1)
-    # the probe connection above is a (failed) handshake; ignore it in the log
+    # LISTENING only when s_server itself reports it is accepting ("ACCEPT"
+    # on its console). Probing the port instead would "succeed" against a
+    # foreign process already holding it, with our s_server dead behind it.
+    boot = b""
+    deadline = time.monotonic() + 15
+    while b"ACCEPT" not in boot:
+        if proc.poll() is not None or time.monotonic() > deadline \
+                or b"Address already in use" in boot or b"unable to bind" in boot:
+            proc.terminate()
+            sys.stderr.write(boot.decode("latin-1") + "\nERROR: s_server is not listening on "
+                             f"{a.bind}:{a.port} (port in use, or it died)\n")
+            return 2
+        r, _, _ = select.select([master], [], [], 0.2)
+        if r:
+            try:
+                boot += os.read(master, 4096)
+            except OSError:
+                pass
+    sys.stdout.write(boot.decode("latin-1").replace("\r\n", "\n"))
     print(f"LISTENING {a.port} {ver} groups={a.groups}", flush=True)
     buf = b""
     try:
@@ -106,7 +119,8 @@ def main(argv=None):
                 os.write(master, BODY + b"Q\n")
     finally:
         proc.terminate()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

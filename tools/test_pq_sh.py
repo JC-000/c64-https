@@ -35,10 +35,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _pq_testlib import (  # noqa: E402
-    Tally, Session, build_or_reuse, sh_message, ks_ext, sv_ext, ext, split_at,
+    Tally, Session, build_or_reuse, require_pq_image, sh_message, ks_ext, sv_ext, ext, split_at,
     chunks, HRR_MAGIC, GROUP_HYB, GROUP_X, CT_LEN,
     E_HRR, E_RECTYPE, E_HDR, E_FIXED, E_EXTLEN, E_VERSION, E_GROUP, E_KSLEN,
-    E_TRAIL, E_MISSING, E_DECAPS, E_KEYGEN,
+    E_TRAIL, E_MISSING, E_DECAPS, E_KEYGEN, E_EXT,
 )
 from _skip_policy import cannot_run, verdict  # noqa: E402
 
@@ -157,10 +157,11 @@ def accepted(s, t):
     run_ok(s, t, "001D, one record", cm, [cm], "x")
     run_ok(s, t, "001D, byte by byte", cm, chunks(cm, [1]), "x")
     run_ok(s, t, "001D with the hybrid NOT offered", cm, [cm], "x", offered=False)
-    cu = classic_msg(exts=ext(0x1234, b"\x01" * 7) + sv_ext() + ext(0x0A, b"")
-                     + ks_ext(GROUP_X, PUB) + ext(0xFF01, b"\x00"))
-    run_ok(s, t, "001D with unknown extensions skipped (incl. zero-length)",
-           cu, chunks(cu, [3, 5, 7]), "x")
+    for v in (b"\x03\x02", b"\x03\x04", b"\x00\x00"):
+        cv = classic_msg(version=v)
+        run_ok(s, t, f"001D with legacy_version {v.hex()} (ignored, RFC 8446 4.2.1)", cv, [cv], "x")
+    hv = hybrid_msg(version=b"\x03\x01")
+    run_ok(s, t, "11EC with legacy_version 0301", hv, split_at(hv, [512, 1024]), "hyb")
 
 
 def refused(s, t):
@@ -190,7 +191,7 @@ def refused(s, t):
         exts=sv_ext() + ks_ext(0x11ED, HYB_KEY)), [512, 1024]), E_GROUP)
     run_err(s, t, "group 0x12EC (hybrid look-alike)", split_at(classic_msg(
         exts=sv_ext() + ks_ext(0x12EC, HYB_KEY)), [512, 1024]), E_GROUP)
-    for n in (31, 33, 64, 0):
+    for n in (31, 33, 64, 0, 288):
         run_err(s, t, f"001D with a {n} B share", [classic_msg(
             exts=sv_ext() + ks_ext(GROUP_X, rb(n)))], E_KSLEN)
     # key_share whose own key length disagrees with its extension length
@@ -214,8 +215,20 @@ def refused(s, t):
     ex = sv_ext() + ks_ext(GROUP_X, PUB)
     crafted = sh_message(ex, random=SRND, sid=b"\x13\x03\x00", suite=struct.pack(">H", 3 + len(ex)))
     run_err(s, t, "session id echo of 3 B that mimics the fixed fields", [crafted], E_FIXED)
-    run_err(s, t, "legacy_version 0x0302", [classic_msg(version=b"\x03\x02")], E_FIXED)
-    run_err(s, t, "legacy_version 0x0304", [classic_msg(version=b"\x03\x04")], E_FIXED)
+    # extensions we did not request (RFC 8446 4.2): every type but the two
+    for typ, data, name in ((0x1234, b"\x01" * 7, "unknown 0x1234"),
+                            (0x0029, b"\x00\x00", "pre_shared_key 0x0029"),
+                            (0x002C, b"\x00\x01\x02", "cookie 0x002C"),
+                            (0x000A, b"", "supported_groups, empty"),
+                            (0xFF01, b"\x00", "renegotiation_info"),
+                            (0x0000, b"", "server_name, empty")):
+        for order, ex in (("before", ext(typ, data) + sv_ext() + ks_ext(GROUP_X, PUB)),
+                          ("between", sv_ext() + ext(typ, data) + ks_ext(GROUP_X, PUB)),
+                          ("after", sv_ext() + ks_ext(GROUP_X, PUB) + ext(typ, data))):
+            run_err(s, t, f"{name} {order} the required extensions", [classic_msg(exts=ex)], E_EXT)
+    run_err(s, t, "unsolicited extension after a fragmented hybrid key_share",
+            split_at(hybrid_msg(exts=sv_ext() + ks_ext(GROUP_HYB, HYB_KEY) + ext(0x0029, b"\x00\x00")),
+                     [512, 1024]), E_EXT)
     run_err(s, t, "session id echo of 32 B", [classic_msg(sid=bytes(32))], E_FIXED)
     run_err(s, t, "compression method 1", [classic_msg(comp=b"\x01")], E_FIXED)
     # required extensions
@@ -223,11 +236,11 @@ def refused(s, t):
         exts=ks_ext(GROUP_X, PUB))], E_MISSING)
     run_err(s, t, "no key_share", [classic_msg(exts=sv_ext())], E_MISSING)
     run_err(s, t, "no extensions at all", [classic_msg(exts=b"")], E_MISSING)
-    run_err(s, t, "key_share look-alike 0x0133 is not a key_share", [classic_msg(
+    run_err(s, t, "key_share look-alike 0x0133 is an unsolicited extension, not a key_share", [classic_msg(
         exts=sv_ext() + ext(0x0133, struct.pack(">HH", GROUP_X, 32) + PUB))],
-        E_MISSING)
-    run_err(s, t, "supported_versions look-alike 0x012B", [classic_msg(
-        exts=ext(0x012B, b"\x03\x04") + ks_ext(GROUP_X, PUB))], E_MISSING)
+        E_EXT)
+    run_err(s, t, "supported_versions look-alike 0x012B is unsolicited", [classic_msg(
+        exts=ext(0x012B, b"\x03\x04") + ks_ext(GROUP_X, PUB))], E_EXT)
     run_err(s, t, "duplicate key_share", [classic_msg(
         exts=sv_ext() + ks_ext(GROUP_X, PUB) + ks_ext(GROUP_X, PUB))], E_KSLEN)
     run_err(s, t, "duplicate supported_versions", [classic_msg(
@@ -302,6 +315,13 @@ def refused(s, t):
 def glue(s, t):
     print("\n[3] glue")
     L = s.L
+    # pq_sh_init resets the recorded group: a refusal after a success leaves none
+    cm0 = classic_msg()
+    run_ok(s, t, "(setup) 001D accepted, group recorded", cm0, [cm0], "x")
+    s.begin(True)
+    c, z = s.feed(sh_message(sv_ext() + ks_ext(0x0017, rb(65)), random=SRND))
+    t.check(c == 1 and s.group() == 0, "a refusal after a success leaves tls_kex_group reset",
+            f"group=${s.group():02X}")
     # classic path: no ML-KEM, seed scrubbed, ss untouched
     s.wr(L("tls_pq_seed"), bytes([0x77]) * 64)
     s.wr(L("tls_mlkem_ss"), bytes([0x66]) * 32)
@@ -330,6 +350,8 @@ def glue(s, t):
             "pq_secrets_zero zeroes the seed and the ML-KEM secret")
     # KeyGen refused: C=1, SH_ERR_PQ_KEYGEN, dk scratch zero, nothing armed
     dk = 0xC000                      # mlkem_dk_scratch = tcp_recv_buf
+    s.wr(L("tls_mlkem_ss"), bytes([0x66]) * 32)
+    s.wr(L("tls_pq_seed"), bytes([0x77]) * 64)
     s.wr(dk, bytes([0xEE]) * 2400)
     s.wr(dk + 2400, bytes([0xEE]) * 16)
     s.wr(L("tls_ch_ks_len"), [0, 0])
@@ -342,6 +364,10 @@ def glue(s, t):
             "the 2,400 B dk scratch is zero even when KeyGen was refused")
     t.check(s.rd(dk + 2400, 16) == bytes([0xEE]) * 16,
             "...and the zeroing stops at 2,400 B")
+    t.check(s.rd(L("tls_mlkem_ss"), 32) == bytes(32),
+            "the next connection's prep scrubs the previous tls_mlkem_ss")
+    t.check(s.rd(L("tls_pq_seed"), 64) != bytes([0x77]) * 64,
+            "...and replaces the previous seed")
     t.check(s.rd(L("tls_ch_ks_len"), 2) == b"\x00\x00",
             "a refused KeyGen arms nothing")
     t.check(s.rd(L("tls_pq_offered"), 1) == b"\x00",
@@ -359,6 +385,24 @@ def scrub(s, t):
             "session_scrub zeroes tls_pq_seed and tls_mlkem_ss")
 
 
+def scrub_wrapper(s, t):
+    print("\n[5] pq_mlkem_scrub")
+    L = s.L
+    win = L("mul38_lo_tab")
+    assert win == 0xB100
+    s.ram_wr(0xD000, bytes([0xEE]) * 4096)
+    s.wr(win - 1, b"\xEE")
+    s.wr(win, bytes([0xEE]) * 0xB00)
+    s.wr(0xBC00, b"\xEE")
+    a, p = s.call("pq_mlkem_scrub", timeout=60.0)
+    t.check(s.ram_rd(0xD000, 4096) == bytes(4096), "the 4 KB polynomial area ($D000) is zero")
+    t.check(s.rd(win, 0xB00) == bytes(0xB00), "the ML-KEM rest-BSS window ($B100-$BBFF) is zero")
+    t.check(s.rd(win - 1, 1) == b"\xEE" and s.rd(0xBC00, 1) == b"\xEE",
+            "...and the bytes either side of the window are not touched (sqtab at $BC00)")
+    t.check(s.ram_rd(0xD000, 1) == bytes(1) and s.rd(1, 1)[0] & 7 == 6,
+            "$01 is back where it was (BASIC out, KERNAL and I/O in)", f"${s.rd(1, 1)[0]:02X}")
+
+
 def main():
     t = Tally()
     if shutil.which("ca65") is None:
@@ -368,6 +412,9 @@ def main():
         print(out[-1500:])
         return cannot_run("the PQ_HYBRID build failed",
                           certifies="the PQ ServerHello reader")
+    why = require_pq_image()
+    if why:
+        return cannot_run(why, certifies="the PQ ServerHello reader")
     only = [a for a in sys.argv[1:] if not a.startswith("-")]
     with Session() as s:
         if not only or "1" in only:
@@ -378,6 +425,8 @@ def main():
             glue(s, t)
         if not only or "4" in only:
             scrub(s, t)
+        if not only or "5" in only:
+            scrub_wrapper(s, t)
     print(f"\nRESULTS: {t.passed}/{t.passed + t.failed} passed, {t.failed} failed")
     return verdict(t.passed, t.failed, certifies="the PQ ServerHello reader")
 

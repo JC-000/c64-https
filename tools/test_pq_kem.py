@@ -39,7 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _pq_testlib import (  # noqa: E402
-    Tally, Session, build_or_reuse, sh_message, ks_ext, sv_ext, split_at,
+    Tally, Session, build_or_reuse, require_pq_image, sh_message, ks_ext, sv_ext, split_at,
     x25519, x25519_pub, GROUP_HYB, GROUP_X, CT_LEN, EK_LEN, E_DECAPS,
 )
 from _skip_policy import cannot_run, verdict  # noqa: E402
@@ -78,6 +78,8 @@ def phase_prep(s, t):
     t.check(ptr[0] | ptr[1] << 8 == s.L("cert_buf"), "tls_ch_ks_ptr = cert_buf")
     t.check(ln[0] | ln[1] << 8 == EK_LEN, "tls_ch_ks_len = 1,184")
     t.check(s.rd(s.L("tls_pq_offered"), 1) == b"\x01", "the hybrid is marked offered")
+    t.check(s.ram_rd(0xD000, 4096) == bytes(4096), "KeyGen's s_hat is gone: $D000-$DFFF is zero after prep")
+    t.check(s.rd(s.L("mul38_lo_tab"), 0xB00) == bytes(0xB00), "the ML-KEM window ($B100-$BBFF) is zero after prep")
     # a second prep: a different seed, again a matching ek
     a2, p2, seed2, ek2 = prep(s)
     t.check(seed2 != seed, "a second prep draws a different seed")
@@ -125,6 +127,9 @@ def phase_decaps(s, t, seed, ek):
     t.check(ss == K, "tls_mlkem_ss == the reference's K", ss.hex())
     t.check(s.rd(s.L("tls_pq_seed"), 64) == bytes(64), "the seed is zeroed after Decaps")
     t.check(s.group() == 0xEC, "tls_kex_group = $EC")
+    t.check(s.ram_rd(0xD000, 4096) == bytes(4096), "Decaps' y/e1/e2 are gone: $D000-$DFFF is zero")
+    t.check(s.rd(s.L("mul38_lo_tab"), 0xB00) == bytes(0xB00),
+            "m'/K'/r' are gone: the ML-KEM window ($B100-$BBFF) is zero after Decaps")
     # implicit rejection: same seed, a corrupted ct
     bad = bytearray(ct)
     bad[100] ^= 0x10
@@ -275,8 +280,8 @@ def run_connect(s, t, tag, kind):
     t.check(ss_x == x25519(priv, spub), "the X25519 shared secret is correct (after Decaps rebuilt the window)")
     t.check(s.rd(L("tls_server_pubkey"), 32) == spub, "the server's x25519 share was extracted")
     t.check(s.group() == (0xEC if kind == "hyb" else 0x1D), "tls_kex_group recorded")
-    t.check(s.rd(L("tls_last_state"), 1)[0] == 3 or carry == 1,
-            "the run got past ServerHello to EncryptedExtensions (tls_last_state = 3)",
+    t.check(s.rd(L("tls_last_state"), 1)[0] == 3 and carry == 1,
+            "the run got past ServerHello and failed at EncryptedExtensions (tls_last_state = 3, C=1)",
             f"last_state={s.rd(L('tls_last_state'), 1)[0]} carry={carry}")
     t.check(carry == 1, "P4 state: the handshake does not complete (key schedule not hybrid yet / no server)")
     t.check(s.rd(L("tls_pq_seed"), 64) == bytes(64), "after tls_connect's error exit the seed is zero")
@@ -360,6 +365,73 @@ def run_connect_refused(s, t):
     t.check(s.rd(0xC000, 2400) == bytes(2400), "the dk scratch is zero")
 
 
+def run_recv_sh(s, t, tag, setup, expect):
+    """tls_recv_server_hello alone (tls_state = SERVER_HELLO, ring filled by
+    *setup*), breakpoint-free; returns (carry, tls_sh_err, tls_state, polls)."""
+    L = s.L
+    s.wr(L("tls_state"), [2])
+    s.call("tls_rx_reset")
+    setup()
+    a, p = s.call("tls_recv_server_hello", timeout=3600.0)
+    pc = s.rd(L("tls_recv_poll_count"), 2)
+    return p & 1, s.err(), s.rd(L("tls_state"), 1)[0], pc[0] | pc[1] << 8
+
+
+def ring_put(s, data):
+    tail = s.rd(s.L("tcp_recv_tail"), 2)
+    off = tail[0] | tail[1] << 8
+    s.wr(0xC000 + off, data)
+    off += len(data)
+    s.wr(s.L("tcp_recv_tail"), [off & 255, off >> 8])
+
+
+def phase_oversize(s, t):
+    print("\n[7] a ServerHello sent as ONE oversize record fails fast")
+    hdr = b"\x16\x03\x03" + struct.pack(">H", 1178)
+    c, err, st, polls = run_recv_sh(s, t, "oversize", lambda: ring_put(s, hdr + bytes(100)), None)
+    t.check(c == 1, "tls_recv_server_hello fails")
+    t.check(err == 14, "tls_sh_err = SH_ERR_RECORD", f"${err:02X}")
+    t.check(st == 0xFF, "the connection is ERROR-latched, not left to time out", f"tls_state=${st:02X}")
+    t.check(polls < 8, "...after a handful of polls, not 65,536", f"{polls} polls")
+
+
+def phase_timeout(s, t):
+    """ONE failed-poll budget for the whole ServerHello: after the first record
+    is fed, make the budget nearly spent and the next failures must end it."""
+    L = s.L
+    print("\n[8] the ServerHello shares one timeout budget")
+    msg = hybrid_sh(bytes(CT_LEN), bytes(32))
+    first = msg[:300]
+    s.wr(L("tls_pq_offered"), [1])
+    s.wr(L("tls_state"), [2])
+    s.call("tls_rx_reset")
+    ring_put(s, b"\x16\x03\x03" + struct.pack(">H", len(first)) + first)
+    tramp = bytes([0x20, L("tls_recv_server_hello") & 255, L("tls_recv_server_hello") >> 8,
+                   0xA9, 0, 0x2A, 0x8D, CARRY & 255, CARRY >> 8, 0xEA, 0xEA])
+    s.wr(CTL, tramp)
+    end = CTL + len(tramp) - 2
+    bp_feed = set_breakpoint(s.tr, L("pq_sh_feed"))
+    bp_end = set_breakpoint(s.tr, end)
+    try:
+        goto(s.tr, CTL)
+        wait_for_pc(s.tr, L("pq_sh_feed"), timeout=600.0)
+        s.wr(L("sh_timeout"), [0xFC, 0xFF])         # four failed polls from timing out
+        delete_breakpoint(s.tr, bp_feed)
+        s.tr.resume()
+        wait_for_pc(s.tr, end, timeout=3600.0)
+    finally:
+        for b in (bp_feed, bp_end):
+            try:
+                delete_breakpoint(s.tr, b)
+            except Exception:
+                pass
+    pc = s.rd(L("tls_recv_poll_count"), 2)
+    polls = pc[0] | pc[1] << 8
+    t.check(s.rd(CARRY, 1)[0] == 1, "tls_recv_server_hello times out")
+    t.check(2 <= polls <= 16, "...after the few polls the shared budget had left, not a fresh 65,536",
+            f"{polls} polls")
+
+
 def main():
     t = Tally()
     if shutil.which("ca65") is None:
@@ -368,7 +440,10 @@ def main():
     if rc != 0:
         print(out[-1500:])
         return cannot_run("the PQ_HYBRID build failed", certifies="the PQ KeyGen/Decaps path")
-    allsec = {"prep", "ch", "decaps", "connect", "bad", "refused"}
+    why = require_pq_image()
+    if why:
+        return cannot_run(why, certifies="the PQ KeyGen/Decaps path")
+    allsec = {"prep", "ch", "decaps", "connect", "bad", "refused", "oversize", "timeout"}
     want = {a for a in sys.argv[1:] if not a.startswith("-")} & allsec or allsec
     if want & {"prep", "ch", "decaps"}:
         with Session() as s:
@@ -388,6 +463,13 @@ def main():
     if "refused" in want:
         with Session() as s:
             run_connect_refused(s, t)
+    if want & {"oversize", "timeout"}:
+        with Session() as s:
+            if "oversize" in want:
+                phase_oversize(s, t)
+        with Session() as s:
+            if "timeout" in want:
+                phase_timeout(s, t)
     print(f"\nRESULTS: {t.passed}/{t.passed + t.failed} passed, {t.failed} failed")
     return verdict(t.passed, t.failed, certifies="the PQ KeyGen/Decaps path")
 

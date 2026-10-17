@@ -88,7 +88,8 @@ def test_state_mode_green_and_red():
 
 def test_the_sentinel_gate_never_gives_a_verdict_from_unreached_memory():
     cases = [dict(tls_kex_group="1d"), dict(tls_sh_err="07"),
-             dict(tls_last_state="01", tls_state="01"),
+             dict(tls_last_state="02"), dict(tls_last_state="01"),
+             dict(tls_last_state="03", tls_state="02"),    # not ERROR: judged by tls_state
              dict(tls_pq_seed="11" * 64), dict(tls_mlkem_ss="00" * 32),
              dict(tls_shared_secret="00" * 32), dict(tls_transcript="00" * 32)]
     for over in cases:
