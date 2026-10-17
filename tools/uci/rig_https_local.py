@@ -780,11 +780,11 @@ def _dump_diag(transport: Ultimate64Transport,
     print()
     print("--- adapter / TLS state ---")
     for name in ("net_last_error", "net_tcp_state", "uci_socket_id",
-                 "net_initialized", "reu_dma_timeout"):
+                 "net_initialized", "reu_dma_timeout", "df_last_err", "tls_sh_err"):
         if name in labels:
             print(f"  {name:22s} : 0x{r8(name):02X}")
     for name in ("tls_state", "tls_last_state", "tls_reached_connected",
-                 "tls_recv_progress", "tls_recv_sub_progress"):
+                 "tls_recv_progress", "tls_recv_sub_progress", "tls_kex_group"):
         if name in labels:
             print(f"  {name:22s} : 0x{r8(name):02X}")
     for name in ("tcp_recv_head", "tcp_recv_tail", "uci_req_len", "uci_read_hdr",
