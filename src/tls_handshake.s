@@ -56,7 +56,7 @@
 ;         and 11EC entry) already carries B. The staging buffer never holds
 ;         more than ~230 B, so the 8-bit Y cursor is safe for the STAGED
 ;         bytes; only the lengths are 16-bit.
-; Clobbers: A, X, Y, zp_tmp1
+; Clobbers: A, X, Y, zp_tmp1, zp_count
 ; =============================================================================
 tls_build_client_hello:
         ldy #0
@@ -262,6 +262,8 @@ ch_put_pub:
 ; Clobbers: A, X, Y, zp_ptr, zp_tmp1, zp_tmp2, zp_temp, zp_count
 ; =============================================================================
 tls_parse_server_hello:
+        lda #0
+        sta tls_sh_err                  ; no stale code from an earlier parse
         ldy #0
 
         ; --- [0] Verify handshake type = 0x02 ---
@@ -484,15 +486,17 @@ tls_parse_server_hello:
 
 ; =============================================================================
 ; tls_sh_chk_hrr - is tls_server_random the HelloRetryRequest magic?
-; Out: C=1 and tls_sh_err = SH_ERR_HRR if so, else C=0 and tls_sh_err = 0.
-; Preserves Y. Clobbers A, X. TLS_CODE: jsr-only, off the ip65 LOADER.
+; Out: C=1 and tls_sh_err = SH_ERR_HRR if so, else C=0 (tls_sh_err is
+; cleared by tls_parse_server_hello on entry). Preserves Y. Clobbers A, X.
+; ip65: CODE (LOADER has room, the CRYPTO_OVERLAY pool does not); UCI:
+; TLS_CODE (uci-comb-demo-store's LOADER would be left with 5 B).
 ; =============================================================================
 SH_ERR_HRR = $01
 
+.ifdef TLS_STREAM_DEFRAME
 .segment "TLS_CODE"
+.endif
 tls_sh_chk_hrr:
-        lda #0
-        sta tls_sh_err
         ldx #31
 :       lda tls_server_random,x
         cmp hrr_magic,x
@@ -565,10 +569,10 @@ tls_hostname_len:  .res 1
 ; refuses any other. Every length field is derived from the staged byte
 ; count, so the tables need no companion edit.
 ; =============================================================================
-; The tables ride CODE (LOADER) on every backend. Measured: LOADER has room
-; (the table-driven builder is ~250 B smaller than the LDA/STA/INY one it
-; replaced), while the crypto pools do not -- ip65's CRYPTO_OVERLAY+RESIDENT
-; are one tight pool and uci-comb-demo-store has 70 B of CRYPTO_HOT.
+; The tables ride CODE (LOADER) on every backend: the crypto pools are the
+; scarcer ones (ip65's CRYPTO_OVERLAY+RESIDENT are one tight pool,
+; uci-comb-demo-store has 70 B of CRYPTO_HOT). Measured vs the old builder,
+; tail free in LOADER: ip65 +153 B, uci +7 B (see the PR's margin table).
 .segment "CODE"
 
 ; SHA-256("HelloRetryRequest"), RFC 8446 4.1.3

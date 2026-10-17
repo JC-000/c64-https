@@ -768,18 +768,24 @@ def test_server_hello_parse(transport, labels, rng):
 
         near = bytearray(hrr_random)
         near[31] ^= 1                       # one bit off the magic: a real SH
+        near0 = bytearray(hrr_random)
+        near0[0] ^= 1                       # ... and off at the FIRST byte
         c_ok, e_ok = run_sh(bytes(near))
+        c_ok0, e_ok0 = run_sh(bytes(near0))
         c_hrr, e_hrr = run_sh(hrr_random)
         c_ok2, e_ok2 = run_sh(server_random)  # a state-clearing control
-        if (c_ok, e_ok, c_hrr, e_hrr, c_ok2, e_ok2) == (0, 0, 1, 1, 0, 0):
+        # a magic whose byte 0 differs but bytes 1..31 match must NOT be HRR
+        # (kills a compare loop that skips index 0)
+        if (c_ok, e_ok, c_ok0, e_ok0, c_hrr, e_hrr, c_ok2, e_ok2) == \
+                (0, 0, 0, 0, 1, 1, 0, 0):
             passed += 1
-            print("       PASS: magic -> C=1/err=1; near-miss and normal -> "
-                  "C=0/err=0")
+            print("       PASS: magic -> C=1/err=1; byte-31 and byte-0 "
+                  "near-misses and normal -> C=0/err=0")
         else:
             failed += 1
-            print(f"       FAIL: (C,err) near-miss={c_ok, e_ok} "
-                  f"hrr={c_hrr, e_hrr} normal={c_ok2, e_ok2}; "
-                  f"expected (0,0) (1,1) (0,0)")
+            print(f"       FAIL: (C,err) near-miss31={c_ok, e_ok} "
+                  f"near-miss0={c_ok0, e_ok0} hrr={c_hrr, e_hrr} "
+                  f"normal={c_ok2, e_ok2}; expected (0,0) (0,0) (1,1) (0,0)")
     except Exception as e:
         failed += 1
         print(f"       FAIL: {e}")
@@ -824,7 +830,8 @@ def ref_client_hello(rnd, pub, host, bulk=None):
     return b"\x01" + struct.pack(">I", len(body))[1:] + body
 
 
-def capture_client_hello(transport, labels, rnd, pub, host, bulk):
+def capture_client_hello(transport, labels, rnd, pub, host, bulk,
+                         bulk_addr=None, fail_send=False):
     """Run tls_send_client_hello with net_tcp_send replaced by a recording
     stub. Returns (carry, sections, wire, transcript_hash, ks_len_after)."""
     send = labels["net_tcp_send"]
@@ -838,7 +845,8 @@ def capture_client_hello(transport, labels, rnd, pub, host, bulk):
         elif ld is not None:
             stub += bytes([0xAD, ld & 0xFF, ld >> 8])
         stub += bytes([0x99, (CH_TBL + off) & 0xFF, (CH_TBL + off) >> 8])
-    stub += bytes([0xC8] * 4 + [0x8C, CH_IDX & 0xFF, CH_IDX >> 8, 0x18, 0x60])
+    stub += bytes([0xC8] * 4 + [0x8C, CH_IDX & 0xFF, CH_IDX >> 8,
+                            0x38 if fail_send else 0x18, 0x60])  # sec/clc, rts
     write_bytes(transport, CH_STUB, bytes(stub))
     write_bytes(transport, CH_IDX, [0])
     write_bytes(transport, labels["tls_client_random"], rnd)
@@ -847,7 +855,7 @@ def capture_client_hello(transport, labels, rnd, pub, host, bulk):
     write_bytes(transport, labels["tls_hostname"], hb or b"\x00")
     write_bytes(transport, labels["tls_hostname_len"], [len(hb)])
     if bulk is not None:
-        buf = labels["cert_buf"]
+        buf = bulk_addr if bulk_addr is not None else labels["cert_buf"]
         write_bytes(transport, buf, bulk)
         write_bytes(transport, labels["tls_ch_ks_ptr"], [buf & 0xFF, buf >> 8])
         write_bytes(transport, labels["tls_ch_ks_len"],
@@ -892,12 +900,12 @@ def test_client_hello_sections(transport, labels, rng):
     rnd = bytes(rng.getrandbits(8) for _ in range(32))
     pub = bytes(rng.getrandbits(8) for _ in range(32))
 
-    def check(tag, host, bulk, expect_sections):
+    def check(tag, host, bulk, expect_sections, bulk_addr=None):
         nonlocal passed, failed
         print(f"\n  [{tag}]")
         try:
             carry, secs, wire, th, ks_after = capture_client_hello(
-                transport, labels, rnd, pub, host, bulk)
+                transport, labels, rnd, pub, host, bulk, bulk_addr)
             ref = ref_client_hello(rnd, pub, host, bulk)
             ref_wire = b"\x16\x03\x03" + struct.pack(">H", len(ref)) + ref
             dump = os.environ.get("C64_CH_DUMP")  # byte-identity A/B vs master
@@ -918,7 +926,9 @@ def test_client_hello_sections(transport, labels, rng):
                 problems.append(f"{len(secs)} sends, expected "
                                 f"{expect_sections}: {secs}")
             if bulk is not None:
-                if (labels["cert_buf"], len(bulk)) not in secs:
+                want = (bulk_addr if bulk_addr is not None
+                        else labels["cert_buf"])
+                if (want, len(bulk)) not in secs:
                     problems.append("bulk not sent from its own buffer")
                 if ks_after != b"\x00\x00":
                     problems.append(f"tls_ch_ks_len not cleared: {ks_after}")
@@ -960,6 +970,26 @@ def test_client_hello_sections(transport, labels, rng):
     bulk = bytes(rng.getrandbits(8) for _ in range(1184))
     check("2h  sectioned hello, no SNI", "", bulk, 4)
     check("2i  sectioned hello, 63-char host", "b" * 63, bulk, 4)
+    # bulk NOT at cert_buf: the sender must follow tls_ch_ks_ptr, not a
+    # hardcoded address ($C400 is idle RAM in this harness)
+    check("2j  sectioned hello, bulk at $C400", "example.com", bulk, 4,
+          bulk_addr=0xC400)
+
+    # a send failure mid-hello must not leave the hybrid armed
+    print("\n  [2k  failed send clears tls_ch_ks_len]")
+    try:
+        carry, secs, wire, th, ks_after = capture_client_hello(
+            transport, labels, rnd, pub, "example.com", bulk,
+            fail_send=True)
+        if carry == 1 and ks_after == b"\x00\x00":
+            passed += 1
+            print("       PASS: C=1 and tls_ch_ks_len cleared")
+        else:
+            failed += 1
+            print(f"       FAIL: carry={carry} ks_len after={ks_after}")
+    except Exception as e:
+        failed += 1
+        print(f"       FAIL: {e}")
     return passed, failed
 
 
