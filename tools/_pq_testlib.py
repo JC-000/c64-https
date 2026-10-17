@@ -48,6 +48,9 @@ class Tally:
         else:
             self.failed += 1
             print(f"  FAIL  {what}" + (f": {detail}" if detail else ""))
+            if os.environ.get("C64_FAIL_FAST") == "1":      # tools/mutate_pq_sh.py
+                sys.stdout.flush()
+                raise SystemExit(1)
         return ok
 
 

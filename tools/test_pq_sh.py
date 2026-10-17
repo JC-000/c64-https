@@ -173,8 +173,8 @@ def refused(s, t):
                      random=HRR_MAGIC)
     run_err(s, t, "HRR (real shape)", [hrr], E_HRR)
     # key_share lengths
-    for n in (1119, 1121, 0, 1088, 1152):
-        key = (CT + PUB + bytes(8))[:n] if n > 1120 else (CT + PUB)[:n]
+    for n in (1119, 1121, 0, 1088, 1152, 864, 1376):
+        key = (CT + PUB + bytes(300))[:n]
         run_err(s, t, f"11EC key_exchange of {n} B",
                 split_at(sh_message(sv_ext() + ks_ext(GROUP_HYB, key),
                                     random=SRND), [512, 1024]), E_KSLEN)
@@ -186,6 +186,8 @@ def refused(s, t):
         exts=sv_ext() + ks_ext(0x6399, PUB))], E_GROUP)
     run_err(s, t, "group 0x021D (hi byte set)", [classic_msg(
         exts=sv_ext() + ks_ext(0x021D, PUB))], E_GROUP)
+    run_err(s, t, "group 0x11ED (hybrid look-alike, low byte)", split_at(classic_msg(
+        exts=sv_ext() + ks_ext(0x11ED, HYB_KEY)), [512, 1024]), E_GROUP)
     run_err(s, t, "group 0x12EC (hybrid look-alike)", split_at(classic_msg(
         exts=sv_ext() + ks_ext(0x12EC, HYB_KEY)), [512, 1024]), E_GROUP)
     for n in (31, 33, 64, 0):
@@ -203,6 +205,15 @@ def refused(s, t):
     # fixed fields
     run_err(s, t, "cipher suite 0x1301", [classic_msg(suite=b"\x13\x01")], E_FIXED)
     run_err(s, t, "cipher suite 0x1302", [classic_msg(suite=b"\x13\x02")], E_FIXED)
+    run_err(s, t, "cipher suite 0x0303 (low byte right, high byte wrong)",
+            [classic_msg(suite=b"\x03\x03")], E_FIXED)
+    run_err(s, t, "cipher suite 0x1203", [classic_msg(suite=b"\x12\x03")], E_FIXED)
+    # a 3-byte session id crafted so the bytes after it parse as a valid
+    # suite/compression/extensions_length: only the session-id length check
+    # itself can refuse it
+    ex = sv_ext() + ks_ext(GROUP_X, PUB)
+    crafted = sh_message(ex, random=SRND, sid=b"\x13\x03\x00", suite=struct.pack(">H", 3 + len(ex)))
+    run_err(s, t, "session id echo of 3 B that mimics the fixed fields", [crafted], E_FIXED)
     run_err(s, t, "legacy_version 0x0302", [classic_msg(version=b"\x03\x02")], E_FIXED)
     run_err(s, t, "legacy_version 0x0304", [classic_msg(version=b"\x03\x04")], E_FIXED)
     run_err(s, t, "session id echo of 32 B", [classic_msg(sid=bytes(32))], E_FIXED)
@@ -338,6 +349,16 @@ def glue(s, t):
     s.wr(L("mlkem_copied"), saved)
 
 
+def scrub(s, t):
+    print("\n[4] 'Q' scrub (session_scrub) covers the PQ secrets")
+    L = s.L
+    s.wr(L("tls_pq_seed"), bytes([0x5A]) * 64)
+    s.wr(L("tls_mlkem_ss"), bytes([0x5B]) * 32)
+    s.call("session_scrub", timeout=300.0)
+    t.check(s.rd(L("tls_pq_seed"), 96) == bytes(96),
+            "session_scrub zeroes tls_pq_seed and tls_mlkem_ss")
+
+
 def main():
     t = Tally()
     if shutil.which("ca65") is None:
@@ -355,6 +376,8 @@ def main():
             refused(s, t)
         if not only or "3" in only:
             glue(s, t)
+        if not only or "4" in only:
+            scrub(s, t)
     print(f"\nRESULTS: {t.passed}/{t.passed + t.failed} passed, {t.failed} failed")
     return verdict(t.passed, t.failed, certifies="the PQ ServerHello reader")
 

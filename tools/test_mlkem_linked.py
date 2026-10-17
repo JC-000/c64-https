@@ -338,7 +338,7 @@ def comb_refusal(t):
         with ViceInstanceManager(config=config) as mgr:
             inst = mgr.acquire()
             tr = inst.transport
-            if not t.check(wait_for_text(tr, "Q=QUIT", timeout=2400, verbose=False)
+            if not t.check(wait_for_text(tr, "Q=QUIT", timeout=menu_wait(2400), verbose=False)
                            is not None, "the comb image reached the menu "
                            f"({time.monotonic() - t0:.0f} s)"):
                 mgr.release(inst)

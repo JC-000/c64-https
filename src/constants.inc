@@ -233,11 +233,11 @@ tcp_recv_buf            = $c000
 ; CH_SECTIONED: the sectioned/hybrid ClientHello (16-bit bulk key-share
 ; section, supported_groups 11EC,001D). Build-time switch, NOT a Makefile
 ; knob: it follows TLS_STREAM_DEFRAME (UCI only). ip65 has no bytes to
-; spare and is excluded from PQ. Note a ~1.2 KB hybrid ServerHello is NOT
-; deframed today (tls_recv_server_hello is single-record; a server fragments
-; it under MFL=512): that is the next phase (ServerHello on the streaming
-; deframer). Without CH_SECTIONED the builder still uses the same templates
-; and emits the X25519-only hello, byte-identical.
+; spare and is excluded from PQ. Without CH_SECTIONED the builder still uses
+; the same templates and emits the X25519-only hello, byte-identical. Under
+; PQ_HYBRID=1 tls_connect arms it (pq_connect_prep) and the ~1.2 KB hybrid
+; ServerHello, which a server fragments under MFL=512, is read by the streaming
+; reader in src/crypto/pq_hybrid.s.
 .ifdef TLS_STREAM_DEFRAME
 CH_SECTIONED = 1
 .endif
@@ -253,11 +253,12 @@ CH_SECTIONED = 1
 ; net_poll. Size >= 2,400 and the polys above it: src/crypto/mlkem_link.s.
 ; Comb: COLD_IMAGE is staged at $C000 but cold_bank_init stashes it to the
 ; REU once at boot and never reads it again, so the ring is dead by then.
-; Also owed by the callers (later phases; no home exists yet): the 64 B d||z
-; seed that mlkem_decaps_seed re-reads needs a BSS home outside the unions
-; below AND a session_scrub span (P5); and ML-KEM never interleaves with
-; X25519 or fp_mul (the BSS window is X25519_TABLES + mul_dma): call it only
-; through pq_mlkem_keygen / pq_mlkem_decaps_seed (src/crypto/mlkem_link.s).
+; The caller is pq_connect_prep (src/crypto/pq_hybrid.s), from tls_connect: it
+; zeroes the dk at once. The 64 B d||z seed lives in NET_BSS_TAIL (tls_pq_seed,
+; with tls_mlkem_ss after it; one session_scrub span). ML-KEM never
+; interleaves with X25519 or fp_mul (the BSS window is X25519_TABLES +
+; mul_dma): call it only through pq_mlkem_keygen / pq_mlkem_decaps_seed
+; (src/crypto/mlkem_link.s).
 mlkem_dk_scratch        = tcp_recv_buf
 MLKEM_DK_SIZE           = 2400
 MLKEM_EK_SIZE           = 1184          ; ML-KEM-768 encapsulation key

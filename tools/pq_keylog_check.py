@@ -25,6 +25,7 @@ reproduces 32 bytes of HKDF output.
 
 Exit 0: both secrets match. 1: mismatch (it also says if the OTHER ikm order,
 x25519 || mlkem, would have matched). 2: usage / missing keylog line.
+78: --state mode and the run did not reach the point (the sentinel gate).
 """
 
 import argparse
@@ -91,6 +92,28 @@ def check(keylog_text, client_random, mlkem_ss, x25519_ss, transcript):
     return False, "MISMATCH: neither IKM order reproduces the server's secret (wrong ML-KEM secret, X25519 secret or transcript)"
 
 
+def check_state(state, keylog_text):
+    """*state* is tools/uci/rig_https_local.py's PQ_DUMP pq_state.json.
+    Returns (verdict, message): True / False as check(); None = a usage
+    problem; "inconclusive" when the run provably did not reach the point
+    whose memory is being quoted (the sentinel gate: a run that stopped
+    earlier leaves plausible-looking bytes in uninitialised memory)."""
+    h = lambda k: bytes.fromhex(state[k])          # noqa: E731
+    if h("tls_kex_group") != b"\xec":
+        return "inconclusive", f"tls_kex_group=${state['tls_kex_group']}: the server did not choose 11EC, no ML-KEM secret to check"
+    if h("tls_sh_err") != b"\x00":
+        return "inconclusive", f"tls_sh_err=${state['tls_sh_err']}: the ServerHello was refused"
+    if h("tls_last_state")[0] < 3 and h("tls_state")[0] < 3:
+        return "inconclusive", "the run never got past ServerHello (tls_state/last_state < 3)"
+    if h("tls_pq_seed") != bytes(64):
+        return "inconclusive", "tls_pq_seed is not zero: Decaps did not finish and scrub (or the error exit did not run)"
+    for k in ("tls_mlkem_ss", "tls_shared_secret", "tls_transcript"):
+        if h(k) == bytes(len(h(k))):
+            return "inconclusive", f"{k} is all zero: not produced"
+    return check(keylog_text, h("tls_client_random"), h("tls_mlkem_ss"),
+                 h("tls_shared_secret"), h("tls_transcript"))
+
+
 def selftest():
     import os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -139,6 +162,28 @@ def selftest():
     expect(r is False and "did not run the hybrid" in m, "red: a classic-only server is named")
     r, m = check(log, bytes(31) + b"\x01", mk, xs, th)
     expect(r is None, "a keylog without the client_random's lines is a usage error, not a pass")
+    # --- state-file mode and its sentinel gate ---
+    good = {"tls_mlkem_ss": mk.hex(), "tls_shared_secret": xs.hex(),
+            "tls_transcript": th.hex(), "tls_client_random": rnd.hex(),
+            "tls_kex_group": "ec", "tls_sh_err": "00", "tls_state": "ff",
+            "tls_last_state": "03", "tls_pq_seed": "00" * 64}
+    r, m = check_state(good, log)
+    expect(r is True, "state mode: a run that reached the point matches")
+    for key, val, why in (("tls_kex_group", "1d", "11EC"),
+                          ("tls_sh_err", "07", "refused"),
+                          ("tls_last_state", "01", "past ServerHello"),
+                          ("tls_pq_seed", "11" * 64, "seed"),
+                          ("tls_mlkem_ss", "00" * 32, "all zero")):
+        bad = dict(good)
+        bad[key] = val
+        if key == "tls_last_state":
+            bad["tls_state"] = "01"
+        r, m = check_state(bad, log)
+        expect(r == "inconclusive", f"state mode: gate ({why}) -> inconclusive, not a verdict")
+    bad = dict(good)
+    bad["tls_mlkem_ss"] = bytes(range(32)).hex()
+    r, m = check_state(bad, log)
+    expect(r is False, "state mode: a wrong ML-KEM secret is a mismatch")
     print("SELFTEST " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
@@ -150,10 +195,19 @@ def main(argv=None):
     ap.add_argument("--mlkem-ss")
     ap.add_argument("--x25519-ss")
     ap.add_argument("--transcript", help="SHA-256(ClientHello || ServerHello), as the C64 hashed it")
+    ap.add_argument("--state", help="pq_state.json from rig_https_local.py with PQ_DUMP=<dir> "
+                    "(replaces --client-random/--mlkem-ss/--x25519-ss/--transcript)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
+    if a.state:
+        import json
+        if not a.keylog:
+            ap.error("--keylog is required")
+        r, msg = check_state(json.load(open(a.state)), open(a.keylog).read())
+        print(msg)
+        return 78 if r == "inconclusive" else (0 if r else (2 if r is None else 1))
     for n in ("keylog", "client_random", "mlkem_ss", "x25519_ss", "transcript"):
         if getattr(a, n) is None:
             ap.error(f"--{n.replace('_', '-')} is required")

@@ -4167,3 +4167,66 @@ Findings that changed the plan:
     `pq_mlkem_call` is load-bearing: CIA1's IRQ is level-triggered and an RTI
     stub acknowledges nothing (I/O in or out), so an IRQ reaching it would
     re-enter at once and livelock the call. The `sei` prevents that.
+
+## PQ_HYBRID P4: hybrid ServerHello, KeyGen in tls_connect, Decaps (2026-10-17)
+
+`tls_connect` now offers X25519MLKEM768 and reads the answer; the key schedule
+is NOT hybrid yet (P5), so an 11EC server is Decapsed and then fails at the
+first encrypted record. A 001D server completes HTTPS as before.
+
+Decisions and findings:
+
+  - **Both shares are offered** (11EC = ek || x25519, then 001D with the same
+    x25519 key), exactly the hello #312 sent to OpenSSL 3.6.5. Under
+    `-groups X25519` OpenSSL answers 001D, under `-groups X25519MLKEM768` 11EC
+    with a 1,120 B key_exchange (ct 1,088 || x25519 32), fragmented 512+512+154
+    because we send max_fragment_length.
+  - **The ServerHello is not buffered**: a byte-at-a-time machine (gather N
+    bytes to a destination, then a handler arms the next state) in
+    `src/crypto/pq_hybrid.s`. It costs ~930 B, three times the first estimate;
+    most of it is the handlers (each keeps local error stubs because a branch
+    reaches 127 B). `tls_parse_server_hello` (~280 B of LOADER) is assembled out
+    under PQ_HYBRID, which is where the LOADER bytes came from. The PQ code
+    rides two optional segments, `PQ_CODE` (machine) and `PQ_GLUE` (KeyGen,
+    Decaps, scrubs): LOADER/NET_CODE on `cfg/c64-https-uci.cfg`, CRYPTO_HOT on
+    the two comb cfgs, because comb-store-pq has 55 B of CRYPTO_OVERLAY and
+    243 B of NET_CODE. Margins: `tools/measure_margins.py`.
+  - **Stricter than the single-record parser, on purpose**: an EMPTY session id
+    echo (what we send), legacy_version 0303, the extension block must fill the
+    message exactly, supported_versions and key_share at most once each,
+    group 11EC only if it was offered. Unknown extensions are still skipped.
+    `tls_sh_err` codes `$01-$0C` (`src/constants.inc`); `$01` (HRR) keeps its
+    meaning.
+  - **Handshake order (#152)**: `TLS_HS_SEQ_CHECK` is not reused. It derives the
+    one legal type from `tls_state` for the post-ServerHello dispatchers; the
+    machine's header state checks type 2 and its length bound plus DONE refuse
+    a second message, which is the same rule for the first message.
+  - **cert_buf is the home of the ek AND the ct.** The ek is dead once the CH is
+    sent, the ct once Decaps returns, and Decaps runs before anything can write
+    cert_buf (Certificate comes later; the comb cold bank refuses to run while
+    `tls_state` is not IDLE/ERROR). The 64 B seed and the 32 B secret are in
+    NET_BSS_TAIL, below `$4200`: not cert_buf, not `tls_rec_buf`
+    (X25519_SCRATCH), not the `$B100` ML-KEM window, not `$D000`, not the ring.
+  - **Order in `tls_recv_server_hello`**: per-record fold into the transcript
+    right after the record's bytes were parsed (so the fold precedes X25519
+    scratch reuse of `tls_rec_buf`), then the drain, then `pq_sh_decaps`, then
+    the X25519 mult (its `_fresh` entries rebuild the tables ML-KEM overwrote).
+    Each record gets a fresh timeout budget.
+  - **Secrets**: the dk (2,400 B in the ring) is zeroed straight after KeyGen
+    even when KeyGen was refused; the seed is zeroed after Decaps and by
+    `tls_connect`'s error exit; `tls_mlkem_ss` is KEPT on error (like
+    `tls_shared_secret`; the hardware oracle reads it) and is scrubbed by 'Q'
+    (one 96 B span) or the next connection's prep.
+  - **Known gaps**: KeyGen leaves `s_hat` in `$D000-$DFFF` and Decaps leaves
+    y/e1/e2 there until 'Q'. A server that ignores max_fragment_length and sends
+    the 1,178 B ServerHello in ONE record cannot be read (`tls_rec_buf` is
+    548 B; OpenSSL honours MFL). A ChangeCipherSpec record between ServerHello
+    fragments is skipped by the record layer, as before.
+
+Oracle (hardware): the C64 cannot read the first encrypted record yet, so
+`tools/pq_keylog_check.py` runs the RFC 8446 schedule offline on the C64's
+`tls_mlkem_ss || tls_shared_secret` and `tls_transcript` (read with the CPU
+parked and all RAM banked in: `PQ_DUMP=<dir>` in `rig_https_local.py`) and
+compares with `s_server -keylogfile`. A match proves Decaps agreed with the
+server's Encaps and that both sides hashed the same CH || SH. A run that did
+not reach Decaps is INCONCLUSIVE (exit 78), never a verdict.

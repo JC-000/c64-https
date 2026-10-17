@@ -66,6 +66,18 @@ SUITE_ORDER = (
     "curve_refusal",
 )
 
+# PQ_HYBRID=1 suites. They are standalone main() programs (no run_tests()), so
+# the coverage guard below does not reach them, and this runner builds the
+# default ip65 image, which they cannot run on. Run them directly, each builds
+# (or with C64_SKIP_BUILD=1 reuses) the BACKEND=uci USE_NISTCURVES_ONCHIP=1
+# PQ_HYBRID=1 image:
+#   tools/test_mlkem_placement.py   link-time placement + mutants   (#313)
+#   tools/test_mlkem_linked.py      the image runs: copy, KeyGen, Decaps (#313)
+#   tools/test_pq_sh.py             the streaming ServerHello reader    (P4)
+#   tools/test_pq_kem.py            KeyGen / CH / Decaps / tls_connect  (P4)
+#   tools/mutate_pq_sh.py           breaks each P4 check, expects red   (P4)
+#   tools/test_pq_keylog_check.py   the hardware oracle (pytest, no VICE)
+
 # Suites that define run_tests() but are deliberately NOT dispatched here,
 # as {module: why}. Anything absent from both this and SUITE_ORDER fails
 # tools/test_runner_coverage.py.

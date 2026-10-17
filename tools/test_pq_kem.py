@@ -24,7 +24,7 @@ PQ_HYBRID=1 image, checked against libs/mlkem/tools/mlkem_ref.py.
       001D (classic fallback: HTTPS proceeds as before). The expected end state
       is the P4 documented one: the key schedule is not hybrid yet, so the
       first encrypted record cannot be read (tls_last_state = ENCRYPTED_EXT).
-      Afterwards (error exit) seed + ss are zero.
+      Afterwards (error exit) the seed is zero and the ML-KEM secret kept.
 
     python3 tools/test_pq_kem.py            # builds the PQ image first
     C64_SKIP_BUILD=1 python3 tools/test_pq_kem.py
@@ -186,11 +186,13 @@ def inject(s, records):
     L = s.L
     tail = s.rd(L("tcp_recv_tail"), 2)
     off = tail[0] | tail[1] << 8
+    start = off
     data = b"".join(b"\x16\x03\x03" + struct.pack(">H", len(r)) + r for r in records)
     assert off + len(data) <= 0x1000
     s.wr(0xC000 + off, data)
     off += len(data)
     s.wr(L("tcp_recv_tail"), [off & 255, off >> 8])
+    return start
 
 
 def run_connect(s, t, tag, kind):
@@ -277,9 +279,85 @@ def run_connect(s, t, tag, kind):
             "the run got past ServerHello to EncryptedExtensions (tls_last_state = 3)",
             f"last_state={s.rd(L('tls_last_state'), 1)[0]} carry={carry}")
     t.check(carry == 1, "P4 state: the handshake does not complete (key schedule not hybrid yet / no server)")
-    sec = s.rd(L("tls_pq_seed"), 96)
-    t.check(sec == bytes(96), "after tls_connect's error exit seed + ss are zero")
+    t.check(s.rd(L("tls_pq_seed"), 64) == bytes(64), "after tls_connect's error exit the seed is zero")
+    ss_end = s.rd(L("tls_mlkem_ss"), 32)
+    t.check(ss_end == (K if kind == "hyb" else bytes(32)),
+            "...and the ML-KEM secret is still there for the oracle/P5 (scrubbed by 'Q')")
     return K
+
+
+def run_connect_bad(s, t):
+    """A refused ServerHello through the real tls_connect: C=1 at SERVER_HELLO,
+    the machine's code in tls_sh_err, no Decaps, no X25519, seed scrubbed."""
+    L = s.L
+    print("\n[5] tls_connect, refused ServerHello (11EC with a 1,119 B key_exchange)")
+    s.wr(L("tls_hostname"), HOST.encode())
+    s.wr(L("tls_hostname_len"), [len(HOST)])
+    orig = recorder(s)
+    tramp = bytes([0x20, L("tls_connect") & 255, L("tls_connect") >> 8,
+                   0xA9, 0, 0x2A, 0x8D, CARRY & 255, CARRY >> 8, 0xEA, 0xEA])
+    s.wr(CTL, tramp)
+    end = CTL + len(tramp) - 2
+    bp_sh = set_breakpoint(s.tr, L("tls_recv_server_hello"))
+    bp_end = set_breakpoint(s.tr, end)
+    try:
+        goto(s.tr, CTL)
+        wait_for_pc(s.tr, L("tls_recv_server_hello"), timeout=3600.0)
+        ek = s.rd(L("cert_buf"), EK_LEN)
+        seed = s.rd(L("tls_pq_seed"), 64)
+        ek_ref, _ = R.mlkem_keygen(seed[:32], seed[32:])
+        K, ct = R.mlkem_encaps(ek_ref, M_FIXED)
+        key = (ct + bytes(32))[:1119]
+        msg = sh_message(sv_ext() + ks_ext(GROUP_HYB, key), random=bytes(range(32, 64)))
+        s.wr(L("tls_mlkem_ss"), bytes([0x33]) * 32)         # must stay untouched
+        start = inject(s, split_at(msg, [512, 1024]))
+        s.tr.resume()
+        wait_for_pc(s.tr, end, timeout=3600.0)
+    finally:
+        for b in (bp_sh, bp_end):
+            try:
+                delete_breakpoint(s.tr, b)
+            except Exception:
+                pass
+        write_bytes(s.tr, L("net_tcp_send"), orig)
+    t.check(s.rd(CARRY, 1)[0] == 1, "tls_connect fails")
+    t.check(s.err() == 8, "tls_sh_err = SH_ERR_KSLEN", f"${s.err():02X}")
+    t.check(s.rd(L("tls_last_state"), 1)[0] == 2, "failed in SERVER_HELLO (tls_last_state = 2)")
+    t.check(s.rd(L("tls_mlkem_ss"), 32) == bytes([0x33]) * 32, "no Decaps ran")
+    t.check(s.rd(L("tls_pq_seed"), 64) == bytes(64), "the seed is scrubbed by the error exit")
+    t.check(s.group() == 0, "no group recorded")
+    head = s.rd(L("tcp_recv_head"), 2)
+    t.check(head[0] | head[1] << 8 == start + 5 + 512,
+            "the refusal came at once: only the first record was consumed from the ring",
+            f"head={head[0] | head[1] << 8:#x} start={start:#x}")
+
+
+def run_connect_refused(s, t):
+    """KeyGen refused (the ML-KEM image not resident) inside tls_connect:
+    the handshake stops BEFORE the ClientHello is sent."""
+    L = s.L
+    print("\n[6] tls_connect, KeyGen refused")
+    s.wr(L("tls_hostname"), HOST.encode())
+    s.wr(L("tls_hostname_len"), [len(HOST)])
+    s.wr(0xC000, bytes([0xEE]) * 2400)
+    orig = recorder(s)
+    s.wr(L("mlkem_copied"), [0])
+    tramp = bytes([0x20, L("tls_connect") & 255, L("tls_connect") >> 8,
+                   0xA9, 0, 0x2A, 0x8D, CARRY & 255, CARRY >> 8, 0xEA, 0xEA])
+    s.wr(CTL, tramp)
+    end = CTL + len(tramp) - 2
+    bp_end = set_breakpoint(s.tr, end)
+    try:
+        goto(s.tr, CTL)
+        wait_for_pc(s.tr, end, timeout=3600.0)
+    finally:
+        delete_breakpoint(s.tr, bp_end)
+        write_bytes(s.tr, L("net_tcp_send"), orig)
+    t.check(s.rd(CARRY, 1)[0] == 1, "tls_connect fails")
+    t.check(s.err() == 12, "tls_sh_err = SH_ERR_PQ_KEYGEN", f"${s.err():02X}")
+    t.check(s.rd(L("tls_last_state"), 1)[0] == 1, "failed in CLIENT_HELLO (tls_last_state = 1)")
+    t.check(s.rd(REC_IDX, 1)[0] == 0, "no ClientHello was sent")
+    t.check(s.rd(0xC000, 2400) == bytes(2400), "the dk scratch is zero")
 
 
 def main():
@@ -290,17 +368,26 @@ def main():
     if rc != 0:
         print(out[-1500:])
         return cannot_run("the PQ_HYBRID build failed", certifies="the PQ KeyGen/Decaps path")
-    only = [a for a in sys.argv[1:] if not a.startswith("-")]
-    with Session() as s:
-        seed, ek = phase_prep(s, t)
-        phase_ch(s, t, ek)
-        if "nodecaps" not in only:
-            phase_decaps(s, t, seed, ek)
-    if "noconnect" not in only:
+    allsec = {"prep", "ch", "decaps", "connect", "bad", "refused"}
+    want = {a for a in sys.argv[1:] if not a.startswith("-")} & allsec or allsec
+    if want & {"prep", "ch", "decaps"}:
+        with Session() as s:
+            seed, ek = phase_prep(s, t)
+            if "ch" in want:
+                phase_ch(s, t, ek)
+            if "decaps" in want:
+                phase_decaps(s, t, seed, ek)
+    if "connect" in want:
         with Session() as s:
             run_connect(s, t, "hybrid ServerHello (11EC)", "hyb")
         with Session() as s:
             run_connect(s, t, "classic ServerHello (001D)", "x")
+    if "bad" in want:
+        with Session() as s:
+            run_connect_bad(s, t)
+    if "refused" in want:
+        with Session() as s:
+            run_connect_refused(s, t)
     print(f"\nRESULTS: {t.passed}/{t.passed + t.failed} passed, {t.failed} failed")
     return verdict(t.passed, t.failed, certifies="the PQ KeyGen/Decaps path")
 

@@ -74,7 +74,7 @@
 .ifndef PQ_HYBRID
 .import tls_parse_server_hello
 .else
-.import pq_connect_prep, pq_sh_init, pq_sh_feed, pq_sh_decaps, pq_secrets_zero
+.import pq_connect_prep, pq_sh_init, pq_sh_feed, pq_sh_decaps, pq_seed_zero
 .endif
 .ifdef CH_SECTIONED
 .import tls_ch_ks_ptr
@@ -343,7 +343,8 @@ tls_connect:
 
 @error:
 .ifdef PQ_HYBRID
-        jsr pq_secrets_zero     ; seed + ML-KEM secret never outlive a failed connect
+        jsr pq_seed_zero        ; the d||z seed never outlives a failed connect (the
+                                ;  ML-KEM secret stays, like tls_shared_secret: 'Q' scrubs)
 .endif
         lda tls_state           ; preserve last attempted state
         bmi :+                  ; already ERROR: the record layer aborted
@@ -451,12 +452,13 @@ tls_close:
 ; before any max_fragment_length agreement (MFL, RFC 6066 4), so the 2^14
 ; record bound applies to it and a ~1.4 KB hello is a legal single record
 ; with no reassembly needed in the peer.
-; Arming contract: set tls_ch_ks_ptr/len immediately before jsr tls_connect,
-; i.e. after DNS and TCP connect succeeded. tls_connect reaches this routine
-; with no branch in between, and the sectioned sender clears the length on
-; every exit (success or send failure), so nothing stays armed past one
-; ClientHello. A clear at tls_connect ENTRY cannot help: the caller arms
-; before the call, so an entry clear would also discard a fresh arm.
+; Arming: under PQ_HYBRID=1 tls_connect arms tls_ch_ks_ptr/len itself
+; (pq_connect_prep, src/crypto/pq_hybrid.s: KeyGen, then the ek in cert_buf)
+; between the X25519 keypair and this routine, with no branch in between. No
+; caller arms anything, and there is no build in which one does. The sectioned
+; sender clears the length on every exit (success or send failure), so nothing
+; stays armed past one ClientHello. A clear at tls_connect ENTRY would be
+; harmless now (nothing is armed before it) but buys nothing.
 ; =============================================================================
 tls_send_client_hello:
         ; initialize transcript hash

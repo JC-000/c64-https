@@ -153,8 +153,11 @@ def _keep_cycle(word: int) -> bool:
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PRG_PATH = REPO_ROOT / "build" / "c64-https.prg"
-LABELS_PATH = REPO_ROOT / "build" / "labels.txt"
+# C64_PRG / C64_LABELS name a saved build (rig_mlkem_hw.py's convention), so a
+# run that queues for the device does not depend on what build/ holds by the
+# time it gets the lock. Both default to build/.
+PRG_PATH = Path(os.environ.get("C64_PRG", str(REPO_ROOT / "build" / "c64-https.prg")))
+LABELS_PATH = Path(os.environ.get("C64_LABELS", str(REPO_ROOT / "build" / "labels.txt")))
 CERT_PATH = REPO_ROOT / "tools" / "https_e2e" / "certs" / "server.pem"
 KEY_PATH = REPO_ROOT / "tools" / "https_e2e" / "certs" / "server.key"
 
@@ -261,6 +264,46 @@ EXTERNAL_LISTENER = os.environ.get("EXTERNAL_LISTENER", "0") == "1"
 # bound to 0.0.0.0).
 EXTERNAL_HOST = os.environ.get("EXTERNAL_HOST", "")
 EXTERNAL_PORT = int(os.environ.get("EXTERNAL_PORT", "4433"))
+
+# --- PQ_HYBRID post-run dump (PQC phase P4) -------------------------------
+# PQ_DUMP=<dir> writes <dir>/pq_state.json after the fetch, success or not:
+# the ML-KEM secret, the X25519 secret, the SH transcript hash and the other
+# P4 state, read with the CPU parked and all RAM banked in (the $A000+ BSS
+# reads as the BASIC ROM otherwise). tools/pq_keylog_check.py consumes it.
+PQ_DUMP_DIR = os.environ.get("PQ_DUMP", "")
+PQ_PARK_ADDR: int = -1
+
+
+def _pq_dump(client, transport, labels, outdir: str) -> None:
+    """Park the CPU (sei / $01=$34 / jmp *) and dump the P4 state to JSON."""
+    park = bytes([0x78, 0xA9, 0x34, 0x85, 0x01,
+                  0x4C, (PQ_PARK_ADDR + 5) & 255, PQ_PARK_ADDR >> 8])
+    transport.write_memory(PQ_PARK_ADDR, park)
+    park_cmd = "sys%d\r" % PQ_PARK_ADDR      # parks the CPU; not a fetch trigger
+    send_text(transport, park_cmd)
+    time.sleep(3.0)
+
+    def rd(name, n):
+        return bytes(client.read_mem(labels[name], n)).hex()
+
+    state = {
+        "prg_sha256": hashlib.sha256(PRG_PATH.read_bytes()).hexdigest(),
+        "tls_mlkem_ss": rd("tls_mlkem_ss", 32),
+        "tls_pq_seed": rd("tls_pq_seed", 64),
+        "tls_shared_secret": rd("tls_shared_secret", 32),
+        "tls_transcript": rd("tls_transcript", 32),
+        "tls_client_random": rd("tls_client_random", 32),
+        "tls_server_pubkey": rd("tls_server_pubkey", 32),
+        "tls_kex_group": rd("tls_kex_group", 1),
+        "tls_pq_offered": rd("tls_pq_offered", 1),
+        "tls_sh_err": rd("tls_sh_err", 1),
+        "tls_state": rd("tls_state", 1),
+        "tls_last_state": rd("tls_last_state", 1),
+    }
+    Path(outdir).mkdir(parents=True, exist_ok=True)
+    (Path(outdir) / "pq_state.json").write_text(json.dumps(state, indent=1))
+    print(f"PQ state -> {outdir}/pq_state.json (kex group ${state['tls_kex_group']}, "
+          f"sh_err ${state['tls_sh_err']}, last_state ${state['tls_last_state']})")
 
 
 def _detect_local_ip(target: str) -> str:
@@ -1418,6 +1461,9 @@ def main() -> int:
     ROUTINE_ADDR    = 0
     routine_len     = len(_build_http_routine(labels, 0)[0])
     ROUTINE_ADDR    = arbiter.alloc(routine_len, name="trampoline")
+    global PQ_PARK_ADDR
+    if PQ_DUMP_DIR:
+        PQ_PARK_ADDR = arbiter.alloc(8, name="pq park stub")
     print(
         f"\nMemoryPolicy reserved {len(memory_policy.reserved_regions)}"
         f" region(s); arbiter allocations:"
@@ -1648,7 +1694,7 @@ def main() -> int:
 
         print("load_prg(PRG), verify, SYS (#199)...")
         try:
-            load_verified_and_run(client, prg)
+            load_verified_and_run(client, prg, labels_path=LABELS_PATH)
         except PrgLoadError as exc:
             print(f"[fatal] {exc}", file=sys.stderr)
             return 4
@@ -1771,6 +1817,8 @@ def main() -> int:
             if server_thread is not None:
                 server_thread.join(timeout=1.0)
             _dump_full(transport, labels, server_result, run_dir=run_dir)
+            if PQ_DUMP_DIR:
+                _pq_dump(client, transport, labels, PQ_DUMP_DIR)
             outcome = "TIMEOUT"
             exit_code = 1
             return exit_code
@@ -1780,6 +1828,8 @@ def main() -> int:
         if server_thread is not None:
             server_thread.join(timeout=5.0)
         _dump_full(transport, labels, server_result, run_dir=run_dir)
+        if PQ_DUMP_DIR:
+            _pq_dump(client, transport, labels, PQ_DUMP_DIR)
 
         # Reread resp_data + screen_text for the assertion logic below.
         resp_len_raw = transport.read_memory(labels["http_resp_len"], 2)
