@@ -44,6 +44,9 @@
 
 ; TLS state / buffers (data.asm)
 .import tls_shared_secret
+.ifdef PQ_HYBRID
+.import tls_mlkem_ss, tls_kex_group
+.endif
 .import tls_transcript
 .import tls_early_secret
 .import tls_handshake_secret
@@ -172,7 +175,49 @@ tls_derive_handshake_keys:
         lda #32
         sta hkdf_ikm_len
 
+.ifdef PQ_HYBRID
+        ; X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem): the shared secret is
+        ; mlkem_ss || x25519_ss (ML-KEM first), 64 B.  Concatenate into
+        ; input_buffer (dead scratch since step 1) and point the IKM at it.
+        lda tls_kex_group
+        cmp #$EC
+        bne @dhk_ikm_ready
+        ldx #31
+@dhk_cat:
+        lda tls_mlkem_ss,x
+        sta input_buffer,x
+        lda tls_shared_secret,x
+        sta input_buffer+32,x
+        dex
+        bpl @dhk_cat
+        lda #<input_buffer
+        sta hkdf_ikm_ptr
+        lda #>input_buffer
+        sta hkdf_ikm_ptr+1
+        lda #64
+        sta hkdf_ikm_len
+@dhk_ikm_ready:
+.endif
+
         jsr hkdf_extract
+
+.ifdef PQ_HYBRID
+        ; Both shared secrets (and the concatenation and hkdf_extract's copy
+        ; of it in hmac_data_buf) are dead once the handshake secret exists.
+        lda #0
+        ldx #63
+@dhk_zero:
+        sta input_buffer,x
+        sta hmac_data_buf,x
+        dex
+        bpl @dhk_zero
+        ldx #31
+@dhk_zss:
+        sta tls_shared_secret,x
+        sta tls_mlkem_ss,x
+        dex
+        bpl @dhk_zss
+.endif
 
         ; Copy hkdf_prk → tls_handshake_secret
         ldx #31

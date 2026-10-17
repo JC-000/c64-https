@@ -274,6 +274,19 @@ def run_connect(s, t, tag, kind):
                 == len(ref) + len(msg),
                 "transcript has folded exactly CH + SH (byte count)")
         delete_breakpoint(s.tr, bp_ecdh)
+        # P5: stop at the key schedule. Both secrets are final there and the
+        # schedule is about to consume them; afterwards they are zero.
+        bp_dk = set_breakpoint(s.tr, L("tls_derive_handshake_keys"))
+        s.tr.resume()
+        wait_for_pc(s.tr, L("tls_derive_handshake_keys"), timeout=7200.0)
+        ss_x = s.rd(L("tls_shared_secret"), 32)
+        t.check(ss_x == x25519(priv, spub), "at the key schedule the X25519 shared secret is correct (after Decaps rebuilt the window)")
+        t.check(s.rd(L("tls_mlkem_ss"), 32) == (K if kind == "hyb" else bytes(32)),
+                "...and the ML-KEM secret is the reference K (zero on the classic path)")
+        th = hashlib.sha256(ref + msg).digest()
+        t.check(s.rd(L("tls_transcript"), 32) == th, "tls_transcript = SHA-256(CH || SH) as the host computes it")
+        ikm = (K + ss_x) if kind == "hyb" else ss_x
+        delete_breakpoint(s.tr, bp_dk)
         s.tr.resume()
         wait_for_pc(s.tr, end, timeout=7200.0)
     finally:
@@ -284,18 +297,19 @@ def run_connect(s, t, tag, kind):
                 pass
         write_bytes(s.tr, L("net_tcp_send"), orig)
     carry = s.rd(CARRY, 1)[0]
-    ss_x = s.rd(L("tls_shared_secret"), 32)
-    t.check(ss_x == x25519(priv, spub), "the X25519 shared secret is correct (after Decaps rebuilt the window)")
     t.check(s.rd(L("tls_server_pubkey"), 32) == spub, "the server's x25519 share was extracted")
     t.check(s.group() == (0xEC if kind == "hyb" else 0x1D), "tls_kex_group recorded")
     t.check(s.rd(L("tls_last_state"), 1)[0] == 3 and carry == 1,
             "the run got past ServerHello and failed at EncryptedExtensions (tls_last_state = 3, C=1)",
             f"last_state={s.rd(L('tls_last_state'), 1)[0]} carry={carry}")
-    t.check(carry == 1, "P4 state: the handshake does not complete (key schedule not hybrid yet / no server)")
+    t.check(carry == 1, "no server behind the fake network: the handshake stops at EncryptedExtensions")
     t.check(s.rd(L("tls_pq_seed"), 64) == bytes(64), "after tls_connect's error exit the seed is zero")
-    ss_end = s.rd(L("tls_mlkem_ss"), 32)
-    t.check(ss_end == (K if kind == "hyb" else bytes(32)),
-            "...and the ML-KEM secret is still there for the oracle/P5 (scrubbed by 'Q')")
+    t.check(s.rd(L("tls_mlkem_ss"), 32) == bytes(32) and s.rd(L("tls_shared_secret"), 32) == bytes(32),
+            "after the key schedule both shared secrets are zero (P5)")
+    # the handshake secret the C64 derived is the host's, for the IKM the group implies
+    from test_pq_keyschedule import host_schedule
+    t.check(s.rd(L("tls_handshake_secret"), 32) == host_schedule(ikm, th)[0],
+            "tls_handshake_secret == host HKDF over " + ("mlkem_ss || x25519_ss" if kind == "hyb" else "x25519_ss"))
     return K
 
 

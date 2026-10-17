@@ -229,11 +229,9 @@ pq_sh_decaps:
         bne @done
         jsr pq_set_args
         jsr pq_mlkem_decaps_seed        ; A = status; C=1/A=$FF refused
-        php
         pha
-        jsr pq_mlkem_scrub              ; y/e1/e2 in $D000, m'/K'/r' in the window, any outcome
-        pla
-        plp
+        jsr pq_mlkem_scrub              ; y/e1/e2 in $D000, m'/K'/r' in the window, any outcome (preserves C)
+        pla                             ; pla leaves C alone
         bcs @fail
         cmp #0
         bne @fail

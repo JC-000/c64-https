@@ -38,6 +38,8 @@ SH2 = ["tools/test_pq_sh.py", "2"]
 SH3 = ["tools/test_pq_sh.py", "3"]
 SH4 = ["tools/test_pq_sh.py", "4"]
 KEM = ["tools/test_pq_kem.py"]
+KS = ["tools/test_pq_keyschedule.py"]
+KSF = "src/tls_keyschedule.s"
 
 
 SCRUB_BODY = """pq_mlkem_scrub:
@@ -192,7 +194,7 @@ MUTANTS = [
     ("M48", "pq_sh_init does not reset tls_kex_group", H,
      "        sta shs_seen\n        sta tls_kex_group\n", "        sta shs_seen\n" + nop(3), SH3),
     ("M49", "Decaps leaves y/e1/e2 and m'/K'/r' behind", H,
-     "        jsr pq_mlkem_scrub              ; y/e1/e2 in $D000, m'/K'/r' in the window, any outcome\n", nop(3), KEM + ["decaps"]),
+     "        jsr pq_mlkem_scrub              ; y/e1/e2 in $D000, m'/K'/r' in the window, any outcome (preserves C)\n", nop(3), KEM + ["decaps"]),
     ("M50", "KeyGen leaves s_hat behind", H,
      "        jsr pq_mlkem_scrub              ; s_hat in $D000 and the sponge/ring residue in the window\n", nop(3), KEM + ["prep"]),
     ("M51", "the scrub misses the last polynomial page", "src/crypto/mlkem_link.s",
@@ -223,6 +225,33 @@ MUTANTS = [
     ("M56", "the SH loop ignores the ERROR latch", T13,
      "        bpl :+                          ;  record header while waiting for the SH\n",
      "        jmp :+\n", KEM + ["oversize"]),
+    # --- P5: the hybrid key schedule (suite: tools/test_pq_keyschedule.py) ---
+    ("K01", "wrong IKM order: x25519_ss || mlkem_ss", KSF,
+     "        lda tls_mlkem_ss,x\n        sta input_buffer,x\n        lda tls_shared_secret,x\n        sta input_buffer+32,x\n",
+     "        lda tls_mlkem_ss,x\n        sta input_buffer+32,x\n        lda tls_shared_secret,x\n        sta input_buffer,x\n", KS),
+    ("K02", "IKM length 32 instead of 64", KSF,
+     "        lda #64\n        sta hkdf_ikm_len\n", "        lda #32\n        sta hkdf_ikm_len\n", KS),
+    ("K03", "group test inverted (hybrid only for a non-11EC group)", KSF,
+     "        cmp #$EC\n        bne @dhk_ikm_ready\n", "        cmp #$EC\n        beq @dhk_ikm_ready\n", KS),
+    ("K04", "group test compares 001D instead of 11EC", KSF,
+     "        cmp #$EC\n        bne @dhk_ikm_ready\n", "        cmp #$1D\n        bne @dhk_ikm_ready\n", KS),
+    ("K05", "the hybrid IKM is never selected (always classic)", KSF,
+     "        cmp #$EC\n        bne @dhk_ikm_ready\n", "        cmp #$EC\n        jmp @dhk_ikm_ready\n", KS),
+    ("K06", "the IKM pointer still names tls_shared_secret", KSF,
+     "        lda #<input_buffer\n        sta hkdf_ikm_ptr\n        lda #>input_buffer\n        sta hkdf_ikm_ptr+1\n        lda #64\n",
+     "        lda #64\n", KS),
+    ("K07", "the concatenation stops one byte short", KSF,
+     "        ldx #31\n@dhk_cat:", "        ldx #30\n@dhk_cat:", KS),
+    ("K08", "the x25519 ss is not zeroed after the extract", KSF,
+     "@dhk_zss:\n        sta tls_shared_secret,x\n", "@dhk_zss:\n" + nop(3), KS),
+    ("K09", "tls_mlkem_ss is not zeroed after the extract", KSF,
+     "        sta tls_mlkem_ss,x\n        dex\n        bpl @dhk_zss\n", nop(3) + "        dex\n        bpl @dhk_zss\n", KS),
+    ("K10", "the IKM concatenation in input_buffer is not zeroed", KSF,
+     "@dhk_zero:\n        sta input_buffer,x\n", "@dhk_zero:\n" + nop(3), KS),
+    ("K11", "hkdf_extract's copy of the IKM (hmac_data_buf) is not zeroed", KSF,
+     "        sta hmac_data_buf,x\n        dex\n        bpl @dhk_zero\n", nop(3) + "        dex\n        bpl @dhk_zero\n", KS),
+    ("K12", "the IKM zeroing covers only 32 of the 64 bytes", KSF,
+     "        lda #0\n        ldx #63\n@dhk_zero:", "        lda #0\n        ldx #31\n@dhk_zero:", KS),
 ]
 
 
@@ -255,7 +284,7 @@ def main():
     if "--no-control" not in sys.argv:
         # A mutant "killed" by a suite that is red on the unmodified tree
         # proves nothing: the controls go first.
-        for c in (SH, KEM):
+        for c in (SH, KEM, KS):
             crc, cout = run(c, env={"C64_FAIL_FAST": "0"})
             print(f"control {' '.join(c)}: rc={crc}", flush=True)
             if crc:

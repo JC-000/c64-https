@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """pq_keylog_check.py - did the C64's Decaps agree with the server's Encaps?
 
-The oracle for the X25519MLKEM768 hardware rig (PQC phase P4). OpenSSL's
-`s_server -keylogfile` writes the handshake traffic secrets it derived:
+The oracle for the X25519MLKEM768 hardware rig (PQC phases P4/P5). OpenSSL's
+`s_server -keylogfile` writes the traffic secrets it derived:
 
     SERVER_HANDSHAKE_TRAFFIC_SECRET <client_random hex> <secret hex>
     CLIENT_HANDSHAKE_TRAFFIC_SECRET <client_random hex> <secret hex>
 
-The C64 (P4) does not run the hybrid key schedule yet, so it cannot read the
-first encrypted record - but its Decaps output, its X25519 shared secret and
-its transcript hash are in RAM. This tool runs the RFC 8446 section 7.1
-schedule on them OFFLINE (hashlib/hmac only) with the hybrid input
+--state (P5, the rig mode): the C64 runs the hybrid key schedule and zeroes both
+shared secrets, so the verdict compares its application traffic secrets with
+the keylog's CLIENT/SERVER_TRAFFIC_SECRET_0, gated on tls_reached_connected.
+The explicit mode below (P4) takes the secrets as arguments: it runs the
+RFC 8446 section 7.1 schedule on them OFFLINE (hashlib/hmac only) with the hybrid input
 
     IKM = mlkem_ss || x25519_ss          (draft-ietf-tls-ecdhe-mlkem: ML-KEM first)
 
@@ -26,6 +27,7 @@ reproduces 32 bytes of HKDF output.
 Exit 0: both secrets match. 1: mismatch (it also says if the OTHER ikm order,
 x25519 || mlkem, would have matched). 2: usage / missing keylog line.
 78: --state mode and the run did not reach the point (the sentinel gate).
+In --state mode exit 1 is also a RESIDUE failure (a hybrid secret left in RAM).
 """
 
 import argparse
@@ -93,29 +95,44 @@ def check(keylog_text, client_random, mlkem_ss, x25519_ss, transcript):
 
 
 def check_state(state, keylog_text):
-    """*state* is tools/uci/rig_https_local.py's PQ_DUMP pq_state.json.
-    Returns (verdict, message): True / False as check(); None = a usage
-    problem; "inconclusive" when the run provably did not reach the point
-    whose memory is being quoted (the sentinel gate: a run that stopped
-    earlier leaves plausible-looking bytes in uninitialised memory)."""
+    """*state* is tools/uci/rig_https_local.py's PQ_DUMP pq_state.json (P5).
+    Returns (verdict, message): True / False; None = a usage problem;
+    "inconclusive" when the run provably did not reach the point whose memory
+    is being quoted (the sentinel gate: a run that stopped earlier leaves
+    plausible-looking bytes in uninitialised memory).
+
+    Since P5 the C64 zeroes both shared secrets once the handshake secret is
+    extracted, so the secrets themselves are no longer there to compare. What
+    stays is the APPLICATION traffic secrets (tls_c_hs_secret / tls_s_hs_secret
+    are reused for them): a pure function of the hybrid handshake secret and
+    the transcript through the server Finished, which OpenSSL logs as
+    CLIENT_TRAFFIC_SECRET_0 / SERVER_TRAFFIC_SECRET_0. Equal bytes prove the
+    C64's key schedule ran with the server's own mlkem_ss || x25519_ss. The
+    gate is the tls_reached_connected latch (#204), not tls_state, which is
+    IDLE again after tls_close."""
     h = lambda k: bytes.fromhex(state[k])          # noqa: E731
     if h("tls_kex_group") != b"\xec":
-        return "inconclusive", f"tls_kex_group=${state['tls_kex_group']}: the server did not choose 11EC, no ML-KEM secret to check"
+        return "inconclusive", f"tls_kex_group=${state['tls_kex_group']}: the server did not choose 11EC, no hybrid run to check"
     if h("tls_sh_err") != b"\x00":
         return "inconclusive", f"tls_sh_err=${state['tls_sh_err']}: the ServerHello was refused"
-    # A failed run ends in ERROR ($FF) with tls_last_state = the state it failed
-    # in; only a run still in a normal state is judged by tls_state itself.
-    reached = h("tls_last_state")[0] if h("tls_state")[0] == 0xFF else h("tls_state")[0]
-    if reached < 3:
-        return "inconclusive", (f"the run never got past ServerHello (reached state {reached}: "
-                                f"tls_state=${state['tls_state']}, last_state=${state['tls_last_state']})")
-    if h("tls_pq_seed") != bytes(64):
-        return "inconclusive", "tls_pq_seed is not zero: Decaps did not finish and scrub (or the error exit did not run)"
-    for k in ("tls_mlkem_ss", "tls_shared_secret", "tls_transcript"):
-        if h(k) == bytes(len(h(k))):
+    if h("tls_reached_connected") != b"\x07":
+        return "inconclusive", (f"tls_reached_connected=${state['tls_reached_connected']}: the handshake never "
+                                f"completed (tls_state=${state['tls_state']}, last_state=${state['tls_last_state']})")
+    for k in ("tls_c_hs_secret", "tls_s_hs_secret"):
+        if h(k) == bytes(32):
             return "inconclusive", f"{k} is all zero: not produced"
-    return check(keylog_text, h("tls_client_random"), h("tls_mlkem_ss"),
-                 h("tls_shared_secret"), h("tls_transcript"))
+    # Hygiene first: a connected run must have scrubbed every hybrid secret.
+    for k in ("tls_pq_seed", "tls_mlkem_ss", "tls_shared_secret"):
+        if h(k) != bytes(len(h(k))):
+            return False, f"RESIDUE: {k} is not zero after the handshake secret was extracted"
+    log = parse_keylog(keylog_text, h("tls_client_random").hex())
+    need = ("CLIENT_TRAFFIC_SECRET_0", "SERVER_TRAFFIC_SECRET_0")
+    for n in need:
+        if n not in log:
+            return None, f"keylog has no {n} for client_random {state['tls_client_random']}"
+    if log[need[0]] == h("tls_c_hs_secret") and log[need[1]] == h("tls_s_hs_secret"):
+        return True, "match: the C64's application traffic secrets equal the server's CLIENT/SERVER_TRAFFIC_SECRET_0 (hybrid key schedule agreed)"
+    return False, "MISMATCH: the C64's application traffic secrets differ from the server's (key schedule, secret or transcript disagree)"
 
 
 def selftest():
@@ -166,27 +183,38 @@ def selftest():
     expect(r is False and "did not run the hybrid" in m, "red: a classic-only server is named")
     r, m = check(log, bytes(31) + b"\x01", mk, xs, th)
     expect(r is None, "a keylog without the client_random's lines is a usage error, not a pass")
-    # --- state-file mode and its sentinel gate ---
-    good = {"tls_mlkem_ss": mk.hex(), "tls_shared_secret": xs.hex(),
-            "tls_transcript": th.hex(), "tls_client_random": rnd.hex(),
-            "tls_kex_group": "ec", "tls_sh_err": "00", "tls_state": "ff",
-            "tls_last_state": "03", "tls_pq_seed": "00" * 64}
-    r, m = check_state(good, log)
-    expect(r is True, "state mode: a run that reached the point matches")
+    # --- state-file mode (P5): application traffic secrets + sentinel gate ---
+    ca, sa = bytes(range(1, 33)), bytes(range(50, 82))
+    log3 = log + (f"CLIENT_TRAFFIC_SECRET_0 {rnd.hex()} {ca.hex()}\n"
+                  f"SERVER_TRAFFIC_SECRET_0 {rnd.hex()} {sa.hex()}\n")
+    good = {"tls_c_hs_secret": ca.hex(), "tls_s_hs_secret": sa.hex(),
+            "tls_client_random": rnd.hex(), "tls_kex_group": "ec", "tls_sh_err": "00",
+            "tls_state": "00", "tls_last_state": "00", "tls_reached_connected": "07",
+            "tls_pq_seed": "00" * 64, "tls_mlkem_ss": "00" * 32, "tls_shared_secret": "00" * 32}
+    r, m = check_state(good, log3)
+    expect(r is True, "state mode: a CONNECTED-then-closed run (tls_state=0) matches")
     for key, val, why in (("tls_kex_group", "1d", "11EC"),
                           ("tls_sh_err", "07", "refused"),
-                          ("tls_last_state", "02", "past ServerHello, failed run (ERROR, last_state 2)"),
-                          ("tls_last_state", "01", "past ServerHello, failed run (ERROR, last_state 1)"),
-                          ("tls_pq_seed", "11" * 64, "seed"),
-                          ("tls_mlkem_ss", "00" * 32, "all zero")):
+                          ("tls_reached_connected", "00", "never connected"),
+                          ("tls_reached_connected", "03", "stopped at ServerHello"),
+                          ("tls_c_hs_secret", "00" * 32, "client secret all zero"),
+                          ("tls_s_hs_secret", "00" * 32, "server secret all zero")):
         bad = dict(good)
         bad[key] = val
-        r, m = check_state(bad, log)
+        r, m = check_state(bad, log3)
         expect(r == "inconclusive", f"state mode: gate ({why}) -> inconclusive, not a verdict")
-    bad = dict(good)
-    bad["tls_mlkem_ss"] = bytes(range(32)).hex()
-    r, m = check_state(bad, log)
-    expect(r is False, "state mode: a wrong ML-KEM secret is a mismatch")
+    for key in ("tls_pq_seed", "tls_mlkem_ss", "tls_shared_secret"):
+        bad = dict(good)
+        bad[key] = "11" * len(bytes.fromhex(good[key]))
+        r, m = check_state(bad, log3)
+        expect(r is False and "RESIDUE" in m, f"state mode: {key} left non-zero is a RESIDUE failure")
+    for key in ("tls_c_hs_secret", "tls_s_hs_secret"):
+        bad = dict(good)
+        bad[key] = bytes(range(9, 41)).hex()
+        r, m = check_state(bad, log3)
+        expect(r is False, f"state mode: a wrong {key} is a mismatch")
+    r, m = check_state(good, log)
+    expect(r is None, "state mode: a keylog without the traffic-secret lines is a usage error")
     print("SELFTEST " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 

@@ -75,6 +75,7 @@ SUITE_ORDER = (
 #   tools/test_mlkem_linked.py      the image runs: copy, KeyGen, Decaps (#313)
 #   tools/test_pq_sh.py             the streaming ServerHello reader    (P4)
 #   tools/test_pq_kem.py            KeyGen / CH / Decaps / tls_connect  (P4)
+#   tools/test_pq_keyschedule.py    hybrid IKM mlkem_ss || x25519_ss + zeroing (P5)
 #   tools/mutate_pq_sh.py           breaks each P4 check, expects red   (P4)
 #   tools/test_pq_keylog_check.py   the hardware oracle (pytest, no VICE)
 
