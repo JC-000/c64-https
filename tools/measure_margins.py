@@ -148,6 +148,16 @@ def parse_cfg_memory(text):
         })
     if not areas:
         raise ParseError("empty MEMORY block in cfg")
+    # A RAM view and a file view over the same extent (PQ_HYBRID's
+    # CRYPTO_COLD_SHADOW / COLD_FILE): the file area is reported under the
+    # RAM view's name, which is the one the docs and every BSS segment use.
+    # Its own name stays as `alias` so a segment that LOADS there is found.
+    for f in [a for a in areas if a["file"]]:
+        views = [r for r in areas if not r["file"] and
+                 (r["start"], r["size"]) == (f["start"], f["size"])]
+        if views:
+            f["alias"], f["name"] = f["name"], views[0]["name"]
+            areas = [a for a in areas if a is not views[0]]
     return areas
 
 
@@ -197,11 +207,13 @@ def parse_cfg_split_segments(text):
                 attrs[key.strip().lower()] = val.strip()
         if "run" not in attrs or attrs["run"] == attrs.get("load"):
             continue
-        if {"align", "start", "offset"} & attrs.keys():
+        if {"start", "offset"} & attrs.keys():
             raise ParseError(f"segment {name.strip()}: load/run split with "
                              "its own placement attribute")
+        al = attrs.get("align_load", attrs.get("align"))
         out.append({"name": name.strip(), "load": attrs["load"],
-                    "run": attrs["run"]})
+                    "run": attrs["run"],
+                    "align_load": _number(al) if al else 1})
     return out
 
 
@@ -234,10 +246,13 @@ def measure(areas, segments, split=()):
     placed = []
     for sp in split:
         seg = by_name.get(sp["name"])
-        area = next((a for a in areas if a["name"] == sp["load"]), None)
+        area = next((a for a in areas
+                     if sp["load"] in (a["name"], a.get("alias"))), None)
         if seg is None or not seg["size"] or area is None:
             continue
         lo = cursor.get(area["name"], area["start"])
+        al = sp.get("align_load", 1)
+        lo = (lo + al - 1) // al * al
         placed.append({"name": sp["name"], "start": lo,
                        "end": lo + seg["size"] - 1, "size": seg["size"]})
         cursor[area["name"]] = lo + seg["size"]

@@ -143,6 +143,9 @@ SINK_PROBE = 1
         .import entropy_init
         .import drbg_init_entropy
         .import sqtab_init
+        .ifdef PQ_HYBRID
+        .import mlkem_boot_init
+        .endif
         .import crypto_init
 
         ; ---- imports: network (backend adapter — ip65 or uci) ----
@@ -240,11 +243,20 @@ start:
 
         sei                     ; disable interrupts during init
 
+.ifdef PQ_HYBRID
+        ; libs/mlkem: copy the code image from its load address ($A000, the
+        ; shadow BSS's file bytes) up to $E000 BEFORE the zeroing below
+        ; erases it. BASIC ROM is already out, so $A000 reads RAM. The order
+        ; is asserted after the loop.
+mlkem_copy_site:
+        jsr mlkem_boot_init
+.endif
         ; Zero SHADOW_BSS ($A000-$BFFF, 8 KiB). PRG LOAD does not zero BSS;
         ; ca65 BSS segments in file-less regions start with whatever RAM
         ; happened to contain. Without this, `net_initialized` and similar
         ; boot guards read garbage and send us straight into ip65 code before
         ; ip65 has been initialised, crashing us back to BASIC READY.
+boot_zbss_first:
         ldy #$00
         ldx #$20                ; 32 pages = $2000 bytes
         lda #$A0
@@ -258,6 +270,9 @@ start:
         inc @zbss_store+2
         dex
         bne @zbss_page
+.ifdef PQ_HYBRID
+.assert mlkem_copy_site < boot_zbss_first, error, "PQ_HYBRID: the ML-KEM boot copy must run BEFORE the $A000-$BFFF zeroing (it reads its source from there)"
+.endif
 .ifdef SINK_PROBE
         ; The REU's size bounds the HTTP body sink's region (src/http.s).
         ; Probed before anything else writes the REU: it writes offset 0

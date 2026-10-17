@@ -48,7 +48,7 @@ CFGS = {
 LINK_S = REPO / "src" / "crypto" / "mlkem_link.s"
 # The one area that CONTAINS the sqtab window by design: the window is
 # c64-https's own table (TABLES_BSS). mlkem_link.s asserts the equivalent.
-EXEMPT = {"CRYPTO_COLD_SHADOW"}
+EXEMPT = {"CRYPTO_COLD_SHADOW", "COLD_FILE"}
 EXPECT_AREAS = {
     "MLKEM_CODE_RAM": ("$E000", "$1E00"),
     "MLKEM_BSS_RAM": ("$B100", "$0B00"),
@@ -100,6 +100,18 @@ def no_define(cfg_text):
             if not re.search(r"define\s*=\s*yes", a)]
 
 
+ENTRY_RE = re.compile(r"\bmlkem_(keygen|encaps|decaps|decaps_seed|arith_init)\b")
+
+
+def unwrapped_callers(extra=None):
+    """Source files other than mlkem_link.s that name a library entry."""
+    files = {str(p.relative_to(REPO)): p.read_text()
+             for p in (REPO / "src").rglob("*.s")
+             if p.name != "mlkem_link.s"}
+    files.update(extra or {})
+    return sorted(f for f, txt in files.items() if ENTRY_RE.search(txt))
+
+
 def run_make(args, extra_env=None, timeout=1800):
     env = dict(os.environ, **(extra_env or {}))
     r = subprocess.run(["make"] + args, cwd=REPO, capture_output=True,
@@ -118,6 +130,9 @@ def static_checks(t):
                     and 'file = ""' in a and "define = yes" in a,
                     f"{cfg}: {name} = {start}/{size}, file=\"\", define",
                     a or "area missing")
+        t.check("file = %O" in areas.get("COLD_FILE", "") and
+                'file = ""' in areas.get("CRYPTO_COLD_SHADOW", ""),
+                f"{cfg}: COLD_FILE is the file view, CRYPTO_COLD_SHADOW the RAM view")
         t.check(not no_define(text), f"{cfg}: every MEMORY area is define = yes",
                 ", ".join(no_define(text)))
         t.check(not unguarded(text, cold),
@@ -127,6 +142,14 @@ def static_checks(t):
                     "LIB_MLKEM_POLY_BSS"):
             t.check(re.search(rf"^\s*{seg}:.*optional\s*=\s*yes", text, re.M),
                     f"{cfg}: {seg} is optional (unset builds stay identical)")
+
+    # The entry rule: nothing but mlkem_link.s names a library entry, so
+    # pq_mlkem_call (which runs mlkem_arith_init) is the only way in.
+    stray = unwrapped_callers()
+    t.check(not stray, "only mlkem_link.s references the ML-KEM entries",
+            ", ".join(stray))
+    t.check(unwrapped_callers({"src/zz.s": "  jsr mlkem_keygen\n"}) == ["src/zz.s"],
+            "red: a direct jsr mlkem_keygen elsewhere is reported")
 
     # Red cases for the guard: it must see a new area and a missing define.
     base = (REPO / "cfg" / "c64-https-uci.cfg").read_text()
@@ -201,13 +224,28 @@ def layout_checks(t, tag):
             f"{tag}: code+rodata = $E000-${segs['LIB_MLKEM_RODATA'][1]:04X}, "
             f"inside $E000-$FDFF")
     prg = REPO / "build" / "c64-https.prg"
-    bad = prg_io_violation(prg.read_bytes())
+    img = prg.read_bytes()
+    off = 0xA000 - 0x0801 + 2
+    t.check(img[off] != 0 and any(img[off:off + 0x1D00]),
+            f"{tag}: the ML-KEM image is in the PRG at $A000 (first byte nonzero)")
+    bad = prg_io_violation(img)
     t.check(bad is None, f"{tag}: the PRG does not load into $D000-$DFFF",
             str(bad))
 
 
 # (label, file, old, new, expected ld65/ca65 text)
 MUTANTS = [
+    ("load image layout differs from the run layout", "cfg/c64-https-uci.cfg",
+     "align = $40, align_load = $40, define = yes;", "align = $40, define = yes;",
+     "the load image and the run image are laid out differently"),
+    ("load image moved off the head of COLD_FILE", "cfg/c64-https-uci.cfg",
+     "LIB_MLKEM_CODE:     load = COLD_FILE, run = MLKEM_CODE_RAM, type = ro,  optional = yes, define = yes;",
+     "LIB_MLKEM_CODE:     load = COLD_FILE, run = MLKEM_CODE_RAM, type = ro,  optional = yes, define = yes, start = $A100;",
+     None),
+    ("COLD_FILE shrunk below the image", "cfg/c64-https-uci.cfg",
+     "COLD_FILE:          start = $A000, size = $2000",
+     "COLD_FILE:          start = $A000, size = $1000",
+     "COLD_FILE no longer ends at $BFFF"),
     ("polys moved off $D000", "cfg/c64-https-uci.cfg",
      "MLKEM_POLY_RAM:     start = $D000, size = $1000",
      "MLKEM_POLY_RAM:     start = $D100, size = $0F00",
@@ -276,9 +314,7 @@ def link_ok(t, tag, args):
     ok = t.check(rc == 0, f"{tag}: links", "\n".join(errs[-5:]) or out[-400:])
     if ok:
         warns = [ln for ln in out.splitlines() if ln.startswith("ld65: Warning")]
-        t.check(len(warns) == 1 and "LINKED at $E000" in warns[0],
-                f"{tag}: the only ld65 warning is the not-delivered notice",
-                "; ".join(warns))
+        t.check(not warns, f"{tag}: no ld65 warnings", "; ".join(warns))
         layout_checks(t, tag)
     return ok
 

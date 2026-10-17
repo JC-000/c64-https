@@ -310,6 +310,23 @@ def run_tests(transport, labels, seed=None):
             t.check(not any(got), f"{name} zero ({size} B at ${addr:04X})",
                     f"{sum(1 for x in got if x)} non-zero bytes, first "
                     + hx(got[:8]))
+        if labels.address("__LIB_MLKEM_CODE_RUN__") is not None:
+            # The code is not secret and 'Q' must leave it (and the RAM
+            # vectors) alone: the image is still byte-identical to the PRG's.
+            with open(PRG_PATH, "rb") as f:
+                prg = f.read()
+            for seg in ("CODE", "RODATA"):
+                load = labels[f"__LIB_MLKEM_{seg}_LOAD__"]
+                run = labels[f"__LIB_MLKEM_{seg}_RUN__"]
+                size = labels[f"__LIB_MLKEM_{seg}_SIZE__"]
+                want = prg[load - 0x0801 + 2:load - 0x0801 + 2 + size]
+                got = ram_rw(transport, run, size=size)
+                t.check(got == want, f"ML-KEM {seg} at ${run:04X} survives 'Q' "
+                        f"({size} B, not scrubbed)")
+            vec = ram_rw(transport, 0xFFFA, size=6)
+            t.check(vec == bytes([labels["mlkem_rti"] & 255,
+                                  labels["mlkem_rti"] >> 8]) * 3,
+                    "ML-KEM RAM vectors survive 'Q'", vec.hex())
         for i, (name, size) in enumerate(RESEEDED, start=len(ZEROED)):
             if not t.check(labels.address(name) is not None,
                            f"{name} exists", "not in labels.txt"):

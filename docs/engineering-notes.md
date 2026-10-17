@@ -4116,19 +4116,26 @@ lives; nothing calls it. Measured on the uci-onchip link: code+rodata
 `$E000-$FD40` (7,489 B with alignment fill, 191 B spare in the 7,680 B
 window), `LIB_MLKEM_BSS` `$B100-$BAF0` (2,545 B, 271 B spare before the
 sqtab at `$BC00`), `LIB_MLKEM_POLY_BSS` `$D000-$DFFF` (exactly 4,096 B).
-Scrub cost: 21 B of LOADER on comb-store (61 B left), 82 -> 61.
+Costs on comb-store: LOADER 82 -> 58 B, NET_CODE 589 -> 493 B.
 
 Findings that changed the plan:
 
-  - **The $E000 code is linked but not delivered.** #288 removed the only
-    file-backed way to reach `$E000` (the zero pad through the I/O page), and
-    staging 7.5 KB inside the PRG below `$D000` to copy up at boot needs file
-    bytes the images do not have: the free tails total ~2.7 KB, and
-    `$C000-$CFFF` (4 KB, free on uci, 1.7 KB free on comb) is the only
-    other file-backed area that can exist. So the cfgs put the code in a
-    `file=""` area and `mlkem_link.s` ldwarns on every link. Options for the
-    follow-up: relax #288 for DMA-only products (UCI loads by DMA), or
-    ship the code in the REU on comb, or shrink below 4 KB (not possible).
+  - **Delivery of the $E000 code (user decision 2026-10-13).** #288 removed
+    the file-backed route to `$E000`, so the image LOADS at `$A000` and boot
+    copies it up. The file bytes at `$A000-$BFFF` are CRYPTO_COLD_SHADOW's
+    BSS fill, which exist anyway. ld65 cannot put a ro segment and the BSS
+    at the same addresses of one area, so the shadow is split into a RAM
+    view (`CRYPTO_COLD_SHADOW`, `file=""`, all the BSS, same names and
+    addresses) and a file view (`COLD_FILE`, `file=%O`, the zero fill; holds
+    the image's load address). Unset, the PRG is byte-identical. The copy
+    (`mlkem_boot_init`, 30 pages, whole-page so no length symbol is needed)
+    runs right after `sei` in boot.s, before the zeroing that would erase its
+    source; an assembler assert pins that order. 'Q' leaves `$E000` and the
+    RAM vectors alone (not secret). Re-entry: the copy runs only when a
+    PRG-data flag is clear AND `$A000` is nonzero, since the stage is zero
+    after the first boot and `tls_rec_buf` is scrubbed to zero on 'Q'.
+    The NMI vectors in `$FFFA-$FFFF` (RAM with the KERNAL out) point at one
+    RTI in NET_CODE; IRQ/BRK point there too, moot under `sei`.
   - **`mlkem_arith_init` builds 1 KB of reduction tables inside
     `LIB_MLKEM_BSS`.** That window is X25519_TABLES, which X25519 rebuilds
     per scalar mult, so every ML-KEM call group needs `mlkem_arith_init`
