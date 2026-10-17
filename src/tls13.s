@@ -71,7 +71,12 @@
 
 ; --- ClientHello / ServerHello builders & parsers (tls_handshake) ---
 .import tls_build_client_hello
+.ifndef PQ_HYBRID
 .import tls_parse_server_hello
+.else
+.import tls_sh_err
+.import pq_connect_prep, pq_sh_init, pq_sh_feed, pq_sh_decaps, pq_seed_zero
+.endif
 .ifdef CH_SECTIONED
 .import tls_ch_ks_ptr
 .import tls_ch_ks_len
@@ -175,6 +180,12 @@ tls_connect:
         ; --- send ClientHello ---
         lda #TLS_STATE_CLIENT_HELLO
         sta tls_state
+.ifdef PQ_HYBRID
+        jsr pq_connect_prep     ; KeyGen + arm the hybrid key share (C=1: refused)
+        bcc :+
+        jmp @error
+:
+.endif
         jsr tls_send_client_hello
         bcc @ok1
         jmp @error
@@ -332,6 +343,10 @@ tls_connect:
         rts
 
 @error:
+.ifdef PQ_HYBRID
+        jsr pq_seed_zero        ; the d||z seed never outlives a failed connect (the
+                                ;  ML-KEM secret stays, like tls_shared_secret: 'Q' scrubs)
+.endif
         lda tls_state           ; preserve last attempted state
         bmi :+                  ; already ERROR: the record layer aborted
                                 ;  (#239) and recorded the state itself
@@ -438,12 +453,13 @@ tls_close:
 ; before any max_fragment_length agreement (MFL, RFC 6066 4), so the 2^14
 ; record bound applies to it and a ~1.4 KB hello is a legal single record
 ; with no reassembly needed in the peer.
-; Arming contract: set tls_ch_ks_ptr/len immediately before jsr tls_connect,
-; i.e. after DNS and TCP connect succeeded. tls_connect reaches this routine
-; with no branch in between, and the sectioned sender clears the length on
-; every exit (success or send failure), so nothing stays armed past one
-; ClientHello. A clear at tls_connect ENTRY cannot help: the caller arms
-; before the call, so an entry clear would also discard a fresh arm.
+; Arming: under PQ_HYBRID=1 tls_connect arms tls_ch_ks_ptr/len itself
+; (pq_connect_prep, src/crypto/pq_hybrid.s: KeyGen, then the ek in cert_buf)
+; between the X25519 keypair and this routine, with no branch in between. No
+; caller arms anything, and there is no build in which one does. The sectioned
+; sender clears the length on every exit (success or send failure), so nothing
+; stays armed past one ClientHello. A clear at tls_connect ENTRY would be
+; harmless now (nothing is armed before it) but buys nothing.
 ; =============================================================================
 tls_send_client_hello:
         ; initialize transcript hash
@@ -592,6 +608,9 @@ ch_sec_ptr: .res 2
 tls_recv_server_hello:
         lda #$01
         sta tls_recv_progress
+.ifdef PQ_HYBRID
+        jsr pq_sh_init          ; the streaming reader (src/crypto/pq_hybrid.s)
+.endif
         lda #0
         sta sh_timeout
         sta sh_timeout+1
@@ -605,6 +624,15 @@ tls_recv_server_hello:
         jsr net_poll
         jsr tls_record_recv_and_decrypt
         bcc @sh_got_record
+.ifdef PQ_HYBRID
+        bit tls_state                   ; ERROR latched: a malformed or oversize
+        bpl :+                          ;  record header while waiting for the SH
+        lda #SH_ERR_RECORD              ;  (a hybrid SH sent as ONE record does
+        sta tls_sh_err                  ;  not fit tls_rec_buf): fail now, do not
+        sec                             ;  resync through the payload for ~43 min
+        rts
+:
+.endif
         inc sh_timeout
         bne @sh_wait
         inc sh_timeout+1
@@ -615,6 +643,20 @@ tls_recv_server_hello:
 @sh_got_record:
         lda #$02
         sta tls_recv_progress
+.ifdef PQ_HYBRID
+        ; PQ_HYBRID: a hybrid ServerHello is ~1.2 KB and a server sends it as
+        ; several plaintext handshake records (OpenSSL under MFL 512: 512 +
+        ; 512 + 154). pq_sh_feed streams this record's bytes through the
+        ; ServerHello machine and folds them into the transcript (so this is
+        ; the last read of tls_rec_buf for the record, as below). Z=1: the
+        ; message is complete; Z=0: wait for the next record (the failed-poll
+        ; budget is shared by the whole message, like tls_recv_encrypted's).
+        jsr pq_sh_feed
+        bcs @sh_error
+        bne @sh_wait                    ; Z=0: more records; ONE timeout budget for the whole SH
+        lda #$05
+        sta tls_recv_progress
+.else
         ; verify content type is handshake
         lda tls_rec_type
         cmp #TLS_CT_HANDSHAKE
@@ -653,6 +695,8 @@ tls_recv_server_hello:
         lda tls_rec_len+1
         sta zp_count+1
         jsr tls_transcript_update
+
+.endif
 
         ; Drain frames already at the NIC and ACK them BEFORE the
         ; multi-minute ECDHE stall. The server's post-SH flight is on
@@ -697,6 +741,13 @@ tls_recv_server_hello:
         ; C=1 means the server's key_share drove the shared secret to all
         ; zeros (RFC 8446 §7.4.2 / RFC 7748 §6.1) — abort, see the comment in
         ; src/tls_ecdh.s. This used to be an unconditional `clc`.
+        ; PQ_HYBRID: the server chose 11EC -> Decaps its ct now, BEFORE the
+        ; X25519 mult: the ML-KEM BSS overlays X25519_TABLES, which the
+        ; x25519_*_fresh entries rebuild. C=1: refused.
+.ifdef PQ_HYBRID
+        jsr pq_sh_decaps
+        bcs @sh_error
+.endif
         jsr tls_ecdh_compute_shared
         bcs @sh_error
 

@@ -56,6 +56,10 @@
 ;                                         caller forgot to zero it (the ring
 ;                                         is otherwise ciphertext, not
 ;                                         scrubbed).
+;   tls_pq_seed..tls_mlkem_ss+32, 96 B    the 64 B d||z seed (secret from KeyGen
+;                                         until Decaps) and the 32 B ML-KEM
+;                                         shared secret (src/crypto/pq_hybrid.s;
+;                                         NET_BSS_TAIL, one adjacent pair).
 ;
 ; The multi-buffer spans zero whatever their module declares between the
 ; two ends, so each length is asserted exactly: a field added inside a span
@@ -109,6 +113,7 @@
         .ifdef PQ_HYBRID
         .import mul38_lo_tab
         .import __LIB_MLKEM_POLY_BSS_RUN__, __LIB_MLKEM_POLY_BSS_SIZE__
+        .import tls_pq_seed, tls_mlkem_ss
         .endif
         .import drbg_init_entropy
 
@@ -187,6 +192,7 @@ scrub_spans:
         SPAN mul38_lo_tab,      mul_dma_hi + 256,       2816
         SPAN __LIB_MLKEM_POLY_BSS_RUN__, __LIB_MLKEM_POLY_BSS_RUN__ + __LIB_MLKEM_POLY_BSS_SIZE__, 4096
         SPAN tcp_recv_buf,      tcp_recv_buf + MLKEM_DK_SIZE, 2400
+        SPAN tls_pq_seed,       tls_mlkem_ss + 32,      96
         .else
         SPAN mul_dma_lo,        mul_dma_hi + 256,       512
         .endif

@@ -469,7 +469,7 @@ endif
 CA65FLAGS += -D PQ_HYBRID=1
 SIBLING_LIB_ARCHIVES += build/lib/mlkem.a
 else
-CRYPTO_SRCS_EFFECTIVE := $(filter-out src/crypto/mlkem_link.s,$(CRYPTO_SRCS_EFFECTIVE))
+CRYPTO_SRCS_EFFECTIVE := $(filter-out src/crypto/mlkem_link.s src/crypto/pq_hybrid.s,$(CRYPTO_SRCS_EFFECTIVE))
 endif
 
 # #155 phase 2 memory reclaims: code no shipped image reaches is assembled

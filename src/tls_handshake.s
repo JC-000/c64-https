@@ -16,7 +16,9 @@
 
 ; --- Exports ---
 .export tls_build_client_hello
+.ifndef PQ_HYBRID
 .export tls_parse_server_hello
+.endif
 .export tls_parse_encrypted_extensions
 .export tls_hostname
 .export tls_hostname_len
@@ -251,6 +253,11 @@ ch_put_pub:
 
 
 
+; PQ_HYBRID: the single-record parser below is replaced by the streaming
+; reader in src/crypto/pq_hybrid.s (a hybrid ServerHello is ~1.2 KB and
+; arrives in several records), so it is assembled out there: the LOADER bytes
+; go to the glue that calls the reader.
+.ifndef PQ_HYBRID
 ; =============================================================================
 ; tls_parse_server_hello - parse ServerHello message
 ;
@@ -484,6 +491,8 @@ tls_parse_server_hello:
         rts
 
 
+.endif ; !PQ_HYBRID
+
 ; =============================================================================
 ; tls_sh_chk_hrr - is tls_server_random the HelloRetryRequest magic?
 ; Out: C=1 and tls_sh_err = SH_ERR_HRR if so, else C=0 (tls_sh_err is
@@ -491,8 +500,6 @@ tls_parse_server_hello:
 ; ip65: CODE (LOADER has room, the CRYPTO_OVERLAY pool does not); UCI:
 ; TLS_CODE (uci-comb-demo-store's LOADER would be left with 5 B).
 ; =============================================================================
-SH_ERR_HRR = $01
-
 .ifdef TLS_STREAM_DEFRAME
 .segment "TLS_CODE"
 .endif
@@ -536,8 +543,10 @@ tls_parse_encrypted_extensions:
 ; =============================================================================
 .segment "BSS"
 
+.ifndef PQ_HYBRID
 sh_found_ver:  .res 1
 sh_found_ks:   .res 1
+.endif
 
 ; Optional bulk key-share section for the ClientHello (see
 ; tls_build_client_hello). BSS is zeroed at boot, so the default is
