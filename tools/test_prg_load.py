@@ -165,13 +165,24 @@ def test_the_c000_ram_window_is_carried_and_compared() -> None:
 
 
 def test_non_zero_bytes_outside_both_windows_still_refuse() -> None:
-    for addr in (0xA000, 0xBFFF, 0xD000, 0xFDFF):
+    for addr in (0xD000, 0xFDFF):
         try:
             pl.image_span(make_prg(tail_byte=0xEA, at=addr, window=COLD))
         except pl.PrgLoadError as exc:
             assert f"${addr:04X}" in str(exc), exc
         else:
             raise AssertionError(f"a byte at ${addr:04X} would go unverified")
+
+
+def test_the_staged_ml_kem_image_span_is_allowed_and_counted() -> None:
+    """$A000-$BFFF holds the ML-KEM load image under PQ_HYBRID: it cannot be
+    read back (BASIC ROM), so it is allowed, counted, and named in the report
+    (rig_mlkem_hw.py proves the copy). The bytes either side still refuse."""
+    for addr in (0xA000, 0xBFFF):
+        prg = make_prg(tail_byte=0xEA, at=addr, window=COLD)
+        pl.image_span(prg)
+        assert pl.stage_bytes(prg) == addr - 0xA000 + 1, addr
+    assert pl.stage_bytes(make_prg()) == 0
 
 
 def test_a_zeroed_head_is_rewritten_then_verified() -> None:

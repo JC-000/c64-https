@@ -57,6 +57,14 @@ VERIFY_END = 0xA000
 #: (src/net/uci/cold_bank.s) carries its image here; no other image reaches
 #: it since #288 (they end at $BFFF), so the window compares nothing there.
 RAM_WINDOW = (0xC000, 0xD000)
+#: The ML-KEM load image (PQ_HYBRID): LIB_MLKEM_CODE/RODATA LOAD at $A000, in
+#: the file bytes under CRYPTO_COLD_SHADOW, and boot copies them to $E000 and
+#: then zeroes the stage. A host read of $A000-$BFFF returns the BASIC ROM and
+#: of $E000 the KERNAL, so this span cannot be compared before the run or
+#: after it. Non-zero bytes here are allowed (and counted in the report, loudly);
+#: tools/uci/rig_mlkem_hw.py parks the CPU with all RAM banked in and compares
+#: the copy at $E000 to the PRG's bytes - that is where it is proven.
+STAGE_RANGE = (0xA000, 0xC000)
 #: The head-zeroing event lands 2-5 s after READY; re-check past it.
 HEAD_SETTLE_S = 7.0
 #: Readback chunk; small enough that no firmware readmem cap is in play.
@@ -87,6 +95,9 @@ def image_span(prg: bytes):
     tail = bytearray(body[verify_len:])
     if w_len:
         tail[w_off - verify_len:w_off - verify_len + w_len] = bytes(w_len)
+    s_lo = max(STAGE_RANGE[0] - load_addr - verify_len, 0)
+    s_hi = max(STAGE_RANGE[1] - load_addr - verify_len, 0)
+    tail[s_lo:s_hi] = bytes(len(tail[s_lo:s_hi]))
     if any(tail):
         first = verify_len + next(i for i, b in enumerate(tail) if b)
         raise PrgLoadError(
@@ -95,6 +106,16 @@ def image_span(prg: bytes):
             f"${RAM_WINDOW[1] - 1:04X}: that span cannot be read back as "
             "loaded, so the verify would not cover the whole image")
     return load_addr, body, verify_len
+
+
+def stage_bytes(prg: bytes) -> int:
+    """Non-zero extent (up to the last non-zero byte) of the $A000-$BFFF tail."""
+    load_addr = prg[0] | (prg[1] << 8)
+    body = prg[2:]
+    lo = STAGE_RANGE[0] - load_addr
+    hi = min(STAGE_RANGE[1] - load_addr, len(body))
+    seg = body[lo:hi] if lo >= 0 else b""
+    return len(seg.rstrip(b"\x00"))
 
 
 def read_back(read_mem, addr: int, length: int) -> bytes:
@@ -167,12 +188,20 @@ def load_verified_and_run(client, prg: bytes, *, retries: int = 1,
             f"({attempts}); not starting a run on an image known to be wrong")
     window = (f" and {report['verified_ram_window']} ({w_len} B)"
               if w_len else "")
+    staged = stage_bytes(prg)
+    report["unverified_stage_bytes"] = staged
+    if staged:
+        print(f"NOTE: {staged} B of the $A000-$BFFF tail are the staged ML-KEM "
+              "image: NOT read back (a host read there returns the BASIC "
+              "ROM). tools/uci/rig_mlkem_hw.py proves the copy at $E000.",
+              file=out)
     print(f"PRG verified in RAM: {report['verified']} ({verify_len} B){window}; "
           f"the other {report['unverified_zero_tail']} B of the $A000+ tail "
-          f"are zero fill, not compared — SYS{entry}", file=out)
+          f"are zero fill (or the staged image noted above), not compared — SYS{entry}", file=out)
     client.send_text(f"SYS{entry}", finish_with_return=True)
     return report
 
 
-__all__ = ["HEAD_SETTLE_S", "PrgLoadError", "RAM_WINDOW", "VERIFY_END",
+__all__ = ["HEAD_SETTLE_S", "PrgLoadError", "RAM_WINDOW", "STAGE_RANGE",
+           "VERIFY_END", "stage_bytes",
            "image_span", "load_verified_and_run", "ram_window", "read_back"]
