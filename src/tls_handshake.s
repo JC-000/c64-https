@@ -571,8 +571,7 @@ tls_hostname_len:  .res 1
 ; =============================================================================
 ; The tables ride CODE (LOADER) on every backend: the crypto pools are the
 ; scarcer ones (ip65's CRYPTO_OVERLAY+RESIDENT are one tight pool,
-; uci-comb-demo-store has 70 B of CRYPTO_HOT). Measured vs the old builder,
-; tail free in LOADER: ip65 +153 B, uci +7 B (see the PR's margin table).
+; uci-comb-demo-store has little CRYPTO_HOT). Margins: tools/measure_margins.py.
 .segment "CODE"
 
 ; SHA-256("HelloRetryRequest"), RFC 8446 4.1.3

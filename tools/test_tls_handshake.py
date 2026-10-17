@@ -845,8 +845,14 @@ def capture_client_hello(transport, labels, rnd, pub, host, bulk,
         elif ld is not None:
             stub += bytes([0xAD, ld & 0xFF, ld >> 8])
         stub += bytes([0x99, (CH_TBL + off) & 0xFF, (CH_TBL + off) >> 8])
-    stub += bytes([0xC8] * 4 + [0x8C, CH_IDX & 0xFF, CH_IDX >> 8,
-                            0x38 if fail_send else 0x18, 0x60])  # sec/clc, rts
+    stub += bytes([0xC8] * 4 + [0x8C, CH_IDX & 0xFF, CH_IDX >> 8])
+    if fail_send:
+        # fail on the k-th call only (fail_send = k, 1-based):
+        # cpy #4k / beq L / clc / rts / L: sec / rts
+        stub += bytes([0xC0, 4 * int(fail_send), 0xF0, 0x02, 0x18, 0x60,
+                       0x38, 0x60])
+    else:
+        stub += bytes([0x18, 0x60])                      # clc, rts
     write_bytes(transport, CH_STUB, bytes(stub))
     write_bytes(transport, CH_IDX, [0])
     write_bytes(transport, labels["tls_client_random"], rnd)
@@ -970,26 +976,30 @@ def test_client_hello_sections(transport, labels, rng):
     bulk = bytes(rng.getrandbits(8) for _ in range(1184))
     check("2h  sectioned hello, no SNI", "", bulk, 4)
     check("2i  sectioned hello, 63-char host", "b" * 63, bulk, 4)
-    # bulk NOT at cert_buf: the sender must follow tls_ch_ks_ptr, not a
-    # hardcoded address ($C400 is idle RAM in this harness)
-    check("2j  sectioned hello, bulk at $C400", "example.com", bulk, 4,
-          bulk_addr=0xC400)
+    # bulk NOT at cert_buf and NOT page-aligned: the sender must follow BOTH
+    # bytes of tls_ch_ks_ptr ($C433 is idle RAM in this harness)
+    check("2j  sectioned hello, bulk at $C433", "example.com", bulk, 4,
+          bulk_addr=0xC433)
 
-    # a send failure mid-hello must not leave the hybrid armed
-    print("\n  [2k  failed send clears tls_ch_ks_len]")
-    try:
-        carry, secs, wire, th, ks_after = capture_client_hello(
-            transport, labels, rnd, pub, "example.com", bulk,
-            fail_send=True)
-        if carry == 1 and ks_after == b"\x00\x00":
-            passed += 1
-            print("       PASS: C=1 and tls_ch_ks_len cleared")
-        else:
+    # a send failure at ANY of the four sends (header, head, bulk, tail)
+    # must return C=1 and not leave the hybrid armed
+    for k in (1, 2, 3, 4):
+        print(f"\n  [2k  send #{k} fails: C=1, tls_ch_ks_len cleared]")
+        try:
+            carry, secs, wire, th, ks_after = capture_client_hello(
+                transport, labels, rnd, pub, "example.com", bulk,
+                fail_send=k)
+            if carry == 1 and ks_after == b"\x00\x00" and len(secs) == k:
+                passed += 1
+                print(f"       PASS: C=1, stopped after {k} sends, "
+                      f"tls_ch_ks_len cleared")
+            else:
+                failed += 1
+                print(f"       FAIL: carry={carry} sends={len(secs)} "
+                      f"ks_len after={ks_after}")
+        except Exception as e:
             failed += 1
-            print(f"       FAIL: carry={carry} ks_len after={ks_after}")
-    except Exception as e:
-        failed += 1
-        print(f"       FAIL: {e}")
+            print(f"       FAIL: {e}")
     return passed, failed
 
 

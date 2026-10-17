@@ -434,11 +434,10 @@ tls_close:
 ; in tls_rec_buf and goes out exactly as it always has. tls_ch_ks_len != 0:
 ; the message is SECTIONED (see tls_build_client_hello) and tls_ch_send_
 ; sections streams it. Either way ONE TLS record carries the whole
-; ClientHello: RFC 8446 5.1 would allow fragmenting it, but a ClientHello
-; precedes any max_fragment_length negotiation (the MFL extension, RFC 6066
-; 4, binds records only AFTER the server echoes it), so the 2^14 default
-; bound holds and a ~1.4 KB hello is a legal single record, which is what
-; every peer parses without a reassembly path.
+; ClientHello: RFC 8446 5.1 would allow fragmenting it, but the CH is sent
+; before any max_fragment_length agreement (MFL, RFC 6066 4), so the 2^14
+; record bound applies to it and a ~1.4 KB hello is a legal single record
+; with no reassembly needed in the peer.
 ; Arming contract: set tls_ch_ks_ptr/len immediately before jsr tls_connect,
 ; i.e. after DNS and TCP connect succeeded. tls_connect reaches this routine
 ; with no branch in between, and the sectioned sender clears the length on
