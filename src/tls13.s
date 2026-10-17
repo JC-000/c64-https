@@ -72,6 +72,12 @@
 ; --- ClientHello / ServerHello builders & parsers (tls_handshake) ---
 .import tls_build_client_hello
 .import tls_parse_server_hello
+.ifdef CH_SECTIONED
+.import tls_ch_ks_ptr
+.import tls_ch_ks_len
+.import tls_ch_split
+.import tls_rec_header
+.endif
 
 ; --- Transcript hash (tls_transcript.s) ---
 .import tls_transcript_init
@@ -423,6 +429,16 @@ tls_close:
 ; =============================================================================
 ; tls_send_client_hello - build and send ClientHello, init transcript
 ; Output: C=0 success, C=1 send failure
+;
+; Two paths. tls_ch_ks_len = 0 (every build today): the whole message sits
+; in tls_rec_buf and goes out exactly as it always has. tls_ch_ks_len != 0:
+; the message is SECTIONED (see tls_build_client_hello) and tls_ch_send_
+; sections streams it. Either way ONE TLS record carries the whole
+; ClientHello: RFC 8446 5.1 would allow fragmenting it, but a ClientHello
+; precedes any max_fragment_length negotiation (RFC 8449 limits apply to
+; records AFTER the server accepts), so the 2^14 default bound holds and a
+; ~1.4 KB hello is a legal single record, which is what every peer parses
+; without a reassembly path.
 ; =============================================================================
 tls_send_client_hello:
         ; initialize transcript hash
@@ -431,6 +447,13 @@ tls_send_client_hello:
         ; build ClientHello directly into tls_rec_buf, sets tls_rec_len
         jsr tls_build_client_hello
 
+.ifdef CH_SECTIONED
+        lda tls_ch_ks_len
+        ora tls_ch_ks_len+1
+        beq @classic
+        jmp tls_ch_send_sections
+@classic:
+.endif
         ; send as plaintext handshake record
         lda #TLS_CT_HANDSHAKE
         jsr tls_record_send_plaintext
@@ -454,6 +477,107 @@ tls_send_client_hello:
 @ch_fail:
         sec
         rts
+
+; =============================================================================
+; tls_ch_send_sections - stream a sectioned ClientHello as ONE record.
+; Wire order: record header (5, not hashed), head, bulk, tail; each section is
+; folded into the transcript right after it is sent, in wire order (the
+; SHA-256 block buffer makes the fold split-point independent).
+; Clears tls_ch_ks_len (one-shot). Output: C=0 success, C=1 send failure.
+; Lives in TLS_CODE: jsr/jmp-only, off the ip65 LOADER.
+; =============================================================================
+.ifdef CH_SECTIONED
+.segment "TLS_CODE"
+tls_ch_send_sections:
+        lda #TLS_CT_HANDSHAKE
+        sta tls_rec_header
+        lda #$03
+        sta tls_rec_header+1
+        sta tls_rec_header+2
+        ; record length = staged bytes + bulk (16-bit)
+        lda tls_rec_len
+        clc
+        adc tls_ch_ks_len
+        sta tls_rec_header+4
+        lda tls_rec_len+1
+        adc tls_ch_ks_len+1
+        sta tls_rec_header+3
+        lda #5
+        sta net_send_len
+        lda #0
+        sta net_send_len+1
+        lda #<tls_rec_header
+        ldx #>tls_rec_header
+        jsr net_tcp_send
+        bcs @cs_done
+
+        ; head = tls_rec_buf[0 .. split)
+        lda tls_ch_split
+        sta net_send_len
+        lda #0
+        sta net_send_len+1
+        lda #<tls_rec_buf
+        ldx #>tls_rec_buf
+        jsr tls_ch_section
+        bcs @cs_done
+
+        ; bulk = (tls_ch_ks_ptr), tls_ch_ks_len bytes
+        lda tls_ch_ks_len
+        sta net_send_len
+        lda tls_ch_ks_len+1
+        sta net_send_len+1
+        lda tls_ch_ks_ptr
+        ldx tls_ch_ks_ptr+1
+        jsr tls_ch_section
+        bcs @cs_done
+
+        ; tail = tls_rec_buf[split .. tls_rec_len)
+        lda tls_rec_len
+        sec
+        sbc tls_ch_split
+        sta net_send_len
+        lda tls_rec_len+1
+        sbc #0
+        sta net_send_len+1
+        lda #<tls_rec_buf
+        clc
+        adc tls_ch_split
+        pha
+        lda #>tls_rec_buf
+        adc #0
+        tax
+        pla
+        jsr tls_ch_section
+@cs_done:
+        php
+        lda #0
+        sta tls_ch_ks_len               ; one-shot
+        sta tls_ch_ks_len+1
+        plp
+        rts
+
+; tls_ch_section - send net_send_len bytes at A/X, then fold them into the
+; transcript. C=1 on send failure (nothing folded).
+tls_ch_section:
+        sta ch_sec_ptr                  ; net_tcp_send may use zp_ptr
+        stx ch_sec_ptr+1
+        jsr net_tcp_send
+        bcs @sec_ret
+        lda ch_sec_ptr
+        sta zp_ptr
+        lda ch_sec_ptr+1
+        sta zp_ptr+1
+        lda net_send_len
+        sta zp_count
+        lda net_send_len+1
+        sta zp_count+1
+        jsr tls_transcript_update
+        clc
+@sec_ret:
+        rts
+ch_sec_ptr: .word 0
+.segment "CODE"
+.endif
 
 ; =============================================================================
 ; tls_recv_server_hello - receive and parse ServerHello, update transcript

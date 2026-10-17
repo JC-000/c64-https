@@ -660,6 +660,19 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
     profile — never carry a figure from one to another.
   - 'Q' zeroes only the spans in `src/session_scrub.s`: a new secret buffer outside every span is silently left in RAM (add a SPAN).
     After 'Q' BASIC owns $0801-$9FFF (the image): SYS re-entry is valid only before BASIC allocates anything (variables, strings, LOAD), and BASIC is unusable after such a SYS returns; rigs park the CPU (JMP *) or type only further SYS lines.
+  - **ClientHello is sectioned (PQ P3).** `tls_build_client_hello` stages
+    head+tail in `tls_rec_buf` from length-prefixed templates (`ch_tmpl`,
+    CODE); `tls_ch_ks_ptr/len` (16-bit, BSS, **cleared by each send**) name
+    an optional bulk key-share section (the future 1,184 B ML-KEM ek) that
+    `tls_ch_send_sections` streams between head (`tls_ch_split`) and tail as
+    ONE record, hashing each section in wire order. Length 0 = the classic
+    X25519-only hello, byte-identical to before. Built only under
+    `TLS_STREAM_DEFRAME` (`CH_SECTIONED`, `constants.inc`), i.e. UCI; ip65
+    keeps the table-driven X25519-only builder. A CH may exceed the 512 B
+    MFL: that limit only binds after the server accepts it. HelloRetryRequest
+    (SH random = SHA-256("HelloRetryRequest")) is refused with
+    `tls_sh_err = $01` (`tls_sh_chk_hrr`). Test: `test_tls_handshake.py`
+    [2d-2i], [3d].
   - `net_tcp_set_recv_cb` is an RTS stub. Boot banner: `rr-net` under ip65,
     `UCI NETWORKING` under UCI — `boot_check.py` asserts both.
 
