@@ -37,6 +37,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
+sys.path.insert(0, str(REPO / "tools" / "uci"))
 from _skip_policy import cannot_run, verdict  # noqa: E402
 from check_prg_io_range import prg_io_violation  # noqa: E402
 
@@ -110,6 +111,39 @@ def unwrapped_callers(extra=None):
              if p.name != "mlkem_link.s"}
     files.update(extra or {})
     return sorted(f for f, txt in files.items() if ENTRY_RE.search(txt))
+
+
+EXPORT_RE = re.compile(r"(\S+)\s+([0-9A-F]{6})\s+[RL][EL]?[A-Z]?(?:\s|$)")
+
+
+def rom_shadowed_symbols(map_path):
+    """Names the linker puts in $E000-$FDFF (the ML-KEM run image), from the
+    map's Exports list - not a name regex, so a library addition is covered."""
+    text = Path(map_path).read_text()
+    sec = text.split("Exports list by name:")[1].split("Imports list")[0]
+    out = {}
+    for name, addr in EXPORT_RE.findall(sec):
+        a = int(addr, 16)
+        if 0xE000 <= a <= 0xFDFF and not name.startswith(("LIB_", "__")):
+            out[name] = a
+    return out
+
+
+def banned_references(symbols, extra=None):
+    """{file: [symbols]} for every source file except mlkem_link.s that names
+    a symbol in the run image: such a reference is an unbanked call into
+    KERNAL ROM (or skips mlkem_arith_init)."""
+    files = {str(p.relative_to(REPO)): p.read_text()
+             for p in (REPO / "src").rglob("*.s")
+             if p.name != "mlkem_link.s"}
+    files.update(extra or {})
+    hits = {}
+    for f, txt in files.items():
+        txt = "\n".join(ln.split(";")[0] for ln in txt.splitlines())
+        found = sorted(s for s in symbols if re.search(rf"\b{re.escape(s)}\b", txt))
+        if found:
+            hits[f] = found
+    return hits
 
 
 def run_make(args, extra_env=None, timeout=1800):
@@ -223,8 +257,30 @@ def layout_checks(t, tag):
             and segs["LIB_MLKEM_RODATA"][1] <= 0xFDFF,
             f"{tag}: code+rodata = $E000-${segs['LIB_MLKEM_RODATA'][1]:04X}, "
             f"inside $E000-$FDFF")
+    syms = rom_shadowed_symbols(REPO / "build" / "c64-https.map")
+    t.check(len(syms) >= 20 and "mlkem_keygen" in syms and "keccak_f1600" in syms,
+            f"{tag}: the map's export list has {len(syms)} symbols in $E000-$FDFF")
+    hits = banned_references(syms)
+    t.check(not hits, f"{tag}: no source outside mlkem_link.s names one of them",
+            str(hits))
+    t.check(banned_references(syms, {"src/zz.s": "  jsr mlkem_poly_ntt\n"}) ==
+            {"src/zz.s": ["mlkem_poly_ntt"]},
+            f"{tag}: red: a direct jsr into the image is reported")
+    t.check(set(syms) >= {"mlkem_keygen", "mlkem_decaps_seed", "mlkem_arith_init"},
+            f"{tag}: red: the symbol set covers the entries, not a name regex")
+    allowed = banned_references(syms, {"src/zz.s": "  jsr pq_mlkem_keygen\n  jsr pq_mlkem_decaps_seed\n  lda #<pq_mlkem_call\n"})
+    t.check("src/zz.s" not in allowed,
+            f"{tag}: the named wrappers are callable from anywhere")
     prg = REPO / "build" / "c64-https.prg"
     img = prg.read_bytes()
+    import _prg_load as pl
+    stage = pl.stage_from_labels(REPO / "build" / "labels.txt")
+    try:
+        pl.image_span(img, stage)
+        ok_load = stage is not None
+    except pl.PrgLoadError as exc:
+        ok_load = False
+    t.check(ok_load, f"{tag}: _prg_load accepts this PQ image (stage {stage})")
     off = 0xA000 - 0x0801 + 2
     t.check(img[off] != 0 and any(img[off:off + 0x1D00]),
             f"{tag}: the ML-KEM image is in the PRG at $A000 (first byte nonzero)")

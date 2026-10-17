@@ -16,7 +16,7 @@
 ; PLACEMENT (cfg/c64-https-uci-onchip.cfg and ...-onchip-cold.cfg)
 ;
 ;   LIB_MLKEM_CODE/RODATA  MLKEM_CODE_RAM  $E000-$FDFF  RAM under the KERNAL
-;                          ROM. file="" - NOT in the PRG (see HAZARD below).
+;                          ROM. file="" - NOT in the PRG (see DELIVERY below).
 ;   LIB_MLKEM_POLY_BSS     MLKEM_POLY_RAM  $D000-$DFFF  RAM under I/O, the
 ;                          eight polynomials, exactly 4,096 B.
 ;   LIB_MLKEM_BSS          MLKEM_BSS_RAM   $B100-$BBFF  = X25519_TABLES
@@ -35,9 +35,9 @@
 ;      mlkem_keygen, secret-derived y/e1/e2 after Decaps; LIB_MLKEM_BSS:
 ;      m', K', r'). src/session_scrub.s zeroes both under PQ_HYBRID.
 ;   3. $E000 code and the $D000 polys need $01 banked (KERNAL and I/O out,
-;      $01 = $34) under sei around every ML-KEM call. With the KERNAL out the
-;      hardware vectors are RAM: a RESTORE-key NMI during a call jumps through
-;      whatever sits at $FFFA. $FE00-$FFFF is left free for a vector stub.
+;      $01 = $34) under sei around every ML-KEM call; pq_mlkem_call does
+;      both. With the KERNAL out the hardware vectors are RAM, and
+;      mlkem_boot_init points all three at an RTI (VECTORS below).
 ;
 ; DELIVERY (#288): the PRG may not carry a byte at $D000+, so the code is not
 ; file-backed at $E000. It LOADS at $A000 (COLD_FILE: the file bytes under
@@ -47,19 +47,24 @@
 ; so $A000 reads RAM). The ordering is asserted in boot.s and tested in
 ; tools/test_mlkem_linked.py (which also compares the copied bytes).
 ;
-; ENTRY: pq_mlkem_call is the only way in. It banks ($01 = $34, under sei),
+; ENTRY: pq_mlkem_call (and its named wrappers pq_mlkem_keygen and
+; pq_mlkem_decaps_seed) is the only way in. It banks ($01 = $34, under sei),
 ; runs mlkem_arith_init (RULE 1 above: the reduction tables live in a window
-; X25519 rebuilds), jsrs the entry in A/X and restores. The library's own
-; entries are not to be referenced anywhere else
-; (tools/test_mlkem_placement.py greps for it). The parameter block
+; X25519 rebuilds), jsrs the entry in A/X and restores. No symbol the linker
+; places in $E000-$FDFF may be referenced outside this file
+; (tools/test_mlkem_placement.py reads the map's export list). A client needs
+; KeyGen and Decaps-from-seed only; Encaps and Decaps-with-dk have no wrapper
+; because nothing here calls them. The parameter block
 ; (mlkem_arg_*) is ALSO in LIB_MLKEM_BSS: fill it after the last X25519 /
 ; fp_mul and before pq_mlkem_call, never across one.
 ;
 ; VECTORS: with the KERNAL out $FFFA-$FFFF are RAM. mlkem_boot_init points
 ; NMI, RESET and IRQ/BRK at one RTI (in NET_CODE, always RAM), so a
-; RESTORE-key NMI during a call returns instead of jumping through
-; garbage. IRQ and BRK are moot: every call runs under sei, and no BRK is
-; ever executed; they point at the same RTI so a stray one is harmless.
+; RESTORE-key NMI (edge-triggered, one event) returns instead of jumping
+; through garbage. The sei in pq_mlkem_call is LOAD-BEARING for IRQ: CIA1's
+; IRQ line is level-triggered and, with I/O banked out, nothing can
+; acknowledge it, so an IRQ that reached the RTI would re-enter at once and
+; livelock the call. No BRK is executed; its vector shares the RTI.
 ;
 ; ZERO PAGE (tools/integration/build_mlkem.sh has the table and reasoning):
 ; $40-$4F, inside ZP_WIDE; the only co-tenant is the X25519 sibling's
@@ -95,6 +100,7 @@ LIB_SHARED_SQTAB_BASE = $BC00
 .import __COLD_FILE_START__, __COLD_FILE_SIZE__
 .import __LIB_MLKEM_CODE_LOAD__, __LIB_MLKEM_CODE_RUN__, __LIB_MLKEM_CODE_SIZE__
 .import __LIB_MLKEM_RODATA_LOAD__, __LIB_MLKEM_RODATA_RUN__, __LIB_MLKEM_RODATA_SIZE__
+.import __LIB_MLKEM_MARK_LOAD__, __LIB_MLKEM_MARK_RUN__, __LIB_MLKEM_MARK_SIZE__
 .import __MLKEM_BSS_RAM_START__,  __MLKEM_BSS_RAM_SIZE__,  __MLKEM_BSS_RAM_LAST__
 .import __MLKEM_POLY_RAM_START__, __MLKEM_POLY_RAM_SIZE__, __MLKEM_POLY_RAM_LAST__
 .import __LIB_MLKEM_BSS_RUN__, __LIB_MLKEM_BSS_SIZE__
@@ -148,6 +154,11 @@ MLKEM_LOAD_BASE = $A000
 .assert __LIB_MLKEM_RODATA_LOAD__ + __LIB_MLKEM_RODATA_SIZE__ <= MLKEM_LOAD_BASE + __MLKEM_CODE_RAM_SIZE__, lderror, "the ML-KEM load image is longer than the block boot copies"
 .assert __LIB_MLKEM_RODATA_LOAD__ + __LIB_MLKEM_RODATA_SIZE__ <= __COLD_FILE_START__ + __COLD_FILE_SIZE__, lderror, "the ML-KEM load image runs past the PRG's file content"
 .assert __LIB_MLKEM_RODATA_RUN__ + __LIB_MLKEM_RODATA_SIZE__ <= __MLKEM_CODE_RAM_START__ + __MLKEM_CODE_RAM_SIZE__, lderror, "the ML-KEM run image overflows MLKEM_CODE_RAM"
+.assert __LIB_MLKEM_MARK_SIZE__ = 1, lderror, "the tail marker is not one byte"
+.assert __LIB_MLKEM_MARK_LOAD__ = __LIB_MLKEM_RODATA_LOAD__ + __LIB_MLKEM_RODATA_SIZE__, lderror, "the tail marker is not the last byte of the load image"
+.assert __LIB_MLKEM_MARK_LOAD__ - __LIB_MLKEM_CODE_LOAD__ = __LIB_MLKEM_MARK_RUN__ - __LIB_MLKEM_CODE_RUN__, lderror, "the tail marker's load and run offsets differ"
+.assert __LIB_MLKEM_MARK_LOAD__ < MLKEM_LOAD_BASE + __MLKEM_CODE_RAM_SIZE__, lderror, "the tail marker is past the block boot copies"
+.assert __LIB_MLKEM_MARK_RUN__ < __MLKEM_CODE_RAM_START__ + __MLKEM_CODE_RAM_SIZE__, lderror, "the tail marker overflows MLKEM_CODE_RAM"
 .assert __MLKEM_CODE_RAM_SIZE__ .mod 256 = 0, lderror, "the boot copy moves whole pages: MLKEM_CODE_RAM is not a page multiple"
 .assert __MLKEM_CODE_RAM_START__ + __MLKEM_CODE_RAM_SIZE__ <= $FFFA, lderror, "MLKEM_CODE_RAM overlaps the $FFFA vectors"
 
@@ -250,25 +261,36 @@ SQTAB_GUARD "COLD_RUN_TRUST",     __COLD_RUN_TRUST_START__,     __COLD_RUN_TRUST
 ; =============================================================================
 ; Code (NET_CODE via LOADER_OVERFLOW; always RAM, so the SMC below is legal)
 ; =============================================================================
-.export mlkem_boot_init, pq_mlkem_call
+.export mlkem_boot_init, pq_mlkem_call, pq_mlkem_keygen, pq_mlkem_decaps_seed
 
 .segment "LOADER_OVERFLOW"
 
 ; mlkem_boot_init - boot.s, right after `sei`, BEFORE it zeroes $A000-$BFFF.
 ; In:  BASIC ROM already banked out ($01 bit 0 clear), so $A000 reads RAM.
-; Out: the load image at $A000 copied to $E000 (30 pages); NMI/RESET/IRQ
-;      vectors in RAM point at an RTI. Clobbers A, X, Y.
-; Skips the copy unless this is a fresh LOAD: mlkem_copied is PRG data (0
-; only after a LOAD) AND $A000 is nonzero (the stage is zeroed by the boot
-; right after the copy, and 'Q' zeroes tls_rec_buf at the same address). Both
-; must say "fresh": after 'Q' the stage is zeros, so a re-entry that copied
-; would erase the code. $E000 and the vectors are not secret and 'Q' leaves
-; them alone (session_scrub has no span there).
+; Out: the load image at $A000 copied to $E000 (30 pages) and
+;      mlkem_copied = 1; NMI/RESET/IRQ vectors in RAM point at an RTI.
+;      Clobbers A, X, Y.
+; Three cases, decided by the image's TAIL MARKER (LIB_MLKEM_MARK, the last
+; byte of the load image, like cold_bank_init's COLD_MARK: a LOAD cut short
+; before it never has it):
+;   1. mlkem_copied already 1 (a SYS re-entry): nothing to do.
+;   2. the marker is present at the load address: a fresh, complete LOAD:
+;      copy, set the vectors, mlkem_copied = 1.
+;   3. no marker at the load address (the stage was zeroed by an earlier boot
+;      or the LOAD stopped short): if the RUN address already holds the marker
+;      the image is resident from an earlier boot (the PRG-data flag was
+;      clobbered, e.g. by BASIC after 'Q'): mlkem_copied = 1. Otherwise
+;      REFUSE: mlkem_copied stays 0, the border goes red, and pq_mlkem_call
+;      returns A=$FF with C=1 and runs nothing. Never a silent skip.
+; $E000 and the vectors are not secret and 'Q' leaves them alone
+; (session_scrub has no span there).
+MLKEM_MARK = $5C
 mlkem_boot_init:
         lda mlkem_copied
         bne @done
-        lda MLKEM_LOAD_BASE
-        beq @done
+        lda __LIB_MLKEM_MARK_LOAD__
+        cmp #MLKEM_MARK
+        bne @resident
         lda #>MLKEM_LOAD_BASE
         sta @ld+2
         lda #>__MLKEM_CODE_RAM_START__
@@ -291,6 +313,22 @@ mlkem_boot_init:
         bpl @vec
         inc mlkem_copied
 @done:  rts
+@resident:
+        lda $01
+        pha
+        lda #$34                ; all RAM: $E000+ would read the KERNAL
+        sta $01
+        ldx __LIB_MLKEM_MARK_RUN__
+        pla
+        sta $01
+        cpx #MLKEM_MARK
+        bne @refuse
+        inc mlkem_copied
+        rts
+@refuse:
+        lda #2                  ; red border: the image is not there
+        sta $D020
+        rts
 
 mlkem_vec_tab:                  ; NMI, RESET, IRQ/BRK -> the one RTI
         .word mlkem_rti, mlkem_rti, mlkem_rti
@@ -302,12 +340,19 @@ mlkem_copied:
 ; pq_mlkem_call - the only entry into libs/mlkem.
 ; In:  A/X = entry (mlkem_keygen, mlkem_decaps_seed, ...); the mlkem_arg_*
 ;      block already filled.
-; Out: A = the entry's A (its status); X, Y, C, Z, N clobbered; I restored.
+; Out: C=0: A = the entry's A (its status), X/Y/N/Z clobbered, the caller's I
+;      flag restored. C=1, A=$FF: refused (the image is not resident, see
+;      mlkem_boot_init); nothing ran.
 ; Banks $01 = $34 (KERNAL, BASIC and I/O out: code at $E000, polys at
 ; $D000) under sei, runs mlkem_arith_init FIRST on every call because its
 ; tables live in the window X25519 rebuilds, then the entry.
 pq_mlkem_call:
-        sta @go+1
+        ldy mlkem_copied
+        bne @run
+        lda #$FF
+        sec
+        rts
+@run:   sta @go+1
         stx @go+2
         php
         sei
@@ -322,4 +367,20 @@ pq_mlkem_call:
         sta $01
         plp
 @ra:    lda #0
+        clc
         rts
+
+; Named entries: all a client calls (KeyGen to send ek; Decaps from the
+; 64 B seed). Encaps and Decaps-with-dk are not wrapped: nothing calls them.
+pq_mlkem_keygen:
+        lda #<mlkem_keygen
+        ldx #>mlkem_keygen
+        jmp pq_mlkem_call
+pq_mlkem_decaps_seed:
+        lda #<mlkem_decaps_seed
+        ldx #>mlkem_decaps_seed
+        jmp pq_mlkem_call
+
+.segment "LIB_MLKEM_MARK"
+mlkem_mark:
+        .byte MLKEM_MARK

@@ -47,10 +47,11 @@
 ;                                         out) under sei, restored on exit;
 ;                                         every other span is plain RAM
 ;                                         either way. With the KERNAL out the
-;                                         vectors at $FFFA/$FFFE are RAM, so a
-;                                         RESTORE-key NMI in this window (a
-;                                         few ms) would jump through garbage:
-;                                         accepted, the next line is 'Q'.
+;                                         vectors at $FFFA/$FFFE are RAM; they
+;                                         point at an RTI (mlkem_boot_init), so
+;                                         a RESTORE-key NMI in this window
+;                                         returns. The sei above is what keeps
+;                                         an IRQ out (see mlkem_link.s).
 ;   tcp_recv_buf, 2,400 B                 the discarded ML-KEM dk if the
 ;                                         caller forgot to zero it (the ring
 ;                                         is otherwise ciphertext, not

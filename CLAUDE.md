@@ -150,7 +150,8 @@ Variables:
     `src/crypto/mlkem_link.s`, guards `tools/test_mlkem_placement.py` and
     `tools/test_mlkem_linked.py`. The code **loads at $A000** (the shadow
     BSS's file bytes) and `mlkem_boot_init` copies it to $E000 before boot's
-    zeroing (#288 stays satisfied). The only entry is `pq_mlkem_call`.
+    zeroing (#288 stays satisfied); a tail marker refuses a cut-short LOAD. The
+    only entries are `pq_mlkem_keygen` / `pq_mlkem_decaps_seed` (`pq_mlkem_call`).
   - `USE_X25519_SIBLING` — **retired, `$(error)`-guarded (#245)**: every
     build links the `libs/x25519` sibling; any value is refused.
   - `ENABLE_P384_VERIFY`, `USE_OVERLAY_P384_EMBED`, `KEEP_CRYPTO_SWAP`,
@@ -829,8 +830,9 @@ serves uci-onchip; `-onchip-cold.cfg` comb; `-onchip.cfg` comb COLD_BANK=0):
 (2,545 B of 2,816, over X25519_TABLES + the $B900 hole + mul_dma). Rules:
 ML-KEM never interleaves with X25519 or fp_mul, and **every ML-KEM call group
 needs `mlkem_arith_init` first** (its 1 KB of mod-q tables live in that
-window, which X25519 rebuilds over): `pq_mlkem_call` does both, and
-`test_mlkem_placement.py` fails on any other reference to a library entry.
+window, which X25519 rebuilds over): the wrappers do both, and
+`test_mlkem_placement.py` fails on any source outside `mlkem_link.s` naming a
+symbol the map places in $E000-$FDFF.
 The `mlkem_arg_*` block is in that window too: fill it after the last X25519.
 All pinned in `src/crypto/mlkem_link.s`; scrub spans in `session_scrub.s`.
 

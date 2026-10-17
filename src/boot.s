@@ -271,6 +271,8 @@ boot_zbss_first:
         dex
         bne @zbss_page
 .ifdef PQ_HYBRID
+; This compares LABELS, not the call itself: a jsr moved elsewhere still passes it.
+; tools/test_mlkem_linked.py (the image compare and mutant b) is the real guard.
 .assert mlkem_copy_site < boot_zbss_first, error, "PQ_HYBRID: the ML-KEM boot copy must run BEFORE the $A000-$BFFF zeroing (it reads its source from there)"
 .endif
 .ifdef SINK_PROBE

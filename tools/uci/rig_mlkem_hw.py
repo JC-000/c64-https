@@ -16,6 +16,9 @@ copied-to-$E000 image is proven on silicon:
               dk and K with the libs/mlkem reference (the one the library's
               ACVP runs are checked against).
 
+Both phases run AFTER 'Q' (BASIC owns the machine), so no in-session call
+(KeyGen between the menu and a connection) is proven here - that is P4's job.
+
 Environment: U64_HOST (default 192.168.1.81), BOOT_TIMEOUT (default 60; set
 C64_INIT_WAIT-style larger values for the comb profile's boot precompute),
 C64_PRG. Exit 0 = all checks passed, 1 = a check failed, 2 = could not run.
@@ -42,9 +45,13 @@ from c64_test_harness.uci_network import disable_uci, enable_uci  # noqa: E402
 from _device_lock_helper import LockTimeoutConfigError, acquire_device_lock  # noqa: E402
 from _device_prep import DevicePrepError, prepare_device  # noqa: E402
 from _reu_preflight import ReuPreflightError, preflight_reu  # noqa: E402
+from _memory_policy import TCP_RING_DEFAULT, _label_value, build_policy_and_low_ram_arbiter  # noqa: E402
 from _prg_load import PrgLoadError, load_verified_and_run  # noqa: E402
 from _skip_policy import cannot_run, verdict  # noqa: E402
 from boot_check import decode_screen, screen_text  # noqa: E402
+
+#: Labels a build must carry for this rig to run (tools/test_rig_scratch.py).
+NEEDED = ("pq_mlkem_keygen",)
 
 HOST = os.environ.get("U64_HOST", "192.168.1.81")
 BOOT_TIMEOUT = float(os.environ.get("BOOT_TIMEOUT", os.environ.get("C64_INIT_WAIT", "60")))
@@ -52,20 +59,34 @@ PRG_PATH = Path(os.environ.get("C64_PRG", str(REPO / "build" / "c64-https.prg"))
 TURBO_MHZ = int(os.environ.get("TURBO_MHZ", "48"))
 LABELS_PATH = Path(os.environ.get("C64_LABELS", str(REPO / "build" / "labels.txt")))
 
-STUB = 0x0340
-SENT = 0x03F0           # +0 A result, +1 sentinel $A5
-SEED = 0xCE00           # d (32) then z (32), inside the TCP ring
-KEY = 0x0380
-EK_AT = 0x4200          # cert_buf
-DK_AT = 0xC000          # the ring: where the real dk will live
-CT_AT = 0xC960
+# Scratch comes from build/labels.txt and tools/uci/_memory_policy.py, never
+# hardcoded: page 3 (arbiter) for the stub, sentinel, seed and key; cert_buf
+# for ek; the TCP ring (the real dk's home) for dk and ct. Set by layout().
+STUB = SENT = SEED = KEY = EK_AT = DK_AT = CT_AT = None
+
+
+def layout(labels):
+    global STUB, SENT, SEED, KEY, EK_AT, DK_AT, CT_AT
+    _, arb = build_policy_and_low_ram_arbiter(LABELS_PATH, PRG_PATH)
+    STUB = arb.alloc(24, name="stub")
+    SENT = arb.alloc(2, name="result+sentinel")
+    SEED = arb.alloc(64, name="d||z seed")
+    KEY = arb.alloc(32, name="shared key")
+    EK_AT = labels["cert_buf"]
+    assert labels["cert_buf_size"] >= 1184
+    ring = _label_value(LABELS_PATH, "tcp_recv_buf", TCP_RING_DEFAULT)
+    DK_AT = ring                    # 2,400 B
+    CT_AT = ring + 2400             # 1,088 B: ends at ring + 3,488 < ring + 4 KB
+
+
 D = bytes(range(1, 33))
 Z = bytes(range(101, 133))
 M = bytes(range(201, 233))
 
-PARK = bytes([0x78,                 # sei
-              0xA9, 0x34, 0x85, 0x01,   # lda #$34 / sta $01   (all RAM)
-              0x4C, (STUB + 5) & 255, STUB >> 8])  # jmp *  (at STUB+5)
+def park_stub():
+    return bytes([0x78,                 # sei
+                  0xA9, 0x34, 0x85, 0x01,   # lda #$34 / sta $01   (all RAM)
+                  0x4C, (STUB + 5) & 255, STUB >> 8])  # jmp *  (at STUB+5)
 
 
 class Tally:
@@ -114,8 +135,8 @@ def run_stub(transport, client, code, timeout):
 
 
 def call_stub(labels, entry):
-    e, c = labels[entry], labels["pq_mlkem_call"]
-    return bytes([0xA9, e & 255, 0xA2, e >> 8, 0x20, c & 255, c >> 8,   # lda/ldx/jsr
+    c = labels["pq_" + entry]                       # pq_mlkem_keygen / _decaps_seed
+    return bytes([0x20, c & 255, c >> 8,                                 # jsr wrapper
                   0x8D, SENT & 255, SENT >> 8,                         # sta SENT
                   0xA9, 0xA5, 0x8D, (SENT + 1) & 255, (SENT + 1) >> 8,  # sentinel
                   0x60])                                               # rts: back to BASIC
@@ -129,7 +150,7 @@ def set_args(transport, labels, **ptrs):
 def image_phase(t, client, transport, prg, labels):
     print("\n[1] the copied image, read with the CPU parked and all RAM banked in")
     boot_to_basic(client, transport, prg)
-    transport.write_memory(STUB, PARK)
+    transport.write_memory(STUB, park_stub())
     send_text(transport, f"sys{STUB}\r")
     time.sleep(3.0)
     body = prg[2:]
@@ -181,9 +202,10 @@ def main():
         return cannot_run(f"{PRG_PATH} / {LABELS_PATH} missing: build PQ_HYBRID=1 first",
                           certifies="the ML-KEM image on hardware")
     labels = Labels.from_file(str(LABELS_PATH))
-    if labels.address("pq_mlkem_call") is None:
+    if labels.address("pq_mlkem_keygen") is None:
         return cannot_run("the build in build/ is not a PQ_HYBRID image",
                           certifies="the ML-KEM image on hardware")
+    layout(labels)          # before the lock, like every rig
     prg = PRG_PATH.read_bytes()
     print(f"PRG {PRG_PATH} sha256 "
           f"{__import__('hashlib').sha256(prg).hexdigest()}")

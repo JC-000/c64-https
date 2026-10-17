@@ -81,6 +81,7 @@ class FakeClient:
 
 
 def run(client, prg, **k):
+    k.setdefault("labels_path", "/nonexistent/labels.txt")   # hermetic: knob off
     return pl.load_verified_and_run(client, prg, clock=lambda: 0.0,
                                     sleep=lambda s: None, out=io.StringIO(),
                                     **k)
@@ -165,7 +166,7 @@ def test_the_c000_ram_window_is_carried_and_compared() -> None:
 
 
 def test_non_zero_bytes_outside_both_windows_still_refuse() -> None:
-    for addr in (0xD000, 0xFDFF):
+    for addr in (0xA000, 0xB000, 0xBFFF, 0xD000, 0xFDFF):
         try:
             pl.image_span(make_prg(tail_byte=0xEA, at=addr, window=COLD))
         except pl.PrgLoadError as exc:
@@ -174,15 +175,68 @@ def test_non_zero_bytes_outside_both_windows_still_refuse() -> None:
             raise AssertionError(f"a byte at ${addr:04X} would go unverified")
 
 
-def test_the_staged_ml_kem_image_span_is_allowed_and_counted() -> None:
-    """$A000-$BFFF holds the ML-KEM load image under PQ_HYBRID: it cannot be
-    read back (BASIC ROM), so it is allowed, counted, and named in the report
-    (rig_mlkem_hw.py proves the copy). The bytes either side still refuse."""
-    for addr in (0xA000, 0xBFFF):
-        prg = make_prg(tail_byte=0xEA, at=addr, window=COLD)
-        pl.image_span(prg)
-        assert pl.stage_bytes(prg) == addr - 0xA000 + 1, addr
+PQ_LABELS = """al C:28B1 .pq_mlkem_call
+al C:A000 .__LIB_MLKEM_CODE_LOAD__
+al C:BD40 .__LIB_MLKEM_MARK_LOAD__
+"""
+
+
+def pq_labels(tmp: Path, text: str = PQ_LABELS) -> Path:
+    p = tmp / "labels.txt"
+    p.write_text(text)
+    return p
+
+
+def test_the_staged_ml_kem_image_span_is_allowed_only_for_a_pq_build() -> None:
+    """The ML-KEM load image ([CODE load, tail marker + 1) in labels.txt)
+    cannot be read back (BASIC ROM), so it is allowed, counted and named in
+    the report (rig_mlkem_hw.py proves the copy), but ONLY on a build whose
+    labels link pq_mlkem_call, and ONLY that span."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        stage = pl.stage_from_labels(pq_labels(Path(d)))
+        assert stage == (0xA000, 0xBD41), stage
+        for addr in (0xA000, 0xB123, 0xBD40):                 # the image: accepted
+            prg = make_prg(tail_byte=0xEA, at=addr, window=COLD)
+            pl.image_span(prg, stage)
+            assert pl.stage_bytes(prg, stage) == addr - 0xA000 + 1, addr
+        for addr in (0xBD41, 0xBFFF):                         # past its end: refused
+            try:
+                pl.image_span(make_prg(tail_byte=0xEA, at=addr, window=COLD), stage)
+            except pl.PrgLoadError as exc:
+                assert f"${addr:04X}" in str(exc), exc
+            else:
+                raise AssertionError(f"a byte at ${addr:04X}, past the image, was accepted")
+        # a knob-off build (no pq_mlkem_call, or no labels at all): refused
+        # at $A000 exactly as before
+        no_pq = pq_labels(Path(d), PQ_LABELS.replace("pq_mlkem_call", "other"))
+        assert pl.stage_from_labels(no_pq) is None
+        assert pl.stage_from_labels(Path(d) / "missing.txt") is None
+        for st in (None, pl.stage_from_labels(no_pq)):
+            try:
+                pl.image_span(make_prg(tail_byte=0xEA, at=0xA000, window=COLD), st)
+            except pl.PrgLoadError as exc:
+                assert "$A000" in str(exc), exc
+            else:
+                raise AssertionError("a knob-off image with a byte at $A000 was accepted")
     assert pl.stage_bytes(make_prg()) == 0
+
+
+def test_run_refuses_a_planted_byte_past_the_pq_image_and_accepts_the_image() -> None:
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        lab = pq_labels(Path(d))
+        ok = FakeClient()
+        run(ok, make_prg(tail_byte=0xEA, at=0xA000, window=COLD), labels_path=lab)
+        assert ok.typed == ["SYS2061"], ok.typed
+        bad = FakeClient()
+        try:
+            run(bad, make_prg(tail_byte=0xEA, at=0xBE00, window=COLD), labels_path=lab)
+        except pl.PrgLoadError:
+            pass
+        else:
+            raise AssertionError("a byte past the image end was accepted")
+        assert bad.typed == [], "a run was started on an image known to be wrong"
 
 
 def test_a_zeroed_head_is_rewritten_then_verified() -> None:

@@ -253,5 +253,10 @@ CH_SECTIONED = 1
 ; net_poll. Size >= 2,400 and the polys above it: src/crypto/mlkem_link.s.
 ; Comb: COLD_IMAGE is staged at $C000 but cold_bank_init stashes it to the
 ; REU once at boot and never reads it again, so the ring is dead by then.
+; Also owed by the callers (later phases; no home exists yet): the 64 B d||z
+; seed that mlkem_decaps_seed re-reads needs a BSS home outside the unions
+; below AND a session_scrub span (P5); and ML-KEM never interleaves with
+; X25519 or fp_mul (the BSS window is X25519_TABLES + mul_dma): call it only
+; through pq_mlkem_keygen / pq_mlkem_decaps_seed (src/crypto/mlkem_link.s).
 mlkem_dk_scratch        = tcp_recv_buf
 MLKEM_DK_SIZE           = 2400

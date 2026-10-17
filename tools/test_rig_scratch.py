@@ -349,6 +349,9 @@ PROFILES = {
     "uci-onchip": "BACKEND=uci USE_NISTCURVES_ONCHIP=1",
     "uci-comb": "BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1",
     "uci-comb-trust": "BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1 TRUST_STORE=1",
+    # PQ_HYBRID links (rig_mlkem_hw.py runs only against these).
+    "uci-onchip-pq": "BACKEND=uci USE_NISTCURVES_ONCHIP=1 PQ_HYBRID=1",
+    "uci-comb-pq": "BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1 PQ_HYBRID=1",
     "uci-comb-demo-trust": (
         "BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1 TRUST_STORE=1 "
         "HTTPS_HOST=en.wikipedia.org "
@@ -363,6 +366,7 @@ PROFILES_JSON = REPO / "tools" / "rig_scratch_profiles.json"
 REQUIRES = {
     "rig_trust_store": "NEEDED",           # TRUST_STORE=1
     "rig_https_wiki": "CONTRACT_LABELS",   # HTTPS_BODY_TO_REU=1
+    "rig_mlkem_hw": "NEEDED",              # PQ_HYBRID=1
 }
 
 #: The allocators that hand out a tail of a linked region — what broke
@@ -495,7 +499,7 @@ def test_master_comb_tail_cannot_hold_the_old_allocations() -> None:
     old allocator handed out cannot hold the smallest old request (the
     bench's 320 B stub) on any comb profile."""
     for prof, text in _profile_fixtures().items():
-        if "comb" not in prof:
+        if "comb" not in prof or prof.endswith("-pq"):   # -pq: not a master link
             continue
         with tempfile.TemporaryDirectory() as td:
             labels = Path(td) / "labels.txt"

@@ -4116,7 +4116,6 @@ lives; nothing calls it. Measured on the uci-onchip link: code+rodata
 `$E000-$FD40` (7,489 B with alignment fill, 191 B spare in the 7,680 B
 window), `LIB_MLKEM_BSS` `$B100-$BAF0` (2,545 B, 271 B spare before the
 sqtab at `$BC00`), `LIB_MLKEM_POLY_BSS` `$D000-$DFFF` (exactly 4,096 B).
-Costs on comb-store: LOADER 82 -> 58 B, NET_CODE 589 -> 493 B.
 
 Findings that changed the plan:
 
@@ -4128,7 +4127,10 @@ Findings that changed the plan:
     view (`CRYPTO_COLD_SHADOW`, `file=""`, all the BSS, same names and
     addresses) and a file view (`COLD_FILE`, `file=%O`, the zero fill; holds
     the image's load address). Unset, the PRG is byte-identical. The copy
-    (`mlkem_boot_init`, 30 pages, whole-page so no length symbol is needed)
+    (`mlkem_boot_init`, 30 pages, whole-page so no length symbol is needed; a
+    one-byte tail marker, the last byte of the load image, is checked first, so
+    a LOAD cut short is refused with a red border and `pq_mlkem_call`
+    returning A=$FF/C=1, not half-copied)
     runs right after `sei` in boot.s, before the zeroing that would erase its
     source; an assembler assert pins that order. 'Q' leaves `$E000` and the
     RAM vectors alone (not secret). Re-entry: the copy runs only when a
@@ -4155,7 +4157,9 @@ Findings that changed the plan:
     KeyGen must run after `trust_pre` and before the first server byte.
     Comb's `COLD_IMAGE` sits at `$C000` but is stashed to the REU once at
     boot and never read again (`cold_bank_init`), so it is dead by then.
-  - **NMI.** With the KERNAL out (`$01=$34`) the hardware vectors are RAM; a
-    RESTORE-key NMI during a call jumps through `$FFFA`. The scrub accepts
-    that window (it is followed by 'Q'); the real ML-KEM calls last seconds
-    and will need a vector stub in the free `$FE00-$FFFF`.
+  - **NMI and IRQ.** With the KERNAL out (`$01=$34`) the hardware vectors
+    are RAM. `mlkem_boot_init` points all three at one RTI. That is right for
+    NMI (the RESTORE key is edge-triggered, one event). For IRQ the `sei` in
+    `pq_mlkem_call` is load-bearing: CIA1's IRQ is level-triggered and, with
+    I/O banked out, nothing can acknowledge it, so an IRQ reaching the RTI
+    would re-enter at once and livelock the call.
