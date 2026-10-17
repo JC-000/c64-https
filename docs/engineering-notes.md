@@ -4222,8 +4222,9 @@ Decisions and findings:
   - **Residue**: `pq_mlkem_scrub` (next to `pq_mlkem_call`, same sei / `$01=$34`
     discipline) zeroes the polynomial area (`$D000-$DFFF`: s_hat after KeyGen,
     y/e1/e2 after Decaps) and the whole rest-BSS window (`$B100-$BBFF`: m', K',
-    r', the Keccak state; X25519_TABLES and mul_dma share it and their owners
-    rebuild) after KeyGen and after Decaps, on every outcome. ~7,000 stores,
+    r', the Keccak state; X25519_TABLES shares it and x25519_*_fresh rebuilds
+    it, while mul_dma is per-row scratch regenerated before each row reads it,
+    so stale entries are never read) after KeyGen and after Decaps, on every outcome. ~7,000 stores,
     ~80K cycles. Without it zeroing the seed bought nothing: the same secret
     lived on in kem_hb until 'Q'.
   - **A hybrid SH sent as ONE record** (a server that ignores

@@ -394,7 +394,14 @@ def scrub_wrapper(s, t):
     s.wr(win - 1, b"\xEE")
     s.wr(win, bytes([0xEE]) * 0xB00)
     s.wr(0xBC00, b"\xEE")
-    a, p = s.call("pq_mlkem_scrub", timeout=60.0)
+    for iflag in (1, 0):        # sei first: a leaked $01 with I clear would livelock the next IRQ
+        a, p, port = s.call_port("pq_mlkem_scrub", iflag, timeout=60.0)
+        ok = t.check(port & 7 == 6, f"$01 restored (BASIC out, KERNAL and I/O in) after a scrub entered with I={iflag}",
+                     f"$01=${port:02X}")
+        t.check((p >> 2) & 1 == iflag, f"the I flag is restored: entered with I={iflag}",
+                f"P=${p:02X}")
+        if not ok:
+            break
     t.check(s.ram_rd(0xD000, 4096) == bytes(4096), "the 4 KB polynomial area ($D000) is zero")
     t.check(s.rd(win, 0xB00) == bytes(0xB00), "the ML-KEM rest-BSS window ($B100-$BBFF) is zero")
     t.check(s.rd(win - 1, 1) == b"\xEE" and s.rd(0xBC00, 1) == b"\xEE",

@@ -40,6 +40,26 @@ SH4 = ["tools/test_pq_sh.py", "4"]
 KEM = ["tools/test_pq_kem.py"]
 
 
+SCRUB_BODY = """pq_mlkem_scrub:
+        php
+        sei
+        lda $01
+        pha
+        lda #$34
+        sta $01
+        lda #>__MLKEM_POLY_RAM_START__
+        ldx #>__MLKEM_POLY_RAM_SIZE__
+        jsr @zero
+        lda #>__MLKEM_BSS_RAM_START__
+        ldx #>__MLKEM_BSS_RAM_SIZE__
+        jsr @zero
+        pla
+        sta $01
+        plp
+        rts
+@zero:"""
+
+
 def nop(n):
     return "        nop\n" * n
 
@@ -186,6 +206,20 @@ MUTANTS = [
      "        sta tls_sh_err                  ;  not fit tls_rec_buf): fail now, do not\n", nop(3), KEM + ["oversize"]),
     ("M55", "001D key length: the high byte is not checked", H,
      "        lda shs_f+2                     ; exactly 32\n        bne @kslen\n", "        lda shs_f+2\n" + nop(2), SH2),
+    ("Y3", "pq_mlkem_scrub does not restore $01", "src/crypto/mlkem_link.s",
+     "        jsr @zero\n        pla\n        sta $01\n        plp\n        rts\n@zero:",
+     "        jsr @zero\n        pla\n" + nop(2) + "        plp\n        rts\n@zero:", SH + ["5"]),
+    ("Y4", "pq_mlkem_scrub does not save/restore the I flag", "src/crypto/mlkem_link.s",
+     SCRUB_BODY,
+     SCRUB_BODY.replace("pq_mlkem_scrub:\n        php\n", "pq_mlkem_scrub:\n        nop\n")
+                .replace("        sta $01\n        plp\n        rts\n@zero:", "        sta $01\n        nop\n        rts\n@zero:"), SH + ["5"]),
+    ("Y3p", "$01 leaks out of the post-KeyGen scrub", "src/crypto/mlkem_link.s",
+     "        jsr @zero\n        pla\n        sta $01\n        plp\n        rts\n@zero:",
+     "        jsr @zero\n        pla\n" + nop(2) + "        plp\n        rts\n@zero:", KEM + ["prep"]),
+    ("Y4d", "the I flag leaks out of the post-Decaps scrub", "src/crypto/mlkem_link.s",
+     SCRUB_BODY,
+     SCRUB_BODY.replace("pq_mlkem_scrub:\n        php\n", "pq_mlkem_scrub:\n        nop\n")
+                .replace("        sta $01\n        plp\n        rts\n@zero:", "        sta $01\n        nop\n        rts\n@zero:"), KEM + ["decaps"]),
     ("M56", "the SH loop ignores the ERROR latch", T13,
      "        bpl :+                          ;  record header while waiting for the SH\n",
      "        jmp :+\n", KEM + ["oversize"]),

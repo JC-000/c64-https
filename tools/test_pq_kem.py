@@ -54,8 +54,12 @@ HOST = "example.com"
 M_FIXED = bytes(range(201, 233))
 
 
-def prep(s):
-    a, p = s.call("pq_connect_prep", timeout=1800.0)
+def prep(s, check=None, iflag=0):
+    a, p, port = s.call_port("pq_connect_prep", iflag)
+    if check is not None:
+        check.check(port & 7 == 6, f"pq_connect_prep (KeyGen + scrub) restores $01 (entered with I={iflag})",
+                    f"$01=${port:02X}")
+        check.check((p >> 2) & 1 == iflag, f"...and the caller's I flag (entered with I={iflag})", f"P=${p:02X}")
     seed = s.rd(s.L("tls_pq_seed"), 64)
     ek = s.rd(s.L("cert_buf"), EK_LEN)
     return a, p, seed, ek
@@ -64,7 +68,7 @@ def prep(s):
 def phase_prep(s, t):
     print("\n[1] pq_connect_prep")
     s.wr(0xC000, bytes([0xEE]) * 2400)
-    a, p, seed, ek = prep(s)
+    a, p, seed, ek = prep(s, t, 1)      # sei first: see Session.call_port
     t.check(not p & 1, "pq_connect_prep: C=0", f"P=${p:02X}")
     ek_ref, dk_ref = R.mlkem_keygen(seed[:32], seed[32:])
     t.check(seed != bytes(64), "the DRBG filled the 64 B seed")
@@ -81,7 +85,7 @@ def phase_prep(s, t):
     t.check(s.ram_rd(0xD000, 4096) == bytes(4096), "KeyGen's s_hat is gone: $D000-$DFFF is zero after prep")
     t.check(s.rd(s.L("mul38_lo_tab"), 0xB00) == bytes(0xB00), "the ML-KEM window ($B100-$BBFF) is zero after prep")
     # a second prep: a different seed, again a matching ek
-    a2, p2, seed2, ek2 = prep(s)
+    a2, p2, seed2, ek2 = prep(s, t, 0)
     t.check(seed2 != seed, "a second prep draws a different seed")
     t.check(ek2 == R.mlkem_keygen(seed2[:32], seed2[32:])[0],
             "...and its ek matches the reference too")
@@ -121,9 +125,11 @@ def phase_decaps(s, t, seed, ek):
     for rec in split_at(msg, [512, 1024]):
         c, z_ = s.feed(rec)
         assert not c
-    a, p = s.call("pq_sh_decaps", timeout=1800.0)
+    a, p, port = s.call_port("pq_sh_decaps", 1)
     ss = s.rd(s.L("tls_mlkem_ss"), 32)
-    t.check(not p & 1 and a == 0, "pq_sh_decaps: C=0", f"A={a:02X} P=${p:02X}")
+    t.check(port & 7 == 6, "pq_sh_decaps (Decaps + scrub) restores $01 (entered with I=1)", f"$01=${port:02X}")
+    t.check((p >> 2) & 1 == 1, "...and the caller's I flag (entered with I=1)", f"P=${p:02X}")
+    t.check(not p & 1, "pq_sh_decaps: C=0", f"A={a:02X} P=${p:02X}")
     t.check(ss == K, "tls_mlkem_ss == the reference's K", ss.hex())
     t.check(s.rd(s.L("tls_pq_seed"), 64) == bytes(64), "the seed is zeroed after Decaps")
     t.check(s.group() == 0xEC, "tls_kex_group = $EC")
@@ -139,8 +145,10 @@ def phase_decaps(s, t, seed, ek):
     s.begin(True)
     for rec in split_at(hybrid_sh(bytes(bad), spub), [512, 1024]):
         s.feed(rec)
-    a, p = s.call("pq_sh_decaps", timeout=1800.0)
+    a, p, port = s.call_port("pq_sh_decaps", 0)
     ss2 = s.rd(s.L("tls_mlkem_ss"), 32)
+    t.check(port & 7 == 6 and (p >> 2) & 1 == 0, "the second Decaps (entered with I clear) restores $01 and the I flag",
+            f"$01=${port:02X} P=${p:02X}")
     t.check(not p & 1 and ss2 == K_rej, "a flipped ct bit gives the reference's implicit-rejection key",
             ss2.hex())
 

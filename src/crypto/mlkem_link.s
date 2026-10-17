@@ -392,8 +392,9 @@ pq_mlkem_decaps_seed:
 
 ; pq_mlkem_scrub - zero everything ML-KEM leaves secret: the eight polynomials
 ; ($D000-$DFFF: s_hat after KeyGen, y/e1/e2 after Decaps) and the whole rest-BSS
-; window ($B100-$BBFF: m', K', r', the Keccak state; X25519_TABLES and mul_dma
-; share it and are rebuilt by their owners). Same banking discipline as
+; window ($B100-$BBFF: m', K', r', the Keccak state; X25519_TABLES shares it and
+; x25519_*_fresh rebuilds it; mul_dma is per-row scratch regenerated before each
+; row reads it, so stale entries are never read). Same banking discipline as
 ; pq_mlkem_call: sei, $01 = $34, restored. ~7,000 stores, ~80K cycles.
 ; Clobbers A, X, Y, zp_ptr. Preserves the caller's I flag.
 pq_mlkem_scrub:

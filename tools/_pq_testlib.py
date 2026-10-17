@@ -233,6 +233,29 @@ class Session:
         a, p = self.rd(self.RES, 2)
         return a, p
 
+    def call_port(self, name, iflag, timeout=1800.0):
+        """jsr *name* entered with the I flag clear (iflag=0, cli) or set
+        (iflag=1, sei). Returns (A, P_after, port_after): P and $01 as the
+        routine left them. NOTE: a routine that leaks $01 = $34 AND leaves I
+        clear livelocks on the first IRQ (the RTI vector acknowledges nothing),
+        so callers check $01 under iflag=1 first and only then enter with I clear. The explicit restore checks of pq_mlkem_scrub's
+        callers read these (a leaked $01 = $34 or I flag fails an assertion
+        instead of hanging the next monitor access)."""
+        w = self.L(name)
+        r = self.RES
+        stub = bytes([0x78 if iflag else 0x58,
+                      0x20, w & 255, w >> 8,
+                      0x8D, r & 255, r >> 8,            # sta RES   (A)
+                      0x08, 0x68,                       # php / pla
+                      0x8D, (r + 1) & 255, r >> 8,      # sta RES+1 (P)
+                      0xA5, 0x01,                       # lda $01
+                      0x8D, (r + 2) & 255, r >> 8,      # sta RES+2
+                      0x60])
+        self.wr(self.STUB, stub)
+        jsr(self.tr, self.STUB, timeout=timeout)
+        a, p, port = self.rd(r, 3)
+        return a, p, port
+
     # --- the reader's state, as the tests see it ---
     def feed(self, rec, rtype=0x16):
         """Put *rec* in the record buffer and run pq_sh_feed. Returns
