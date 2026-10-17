@@ -1,4 +1,4 @@
-; ======================================================================
+; =============================================================================
 ; constants.inc - System equates, zero page, hardware addresses
 ;
 ; Converted from constants.asm (ACME, since removed) to ca65 include file.
@@ -241,7 +241,7 @@ tcp_recv_buf            = $c000
 .ifdef TLS_STREAM_DEFRAME
 CH_SECTIONED = 1
 .endif
-=======
+
 ; ML-KEM-768 dk scratch (PQ_HYBRID=1, libs/mlkem). mlkem_keygen writes a
 ; 2,400 B dk that is discarded: Decaps uses only the 64 B seed
 ; (mlkem_decaps_seed). It lives in the TCP ring. ORDERING RULE, enforced
