@@ -197,7 +197,7 @@ def main() -> int:
         client.reset()
         time.sleep(2.5)
         try:
-            load_verified_and_run(client, prg)
+            load_verified_and_run(client, prg, labels_path=LABELS_PATH)
         except PrgLoadError as exc:
             print(f"[fatal] {exc}", file=sys.stderr)
             return 4

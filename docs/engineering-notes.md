@@ -4108,3 +4108,62 @@ happens at 64 MHz; and whether a slower or marginal CS8900a would survive
 where this one did. One device, one cartridge, one clock, one run. The
 shipped `c64-https-ip65-onchip.prg` is still a stock-C64 product and the
 rig still defaults to 1 MHz for that reason.
+
+## PQ_HYBRID P0: placing libs/mlkem (2026-10-16)
+
+Link-only. `PQ_HYBRID=1` links c64-mlkem v0.6.0 (ABI 3) and proves where it
+lives; nothing calls it. Measured sizes live in `tools/measure_margins.py` (the PQ profiles), not
+here.
+
+Findings that changed the plan:
+
+  - **Delivery of the $E000 code (user decision 2026-10-13).** #288 removed
+    the file-backed route to `$E000`, so the image LOADS at `$A000` and boot
+    copies it up. The file bytes at `$A000-$BFFF` are CRYPTO_COLD_SHADOW's
+    BSS fill, which exist anyway. ld65 cannot put a ro segment and the BSS
+    at the same addresses of one area, so the shadow is split into a RAM
+    view (`CRYPTO_COLD_SHADOW`, `file=""`, all the BSS, same names and
+    addresses) and a file view (`COLD_FILE`, `file=%O`, the zero fill; holds
+    the image's load address). Unset, the PRG is byte-identical. The copy
+    (`mlkem_boot_init`, 30 pages, whole-page so no length symbol is needed; a
+    one-byte tail marker, the last byte of the load image, is checked first, so
+    a LOAD cut short is refused with a red border and `pq_mlkem_call`
+    returning A=$FF/C=1, not half-copied)
+    runs right after `sei` in boot.s, before the zeroing that would erase its
+    source; an assembler assert pins that order. 'Q' leaves `$E000` and the
+    RAM vectors alone (not secret). Re-entry: the copy runs only if the PRG
+    data flag is clear AND the tail marker is at the load address (the stage
+    is zero after the first boot, and after 'Q' the marker address holds live
+    sqtab bytes, so `test_mlkem_placement.py` checks the marker value never
+    equals the table byte there). Known limit: a "resident" marker at `$E000`
+    cannot tell which build left the image.
+    The NMI vectors in `$FFFA-$FFFF` (RAM with the KERNAL out) point at one
+    RTI in NET_CODE, written first on every path of `mlkem_boot_init`. IRQ/BRK
+    point there too, which is only safe because every call runs under `sei`
+    (an RTI does not acknowledge CIA1's level-triggered IRQ; the `sei` is
+    what prevents the livelock).
+  - **`mlkem_arith_init` builds 1 KB of reduction tables inside
+    `LIB_MLKEM_BSS`.** That window is X25519_TABLES, which X25519 rebuilds
+    per scalar mult, so every ML-KEM call group needs `mlkem_arith_init`
+    first, not "once at boot" as the library header says.
+  - **The library's sqtab image guard cannot pass `CRYPTO_COLD_SHADOW`**:
+    the window is c64-https's own table inside that area. `mlkem_link.s`
+    asserts the equivalent (the window is exactly the owner's lo+hi planes
+    and the area ends at the window's end). Every other area has the
+    library's one-line guard; `tools/test_mlkem_placement.py` fails on an
+    area with neither.
+  - **The `LIB_SHARED_SQTAB_BASE` the archive was built with is not
+    checkable.** The library never exports it (by contract) and the base is
+    baked into immediates; a wrapper edit to `0xB800` links clean. Same
+    blind spot as `build_x25519.sh` and `build_nistcurves_p256.sh`.
+  - **Dk scratch in the TCP ring.** The trust store and bundle also stage
+    their files in the ring (`TS_BUF`, `TB_BUF`), outside a connection, so
+    KeyGen must run after `trust_pre` and before the first server byte.
+    Comb's `COLD_IMAGE` sits at `$C000` but is stashed to the REU once at
+    boot and never read again (`cold_bank_init`), so it is dead by then.
+  - **NMI and IRQ.** With the KERNAL out (`$01=$34`) the hardware vectors
+    are RAM. `mlkem_boot_init` points all three at one RTI. That is right for
+    NMI (the RESTORE key is edge-triggered, one event). For IRQ the `sei` in
+    `pq_mlkem_call` is load-bearing: CIA1's IRQ is level-triggered and an RTI
+    stub acknowledges nothing (I/O in or out), so an IRQ reaching it would
+    re-enter at once and livelock the call. The `sei` prevents that.

@@ -112,6 +112,42 @@ ZEROED = [
     ("poly_prod_lo", 2),          # poly_prod_hi follows (asserted in the span)
     ("mul_dma_lo", 256), ("mul_dma_hi", 256),
 ]
+# PQ_HYBRID=1 builds (libs/mlkem) add three more secret homes, absent from
+# labels.txt otherwise: (name, label, size). The polynomials sit in RAM under
+# I/O ($D000), so planting and reading go through $01 = $34 (all RAM); the
+# first span of the ML-KEM window ($B100-$BBFF) replaces the mul_dma one;
+# the dk is the first 2,400 B of the TCP ring.
+PQ_REGIONS = [
+    ("ML-KEM rest-BSS window", "mul38_lo_tab", 2816),
+    ("ML-KEM polynomials", "__LIB_MLKEM_POLY_BSS_RUN__", 4096),
+    ("ML-KEM dk scratch (TCP ring)", 0xC000, 2400),   # tcp_recv_buf: an equate, no label
+]
+
+
+def pq_regions(labels):
+    """The PQ_HYBRID regions this build has, as (name, addr, size, index)."""
+    out = []
+    for i, (name, lab, size) in enumerate(PQ_REGIONS):
+        poly = labels.address("__LIB_MLKEM_POLY_BSS_RUN__")
+        addr = lab if isinstance(lab, int) else labels.address(lab)
+        if poly is not None and addr is not None:
+            out.append((name, addr, size, 100 + i))
+    return out
+
+
+def ram_rw(transport, addr, data=None, size=0):
+    """Read (data None) or write RAM at *addr* with $01 = $34 (all RAM), then
+    restore $01. Reaches RAM under I/O and under the ROMs."""
+    old = read_bytes(transport, 1, 1)
+    write_bytes(transport, 1, b"\x34")
+    try:
+        if data is None:
+            return read_bytes(transport, addr, size)
+        write_bytes(transport, addr, data)
+    finally:
+        write_bytes(transport, 1, old)
+
+
 # The DRBG state: re-seeded on quit, not left zero (a zero K/V would hand a
 # rig that SYSes back in all-zero "random" bytes). Must hold neither the
 # planted pattern nor a bare instantiate value (K = 00.., V = 01..).
@@ -244,6 +280,10 @@ def run_tests(transport, labels, seed=None):
     # puts it back to 32, so start it at 0 or the check below is vacuous.
     write_bytes(transport, labels["drbg_buf_idx"], b"\x00")
 
+    for name, addr, size, idx in pq_regions(labels):
+        ram_rw(transport, addr, pattern(idx, size))
+        print(f"      planted {size} B at ${addr:04X}: {name}")
+
     print("\n[3] 'Q': state at quit_scrubbed, before BASIC ROM returns")
     scrub_pc = labels.address("quit_scrubbed")
     if t.check(scrub_pc is not None, "quit_scrubbed exists",
@@ -265,6 +305,28 @@ def run_tests(transport, labels, seed=None):
         for name, size in ZEROED:
             got = read_bytes(transport, labels[name], size)
             t.check(not any(got), f"{name} zero", hx(got[:16]))
+        for name, addr, size, idx in pq_regions(labels):
+            got = ram_rw(transport, addr, size=size)
+            t.check(not any(got), f"{name} zero ({size} B at ${addr:04X})",
+                    f"{sum(1 for x in got if x)} non-zero bytes, first "
+                    + hx(got[:8]))
+        if labels.address("__LIB_MLKEM_CODE_RUN__") is not None:
+            # The code is not secret and 'Q' must leave it (and the RAM
+            # vectors) alone: the image is still byte-identical to the PRG's.
+            with open(PRG_PATH, "rb") as f:
+                prg = f.read()
+            for seg in ("CODE", "RODATA"):
+                load = labels[f"__LIB_MLKEM_{seg}_LOAD__"]
+                run = labels[f"__LIB_MLKEM_{seg}_RUN__"]
+                size = labels[f"__LIB_MLKEM_{seg}_SIZE__"]
+                want = prg[load - 0x0801 + 2:load - 0x0801 + 2 + size]
+                got = ram_rw(transport, run, size=size)
+                t.check(got == want, f"ML-KEM {seg} at ${run:04X} survives 'Q' "
+                        f"({size} B, not scrubbed)")
+            vec = ram_rw(transport, 0xFFFA, size=6)
+            t.check(vec == bytes([labels["mlkem_rti"] & 255,
+                                  labels["mlkem_rti"] >> 8]) * 3,
+                    "ML-KEM RAM vectors survive 'Q'", vec.hex())
         for i, (name, size) in enumerate(RESEEDED, start=len(ZEROED)):
             if not t.check(labels.address(name) is not None,
                            f"{name} exists", "not in labels.txt"):

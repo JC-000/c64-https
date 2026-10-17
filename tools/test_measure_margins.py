@@ -288,7 +288,7 @@ def test_split_segment_bytes_land_in_the_load_area_and_run_area_is_reported():
 
 def test_split_segment_with_its_own_placement_is_refused():
     bad = SPLIT_CFG.replace("T2:   load = IMG, run = RUN,",
-                            "T2:   load = IMG, run = RUN, align = $100,")
+                            "T2:   load = IMG, run = RUN, start = $100,")
     assert _raises(mm.parse_cfg_split_segments, bad)
 
 
@@ -313,6 +313,34 @@ def test_every_shipped_cfg_parses_with_the_regions_the_docs_name():
                  if a["file"]}
         missing = regions - areas
         assert not missing, f"{cfg}: {sorted(missing)} not file-backed MEMORY areas"
+
+
+VIEW_CFG = """
+MEMORY {
+    RAMVIEW: start = $A000, size = $2000, type = rw, file = "", define = yes;
+    FILEVIEW: start = $A000, size = $2000, file = %O, fill = yes;
+    RUNAREA: start = $E000, size = $1E00, type = rw, file = "";
+}
+SEGMENTS {
+    BSS1: load = RAMVIEW, type = bss;
+    IMG1: load = FILEVIEW, run = RUNAREA, type = ro, align = $40, align_load = $40;
+}
+"""
+
+
+def test_ram_view_and_file_view_report_as_one_region_and_align_load_counts():
+    areas = mm.parse_cfg_memory(VIEW_CFG)
+    names = [a["name"] for a in areas]
+    assert names == ["RAMVIEW", "RUNAREA"], names
+    assert areas[0]["file"] and areas[0]["alias"] == "FILEVIEW", areas
+    split = mm.parse_cfg_split_segments(VIEW_CFG)
+    assert split == [{"name": "IMG1", "load": "FILEVIEW", "run": "RUNAREA",
+                      "align_load": 0x40}], split
+    segs = [{"name": "BSS1", "start": 0xA000, "end": 0xB7FF, "size": 0x1800},
+            {"name": "IMG1", "start": 0xE000, "end": 0xE0FF, "size": 0x100}]
+    rows = {r["region"]: r for r in mm.measure(areas, segs, split)}
+    assert rows["RAMVIEW"]["last_used"] == 0xB7FF, rows["RAMVIEW"]
+    assert rows["RUNAREA"]["last_used"] == 0xE0FF and rows["RUNAREA"]["tail"] == 0xFDFF - 0xE0FF, rows["RUNAREA"]
 
 
 def main() -> int:

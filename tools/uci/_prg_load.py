@@ -41,6 +41,7 @@ rig's own, reused rather than re-invented. Pinned hardware-free by
 
 from __future__ import annotations
 
+import re
 import sys
 import time
 from pathlib import Path
@@ -57,6 +58,39 @@ VERIFY_END = 0xA000
 #: (src/net/uci/cold_bank.s) carries its image here; no other image reaches
 #: it since #288 (they end at $BFFF), so the window compares nothing there.
 RAM_WINDOW = (0xC000, 0xD000)
+#: The ML-KEM load image (PQ_HYBRID): LIB_MLKEM_CODE/RODATA/MARK LOAD at
+#: $A000, in the file bytes under CRYPTO_COLD_SHADOW, and boot copies them to
+#: $E000 and then zeroes the stage. A host read of $A000-$BFFF returns the
+#: BASIC ROM and of $E000 the KERNAL, so the stage cannot be compared before
+#: the run or after it. Exactly that span - [__LIB_MLKEM_CODE_LOAD__, tail
+#: marker + 1) from the build's labels.txt, and only when the build links
+#: pq_mlkem_call - may be non-zero (counted in the report, loudly);
+#: tools/uci/rig_mlkem_hw.py parks the CPU with all RAM banked in and
+#: compares the copy at $E000 to the PRG's bytes. Every other byte of the
+#: tail is refused exactly as before, knob-off images included.
+DEFAULT_LABELS = Path(__file__).resolve().parents[2] / "build" / "labels.txt"
+_LABEL = re.compile(r"^al\s+C:([0-9A-Fa-f]+)\s+\.(\S+)\s*$")
+
+
+def stage_from_labels(labels_path) -> "tuple[int, int] | None":
+    """-> (first, end_exclusive) of the ML-KEM load image, or None.
+
+    None unless the labels name pq_mlkem_call (a PQ_HYBRID build) and the
+    image symbols: a knob-off build has no staged span, so nothing is allowed.
+    """
+    try:
+        text = Path(labels_path).read_text()
+    except OSError:
+        return None
+    sym = {}
+    for line in text.splitlines():
+        m = _LABEL.match(line)
+        if m:
+            sym[m.group(2)] = int(m.group(1), 16)
+    need = ("pq_mlkem_call", "__LIB_MLKEM_CODE_LOAD__", "__LIB_MLKEM_MARK_LOAD__")
+    if any(n not in sym for n in need):
+        return None
+    return sym["__LIB_MLKEM_CODE_LOAD__"], sym["__LIB_MLKEM_MARK_LOAD__"] + 1
 #: The head-zeroing event lands 2-5 s after READY; re-check past it.
 HEAD_SETTLE_S = 7.0
 #: Readback chunk; small enough that no firmware readmem cap is in play.
@@ -74,10 +108,11 @@ def ram_window(load_addr: int, body: bytes):
     return lo - load_addr, max(0, hi - lo)
 
 
-def image_span(prg: bytes):
+def image_span(prg: bytes, stage=None):
     """-> (load_addr, body, verify_len). Raises PrgLoadError on a PRG whose
     unverifiable tail (past verify_len, outside RAM_WINDOW) holds anything
-    but zero fill."""
+    but zero fill. *stage* = (first, end_exclusive) from stage_from_labels:
+    the one span allowed to be non-zero."""
     if len(prg) < 3:
         raise PrgLoadError(f"PRG is {len(prg)} bytes; nothing to load")
     load_addr = prg[0] | (prg[1] << 8)
@@ -87,6 +122,10 @@ def image_span(prg: bytes):
     tail = bytearray(body[verify_len:])
     if w_len:
         tail[w_off - verify_len:w_off - verify_len + w_len] = bytes(w_len)
+    if stage is not None:
+        s_lo = max(stage[0] - load_addr - verify_len, 0)
+        s_hi = max(stage[1] - load_addr - verify_len, 0)
+        tail[s_lo:s_hi] = bytes(len(tail[s_lo:s_hi]))
     if any(tail):
         first = verify_len + next(i for i, b in enumerate(tail) if b)
         raise PrgLoadError(
@@ -95,6 +134,39 @@ def image_span(prg: bytes):
             f"${RAM_WINDOW[1] - 1:04X}: that span cannot be read back as "
             "loaded, so the verify would not cover the whole image")
     return load_addr, body, verify_len
+
+
+#: LIB_MLKEM_MARK's value (src/crypto/mlkem_link.s MLKEM_MARK).
+MLKEM_MARK = 0x5C
+
+
+def bind_stage(prg: bytes, stage):
+    """Keep *stage* only if THIS PRG is the build the labels describe.
+
+    labels.txt is a separate file: a stale or foreign one must not widen what
+    a PRG may hide in $A000-$BFFF. The PRG itself must carry the tail marker
+    at the labels' marker address (the last byte of the image); otherwise no
+    span is allowed and any non-zero byte there is refused as on a knob-off
+    image."""
+    if stage is None or len(prg) < 3:
+        return None
+    off = stage[1] - 1 - (prg[0] | (prg[1] << 8))
+    body = prg[2:]
+    if 0 <= off < len(body) and body[off] == MLKEM_MARK:
+        return stage
+    return None
+
+
+def stage_bytes(prg: bytes, stage=None) -> int:
+    """Bytes of the allowed stage span that are non-zero (up to the last one)."""
+    if stage is None:
+        return 0
+    load_addr = prg[0] | (prg[1] << 8)
+    body = prg[2:]
+    lo = stage[0] - load_addr
+    hi = min(stage[1] - load_addr, len(body))
+    seg = body[lo:hi] if lo >= 0 else b""
+    return len(seg.rstrip(b"\x00"))
 
 
 def read_back(read_mem, addr: int, length: int) -> bytes:
@@ -106,6 +178,7 @@ def read_back(read_mem, addr: int, length: int) -> bytes:
 
 
 def load_verified_and_run(client, prg: bytes, *, retries: int = 1,
+                          labels_path=DEFAULT_LABELS,
                           clock=time.monotonic, sleep=time.sleep,
                           out=None) -> dict:
     """``load_prg`` -> verify $0801-$9FFF -> ``SYS<entry>``. -> a report dict.
@@ -117,7 +190,8 @@ def load_verified_and_run(client, prg: bytes, *, retries: int = 1,
     entry = parse_basic_sys_address(prg)
     if entry is None:
         raise PrgLoadError("the PRG carries no BASIC SYS stub to start it by")
-    load_addr, body, verify_len = image_span(prg)
+    stage = bind_stage(prg, stage_from_labels(labels_path))
+    load_addr, body, verify_len = image_span(prg, stage)
     w_off, w_len = ram_window(load_addr, body)
     head = body[:2]
     attempts = []
@@ -167,12 +241,20 @@ def load_verified_and_run(client, prg: bytes, *, retries: int = 1,
             f"({attempts}); not starting a run on an image known to be wrong")
     window = (f" and {report['verified_ram_window']} ({w_len} B)"
               if w_len else "")
+    staged = stage_bytes(prg, stage)
+    report["unverified_stage_bytes"] = staged
+    if staged:
+        print(f"NOTE: {staged} B of the $A000-$BFFF tail are the staged ML-KEM "
+              "image: NOT read back (a host read there returns the BASIC "
+              "ROM). tools/uci/rig_mlkem_hw.py proves the copy at $E000.",
+              file=out)
     print(f"PRG verified in RAM: {report['verified']} ({verify_len} B){window}; "
           f"the other {report['unverified_zero_tail']} B of the $A000+ tail "
-          f"are zero fill, not compared — SYS{entry}", file=out)
+          f"are zero fill (or the staged image noted above), not compared — SYS{entry}", file=out)
     client.send_text(f"SYS{entry}", finish_with_return=True)
     return report
 
 
-__all__ = ["HEAD_SETTLE_S", "PrgLoadError", "RAM_WINDOW", "VERIFY_END",
+__all__ = ["HEAD_SETTLE_S", "PrgLoadError", "RAM_WINDOW", "DEFAULT_LABELS",
+           "VERIFY_END", "bind_stage", "stage_bytes", "stage_from_labels",
            "image_span", "load_verified_and_run", "ram_window", "read_back"]

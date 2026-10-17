@@ -42,7 +42,7 @@ ifeq ($(BACKEND),uci-m3)
 M3_REFUSED_KNOBS := USE_NISTCURVES_ONCHIP USE_NISTCURVES_ONCHIP_COMB \
     COLD_BANK TRUST_STORE TLS_STREAM_DEFRAME \
     KEEP_X509_PARSE_CERT KEEP_WORD32_ALL HTTPS_PIN_WARN \
-    HTTPS_SNI VIC_BLANK
+    HTTPS_SNI VIC_BLANK PQ_HYBRID
 $(foreach k,$(M3_REFUSED_KNOBS),$(if $(strip $($(k))),$(error $(k)=$($(k)) does not apply to BACKEND=uci-m3: it links no 6510 TLS or crypto (the ESP32 does the TLS); drop the variable)))
 ifneq ($(filter-out 0 1,$(M3_ALLOW_TLS12)),)
 $(error M3_ALLOW_TLS12 must be 1 (offer TLS 1.3 and hardened 1.2) or 0/unset (TLS 1.3 only))
@@ -431,6 +431,46 @@ export X25519_SEG_REU     ?= LIB_X25519_CODE
 SIBLING_LIB_ARCHIVES += build/lib/x25519.a
 
 CRYPTO_SRCS_EFFECTIVE := $(CRYPTO_SRCS_ALL)
+
+# PQ_HYBRID=1 - link libs/mlkem (c64-mlkem v0.6.0 ML-KEM-768) for the
+# planned X25519MLKEM768 hybrid key exchange (PQC plan, phase P0: placement
+# only). Nothing calls ML-KEM and the protocol is unchanged. Unset, the
+# archive, src/crypto/mlkem_link.s, the scrub spans and the -D are all gated
+# here and the cfg segment lines are `optional = yes`, so every profile's PRG
+# is byte-identical to a tree that has never heard of the knob.
+#
+# Allowed on exactly the profiles the product list could ship it on:
+# BACKEND=uci with USE_NISTCURVES_ONCHIP=1 or USE_NISTCURVES_ONCHIP_COMB=1,
+# with or without TRUST_STORE=1. Refused on:
+#   ip65      ~41 B of overlay, no streaming deframer: it cannot carry the
+#             ~1.2 KB multi-record hybrid ServerHello at all.
+#   uci-m3    links no 6510 TLS (M3_REFUSED_KNOBS above).
+#   uci REU   (no USE_NISTCURVES_ONCHIP): not a shipped profile, and its
+#             fp_mul row-fetch DMA lands in mul_dma_lo/hi, which the ML-KEM
+#             BSS union claims; the "ML-KEM never interleaves with fp_mul"
+#             rule is cheaper to keep by not building it.
+# The placement, the asserts that pin it and the zero-page map are in
+# src/crypto/mlkem_link.s, cfg/c64-https-uci-onchip*.cfg (MLKEM_*_RAM) and
+# tools/integration/build_mlkem.sh.
+PQ_HYBRID ?=
+ifneq ($(filter-out 0 1,$(PQ_HYBRID)),)
+$(error PQ_HYBRID must be 1 (link libs/mlkem) or 0/unset)
+endif
+ifeq ($(PQ_HYBRID),1)
+ifeq ($(BACKEND),ip65)
+$(error PQ_HYBRID=1 is UCI-only: ip65 has no streaming deframer and ~41 B of overlay, so it cannot carry a hybrid ServerHello)
+endif
+ifneq ($(BACKEND),uci)
+$(error PQ_HYBRID=1 needs BACKEND=uci (got BACKEND=$(BACKEND)))
+endif
+ifneq ($(USE_NISTCURVES_ONCHIP),1)
+$(error PQ_HYBRID=1 needs USE_NISTCURVES_ONCHIP=1 or USE_NISTCURVES_ONCHIP_COMB=1: the uci REU profile does fp_mul row-fetch DMA into mul_dma_lo/hi, which the ML-KEM BSS union claims, and it is not a shipped product)
+endif
+CA65FLAGS += -D PQ_HYBRID=1
+SIBLING_LIB_ARCHIVES += build/lib/mlkem.a
+else
+CRYPTO_SRCS_EFFECTIVE := $(filter-out src/crypto/mlkem_link.s,$(CRYPTO_SRCS_EFFECTIVE))
+endif
 
 # #155 phase 2 memory reclaims: code no shipped image reaches is assembled
 # out by default. Nothing is deleted; each knob re-arms its piece, and with
@@ -862,6 +902,11 @@ $(eval $(call SIBLING_SRC_CHECK,build/lib/x25519.src.stamp,libs/x25519,\
 $(eval $(call SIBLING_SRC_CHECK,build/lib/nistcurves.src.stamp,libs/nistcurves,\
     tools/integration/build_nistcurves_p256.sh,\
     build/lib/nistcurves-*))
+ifeq ($(PQ_HYBRID),1)
+$(eval $(call SIBLING_SRC_CHECK,build/lib/mlkem.src.stamp,libs/mlkem,\
+    tools/integration/build_mlkem.sh,\
+    build/lib/mlkem.a build/lib/mlkem.sizes.txt build/lib/mlkem_staging))
+endif
 endif
 
 # src/boot.s pulls the HTTPS target hostname from this generated include
@@ -992,6 +1037,13 @@ build/lib/nistcurves-p256-onchip-comb.a:
 build/lib/x25519.a: tools/integration/build_x25519.sh $(FLAGS_STAMP)
 	@mkdir -p build/lib
 	bash tools/integration/build_x25519.sh
+
+# libs/mlkem ML-KEM-768 archive (PQ_HYBRID=1 only). Rebuilt when the wrapper
+# or the flags stamp changes; the SIBLING_SRC_CHECK above deletes it on any
+# libs/mlkem source or pin change.
+build/lib/mlkem.a: tools/integration/build_mlkem.sh $(FLAGS_STAMP)
+	@mkdir -p build/lib
+	bash tools/integration/build_mlkem.sh
 
 # Build ip65 object libraries from the submodule. Required once per fresh
 # clone — the submodule ships sources, and the ip65-blob link below needs

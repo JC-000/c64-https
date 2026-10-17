@@ -241,3 +241,22 @@ tcp_recv_buf            = $c000
 .ifdef TLS_STREAM_DEFRAME
 CH_SECTIONED = 1
 .endif
+
+; ML-KEM-768 dk scratch (PQ_HYBRID=1, libs/mlkem). mlkem_keygen writes a
+; 2,400 B dk that is discarded: Decaps uses only the 64 B seed
+; (mlkem_decaps_seed). It lives in the TCP ring. ORDERING RULE, enforced
+; where KeyGen is called (a later phase, not this one): KeyGen runs after
+; trust_pre/TS_BUF/TB_BUF have finished with the ring (the trust store and
+; bundle stage their files here, outside a connection) and BEFORE any
+; server byte enters it (net_tcp_connect empties it, head = tail = 0), and
+; the 2,400 B are zeroed immediately after KeyGen returns, before the first
+; net_poll. Size >= 2,400 and the polys above it: src/crypto/mlkem_link.s.
+; Comb: COLD_IMAGE is staged at $C000 but cold_bank_init stashes it to the
+; REU once at boot and never reads it again, so the ring is dead by then.
+; Also owed by the callers (later phases; no home exists yet): the 64 B d||z
+; seed that mlkem_decaps_seed re-reads needs a BSS home outside the unions
+; below AND a session_scrub span (P5); and ML-KEM never interleaves with
+; X25519 or fp_mul (the BSS window is X25519_TABLES + mul_dma): call it only
+; through pq_mlkem_keygen / pq_mlkem_decaps_seed (src/crypto/mlkem_link.s).
+mlkem_dk_scratch        = tcp_recv_buf
+MLKEM_DK_SIZE           = 2400

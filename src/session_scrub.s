@@ -33,6 +33,30 @@
 ;                                         a handshake that stopped before
 ;                                         CertificateVerify)
 ;
+; Under PQ_HYBRID=1 only (libs/mlkem, src/crypto/mlkem_link.s):
+;   $B100-$BBFF (mul38_lo_tab..sqtab-1)   LIB_MLKEM_BSS's window: m', K', r'
+;                                         and the Keccak state. It REPLACES
+;                                         the mul_dma span (the window covers
+;                                         X25519_TABLES, the $B900 hole and
+;                                         mul_dma_lo/hi), so the same bytes
+;                                         are zeroed either way.
+;   LIB_MLKEM_POLY_BSS ($D000-$DFFF)      s_hat from KeyGen, secret-derived
+;                                         y/e1/e2 from Decaps. RAM under I/O:
+;                                         the whole span loop runs with
+;                                         $01 = $34 (KERNAL, BASIC and I/O all
+;                                         out) under sei, restored on exit;
+;                                         every other span is plain RAM
+;                                         either way. With the KERNAL out the
+;                                         vectors at $FFFA/$FFFE are RAM; they
+;                                         point at an RTI (mlkem_boot_init), so
+;                                         a RESTORE-key NMI in this window
+;                                         returns. The sei above is what keeps
+;                                         an IRQ out (see mlkem_link.s).
+;   tcp_recv_buf, 2,400 B                 the discarded ML-KEM dk if the
+;                                         caller forgot to zero it (the ring
+;                                         is otherwise ciphertext, not
+;                                         scrubbed).
+;
 ; The multi-buffer spans zero whatever their module declares between the
 ; two ends, so each length is asserted exactly: a field added inside a span
 ; fails the link here, and whoever added it decides whether it is session
@@ -82,6 +106,10 @@
         .import zp_save_buf
         .import poly_prod_lo, poly_prod_hi
         .import mul_dma_lo, mul_dma_hi
+        .ifdef PQ_HYBRID
+        .import mul38_lo_tab
+        .import __LIB_MLKEM_POLY_BSS_RUN__, __LIB_MLKEM_POLY_BSS_SIZE__
+        .endif
         .import drbg_init_entropy
 
 ; SPAN first, end, len: zero [first, end), which must be len bytes long.
@@ -94,6 +122,14 @@
         .segment "CODE"
 
 session_scrub:
+        .ifdef PQ_HYBRID
+        php                     ; I flag
+        sei                     ; $01 = $34 below: the IRQ vector is RAM
+        lda $01
+        pha
+        lda #$34                ; all RAM: reaches $D000-$DFFF under I/O
+        sta $01
+        .endif
         ldx #0
 @span:
         lda scrub_spans,x
@@ -126,6 +162,11 @@ session_scrub:
         inx
         cpx #scrub_spans_end - scrub_spans
         bne @span
+        .ifdef PQ_HYBRID
+        pla
+        sta $01                 ; BASIC ROM back out, I/O back in
+        plp
+        .endif
         ; NOT redundant: this is the ONLY scrub of the DRBG's K (drbg_k,
         ; private to hmac_drbg.s, in no span). Re-instantiates K/V from
         ; fresh entropy and sets drbg_buf_idx = 32. See the header.
@@ -142,5 +183,11 @@ scrub_spans:
         SPAN tls_rec_buf,       tls_rec_buf + 548,      548
         SPAN zp_save_buf,       zp_save_buf + 26,       26
         SPAN poly_prod_lo,      poly_prod_hi + 1,       2
+        .ifdef PQ_HYBRID
+        SPAN mul38_lo_tab,      mul_dma_hi + 256,       2816
+        SPAN __LIB_MLKEM_POLY_BSS_RUN__, __LIB_MLKEM_POLY_BSS_RUN__ + __LIB_MLKEM_POLY_BSS_SIZE__, 4096
+        SPAN tcp_recv_buf,      tcp_recv_buf + MLKEM_DK_SIZE, 2400
+        .else
         SPAN mul_dma_lo,        mul_dma_hi + 256,       512
+        .endif
 scrub_spans_end:
