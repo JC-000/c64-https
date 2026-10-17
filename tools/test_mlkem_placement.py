@@ -121,7 +121,10 @@ def rom_shadowed_symbols(map_path):
     map's Exports list - not a name regex, so a library addition is covered.
     Nothing is exempt by prefix: __LIB_MLKEM_CODE_RUN__ is a way in too.
 
-    Known gap, accepted: a literal address (`jsr $E123`) names no symbol."""
+    Known gaps, accepted: a literal address (`jsr $E123`) and symbol
+    arithmetic on a non-banned symbol (`__LIB_MLKEM_CODE_LOAD__+$4000`) name
+    no banned symbol; the Imports check below closes the spellings the source
+    scan misses (`.ident(.concat(...))`, a ';' inside a string)."""
     text = Path(map_path).read_text()
     sec = text.split("Exports list by name:")[1].split("Imports list")[0]
     out = {}
@@ -130,6 +133,34 @@ def rom_shadowed_symbols(map_path):
         if 0xE000 <= a <= 0xFDFF:
             out[name] = a
     return out
+
+
+def map_importers(map_path):
+    """{symbol: {importing module.o}} from the ld65 map's Imports list."""
+    text = Path(map_path).read_text()
+    sec = text.split("Imports list:")[1].split("Exports list")[0] \
+        if "Exports list" in text.split("Imports list:")[1] else text.split("Imports list:")[1]
+    out, cur = {}, None
+    for ln in sec.splitlines():
+        m = re.match(r"^(\S+) \(\S+\):\s*$", ln)
+        if m:
+            cur = m.group(1)
+            out.setdefault(cur, set())
+        elif cur and ln.startswith("    "):
+            out[cur].add(ln.split()[0])
+    return out
+
+
+def library_members():
+    r = subprocess.run(["ar65", "t", str(REPO / "build" / "lib" / "mlkem.a")],
+                       capture_output=True, text=True)
+    return set(r.stdout.split()) | {"mlkem_link.o"}
+
+
+def illegal_importers(symbols, importers, allowed):
+    """{symbol: modules} where a module outside *allowed* imports a banned symbol."""
+    return {s: sorted(m - allowed) for s, m in importers.items()
+            if s in symbols and m - allowed}
 
 
 def banned_references(symbols, extra=None):
@@ -285,6 +316,19 @@ def layout_checks(t, tag):
     hits = banned_references(syms)
     t.check(not hits, f"{tag}: no source outside mlkem_link.s names one of them",
             str(hits))
+    imps = map_importers(REPO / "build" / "c64-https.map")
+    allowed = library_members()
+    bad_imp = illegal_importers(syms, imps, allowed)
+    t.check(not bad_imp and any(s in imps for s in syms),
+            f"{tag}: the map's Imports list: only mlkem_link.o and the library's own "
+            "members import a banned symbol", str(bad_imp))
+    probe = {"mlkem_poly_ntt": {"boot.o"}}
+    t.check(illegal_importers(syms, probe, allowed) == {"mlkem_poly_ntt": ["boot.o"]},
+            f"{tag}: red: a foreign module importing a banned symbol is reported")
+    spelled = 'jsr .ident(.concat("mlkem_", "keygen")) ; ";" in a string\n'
+    t.check("src/zz.s" not in banned_references(syms, {"src/zz.s": spelled}),
+            f"{tag}: (the source scan cannot see .ident(.concat(...)): the Imports "
+            "check above is what catches it)")
     t.check(banned_references(syms, {"src/zz.s": "  jsr mlkem_poly_ntt\n"}) ==
             {"src/zz.s": ["mlkem_poly_ntt"]},
             f"{tag}: red: a direct jsr into the image is reported")
@@ -304,7 +348,7 @@ def layout_checks(t, tag):
             f"{tag}: the tail marker's load address ${maddr:04X} holds sqtab byte "
             f"${sqtab_byte_at(maddr):02X}, not the marker")
     t.check(marker_collides(0xBC67) and marker_collides(0xBD99)
-            and not marker_collides(0xBD40),
+            and not marker_collides(maddr),
             f"{tag}: red: the known collisions $BC67/$BD99 are reported")
     prg = REPO / "build" / "c64-https.prg"
     img = prg.read_bytes()
@@ -441,6 +485,23 @@ def build_checks(t):
                     f"mutant {label!r} fails with {expect!r}",
                     f"rc={rc} " + "\n".join(
                         ln for ln in out.splitlines() if "rror" in ln)[-400:])
+
+    print("\n[4b] a probe module that reaches a banned symbol by .ident(.concat(...))")
+    probe = REPO / "src" / "zz_probe.s"
+    try:
+        probe.write_text('.import .ident(.concat("mlkem_", "keygen"))\n.segment "CODE"\n        jsr .ident(.concat("mlkem_", "keygen"))\n')
+        subprocess.run(["make", "clean"], cwd=REPO, capture_output=True)
+        rc, out = run_make(PQ_ARGS)
+        if t.check(rc == 0, "the probe links (the source scan cannot see it)", out[-300:]):
+            syms = rom_shadowed_symbols(REPO / "build" / "c64-https.map")
+            t.check("src/zz_probe.s" not in banned_references(syms, {"src/zz_probe.s": probe.read_text()}),
+                    "the source scan misses .ident(.concat(...))")
+            bad = illegal_importers(syms, map_importers(REPO / "build" / "c64-https.map"),
+                                    library_members())
+            t.check("zz_probe.o" in bad.get("mlkem_keygen", []),
+                    "the Imports check reports zz_probe.o importing mlkem_keygen", str(bad))
+    finally:
+        probe.unlink(missing_ok=True)
 
     print("\n[5] the stale-checkout probe (libs/mlkem at v0.5.1)")
     sub = REPO / "libs" / "mlkem"

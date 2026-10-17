@@ -502,7 +502,8 @@ def timed_attempt(client, name, bdir: Path, page: str, run_dir: Path) -> dict:
     ref = host_reference(host, path)
     client.reset()
     time.sleep(2.5)
-    load_verified_and_run(client, (bdir / "c64-https.prg").read_bytes())
+    load_verified_and_run(client, (bdir / "c64-https.prg").read_bytes(),
+                          labels_path=bdir / "labels.txt")
     m, lines = wait_for(client, ["Q=QUIT"], INIT_WAIT)
     if not m:
         dump(lines, "boot")

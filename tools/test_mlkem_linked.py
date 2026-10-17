@@ -19,8 +19,9 @@ is THERE and works, in a VICE boot of the linked PQ_HYBRID uci-onchip PRG:
         rule, all at once. (The reference is libs/mlkem/tools/mlkem_ref.py,
         the one the library's ACVP runs are checked against.)
   [2b] a PRG whose tail marker is zeroed (a LOAD cut short) is REFUSED, on
-      uci-onchip here and, with --comb, on the comb image (the precompute's
-      border restore must not erase the red border).
+      uci-onchip here and, ONLY under --comb, on the comb image (the
+      precompute's border restore must not erase the red border; the default
+      run does not guard that path).
   [4] mutants, each must go red: (a) boot.s without the copy call (image
       comparison fails), (b) the copy call moved after the zeroing (the
       assembler assert fires), (c) the call wrapper without mlkem_arith_init
