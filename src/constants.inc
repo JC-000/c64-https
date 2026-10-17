@@ -229,3 +229,15 @@ HTTP_BUF_SIZE           = 256   ; HTTP request/response line buffer
 ; BASIC ROM shadow and I/O). Declared here as an equate rather than in
 ; data.asm so the PRG/BSS stays small — the RAM exists regardless.
 tcp_recv_buf            = $c000
+
+; CH_SECTIONED: the sectioned/hybrid ClientHello (16-bit bulk key-share
+; section, supported_groups 11EC,001D). Build-time switch, NOT a Makefile
+; knob: it follows TLS_STREAM_DEFRAME (UCI only). ip65 has no bytes to
+; spare and is excluded from PQ. Note a ~1.2 KB hybrid ServerHello is NOT
+; deframed today (tls_recv_server_hello is single-record; a server fragments
+; it under MFL=512): that is the next phase (ServerHello on the streaming
+; deframer). Without CH_SECTIONED the builder still uses the same templates
+; and emits the X25519-only hello, byte-identical.
+.ifdef TLS_STREAM_DEFRAME
+CH_SECTIONED = 1
+.endif

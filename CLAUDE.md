@@ -663,6 +663,10 @@ already refused a step later, as `DF_ERR_TYPE = $04`). Test:
   - `net_tcp_set_recv_cb` is an RTS stub. Boot banner: `rr-net` under ip65,
     `UCI NETWORKING` under UCI — `boot_check.py` asserts both.
 
+### ClientHello shape
+
+UCI CH is sectioned (`CH_SECTIONED`, follows `TLS_STREAM_DEFRAME`): `tls_ch_ks_ptr/len` (16-bit, BSS, one-shot) name a bulk key-share that `tls_ch_send_sections` streams from its own buffer between the head and tail staged in `tls_rec_buf`, as ONE record; 0 = classic X25519-only hello (all builds today). Rule: arm `tls_ch_ks_ptr/len` after TCP connect, immediately before `jsr tls_connect`; the sender clears it on every exit. HRR random -> `tls_sh_err=$01` (both backends). Test: `test_tls_handshake.py` [2d-2k], [3d].
+
 ### VIC-II blanking — worth 6.3%, not the fleet's "20-25%"
 
 `src/vic.s` `vic_blank`/`vic_unblank` wrap the two X25519 scalar mults, the

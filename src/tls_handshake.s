@@ -5,6 +5,7 @@
 
 .include "constants.inc"
 
+
 ; --- Externals (data.asm BSS / scratch) ---
 .import tls_rec_buf
 .import tls_rec_len
@@ -19,46 +20,48 @@
 .export tls_parse_encrypted_extensions
 .export tls_hostname
 .export tls_hostname_len
+.ifdef CH_SECTIONED
+.export tls_ch_ks_ptr
+.export tls_ch_ks_len
+.export tls_ch_split
+.endif
+.export tls_sh_err
+.export tls_sh_chk_hrr
 
 ; x25519 named group is defined in constants.inc; no local equate needed.
 
 .segment "CODE"
 
 ; =============================================================================
-; tls_build_client_hello - construct ClientHello message
+; tls_build_client_hello - construct ClientHello message (sectioned, #P3)
 ;
 ; Input:  tls_client_random (32 bytes) already filled
 ;         tls_ecdhe_pubkey (32 bytes) already computed (x25519)
 ;         tls_hostname / tls_hostname_len set (for SNI)
-; Output: tls_rec_buf contains complete handshake message
-;         tls_rec_len = total length (16-bit)
-; Clobbers: A, X, Y, zp_ptr, zp_count
+;         tls_ch_ks_ptr / tls_ch_ks_len: OPTIONAL bulk key-share section
+;           (16-bit length; 0 = none = the classic X25519-only ClientHello,
+;           byte-identical to the pre-sectioned builder).
+; Output: tls_rec_buf = the STAGED bytes of the handshake message;
+;         tls_rec_len = number of staged bytes (16-bit).
+;         With tls_ch_ks_len = 0 the staged bytes ARE the whole message.
+;         With tls_ch_ks_len = B != 0 the message on the wire is
+;             tls_rec_buf[0 .. tls_ch_split)   head, through the 11EC entry
+;                                              header (group, 16-bit length)
+;             B bytes at (tls_ch_ks_ptr)       bulk (the ML-KEM ek)
+;             tls_rec_buf[tls_ch_split .. tls_rec_len)  tail: the x25519
+;                                              share that completes the 11EC
+;                                              entry, the 001D entry, SNI, MFL
+;         i.e. wire length = tls_rec_len + B, and every length field in the
+;         message (extensions_length, handshake length, key_share ext, list
+;         and 11EC entry) already carries B. The staging buffer never holds
+;         more than ~230 B, so the 8-bit Y cursor is safe for the STAGED
+;         bytes; only the lengths are 16-bit.
+; Clobbers: A, X, Y, zp_tmp1, zp_count
 ; =============================================================================
 tls_build_client_hello:
         ldy #0
-
-        ; --- [0] Handshake type ---
-        lda #TLS_HS_CLIENT_HELLO        ; 0x01
-        sta tls_rec_buf,y
-        iny                             ; Y=1
-
-        ; --- [1-3] Length placeholder (24-bit, filled at end) ---
-        lda #0
-        sta tls_rec_buf+1
-        sta tls_rec_buf+2
-        sta tls_rec_buf+3
-        iny                             ; Y=2
-        iny                             ; Y=3
-        iny                             ; Y=4
-
-        ; --- [4-5] legacy_version = 0x0303 ---
-        lda #$03
-        sta tls_rec_buf,y
-        iny                             ; Y=5
-        sta tls_rec_buf,y
-        iny                             ; Y=6
-
-        ; --- [6-37] client_random (32 bytes) ---
+        ldx #CHT_HEAD                   ; 01 00 00 00 03 03
+        jsr ch_put
         ldx #0
 @copy_random:
         lda tls_client_random,x
@@ -66,264 +69,186 @@ tls_build_client_hello:
         iny
         inx
         cpx #32
-        bne @copy_random
-        ; Y=38
+        bne @copy_random                ; Y=38
 
-        ; --- [38] session_id_length = 0x00 ---
-        lda #$00
-        sta tls_rec_buf,y
-        iny                             ; Y=39
+        ; sid_len 0, cipher_suites (1303), compression (null),
+        ; extensions_length placeholder [45-46], supported_versions
+        ldx #CHT_MID
+        jsr ch_put                      ; Y=54
 
-        ; --- [39-40] cipher_suites_length = 0x0002 ---
-        lda #$00
-        sta tls_rec_buf,y
-        iny                             ; Y=40
-        lda #$02
-        sta tls_rec_buf,y
-        iny                             ; Y=41
+        ; --- supported_groups (0x000A) ---
+        ldx #CHT_GROUPS
+.ifdef CH_SECTIONED
+        lda tls_ch_ks_len
+        ora tls_ch_ks_len+1
+        beq :+
+        ldx #CHT_GROUPS_H               ; 11EC, 001D
+:
+.endif
+        jsr ch_put
 
-        ; --- [41-42] cipher_suite = TLS_CHACHA20_POLY1305_SHA256 = 0x1303 ---
-        lda #$13
-        sta tls_rec_buf,y
-        iny                             ; Y=42
-        lda #$03
-        sta tls_rec_buf,y
-        iny                             ; Y=43
+        ; --- signature_algorithms (one scheme, 0x0403) ---
+        ldx #CHT_SIGALGS
+        jsr ch_put
 
-        ; --- [43] compression_methods_length = 0x01 ---
-        lda #$01
-        sta tls_rec_buf,y
-        iny                             ; Y=44
+        ; --- key_share (0x0033) ---
+.ifdef CH_SECTIONED
+        lda tls_ch_ks_len
+        ora tls_ch_ks_len+1
+        bne @ks_hybrid
+.endif
+        ldx #CHT_KS
+        jsr ch_put                      ; 00 33 00 26 00 24 00 1d 00 20
+.ifdef CH_SECTIONED
+        jmp @ks_pub
+@ks_hybrid:
+        ldx #CHT_KS_H                   ; 00 33
+        jsr ch_put
+        lda #74                         ; ext data  = B + 2 + 4 + 32 + 4 + 32
+        jsr ch_put_sum
+        lda #72                         ; list      = B + 4 + 32 + 4 + 32
+        jsr ch_put_sum
+        ldx #CHT_GRP11EC                ; 11 ec
+        jsr ch_put
+        lda #32                         ; entry     = B + 32
+        jsr ch_put_sum
+        sty tls_ch_split                ; bulk goes here
+@ks_pub:
+.endif
+        jsr ch_put_pub                  ; x25519 share (completes 11EC entry)
+.ifdef CH_SECTIONED
+        lda tls_ch_ks_len
+        ora tls_ch_ks_len+1
+        beq @sni
+        ldx #CHT_ENT1D                  ; 00 1d 00 20
+        jsr ch_put
+        jsr ch_put_pub
+.endif
 
-        ; --- [44] compression_method = 0x00 (null) ---
-        lda #$00
-        sta tls_rec_buf,y
-        iny                             ; Y=45
-
-        ; --- [45-46] extensions_length placeholder (filled at end) ---
-        lda #$00
-        sta tls_rec_buf,y
-        iny                             ; Y=46
-        sta tls_rec_buf,y
-        iny                             ; Y=47
-
-        ; =================================================================
-        ; Extensions start at offset 47
-        ; =================================================================
-
-        ; --- Extension 1: supported_versions (0x002B) ---
-        ; 00 2b 00 03 02 03 04
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$2b
-        sta tls_rec_buf,y
-        iny
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$03
-        sta tls_rec_buf,y
-        iny
-        lda #$02
-        sta tls_rec_buf,y
-        iny
-        lda #$03
-        sta tls_rec_buf,y
-        iny
-        lda #$04
-        sta tls_rec_buf,y
-        iny                             ; 7 bytes written
-
-        ; --- Extension 2: supported_groups (0x000A) ---
-        ; 00 0a 00 04 00 02 00 1d
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$0a
-        sta tls_rec_buf,y
-        iny
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$04
-        sta tls_rec_buf,y
-        iny
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$02
-        sta tls_rec_buf,y
-        iny
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$1d
-        sta tls_rec_buf,y
-        iny                             ; 8 bytes written
-
-        ; --- Extension 3: signature_algorithms (0x000D) ---
-        ; 00 0d 00 04 00 02 04 03
-        ; ONE scheme advertised: ecdsa_secp256r1_sha256 (0x0403). Inner list
-        ; length = 2 (one 2-byte scheme); extension data length = 4. See the
-        ; table for why 0x0503 is gone. Every outer length (extensions_length,
-        ; handshake length, tls_rec_len) is computed from Y at the end of this
-        ; routine, so shrinking the table needs no other edit. Table-driven to
-        ; keep LOADER from overflowing.
-        ldx #0
-@sig_algs_ext_loop:
-        lda sig_algs_ext_data,x
-        sta tls_rec_buf,y
-        iny
-        inx
-        cpx #8
-        bne @sig_algs_ext_loop          ; 8 bytes written
-
-        ; --- Extension 4: key_share (0x0033) ---
-        ; 00 33 00 26 00 24 00 1d 00 20 [32 bytes pubkey]
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$33
-        sta tls_rec_buf,y
-        iny
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$26                        ; ext data length = 38
-        sta tls_rec_buf,y
-        iny
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$24                        ; entries length = 36
-        sta tls_rec_buf,y
-        iny
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$1d                        ; group = x25519
-        sta tls_rec_buf,y
-        iny
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$20                        ; key length = 32
-        sta tls_rec_buf,y
-        iny
-
-        ; Copy 32 bytes of x25519 public key
-        ldx #0
-@copy_pubkey:
-        lda tls_ecdhe_pubkey,x
-        sta tls_rec_buf,y
-        iny
-        inx
-        cpx #32
-        bne @copy_pubkey
-        ; 10 + 32 = 42 bytes written
-
-        ; --- Extension 5: server_name / SNI (0x0000) ---
-        ; Only include if tls_hostname_len > 0
-        lda tls_hostname_len
+@sni:
+        ; --- server_name / SNI (0x0000), only if tls_hostname_len > 0 ---
+        ldx tls_hostname_len
         beq @skip_sni
-
-        ; Type 00 00
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        sta tls_rec_buf,y
-        iny
-
-        ; Ext data length = hostname_len + 5 (big-endian)
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda tls_hostname_len
+        stx zp_tmp1
+        ldx #CHT_SNI0                   ; 00 00 00
+        jsr ch_put
+        lda zp_tmp1
         clc
-        adc #5
-        sta tls_rec_buf,y
-        iny
-
-        ; Server name list length = hostname_len + 3 (big-endian)
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda tls_hostname_len
+        adc #5                          ; ext data length
+        jsr ch_put_a
+        lda #0
+        jsr ch_put_a
+        lda zp_tmp1
         clc
-        adc #3
-        sta tls_rec_buf,y
-        iny
-
-        ; Host name type = 0 (host_name)
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-
-        ; Host name length (2 bytes big-endian)
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda tls_hostname_len
-        sta tls_rec_buf,y
-        iny
-
-        ; Copy hostname bytes
+        adc #3                          ; server name list length
+        jsr ch_put_a
+        ldx #CHT_SNI1                   ; 00 (host_name) 00 (len hi)
+        jsr ch_put
+        lda zp_tmp1
+        jsr ch_put_a
         ldx #0
 @copy_hostname:
         lda tls_hostname,x
         sta tls_rec_buf,y
         iny
         inx
-        cpx tls_hostname_len
+        cpx zp_tmp1
         bne @copy_hostname
 @skip_sni:
-
-        ; --- Extension 6: max_fragment_length (0x0001) ---
-        ; 00 01 00 01 01
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$01
-        sta tls_rec_buf,y
-        iny
-        lda #$00
-        sta tls_rec_buf,y
-        iny
-        lda #$01
-        sta tls_rec_buf,y
-        iny
-        lda #$01                        ; value 1 = 512 bytes
-        sta tls_rec_buf,y
-        iny                             ; 5 bytes written
+        ldx #CHT_MFL                    ; max_fragment_length = 512
+        jsr ch_put
 
         ; =================================================================
-        ; Fill in length fields. Y = total bytes written.
+        ; Fill in length fields. Y = staged bytes; B = tls_ch_ks_len.
         ; =================================================================
-
-        ; extensions_length at [45-46] = Y - 47 (big-endian)
+.ifdef CH_SECTIONED
+        ; extensions_length at [45-46] = (Y - 47) + B
         tya
         sec
         sbc #47
-        sta tls_rec_buf+46              ; low byte of extensions length
-        lda #0
-        sta tls_rec_buf+45              ; high byte (always 0, msg < 256)
+        clc
+        adc tls_ch_ks_len
+        sta tls_rec_buf+46
+        lda tls_ch_ks_len+1
+        adc #0
+        sta tls_rec_buf+45
 
-        ; handshake length at [1-3] = Y - 4 (24-bit big-endian)
+        ; handshake length at [1-3] = (Y - 4) + B (24-bit big-endian)
         tya
         sec
         sbc #4
-        sta tls_rec_buf+3               ; low byte
+        clc
+        adc tls_ch_ks_len
+        sta tls_rec_buf+3
+        lda tls_ch_ks_len+1
+        adc #0
+        sta tls_rec_buf+2
         lda #0
-        sta tls_rec_buf+2               ; mid byte
-        sta tls_rec_buf+1               ; high byte
+        adc #0
+        sta tls_rec_buf+1
+.else
+        ; no bulk section: the whole message is < 256 B; the high bytes
+        ; [45], [1], [2] are already 0 from the templates
+        tya
+        sec
+        sbc #47
+        sta tls_rec_buf+46              ; extensions_length
+        tya
+        sec
+        sbc #4
+        sta tls_rec_buf+3               ; handshake length
+.endif
 
-        ; tls_rec_len = Y (16-bit)
+        ; tls_rec_len = Y (staged bytes, 16-bit)
         sty tls_rec_len
         lda #0
         sta tls_rec_len+1
-
         rts
+
+; ch_put - append template at ch_tmpl+X (length-prefixed) at tls_rec_buf+Y.
+; Out: Y advanced. Clobbers A, X, zp_count (NOT zp_tmp1: SNI keeps its
+; hostname length there).
+ch_put:
+        lda ch_tmpl,x
+        sta zp_count
+:       inx
+        lda ch_tmpl,x
+        sta tls_rec_buf,y
+        iny
+        dec zp_count
+        bne :-
+        rts
+
+; ch_put_a - append A at tls_rec_buf+Y.
+ch_put_a:
+        sta tls_rec_buf,y
+        iny
+        rts
+
+.ifdef CH_SECTIONED
+; ch_put_sum - append the big-endian 16-bit value (tls_ch_ks_len + A).
+ch_put_sum:
+        clc
+        adc tls_ch_ks_len
+        pha
+        lda tls_ch_ks_len+1
+        adc #0
+        jsr ch_put_a
+        pla
+        jmp ch_put_a
+.endif
+
+; ch_put_pub - append the 32-byte x25519 public key.
+ch_put_pub:
+        ldx #0
+:       lda tls_ecdhe_pubkey,x
+        sta tls_rec_buf,y
+        iny
+        inx
+        cpx #32
+        bne :-
+        rts
+
 
 
 ; =============================================================================
@@ -337,6 +262,8 @@ tls_build_client_hello:
 ; Clobbers: A, X, Y, zp_ptr, zp_tmp1, zp_tmp2, zp_temp, zp_count
 ; =============================================================================
 tls_parse_server_hello:
+        lda #0
+        sta tls_sh_err                  ; no stale code from an earlier parse
         ldy #0
 
         ; --- [0] Verify handshake type = 0x02 ---
@@ -366,6 +293,12 @@ tls_parse_server_hello:
         cpx #32
         bne @copy_server_random
         ; Y=38
+
+        ; HelloRetryRequest is a ServerHello whose random is a fixed magic
+        ; (RFC 8446 4.1.3). We never send a second ClientHello, so it is a
+        ; clean refusal (tls_sh_err = SH_ERR_HRR), not a misparse.
+        jsr tls_sh_chk_hrr
+        bcs @sh_error_jmp
 
         ; --- [38] session_id_echo_length — skip that many bytes ---
         lda tls_rec_buf,y
@@ -552,6 +485,34 @@ tls_parse_server_hello:
 
 
 ; =============================================================================
+; tls_sh_chk_hrr - is tls_server_random the HelloRetryRequest magic?
+; Out: C=1 and tls_sh_err = SH_ERR_HRR if so, else C=0 (tls_sh_err is
+; cleared by tls_parse_server_hello on entry). Preserves Y. Clobbers A, X.
+; ip65: CODE (LOADER has room, the CRYPTO_OVERLAY pool does not); UCI:
+; TLS_CODE (uci-comb-demo-store's LOADER would be left with 5 B).
+; =============================================================================
+SH_ERR_HRR = $01
+
+.ifdef TLS_STREAM_DEFRAME
+.segment "TLS_CODE"
+.endif
+tls_sh_chk_hrr:
+        ldx #31
+:       lda tls_server_random,x
+        cmp hrr_magic,x
+        bne @not_hrr
+        dex
+        bpl :-
+        lda #SH_ERR_HRR
+        sta tls_sh_err
+        sec
+        rts
+@not_hrr:
+        clc
+        rts
+.segment "CODE"
+
+; =============================================================================
 ; tls_parse_encrypted_extensions - parse EncryptedExtensions
 ;
 ; Input:  tls_rec_buf contains decrypted handshake message
@@ -578,6 +539,17 @@ tls_parse_encrypted_extensions:
 sh_found_ver:  .res 1
 sh_found_ks:   .res 1
 
+; Optional bulk key-share section for the ClientHello (see
+; tls_build_client_hello). BSS is zeroed at boot, so the default is
+; "none" = X25519-only. tls_send_client_hello clears the length after one
+; use: a caller that wants a hybrid hello sets ptr/len before EACH connect.
+.ifdef CH_SECTIONED
+tls_ch_ks_ptr: .res 2
+tls_ch_ks_len: .res 2
+tls_ch_split:  .res 1                   ; staged offset where the bulk goes
+.endif
+tls_sh_err:    .res 1                   ; SH_ERR_* of the last SH parse (0 = none)
+
 
 ; =============================================================================
 ; Inline data: hostname for SNI extension
@@ -589,17 +561,55 @@ tls_hostname_len:  .res 1
 
 
 ; =============================================================================
-; signature_algorithms extension payload (TLS 1.3, two ECDSA schemes).
-; Lives in RODATA to keep the LOADER segment from overflowing — emitting
-; ten LDA/STA/INY triples in CODE costs 60 B vs ~24 B (table + 7-insn
-; copy loop).
+; ClientHello templates: length-prefixed byte runs, copied by ch_put. RODATA
+; keeps LOADER small (a table + one copy loop is far cheaper than the
+; LDA/STA/INY triple per byte the builder used to spend).
+; signature_algorithms offers ONE scheme, ecdsa_secp256r1_sha256 (0x0403):
+; only P-256 is verified (P-384 is retired) and tls_handle_cert_verify
+; refuses any other. Every length field is derived from the staged byte
+; count, so the tables need no companion edit.
 ; =============================================================================
-.segment "RODATA"
+; The tables ride CODE (LOADER) on every backend: the crypto pools are the
+; scarcer ones (ip65's CRYPTO_OVERLAY+RESIDENT are one tight pool,
+; uci-comb-demo-store has little CRYPTO_HOT). Margins: tools/measure_margins.py.
+.segment "CODE"
 
-sig_algs_ext_data:
-        .byte $00, $0d                  ; extension type = signature_algorithms
-        .byte $00, $04                  ; extension data length = 4
-        .byte $00, $02                  ; supported_signature_algorithms length = 2
-        .byte $04, $03                  ; ecdsa_secp256r1_sha256
-        ; Only P-256 is verified (P-384 is retired), so 0x0403 is the one
-        ; scheme offered; tls_handle_cert_verify refuses any other.
+; SHA-256("HelloRetryRequest"), RFC 8446 4.1.3
+hrr_magic:
+        .byte $cf, $21, $ad, $74, $e5, $9a, $61, $11, $be, $1d, $8c, $02, $1e, $65, $b8, $91
+        .byte $c2, $a2, $11, $16, $7a, $bb, $8c, $5e, $07, $9e, $09, $e2, $c8, $a8, $33, $9c
+
+ch_tmpl:
+CHT_HEAD     = * - ch_tmpl
+        .byte 6, $01, $00, $00, $00, $03, $03   ; type, len24 (patched), legacy_version
+CHT_MID      = * - ch_tmpl
+        .byte 16
+        .byte $00                               ; session_id_length
+        .byte $00, $02, $13, $03                ; cipher_suites: CHACHA20_POLY1305
+        .byte $01, $00                          ; compression: null
+        .byte $00, $00                          ; extensions_length (patched)
+        .byte $00, $2b, $00, $03, $02, $03, $04 ; supported_versions: TLS 1.3
+CHT_GROUPS   = * - ch_tmpl
+        .byte 8, $00, $0a, $00, $04, $00, $02, $00, $1d
+.ifdef CH_SECTIONED
+CHT_GROUPS_H = * - ch_tmpl
+        .byte 10, $00, $0a, $00, $06, $00, $04, $11, $ec, $00, $1d
+.endif
+CHT_SIGALGS  = * - ch_tmpl
+        .byte 8, $00, $0d, $00, $04, $00, $02, $04, $03
+CHT_KS       = * - ch_tmpl
+        .byte 10, $00, $33, $00, $26, $00, $24, $00, $1d, $00, $20
+.ifdef CH_SECTIONED
+CHT_KS_H     = * - ch_tmpl
+        .byte 2, $00, $33
+CHT_GRP11EC  = * - ch_tmpl
+        .byte 2, $11, $ec
+CHT_ENT1D    = * - ch_tmpl
+        .byte 4, $00, $1d, $00, $20
+.endif
+CHT_SNI0     = * - ch_tmpl
+        .byte 3, $00, $00, $00
+CHT_SNI1     = * - ch_tmpl
+        .byte 2, $00, $00
+CHT_MFL      = * - ch_tmpl
+        .byte 5, $00, $01, $00, $01, $01        ; max_fragment_length = 512
