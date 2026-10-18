@@ -1111,7 +1111,11 @@ _ := $(shell if [ -f $(IP65_BIN) ]; then \
                  rm -f $(IP65_BLOB_OBJ) $(IP65_RM_LINK); \
              fi; \
              mv $(IP65_BIN_STAMP).tmp $(IP65_BIN_STAMP); \
+             else rm -f $(IP65_BLOB_OBJ) $(IP65_RM_LINK); \
              fi)
+# An ABSENT blob is rebuilt (deterministically) newer-or-equal to an object that
+# may have been assembled from a flipped one, and the rule's own stamp then
+# matches: the stale object/PRG would be permanent. So absence clears them too.
 else
 ifneq ($(shell $(IP65_BLOB_STAMP_BODY) 2>/dev/null | cmp -s - $(IP65_BLOB_STAMP) >/dev/null 2>&1 || echo differs),)
 $(warning DRY RUN (-$(MAKE_OPT_LETTERS)): ip65 blob inputs differ from $(IP65_BLOB_STAMP).)

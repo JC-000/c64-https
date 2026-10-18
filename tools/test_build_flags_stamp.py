@@ -1117,6 +1117,29 @@ def test_ip65_blob_byte_flip_reaches_the_prg():
         _check_first_flip(farm)
 
 
+def test_ip65_deleted_blob_after_a_flip_recovers_the_prg():
+    """flip -> delete the blob -> rebuild: the regenerated (good) blob must
+    take the flipped PRG with it, even when the object and PRG look newer
+    than the new blob (same second on make 3.81)."""
+    _require_toolchain()
+    with Ip65Farm("no-blob-no-stamps") as farm:
+        farm.make(*IP65)
+        good = farm.sha()
+        blob = farm.path(BLOB)
+        data, ns = blob.read_bytes(), blob.stat().st_mtime_ns
+        blob.write_bytes(data[:100] + bytes([data[100] ^ 0xFF]) + data[101:])
+        os.utime(blob, ns=(ns, ns))
+        farm.make(*IP65)
+        assert farm.sha() != good
+        blob.unlink()
+        for rel in ("build/net/ip65/ip65_blob.o", PRG):
+            p = farm.path(rel)
+            fut = p.stat().st_mtime_ns + 60_000_000_000
+            os.utime(p, ns=(fut, fut))
+        farm.make(*IP65)
+        assert farm.sha() == good, "a deleted blob left the flipped PRG permanent"
+
+
 def test_ip65_cases_do_not_depend_on_checkout_state():
     """A fresh clone (no blob, no stamps) and a pre-stamp tree (blob, no
     stamps) must behave exactly like the checkout the suite runs in."""
