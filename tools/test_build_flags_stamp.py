@@ -863,6 +863,137 @@ def test_ip65_cfg_edit_changes_the_stamp_and_clears_outputs():
             assert not farm.exists(o), f"{o} survived an ip65 cfg edit"
 
 
+BLOB = "ip65-build/ip65-c64.bin"
+BLOB_STAMP = "ip65-build/ip65-c64.stamp"
+IP65_LIBS = ("ip65/ip65/ip65_tcp.lib", "ip65/drivers/ip65_c64.lib")
+IP65 = ("BACKEND=ip65", "USE_NISTCURVES_ONCHIP=1")
+
+
+class Ip65Farm(Farm):
+    """A Farm with PRIVATE copies of ip65/ and ip65-build/, so a test may
+    touch a lib or edit the blob's cfg without disturbing the checkout.
+    Libs come from the checkout when built there, else from `make ip65-libs`
+    run inside the copy."""
+
+    def __init__(self):
+        super().__init__()
+        for name in ("ip65", "ip65-build"):
+            os.unlink(self.dir / name)
+            shutil.copytree(REPO / name, self.dir / name, symlinks=True)
+        if not all(self.exists(r) for r in IP65_LIBS):
+            self.make("ip65-libs", check=False)
+        assert all(self.exists(r) for r in IP65_LIBS), "ip65 libs would not build"
+
+    def blob_build(self, **kw):
+        return self.make("BACKEND=ip65", "ip65-blob", **kw)
+
+    def blob_mtime(self):
+        return self.path(BLOB).stat().st_mtime_ns
+
+    def edit_same_second(self, rel, text):
+        """Append to an input, then pin its mtime to the blob's: only a
+        CONTENT check can see the edit."""
+        blob_ns = self.blob_mtime()
+        with open(self.path(rel), "a") as fh:
+            fh.write(text)
+        os.utime(self.path(rel), ns=(blob_ns, blob_ns))
+
+
+def test_ip65_blob_tracks_its_libs_cfg_and_stub():
+    """#309: the blob's ld65 line links two archives and a cfg; none of them
+    was a prerequisite (or, for the cfg, tracked by anything but mtime)."""
+    _require_toolchain()
+    with Ip65Farm() as farm:
+        farm.blob_build()
+        good = farm.sha(BLOB)
+        assert farm.exists(BLOB_STAMP)
+
+        # unchanged: nothing runs
+        old = farm.blob_mtime()
+        proc = farm.blob_build()
+        assert "ld65 " not in proc.stdout and farm.blob_mtime() == old, (
+            "an unchanged blob relinked:\n" + proc.stdout)
+
+        # each lib, touched (content unchanged): the mtime prerequisite
+        for lib in IP65_LIBS:
+            orig = farm.path(lib).stat().st_mtime_ns
+            newer = farm.blob_mtime() + 2_000_000_000   # unambiguously newer
+            os.utime(farm.path(lib), ns=(newer, newer))
+            proc = farm.blob_build()
+            assert "ld65 " in proc.stdout, f"touching {lib} did not relink the blob"
+            assert farm.sha(BLOB) == good
+            # put it back in the past, or every later step relinks on the
+            # lib's future mtime and the cases below prove nothing
+            os.utime(farm.path(lib), ns=(orig, orig))
+
+        # same-second content edits of the cfg and of the stub
+        for rel, text in (("ip65-build/ip65.cfg", "\n# same-second edit\n"),
+                          ("ip65-build/ip65_stub.s", "\n; same-second edit\n")):
+            farm.edit_same_second(rel, text)
+            proc = farm.blob_build()
+            assert "ld65 " in proc.stdout, (
+                f"a same-second edit of {rel} did not relink the blob:\n"
+                + proc.stdout)
+            assert farm.sha(BLOB) == good, "a comment edit moved the blob"
+
+        # a stale blob must take the PRG with it, with no clean
+        farm.make(*IP65)
+        prg = farm.sha()
+        out = {o: farm.path(o).stat().st_mtime_ns for o in LINK_OUTPUTS}
+        farm.edit_same_second("ip65-build/ip65.cfg", "\n# again\n")
+        proc = farm.make(*IP65)
+        assert "ld65 " in proc.stdout and farm.sha() == prg
+        assert all(farm.path(o).stat().st_mtime_ns != out[o] for o in LINK_OUTPUTS), (
+            "a rebuilt blob left a stale link output")
+
+
+def test_ip65_blob_dry_run_writes_nothing():
+    """#174: -n/-q/-t on a stale blob compare and report, and mutate nothing."""
+    _require_toolchain()
+    with Ip65Farm() as farm:
+        farm.blob_build()
+        farm.edit_same_second("ip65-build/ip65.cfg", "\n# stale\n")
+
+        def snap():
+            return {str(p.relative_to(farm.dir)): (p.stat().st_mtime_ns,
+                                                   p.read_bytes())
+                    for p in farm.path("ip65-build").rglob("*") if p.is_file()}
+        before = snap()
+        for opt in ("-n", "-q", "-t"):
+            proc = farm.make("BACKEND=ip65", "ip65-blob", opts=(opt,), check=False)
+            assert snap() == before, f"`make {opt} ip65-blob` mutated ip65-build/"
+        proc = farm.make("BACKEND=ip65", "ip65-blob", opts=("-n",))
+        assert "DRY RUN" in proc.stdout and BLOB_STAMP in proc.stdout, (
+            "a dry run on a stale blob did not report it:\n" + proc.stdout)
+
+
+def test_ip65_blob_missing_lib_fails_by_name():
+    """A fresh clone without `make ip65-libs` fails loudly, naming the file
+    and the fix, before any link is attempted."""
+    _require_toolchain()
+    with Ip65Farm() as farm:
+        for lib in IP65_LIBS:
+            farm.path(lib).rename(farm.path(lib + ".held"))
+            proc = farm.blob_build(check=False)
+            assert proc.returncode != 0, f"missing {lib} did not fail the build"
+            assert lib in proc.stdout and "make ip65-libs" in proc.stdout, (
+                f"missing {lib}: failure does not name it and the fix:\n"
+                + proc.stdout)
+            assert "ld65" not in proc.stdout, "got as far as the link"
+            farm.path(lib + ".held").rename(farm.path(lib))
+
+
+def test_uci_build_does_not_need_the_ip65_tree():
+    """BACKEND=uci neither reads nor requires ip65/ or ip65-build/."""
+    _require_toolchain()
+    with Farm() as farm:
+        for name in ("ip65", "ip65-build"):
+            os.unlink(farm.dir / name)
+        farm.make(*UCI)
+        assert farm.exists(PRG)
+        assert not farm.exists("ip65-build")
+
+
 def test_unchanged_flags_rebuild_nothing():
     """The inverse property: the stamp must not make every build a rebuild."""
     _require_toolchain()
