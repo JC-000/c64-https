@@ -4235,10 +4235,87 @@ Decisions and findings:
     cannot READ such a hello. A ChangeCipherSpec record between SH fragments
     is skipped by the record layer, as before.
 
-Oracle (hardware): the C64 cannot read the first encrypted record yet, so
+Oracle (hardware, P4; superseded by the P5 section below): the C64 cannot read the first encrypted record yet, so
 `tools/pq_keylog_check.py` runs the RFC 8446 schedule offline on the C64's
 `tls_mlkem_ss || tls_shared_secret` and `tls_transcript` (read with the CPU
 parked and all RAM banked in: `PQ_DUMP=<dir>` in `rig_https_local.py`) and
 compares with `s_server -keylogfile`. A match proves Decaps agreed with the
 server's Encaps and that both sides hashed the same CH || SH. A run that did
 not reach Decaps is INCONCLUSIVE (exit 78), never a verdict.
+
+## PQ_HYBRID P5: hybrid key schedule, first X25519MLKEM768 handshake (2026-10-17)
+
+`tls_derive_handshake_keys` (src/tls_keyschedule.s, `.ifdef PQ_HYBRID`) now takes
+the handshake-secret IKM from the group the ServerHello chose: `tls_kex_group`
+= `$EC` gives HKDF-Extract(salt = derived, IKM = `tls_mlkem_ss || tls_shared_secret`)
+(draft-ietf-tls-ecdhe-mlkem: ML-KEM first, then X25519, 64 B), `$1D` (or 0, a test
+that calls the routine bare) the unchanged 32 B x25519 secret. Everything after
+the extract is the existing schedule; the transcript is the same SHA-256.
+
+Decisions and findings:
+
+  - **A small concat, not a contiguous span.** `tls_mlkem_ss` sits in
+    NET_BSS_TAIL (below `$4200`) and `tls_shared_secret` in data.s BSS, so the
+    64 B IKM is copied into `input_buffer` (256 B scratch, dead since the
+    early-secret step) and the HKDF IKM pointer/length retargeted. NET_CODE
+    free drops by 61 B on the onchip profiles (166 -> 105) and 63 B on the comb
+    profiles (335 -> 272, 197 -> 134): about 63 B of TLS_CODE, and on onchip
+    2 B come back from `pq_sh_decaps` (on comb its PQ_GLUE sits in CRYPTO_HOT,
+    +2 there). `tools/measure_margins.py`. `hkdf_extract`
+    copies the IKM into `hmac_data_buf` (97 B) and HMACs it as the message, so 64
+    is within its limit; nothing there treats it as a key.
+  - **Zeroed at the extract, not at 'Q'.** Right after `hkdf_extract` the two
+    32 B secrets, the 64 B concatenation (`input_buffer`) and `hkdf_extract`'s
+    copy (`hmac_data_buf[0:64]`) are zeroed, for BOTH groups. Later HKDF calls
+    reuse `hmac_data_buf` for public info strings, so the copy is checked by
+    content (no 8-byte window of the IKM survives), and the span matters: with the
+    `hmac_data_buf` zeroing removed (mutant K11) IKM bytes around offset 55-63
+    were still there after the schedule ran. Not zeroed (unchanged, same on classic builds):
+    `tls_ecdhe_privkey` (until 'Q'), and SHA-256's internal block/schedule
+    buffers (not inspected; the following HMACs of the same routine rewrite them). Only PQ builds pay for the zeroing; the seven
+    knob-off PRGs are byte-identical.
+  - **The oracle changed with it.** With the secrets gone, `pq_keylog_check.py
+    --state` compares what stays: `tls_c_hs_secret` / `tls_s_hs_secret` are reused
+    for the APPLICATION traffic secrets after `tls_derive_traffic_keys`, which are
+    a pure function of the hybrid handshake secret and the transcript through the
+    server Finished, and `s_server -keylogfile` logs them as `CLIENT_TRAFFIC_SECRET_0`
+    / `SERVER_TRAFFIC_SECRET_0`. Gate: `tls_reached_connected == 7` (#204; a run
+    that connected and then called `tls_close` reads `tls_state = 0`), `tls_kex_group
+    == $EC`, `tls_sh_err == 0`, both secrets non-zero; a non-zero seed/ss/shared
+    secret in a connected run is a RESIDUE failure, not a pass. The P4 offline mode
+    (explicit secrets as arguments) is unchanged.
+  - **pq_sh_decaps** lost its redundant outer `php`/`plp` (`pq_mlkem_scrub` saves
+    and restores P itself); 2 B back in PQ_GLUE.
+  - **Which-group evidence on hardware:** `openssl_listener.py --trace` prints the
+    ServerHello key_share group (`X25519MLKEM768 (4588)` = 0x11EC); `--groups
+    default` runs `s_server` without `-groups`, and OpenSSL 3.6.5 then picks
+    X25519MLKEM768 for our hello (it prefers it).
+  - **Trap: `HTTPS_SNI=` on a live run.** A PQ image built with `HTTPS_SNI=www.foo.invalid`
+    (for the local self-signed listener) fails a LIVE host with `df_last_err = $05`
+    (DF_ERR_CERT_FMT: the SAN check runs against the baked name). It looked like a
+    hybrid defect for one run; the same image without the override passes. Build
+    live images without `HTTPS_SNI`.
+  - **Real servers.** browserleaks.com and en.wikipedia.org negotiate 11EC (they
+    complete `openssl s_client -groups X25519MLKEM768 -maxfraglen 512`); github.com
+    and lwn.net answer `handshake_failure` to a hybrid-only hello (they would pick
+    001D for our dual hello).
+
+Hardware record (U64E 10.43.23.81, 48 MHz, DeviceLock, OpenSSL 3.6.5 `s_server`;
+all runs full HTTPS PASS, tls_kex_group $EC unless noted):
+
+  - onchip, `make BACKEND=uci USE_NISTCURVES_ONCHIP=1 PQ_HYBRID=1
+    HTTPS_SNI=www.foo.invalid`, sha256
+    `ab85014cdc8bb074fc9cb99180c90dc8a74ac4d8ed9f68cfda32e7d311cf5e0f`:
+    rig wall-clock 108 s (`-groups X25519MLKEM768`), 107 s (`-groups X25519`,
+    $1D), 109 s (default groups, OpenSSL picks 11EC).
+  - comb (REU 16 MB, `C64_INIT_WAIT=90`), `make BACKEND=uci
+    USE_NISTCURVES_ONCHIP_COMB=1 PQ_HYBRID=1 HTTPS_SNI=www.foo.invalid`, sha256
+    `265c4c583c2b5a2430daf3a7ee2a3e546d99a8b7c1c4173476e8455097cfa042`: 165 s /
+    164 s ($1D) / 166 s. With `PHASE_TIMING=1` (1 s poll, n=1 each) trigger to
+    client Finished 43.7 s hybrid vs 42.0 s X25519-only: about +1.7 s.
+  - live (`tools/uci/rig_https_live.py`), comb image WITHOUT `HTTPS_SNI`, `make
+    BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1 PQ_HYBRID=1`, sha256
+    `b8677dd79968fb57e475baaa0995c8979d670b159ae753b207a947d5e8be8d61`:
+    browserleaks.com HTTP 200 (Finished at 44.1 s; the non-PQ comb image
+    `ad85797b...` 42.3 s), en.wikipedia.org HTTP 301 at `/` (39.8 s). Onchip was
+    not run against live servers.

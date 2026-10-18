@@ -10,6 +10,7 @@ tools/uci/rig_https_local.py expects.
 
     openssl_listener.py --groups X25519 --port 4433 --keylog /tmp/k.log
     openssl_listener.py --groups X25519MLKEM768 ...
+    openssl_listener.py --groups default --trace ...   # OpenSSL's own group list
 
 Prints "LISTENING <port> <openssl version>" once the server accepts, then runs
 until killed. Group selection is the server's whole policy: under
@@ -57,6 +58,9 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=4433)
     ap.add_argument("--keylog", required=True)
     ap.add_argument("--bind", default="0.0.0.0")
+    ap.add_argument("--trace", action="store_true",
+                    help="s_server -trace: the console shows each message, including the "
+                    "negotiated key_share group (the which-group evidence for P5 runs)")
     a = ap.parse_args(argv)
     from ensure_certs import ensure_certs
     cert, key = ensure_certs("p256")
@@ -64,7 +68,11 @@ def main(argv=None):
     Path(a.keylog).unlink(missing_ok=True)
     cmd = [exe, "s_server", "-accept", f"{a.bind}:{a.port}", "-cert", str(cert),
            "-key", str(key), "-tls1_3", "-ciphersuites", "TLS_CHACHA20_POLY1305_SHA256",
-           "-groups", a.groups, "-keylogfile", a.keylog, "-num_tickets", "0", "-state"]
+           "-keylogfile", a.keylog, "-num_tickets", "0", "-state"]
+    if a.groups != "default":       # "default" = no -groups: OpenSSL's own list and preference
+        cmd += ["-groups", a.groups]
+    if a.trace:
+        cmd.append("-trace")
     # A pty, not pipes: s_server block-buffers stdout on a pipe, and the request
     # line would sit in its buffer instead of reaching us.
     master, slave = pty.openpty()

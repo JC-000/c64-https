@@ -34,11 +34,19 @@ def _log(ikm=MK + XS, th=TH, rnd=RND):
             f"CLIENT_HANDSHAKE_TRAFFIC_SECRET {rnd.hex()} {c.hex()}\n")
 
 
+CA, SA = bytes(range(1, 33)), bytes(range(50, 82))
+
+
+def _log3():
+    return _log() + (f"CLIENT_TRAFFIC_SECRET_0 {RND.hex()} {CA.hex()}\n"
+                     f"SERVER_TRAFFIC_SECRET_0 {RND.hex()} {SA.hex()}\n")
+
+
 def _state(**over):
-    st = {"tls_mlkem_ss": MK.hex(), "tls_shared_secret": XS.hex(),
-          "tls_transcript": TH.hex(), "tls_client_random": RND.hex(),
-          "tls_kex_group": "ec", "tls_sh_err": "00", "tls_state": "ff",
-          "tls_last_state": "03", "tls_pq_seed": "00" * 64}
+    st = {"tls_c_hs_secret": CA.hex(), "tls_s_hs_secret": SA.hex(),
+          "tls_client_random": RND.hex(), "tls_kex_group": "ec", "tls_sh_err": "00",
+          "tls_state": "00", "tls_last_state": "00", "tls_reached_connected": "07",
+          "tls_pq_seed": "00" * 64, "tls_mlkem_ss": "00" * 32, "tls_shared_secret": "00" * 32}
     st.update(over)
     return st
 
@@ -81,19 +89,37 @@ def test_a_keylog_without_the_run_is_a_usage_error():
     assert K.check(_log(), bytes(31) + b"\x01", MK, XS, TH)[0] is None
 
 
-def test_state_mode_green_and_red():
-    assert K.check_state(_state(), _log())[0] is True
-    assert K.check_state(_state(tls_mlkem_ss=bytes(range(32)).hex()), _log())[0] is False
+def test_state_mode_green_for_a_connected_then_closed_run():
+    # tls_state=00 / last_state=00 is what CONNECTED-then-tls_close looks like (#204)
+    assert K.check_state(_state(), _log3())[0] is True
+
+
+def test_state_mode_red_on_either_secret():
+    for k in ("tls_c_hs_secret", "tls_s_hs_secret"):
+        assert K.check_state(_state(**{k: bytes(range(9, 41)).hex()}), _log3())[0] is False
+    # swapped client/server secrets are also a mismatch
+    assert K.check_state(_state(tls_c_hs_secret=SA.hex(), tls_s_hs_secret=CA.hex()),
+                         _log3())[0] is False
+
+
+def test_state_mode_residue_is_a_failure_not_a_pass():
+    for k, n in (("tls_pq_seed", 64), ("tls_mlkem_ss", 32), ("tls_shared_secret", 32)):
+        r, msg = K.check_state(_state(**{k: "11" * n}), _log3())
+        assert r is False and "RESIDUE" in msg, k
+
+
+def test_state_mode_log_without_traffic_secret_lines_is_a_usage_error():
+    assert K.check_state(_state(), _log())[0] is None
 
 
 def test_the_sentinel_gate_never_gives_a_verdict_from_unreached_memory():
-    cases = [dict(tls_kex_group="1d"), dict(tls_sh_err="07"),
-             dict(tls_last_state="02"), dict(tls_last_state="01"),
-             dict(tls_last_state="03", tls_state="02"),    # not ERROR: judged by tls_state
-             dict(tls_pq_seed="11" * 64), dict(tls_mlkem_ss="00" * 32),
-             dict(tls_shared_secret="00" * 32), dict(tls_transcript="00" * 32)]
+    cases = [dict(tls_kex_group="1d"), dict(tls_kex_group="00"), dict(tls_sh_err="07"),
+             dict(tls_reached_connected="00"), dict(tls_reached_connected="03"),
+             dict(tls_c_hs_secret="00" * 32), dict(tls_s_hs_secret="00" * 32)]
     for over in cases:
-        assert K.check_state(_state(**over), _log())[0] == "inconclusive", over
+        assert K.check_state(_state(**over), _log3())[0] == "inconclusive", over
+    # tls_state / tls_last_state are NOT the gate: ERROR with a stale latch of 0
+    assert K.check_state(_state(tls_state="ff", tls_last_state="06"), _log3())[0] is True
 
 
 def main() -> int:

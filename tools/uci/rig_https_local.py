@@ -267,8 +267,8 @@ EXTERNAL_PORT = int(os.environ.get("EXTERNAL_PORT", "4433"))
 
 # --- PQ_HYBRID post-run dump (PQC phase P4) -------------------------------
 # PQ_DUMP=<dir> writes <dir>/pq_state.json after the fetch, success or not:
-# the ML-KEM secret, the X25519 secret, the SH transcript hash and the other
-# P4 state, read with the CPU parked and all RAM banked in (the $A000+ BSS
+# the ML-KEM secret, the X25519 secret (both zero since P5), the SH transcript
+# hash, the application traffic secrets and the other P4/P5 state, read with the CPU parked and all RAM banked in (the $A000+ BSS
 # reads as the BASIC ROM otherwise). tools/pq_keylog_check.py consumes it.
 PQ_DUMP_DIR = os.environ.get("PQ_DUMP", "")
 PQ_PARK_ADDR: int = -1
@@ -299,6 +299,11 @@ def _pq_dump(client, transport, labels, outdir: str) -> None:
         "tls_sh_err": rd("tls_sh_err", 1),
         "tls_state": rd("tls_state", 1),
         "tls_last_state": rd("tls_last_state", 1),
+        # P5: the oracle's inputs after the secrets are zeroed (the application
+        # traffic secrets reuse these two buffers) and its sentinel gate (#204)
+        "tls_c_hs_secret": rd("tls_c_hs_secret", 32),
+        "tls_s_hs_secret": rd("tls_s_hs_secret", 32),
+        "tls_reached_connected": rd("tls_reached_connected", 1),
     }
     Path(outdir).mkdir(parents=True, exist_ok=True)
     (Path(outdir) / "pq_state.json").write_text(json.dumps(state, indent=1))
@@ -775,11 +780,11 @@ def _dump_diag(transport: Ultimate64Transport,
     print()
     print("--- adapter / TLS state ---")
     for name in ("net_last_error", "net_tcp_state", "uci_socket_id",
-                 "net_initialized", "reu_dma_timeout"):
+                 "net_initialized", "reu_dma_timeout", "df_last_err", "tls_sh_err"):
         if name in labels:
             print(f"  {name:22s} : 0x{r8(name):02X}")
     for name in ("tls_state", "tls_last_state", "tls_reached_connected",
-                 "tls_recv_progress", "tls_recv_sub_progress"):
+                 "tls_recv_progress", "tls_recv_sub_progress", "tls_kex_group"):
         if name in labels:
             print(f"  {name:22s} : 0x{r8(name):02X}")
     for name in ("tcp_recv_head", "tcp_recv_tail", "uci_req_len", "uci_read_hdr",
