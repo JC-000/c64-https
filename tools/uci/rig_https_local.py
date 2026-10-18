@@ -284,6 +284,8 @@ def _pq_dump(client, transport, labels, outdir: str) -> None:
     time.sleep(3.0)
 
     def rd(name, n):
+        if name not in labels:      # a classic image has no PQ labels: dump what exists
+            return ""
         return bytes(client.read_mem(labels[name], n)).hex()
 
     state = {

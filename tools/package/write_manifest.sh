@@ -31,6 +31,10 @@ echo
 echo "TLS 1.3 / HTTPS client for the Commodore 64. Everything here is prebuilt:"
 echo "you need no assembler, no cc65, no Python packages and no build step."
 echo
+echo "DEMONSTRATION AND EDUCATIONAL USE ONLY. This client is not cryptographically"
+echo "secure (weak entropy, no certificate chain validation), including the"
+echo "post-quantum hybrid key exchange the UCI images offer."
+echo
 echo "generated : $(info generated)"
 echo "git HEAD  : $(info git_head)"
 if [ "$(info git_dirty)" = "yes" ]; then
@@ -87,14 +91,18 @@ echo "                   what you have, this is the one that will run."
 echo "                   ~36 min per handshake at 1 MHz."
 echo
 echo "     uci-onchip    Ultimate 64 / C64 Ultimate at turbo, REU off."
-echo "                   Boots straight to the menu."
+echo "                   Boots straight to the menu. Offers the hybrid"
+echo "                   X25519MLKEM768 key exchange (key exchange only;"
+echo "                   authentication is unchanged; demonstration only,"
+echo "                   not cryptographically secure)."
 echo
 echo "     uci-comb      Ultimate 64 / C64 Ultimate at turbo, REU ON."
 echo "                   The fastest image: ~1.7x quicker verify than"
 echo "                   uci-onchip. It builds a 16 KB table into REU"
 echo "                   bank 2 at every boot before the menu appears —"
 echo "                   ~34 s at 64 MHz, ~45 s at 48 MHz. That is the"
-echo "                   program working, not a hang."
+echo "                   program working, not a hang. Also offers the"
+echo "                   hybrid X25519MLKEM768 key exchange (+2.5 s, n=3)."
 echo
 echo "   Why the split: below about 5 MHz the extra table work costs more"
 echo "   than it saves, and below ~18 MHz the plain REU multiply path wins"
@@ -165,7 +173,9 @@ echo
 echo "  There are deliberately no combined images. Shipping one variant per disk"
 echo "  means the label is the whole contents, so no image can quietly leave a"
 echo "  product out: what you downloaded is what boots. A disk holding all three"
-echo "  could not fit in any case - 248 + 248 + 186 = 682 blocks against 664."
+echo "  would not be the label-is-the-contents disk this is (the three PRGs are"
+echo "  186 + 186 + 202 = 574 blocks against a .d64's 664, so they would fit;"
+echo "  the split is deliberate, not forced)."
 echo
 if [ -f "$D64_LIST" ]; then
     while IFS= read -r ln; do

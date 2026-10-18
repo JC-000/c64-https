@@ -650,8 +650,40 @@ EXIT_FAIL = 1
 EXIT_INCONCLUSIVE = 78
 
 
+def parse_require_kex(text: str):
+    """REQUIRE_KEX: '' -> None (not required); else one hex byte (e.g. 'EC'
+    or '0xEC'). Anything else raises ValueError -- the rig calls this before
+    the device is touched, so a typo costs nothing."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        val = int(text, 16)
+    except ValueError:
+        raise ValueError(f"REQUIRE_KEX={text!r} is not a hex byte") from None
+    if not 0 <= val <= 0xFF:
+        raise ValueError(f"REQUIRE_KEX={text!r} is outside 00-FF")
+    return val
+
+
+def check_kex_group(kex, required: int) -> Verdict:
+    """The server chose the key-exchange group the run is meant to prove.
+
+    *kex* is tls_kex_group as read from the C64 (None = the label is absent
+    or the read failed). A required group that cannot be read is a failure,
+    never a skip: a PASS that never looked at the group proves nothing about
+    PQ_HYBRID."""
+    if kex is None:
+        return Verdict(False, f"tls_kex_group could not be read "
+                              f"(required ${required:02X})", {"kex": None})
+    if kex != required:
+        return Verdict(False, f"tls_kex_group is ${kex:02X}, required "
+                              f"${required:02X}", {"kex": kex})
+    return Verdict(True, f"tls_kex_group is ${kex:02X}", {"kex": kex})
+
+
 def decide_exit(banner_ok: bool, shadow: Verdict, settled: Verdict,
-                status, body):
+                status, body, kex=None, require_kex=None):
     """Turn the verdicts into (exit code, report lines).
 
     THIS LIVES HERE, NOT IN THE RIG, AND THAT PLACEMENT IS THE POINT.
@@ -683,6 +715,10 @@ def decide_exit(banner_ok: bool, shadow: Verdict, settled: Verdict,
     never turn anything into a PASS, so it cannot hide a truncation.
     """
     checks = [shadow, status, body]
+    kex_v = None
+    if require_kex is not None:
+        kex_v = check_kex_group(kex, require_kex)
+        checks = checks + [kex_v]
     lines = [
         "=== VERDICT ===",
         f"  banner names the build target    : {'PASS' if banner_ok else 'FAIL'}",
@@ -690,7 +726,10 @@ def decide_exit(banner_ok: bool, shadow: Verdict, settled: Verdict,
     for label, v in (("shadow RAM readable ($A000)", shadow),
                      ("fetch settled (not still growing)", settled),
                      ("HTTP status", status),
-                     ("body complete (own framing)", body)):
+                     ("body complete (own framing)", body),
+                     ("key exchange group (REQUIRE_KEX)", kex_v)):
+        if label.startswith("key exchange") and kex_v is None:
+            continue                    # not required: no line, no verdict
         lines.append(f"  {label:<33}: "
                      + ("FAIL (never evaluated)" if v is None
                         else f"{v.status.upper()} — {v.reason}"))

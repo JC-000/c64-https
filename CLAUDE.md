@@ -540,34 +540,17 @@ engineering-notes.
 
 ## End-to-end HTTPS status
 
-**Real servers work** (2026-08-21/22, U64E @ 48 MHz, comb): github.com,
-browserleaks.com, lwn.net all HTTP 200 (~32-39 s to Finished), and
-en.wikipedia.org's C64 article streamed into REU `$10:0000` via
-`HTTPS_BODY_TO_REU=1` and shown by `src/viewer.s` — **handshake and GET
-verified, body completeness NOT** (#211). This entry used to claim
-125,235 B byte-verified; that does not reproduce on either tree. `http_get`
-returns `carry=0`/`http_status=200` on bodies tens of KB short of their
-`Content-Length`, intermittently and not as a function of size — measured
-offline against a local listener with no chunking, and live at
-117,192 / 89,526 / 73,720 B against a same-day 125,703 B anchor. It can also
-hang outright. **Do not treat any large-body fetch as complete until #211
-closes**; it went unnoticed because the only rig on that path could not go
-red on a short body (#210, now fixed: `rig_https_banner.py` derives the
-expected size from the response's own framing and gates its exit code on
-it). That rig also **sets the CPU clock instead of inheriting it** — a
-completeness verdict is clock-sensitive where the banner verdict was not,
-and a device left at 1 MHz makes a slow fetch look like a truncated one.
-**#211 reproduces on the shipped path.** Two runs of ONE artifact — PRG
-`44e6c0dd605db65682131d6621fc9ad7b8b03cb0d22b0b241691abd3c35ed32a`,
-`BACKEND=uci USE_NISTCURVES_ONCHIP=1 HTTPS_HOST=en.wikipedia.org
-HTTPS_PATH=/wiki/Commodore_64`, U64E @ 48 MHz, `FETCH_TIMEOUT=900`, same
-host, same day: one **PASS** (754,413 B consumed == Content-Length, HTTP
-200) and one **FAIL** (frozen at 299,123 B, 455,290 B short). One of each:
-treat neither as the norm, and do not quote the PASS on its own. The stall is
-**abrupt** — the counter freezes and stays frozen for hundreds of seconds,
-which is what #219's fast-expiry path predicts — not a trickle. 754,413 B
-is the *rendered page* at that path and is not the 125,703 B raw-article
-figure quoted above; they are different resources. The handshake results above are unaffected. The
+**Real servers work** (U64E @ 48 MHz): github.com, browserleaks.com, lwn.net
+HTTP 200, and en.wikipedia.org's C64 article (760,609 B at v0.6.0) completes
+with consumed == Content-Length on both UCI products, comb and onchip, through
+`rig_https_banner.py` — the only completeness oracle (it derives the expected
+size from the response's own framing, #210, and **sets the CPU clock instead
+of inheriting it**: a device left at 1 MHz makes a slow fetch look
+truncated). Silent truncation (#211: `http_get` returning `carry=0`/HTTP 200
+on a short body, or hanging) is **closed** (2026-09-24, PR #238); the
+2026-08/09 truncated sizes and the shipped-path PASS/FAIL pair in the issue
+predate that fix. A completeness claim still comes only from that rig's
+verdict, never from `carry` or `http_status`. The
 local-listener handshake works on both backends (UCI at 48 MHz and 1 MHz;
 ip65 in VICE at honest 1 MHz, ~36 min).
 
@@ -588,8 +571,9 @@ never exercised:
   - Cloudflare is out of scope: ignores MFL and enforces a ~15 s deadline.
 
 PQ_HYBRID (P5): X25519MLKEM768 handshakes complete on the U64E against a local
-OpenSSL 3.6.5 `s_server`, onchip and comb images. Live servers, comb image only:
-browserleaks.com (HTTP 200) and en.wikipedia.org (HTTP 301 at `/`); github.com and
+OpenSSL 3.6.5 `s_server`, onchip and comb images. Live: en.wikipedia.org's C64
+article on both release images (see End-to-end status), browserleaks.com (HTTP 200)
+and en.wikipedia.org `/` (HTTP 301) on comb; github.com and
 lwn.net do not offer 11EC (handshake_failure to a hybrid-only hello). Image hashes,
 make lines and timings: the P5 section of engineering-notes.
 
@@ -898,8 +882,11 @@ TABLES_BSS.
 between each, matrix in `tools/package/_common.sh`:
 
   c64-https-ip65-onchip.prg   stock C64 + RR-Net, no REU, no turbo
-  c64-https-uci-onchip.prg    turbo, no REU                          (TRUST_STORE=1)
-  c64-https-uci-comb.prg      turbo + REU, fastest (needs bank 2 + boot precompute; TRUST_STORE=1)
+  c64-https-uci-onchip.prg    turbo, no REU                          (TRUST_STORE=1 PQ_HYBRID=1)
+  c64-https-uci-comb.prg      turbo + REU, fastest (needs bank 2 + boot precompute; TRUST_STORE=1 PQ_HYBRID=1)
+
+Since v0.6.0 both UCI products are `PQ_HYBRID=1`; no classic UCI image ships
+any more (build one by omitting `PQ_HYBRID=1`). `ip65-onchip` stays classic.
 
 REU-profile images were retired (curation: still fastest below ~18 MHz,
 one line in `PACKAGE_VARIANTS` to restore). **That line is a

@@ -118,10 +118,31 @@ MUTANTS = [
      MODULE,
      "    if settled.inconclusive:",
      "    if settled.inconclusive and False:"),
+    ("K1: the kex verdict is never added to decide_exit's checks",
+     MODULE,
+     "        checks = checks + [kex_v]",
+     "        pass"),
+    ("K2: check_kex_group passes a wrong group",
+     MODULE,
+     "    if kex != required:",
+     "    if False and kex != required:"),
+    ("K3: check_kex_group passes an unread group",
+     MODULE,
+     "    if kex is None:\n        return Verdict(False, f\"tls_kex_group could not be read \"",
+     "    if False and kex is None:\n        return Verdict(False, f\"tls_kex_group could not be read \""),
+    ("K4: REQUIRE_KEX 0 is treated as unset",
+     MODULE,
+     "    if require_kex is not None:",
+     "    if require_kex:"),
+    ("K5: the rig does not pass the group to decide_exit",
+     RIG,
+     "                                   kex=kex, require_kex=REQUIRE_KEX)",
+     "                                   kex=None, require_kex=REQUIRE_KEX)"),
     ("the rig decides its own exit code again instead of delegating",
      RIG,
      "        code, report = decide_exit(banner_ok=banner_ok, shadow=shadow,\n"
-     "                                   settled=settled, status=status, body=body)",
+     "                                   settled=settled, status=status, body=body,\n"
+     "                                   kex=kex, require_kex=REQUIRE_KEX)",
      "        code, report = (0, ['PASS'])"),
     # --- Round-2 review wrote these six against decide_exit WITHOUT
     # --- looking at this list, and all six were caught. Folded in so
@@ -155,8 +176,8 @@ MUTANTS = [
     ("the rig passes decide_exit's verdicts positionally, so a "
      "settled/status transposition is invisible to every guard",
      RIG,
-     "        code, report = decide_exit(banner_ok=banner_ok, shadow=shadow,\n                                   settled=settled, status=status, body=body)",
-     "        code, report = decide_exit(banner_ok, shadow, status, settled, body)"),
+     "        code, report = decide_exit(banner_ok=banner_ok, shadow=shadow,\n                                   settled=settled, status=status, body=body,\n                                   kex=kex, require_kex=REQUIRE_KEX)",
+     "        code, report = decide_exit(banner_ok, shadow, status, settled, body, kex, REQUIRE_KEX)"),
     # --- the 6502 side. The reviewer reversed these two arms in
     # --- src/http.s and every host-side test stayed green, 8/8.
     ("the 6502 verdict tests http_chunked before http_cl_valid "
