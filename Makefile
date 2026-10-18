@@ -1103,19 +1103,24 @@ _ := $(shell $(IP65_BLOB_STAMP_BODY) > $(IP65_BLOB_STAMP).tmp; \
 # The blob's own bytes, by content, for a blob changed OUTSIDE this rule (a
 # byte flip, the documented provenance test): blob -> ip65_blob.o is an mtime
 # edge, and a same-second flip left the object, and the PRG, stale. A change
-# deletes the object and link outputs. Absent blob or stamp = record only, so
-# the rebuild after the block above does not trigger a second invalidation.
-_ := $(shell if [ -f $(IP65_BIN) ]; then \
+# deletes the object and link outputs. A present blob with no stamp is only
+# recorded (a pre-stamp tree). An ABSENT blob is rebuilt newer-or-equal to an
+# object that may have been assembled from a flipped one, and the rule's own
+# stamp then matches, so absence clears the object and link outputs too. An
+# EMPTY blob (`make -t` touches one into existence) counts as absent. Last,
+# a missing object always takes the link outputs with it: `make ip65-blob`
+# (a maintenance goal, which keeps the PRG per #220) deletes only the object,
+# and the PRG would otherwise outlive it; IP65_RM_LINK is empty for such goals.
+_ := $(shell [ -s $(IP65_BIN) ] || rm -f $(IP65_BIN); \
+             if [ -f $(IP65_BIN) ]; then \
              $(IP65_BIN_SHA) > $(IP65_BIN_STAMP).tmp; \
              if [ -f $(IP65_BIN_STAMP) ] && ! cmp -s $(IP65_BIN_STAMP).tmp $(IP65_BIN_STAMP); then \
                  rm -f $(IP65_BLOB_OBJ) $(IP65_RM_LINK); \
              fi; \
              mv $(IP65_BIN_STAMP).tmp $(IP65_BIN_STAMP); \
              else rm -f $(IP65_BLOB_OBJ) $(IP65_RM_LINK); \
-             fi)
-# An ABSENT blob is rebuilt (deterministically) newer-or-equal to an object that
-# may have been assembled from a flipped one, and the rule's own stamp then
-# matches: the stale object/PRG would be permanent. So absence clears them too.
+             fi; \
+             [ -f $(IP65_BLOB_OBJ) ] || rm -f $(IP65_RM_LINK))
 else
 ifneq ($(shell $(IP65_BLOB_STAMP_BODY) 2>/dev/null | cmp -s - $(IP65_BLOB_STAMP) >/dev/null 2>&1 || echo differs),)
 $(warning DRY RUN (-$(MAKE_OPT_LETTERS)): ip65 blob inputs differ from $(IP65_BLOB_STAMP).)

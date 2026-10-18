@@ -1140,6 +1140,45 @@ def test_ip65_deleted_blob_after_a_flip_recovers_the_prg():
         assert farm.sha() == good, "a deleted blob left the flipped PRG permanent"
 
 
+def test_ip65_maintenance_rebuild_after_a_flip_recovers_the_prg():
+    """flip -> make -> rm blob -> `make ip65-blob` -> make, with the PRG not
+    older than the reassembled object. The maintenance goal keeps the PRG
+    (#220) but deletes the object; the PRG must not outlive it."""
+    _require_toolchain()
+    with Ip65Farm("no-blob-no-stamps") as farm:
+        farm.make(*IP65)
+        good = farm.sha()
+        blob = farm.path(BLOB)
+        data, ns = blob.read_bytes(), blob.stat().st_mtime_ns
+        blob.write_bytes(data[:100] + bytes([data[100] ^ 0xFF]) + data[101:])
+        os.utime(blob, ns=(ns, ns))
+        farm.make(*IP65)
+        assert farm.sha() != good
+        blob.unlink()
+        farm.make("BACKEND=ip65", "ip65-blob")
+        assert farm.exists(PRG), "the maintenance goal deleted the PRG (#220)"
+        fut = farm.path(PRG).stat().st_mtime_ns + 30_000_000_000
+        os.utime(farm.path(PRG), ns=(fut, fut))
+        farm.make(*IP65)
+        assert farm.sha() == good, "the flipped PRG outlived its deleted object"
+
+
+def test_ip65_dry_run_t_blob_is_recovered_by_the_next_build():
+    """`make -t` with the blob absent touches a 0-byte blob into existence;
+    the next real build must treat it as absent and recover on its own."""
+    _require_toolchain()
+    with Ip65Farm("no-blob-no-stamps") as farm:
+        farm.make(*IP65)
+        good, blob_sha = farm.sha(), farm.sha(BLOB)
+        farm.path(BLOB).unlink()
+        farm.make("BACKEND=ip65", "ip65-blob", opts=("-t",), check=False)
+        assert farm.exists(BLOB) and farm.path(BLOB).stat().st_size == 0, (
+            "`make -t` no longer creates the empty blob; the case is vacuous")
+        farm.make(*IP65)
+        assert farm.sha(BLOB) == blob_sha, "an empty blob was not rebuilt"
+        assert farm.sha() == good
+
+
 def test_ip65_cases_do_not_depend_on_checkout_state():
     """A fresh clone (no blob, no stamps) and a pre-stamp tree (blob, no
     stamps) must behave exactly like the checkout the suite runs in."""
