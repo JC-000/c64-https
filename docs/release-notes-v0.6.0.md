@@ -66,7 +66,9 @@ The 1541 filenames (`ip65-noreu`, `uci-noreu`, `uci-comb`) and the PRG sizes (47
 
 ## `ip65-onchip` is not the v0.5.1 binary
 
-`c64-https-ip65-onchip.prg` is `e69bfce7…`; v0.5.1's was `810f1158…`. Rebuilt at each step: `1c377d34…` after #311 (link order only), then `e69bfce7…` from #312 on, unchanged by #313-#315. **#312 changed ip65 code**: it added the HelloRetryRequest check to the ip65 ServerHello parser and changed the shared ClientHello builder. **No handshake has been run on these ip65 bytes**: the VICE network rig needs a sudo rig-up that was not done for this release, so the image has only been booted to the banner (package-verify). Treat it as not network-validated at v0.6.0, whatever "unchanged by PQ" may suggest. It does not offer the hybrid.
+`c64-https-ip65-onchip.prg` is `e69bfce7…`; v0.5.1's was `810f1158…`. Rebuilt at each step: `1c377d34…` after #311 (link order only), then `e69bfce7…` from #312 on, unchanged by #313-#315. **#312 changed ip65 code**: it added the HelloRetryRequest check to the ip65 ServerHello parser and changed the shared ClientHello builder. It does not offer the hybrid.
+
+**Validated in emulation, not on silicon.** The hardware-free ip65 end-to-end (`tests/rig_vice_https_macos.py`, `E2E_PROFILE=onchip`, `E2E_NO_WARP=1`) PASSED on these bytes: ethernet-capable VICE 3.10 `x64sc` (the patched pcap build at `~/opt/vice-eth/bin/x64sc`) on a feth/pcap link with the rig's dnsmasq, a host TLS 1.3 listener on port 24530, honest 1 MHz, 2,328 s wall (DHCP OK at +35 s; after `G`: TCP connected +3 s, CH +475 s, SH +931 s, ServerHello processed (PROC) +950 s, last flight record received +2,266 s, server Finished +2,269 s, request sent +2,287 s, connection closed +2,293 s), `http_status=200`, body `TLS13 OK FROM C64 TEST` (22 B, as expected). The image under test was built with the exact release arguments plus the rig's port: `make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1 TRUST_RELEASE=1 HTTPS_PORT=24530`, sha256 `9b1ef4b1582242ef0820a33499c60f1f6a69db803f45de6431451fe34a4c7463`. It differs from the release PRG `e69bfce7…` in exactly 4 bytes, the two HTTPS_PORT words (443 = `$01BB` vs 24530 = `$5FD2`, each stored twice); nothing else. What this does NOT cover: real RR-Net/cs8900a silicon (the physical rig was not run), server name validation (the ip65 image has none and accepts any certificate whose signature verifies), and anything faster than 1 MHz.
 
 ## M3 demo
 
@@ -119,7 +121,7 @@ All 8 runs completed; no truncation was seen. The silent-truncation defect #211 
 - **Entropy is weak** (see above).
 - **The Wikipedia REU viewer demo does not link with `PQ_HYBRID=1`.** `make BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1 PQ_HYBRID=1 HTTPS_HOST=en.wikipedia.org HTTPS_PATH=/wiki/Commodore_64 HTTPS_BODY_TO_REU=1` overflows CRYPTO_HOT by 507 B. Build the demo without `PQ_HYBRID`.
 - **A hybrid ServerHello sent as one record cannot be read** (the record buffer is 548 B); the client refuses it at once, leaving `tls_sh_err=$0E` (not shown on screen). Servers that honour max_fragment_length (OpenSSL, Wikipedia, browserleaks) split it. Front ends that ignore it, such as Cloudflare's and BoringSSL-based ones, are out of scope (Cloudflare also enforces a ~15 s deadline).
-- **`ip65-onchip` is not network-validated at this release** (see above).
+- **`ip65-onchip` was validated in VICE only** (one e2e PASS at honest 1 MHz, see above); not on real RR-Net silicon at this release, and it has no server name validation.
 - **The C64 Ultimate was not validated for this release.** The last C64U run (v0.5.1, `uci-onchip` against Wikipedia at 64 MHz) did not reach a connection:
   - Its trust store could not be used, so the image printed `TRUST FAIL 02` and asked `CONTINUE UNPINNED? Y/N`. The UCI images keep their trust store (`TRUST.A` / `TRUST.B`) on `/USB1`, and that C64 Ultimate has no `/USB1` volume. That fits, but the cause was not investigated.
   - The path the rig typed arrived as `/wiki/.ommodore_64`.
