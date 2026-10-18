@@ -1,0 +1,72 @@
+github.com             issuances=10 distinct_keys=9 consecutive_same_key=0/9
+      2026-07-03 b8e9b0a8 Sectigo
+      2026-08-02 a7831b05 Let's Encrypt
+      2026-08-04 5c00bad1 Sectigo
+      2026-08-10 9ffc4eb6 Sectigo
+      2026-08-16 08af26ff Sectigo
+      2026-08-30 4b62d421 Sectigo
+      2026-08-31 1fdba877 Sectigo
+      2026-09-01 ff088be6 Sectigo
+en.wikipedia.org       issuances=0 distinct_keys=0 consecutive_same_key=0/0
+lwn.net                issuances=3 distinct_keys=3 consecutive_same_key=0/2
+      2026-07-07 cd0ad9ae Let's Encrypt
+      2026-08-29 86374d92 Let's Encrypt
+      2026-09-06 2ab1b305 Let's Encrypt
+browserleaks.com       issuances=2 distinct_keys=2 consecutive_same_key=0/1
+      2026-08-06 86ccce59 Let's Encrypt
+      2026-08-06 ce408b17 Let's Encrypt
+www.google.com         issuances=80 distinct_keys=80 consecutive_same_key=0/79
+      2026-09-28 27460835 Google Trust Services
+      2026-09-28 81b6335e Google Trust Services
+      2026-09-28 659bf8ef Google Trust Services
+      2026-09-28 b3fe7cdf Google Trust Services
+      2026-09-28 968b12a0 Google Trust Services
+      2026-09-28 b1abd56d Google Trust Services
+      2026-09-28 105198f3 Google Trust Services
+      2026-09-28 e20b6454 Google Trust Services
+ietf.org               issuances=82 distinct_keys=82 consecutive_same_key=0/81
+      2026-09-18 ed33d673 Let's Encrypt
+      2026-09-18 81ad82b6 Google Trust Services
+      2026-09-18 7b2a4661 Google Trust Services
+      2026-09-19 9b3d4131 Let's Encrypt
+      2026-09-27 1b022be6 Google Trust Services
+      2026-09-27 9f6b7adb Google Trust Services
+      2026-09-27 a93b96ef Google Trust Services
+      2026-09-27 30f44f2f Google Trust Services
+example.com            issuances=13 distinct_keys=13 consecutive_same_key=0/12
+      2026-07-29 9fbbc9b1 SSL.com
+      2026-07-29 0856752f SSL.com
+      2026-09-17 48613e13 Sectigo
+      2026-09-24 3caa3576 Sectigo
+      2026-09-26 3116c9c5 SSL.com
+      2026-09-26 63dc72f0 SSL.com
+      2026-09-26 62335ae3 SSL.com
+      2026-09-26 b68c8c1a SSL.com
+news.ycombinator.com   issuances=2 distinct_keys=2 consecutive_same_key=0/1
+      2026-07-19 bd2735e6 Let's Encrypt
+      2026-09-20 7cd959cf Let's Encrypt
+www.youtube.com        issuances=0 distinct_keys=0 consecutive_same_key=0/0
+lemon64.com            issuances=5 distinct_keys=5 consecutive_same_key=0/4
+      2026-07-16 b0c0428e Google Trust Services
+      2026-07-20 15bdd9c4 Google Trust Services
+      2026-08-03 04d4691a SSL.com
+      2026-09-13 af49b455 Google Trust Services
+      2026-09-18 e572469e Google Trust Services
+kernel.org             issuances=12 distinct_keys=9 consecutive_same_key=0/11
+      2026-08-14 356a5634 Let's Encrypt
+      2026-08-18 0047e9f6 Let's Encrypt
+      2026-08-22 0f81f7eb Let's Encrypt
+      2026-08-25 785d6b96 Let's Encrypt
+      2026-08-27 86bc78a0 Let's Encrypt
+      2026-09-20 f0d682b4 Let's Encrypt
+      2026-09-20 ebf5fb80 Let's Encrypt
+      2026-09-20 1422cf12 Let's Encrypt
+stackoverflow.com      issuances=19 distinct_keys=19 consecutive_same_key=0/18
+      2026-08-22 14ef49a6 Let's Encrypt
+      2026-08-22 187fb524 Let's Encrypt
+      2026-08-22 a09fad60 Let's Encrypt
+      2026-08-22 59b3356e Google Trust Services
+      2026-08-22 b30e65b3 Google Trust Services
+      2026-09-25 0911f5a9 Let's Encrypt
+      2026-09-25 d370635d Let's Encrypt
+      2026-09-26 50f2198b Let's Encrypt

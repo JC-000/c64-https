@@ -3,7 +3,8 @@
 
 A trust bundle is a separate file the C64 loads (from disk, or into the REU)
 and checks with the P-256 `ecdsa_verify_256` it already links. The public key
-and a generation floor are compiled into the PRG (DECISIONS.md item 4). This
+and a generation floor are compiled into the PRG (docs/155-phase2/DECISIONS.md
+item 4; the DECISIONS cites in the tree all name that file). This
 tool is the host half only; loading and verifying on the C64 is not here.
 
 Byte format, version 1. Multi-byte integers are LITTLE-endian unless marked
