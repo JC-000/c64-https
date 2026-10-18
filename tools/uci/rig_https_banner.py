@@ -501,6 +501,18 @@ def main() -> int:
             also=lambda: close_confirmed(stopped_early, read_shadow_ok,
                                          read_tcp_state, closed_before))
         dump(lines, "final screen")
+        # PQ_HYBRID builds: which group the server chose. Read after the close
+        # wait, on the live transport (tls_kex_group sits just past the 'Q'
+        # scrub span; nothing rewrites it until the next connect). Printed always
+        # when the label exists; REQUIRE_KEX=EC (hex) makes a different
+        # group a failure of an otherwise passing run.
+        kex = None
+        try:
+            kex = bytes(client.read_mem(label_addr("tls_kex_group"), 1))[0]
+            print(f"  tls_kex_group=${kex:02X}")
+        except KeyError:
+            pass
+
         if not ok:
             print("WARNING: never saw CONNECTION CLOSED — leaving the machine "
                   "as-is rather than resetting it (a reset with a live socket "
@@ -533,6 +545,11 @@ def main() -> int:
         for line in report[:-1]:
             print(line)
         print(report[-1], file=sys.stderr if code else sys.stdout)
+        want = os.environ.get("REQUIRE_KEX", "")
+        if want and code == 0 and kex != int(want, 16):
+            print(f"FAIL: REQUIRE_KEX=${int(want, 16):02X} but tls_kex_group is "
+                  f"{'absent' if kex is None else '$%02X' % kex}", file=sys.stderr)
+            return 1
         return code
     finally:
         # #234: before disable_uci — the C64 needs the command interface to
