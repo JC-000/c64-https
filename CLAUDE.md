@@ -587,10 +587,11 @@ never exercised:
     during the multi-minute crypto stall.
   - Cloudflare is out of scope: ignores MFL and enforces a ~15 s deadline.
 
-PQ_HYBRID (P5): X25519MLKEM768 handshakes complete on the U64E (OpenSSL 3.6.5
-`s_server`, browserleaks.com, en.wikipedia.org), onchip and comb; github.com and
-lwn.net do not offer 11EC (handshake_failure to a hybrid-only hello). Hashes and timings: the P5 section of
-engineering-notes.
+PQ_HYBRID (P5): X25519MLKEM768 handshakes complete on the U64E against a local
+OpenSSL 3.6.5 `s_server`, onchip and comb images. Live servers, comb image only:
+browserleaks.com (HTTP 200) and en.wikipedia.org (HTTP 301 at `/`); github.com and
+lwn.net do not offer 11EC (handshake_failure to a hybrid-only hello). Image hashes,
+make lines and timings: the P5 section of engineering-notes.
 
 Handshake flow, both backends: CH → SH (X25519) → EE, Certificate,
 CertificateVerify (P-256 via sibling) → server Finished verified → client

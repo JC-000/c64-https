@@ -345,7 +345,8 @@ tls_connect:
 @error:
 .ifdef PQ_HYBRID
         jsr pq_seed_zero        ; the d||z seed never outlives a failed connect (the
-                                ;  ML-KEM secret stays, like tls_shared_secret: 'Q' scrubs)
+                                ;  ML-KEM secret stays if the key schedule never ran, like
+                                ;  tls_shared_secret: 'Q' scrubs; P5 zeroes both after the extract)
 .endif
         lda tls_state           ; preserve last attempted state
         bmi :+                  ; already ERROR: the record layer aborted

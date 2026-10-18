@@ -115,11 +115,16 @@ def main():
         print("\n[1] group $EC: IKM = mlkem_ss || x25519_ss")
         case(s, t, "EC", 0xEC, MK + XS)
         hygiene(s, t, "EC", MK + XS)
-        print("\n[2] group $1D and group 0: the classic 32 B IKM")
+        print("\n[2] group $1D, 0, $EB, $ED, $FF: the classic 32 B IKM")
         case(s, t, "1D", 0x1D, XS)
         hygiene(s, t, "1D", XS)
         case(s, t, "0", 0x00, XS)
         hygiene(s, t, "0", XS)
+        # Only $EC is hybrid: neighbours and the top of the range stay classic
+        # (kills a `bcc`/`bcs` in place of the `bne` after `cmp #$EC`).
+        for g in (0xEB, 0xED, 0xFF):
+            case(s, t, f"{g:02X}", g, XS)
+            hygiene(s, t, f"{g:02X}", XS)
         print("\n[3] a second hybrid run on the same boot (state does not leak across runs)")
         case(s, t, "EC again", 0xEC, MK + XS)
     print(f"\nRESULTS: {t.passed}/{t.passed + t.failed} passed, {t.failed} failed")

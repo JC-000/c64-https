@@ -74,7 +74,12 @@
 ;
 ; Input: tls_shared_secret (32 bytes) = x25519 result
 ;        tls_transcript (32 bytes) = hash of ClientHello || ServerHello
+;        PQ_HYBRID only: tls_kex_group = $EC makes the step-3 IKM the 64 B
+;        tls_mlkem_ss || tls_shared_secret (ML-KEM first, copied into
+;        input_buffer); any other value keeps the 32 B x25519 IKM.
 ; Output: tls_hs_write_key/iv, tls_hs_read_key/iv filled
+;         PQ_HYBRID only: tls_shared_secret, tls_mlkem_ss, input_buffer[0:64]
+;         and hmac_data_buf[0:64] are zeroed right after step 3 (both groups)
 ;         tls_handshake_secret saved for later use
 ;         tls_early_secret saved for reference
 ;

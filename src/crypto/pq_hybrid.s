@@ -219,9 +219,10 @@ pq_connect_prep:
 ; pq_sh_decaps - Decaps the ServerHello's ct if the server chose 11EC.
 ; The args are rewritten here: nothing may sit between them and the call.
 ; The seed is zeroed on every successful exit (no longer needed) and by
-; tls_connect's error exit; tls_mlkem_ss is kept like tls_shared_secret (the
-; hardware oracle reads it) and scrubbed by 'Q' (src/session_scrub.s) or by
-; the next connection's pq_connect_prep.
+; tls_connect's error exit. tls_mlkem_ss is zeroed by tls_derive_handshake_keys
+; right after the handshake secret is extracted (P5); on a connect that fails
+; BEFORE that point it is kept like tls_shared_secret and scrubbed by 'Q'
+; (src/session_scrub.s) or by the next connection's pq_connect_prep.
 ; -----------------------------------------------------------------------------
 pq_sh_decaps:
         lda tls_kex_group

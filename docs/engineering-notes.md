@@ -4257,9 +4257,11 @@ Decisions and findings:
   - **A small concat, not a contiguous span.** `tls_mlkem_ss` sits in
     NET_BSS_TAIL (below `$4200`) and `tls_shared_secret` in data.s BSS, so the
     64 B IKM is copied into `input_buffer` (256 B scratch, dead since the
-    early-secret step) and the HKDF IKM pointer/length retargeted. Net -61 B of
-    NET_CODE free on every PQ profile (about 63 B of TLS_CODE, 2 B back from
-    `pq_sh_decaps`; `tools/measure_margins.py`). `hkdf_extract`
+    early-secret step) and the HKDF IKM pointer/length retargeted. NET_CODE
+    free drops by 61 B on the onchip profiles (166 -> 105) and 63 B on the comb
+    profiles (335 -> 272, 197 -> 134): about 63 B of TLS_CODE, and on onchip
+    2 B come back from `pq_sh_decaps` (on comb its PQ_GLUE sits in CRYPTO_HOT,
+    +2 there). `tools/measure_margins.py`. `hkdf_extract`
     copies the IKM into `hmac_data_buf` (97 B) and HMACs it as the message, so 64
     is within its limit; nothing there treats it as a key.
   - **Zeroed at the extract, not at 'Q'.** Right after `hkdf_extract` the two
@@ -4297,3 +4299,23 @@ Decisions and findings:
     complete `openssl s_client -groups X25519MLKEM768 -maxfraglen 512`); github.com
     and lwn.net answer `handshake_failure` to a hybrid-only hello (they would pick
     001D for our dual hello).
+
+Hardware record (U64E 10.43.23.81, 48 MHz, DeviceLock, OpenSSL 3.6.5 `s_server`;
+all runs full HTTPS PASS, tls_kex_group $EC unless noted):
+
+  - onchip, `make BACKEND=uci USE_NISTCURVES_ONCHIP=1 PQ_HYBRID=1
+    HTTPS_SNI=www.foo.invalid`, sha256
+    `ab85014cdc8bb074fc9cb99180c90dc8a74ac4d8ed9f68cfda32e7d311cf5e0f`:
+    rig wall-clock 108 s (`-groups X25519MLKEM768`), 107 s (`-groups X25519`,
+    $1D), 109 s (default groups, OpenSSL picks 11EC).
+  - comb (REU 16 MB, `C64_INIT_WAIT=90`), `make BACKEND=uci
+    USE_NISTCURVES_ONCHIP_COMB=1 PQ_HYBRID=1 HTTPS_SNI=www.foo.invalid`, sha256
+    `265c4c583c2b5a2430daf3a7ee2a3e546d99a8b7c1c4173476e8455097cfa042`: 165 s /
+    164 s ($1D) / 166 s. With `PHASE_TIMING=1` (1 s poll, n=1 each) trigger to
+    client Finished 43.7 s hybrid vs 42.0 s X25519-only: about +1.7 s.
+  - live (`tools/uci/rig_https_live.py`), comb image WITHOUT `HTTPS_SNI`, `make
+    BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1 PQ_HYBRID=1`, sha256
+    `b8677dd79968fb57e475baaa0995c8979d670b159ae753b207a947d5e8be8d61`:
+    browserleaks.com HTTP 200 (Finished at 44.1 s; the non-PQ comb image
+    `ad85797b...` 42.3 s), en.wikipedia.org HTTP 301 at `/` (39.8 s). Onchip was
+    not run against live servers.

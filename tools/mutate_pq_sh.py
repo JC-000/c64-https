@@ -252,6 +252,8 @@ MUTANTS = [
      "        sta hmac_data_buf,x\n        dex\n        bpl @dhk_zero\n", nop(3) + "        dex\n        bpl @dhk_zero\n", KS),
     ("K12", "the IKM zeroing covers only 32 of the 64 bytes", KSF,
      "        lda #0\n        ldx #63\n@dhk_zero:", "        lda #0\n        ldx #31\n@dhk_zero:", KS),
+    ("X02", "hybrid for any group >= $EC (bne -> bcc after the compare)", KSF,
+     "        cmp #$EC\n        bne @dhk_ikm_ready\n", "        cmp #$EC\n        bcc @dhk_ikm_ready\n", KS),
 ]
 
 
@@ -307,9 +309,14 @@ def main():
             else:
                 rc, out = run(suite)
                 killed = [ln for ln in out.splitlines() if "FAIL" in ln][:1]
-                verdict = "KILLED" if rc != 0 else "SURVIVED"
-                if killed:
-                    verdict += f" by: {killed[0].strip()[:110]}"
+                if rc == 0:
+                    verdict = "SURVIVED"
+                elif killed:
+                    verdict = f"KILLED by: {killed[0].strip()[:110]}"
+                else:
+                    # non-zero exit without an assertion FAIL line: a crash,
+                    # hang or harness error, not a kill by a check
+                    verdict = f"CRASH-OR-HANG (rc={rc}, no FAIL line; NOT a kill): {out.strip()[-120:]!r}"
         finally:
             p.write_text(orig)
         print(f"{mid} {what}: {verdict} ({time.monotonic() - t0:.0f} s)", flush=True)
