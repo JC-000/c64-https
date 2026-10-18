@@ -4311,8 +4311,17 @@ all runs full HTTPS PASS, tls_kex_group $EC unless noted):
   - comb (REU 16 MB, `C64_INIT_WAIT=90`), `make BACKEND=uci
     USE_NISTCURVES_ONCHIP_COMB=1 PQ_HYBRID=1 HTTPS_SNI=www.foo.invalid`, sha256
     `265c4c583c2b5a2430daf3a7ee2a3e546d99a8b7c1c4173476e8455097cfa042`: 165 s /
-    164 s ($1D) / 166 s. With `PHASE_TIMING=1` (1 s poll, n=1 each) trigger to
-    client Finished 43.7 s hybrid vs 42.0 s X25519-only: about +1.7 s.
+    164 s ($1D) / 166 s. (A `PHASE_TIMING=1` pair of 43.7 s hybrid vs 42.0 s
+    X25519-only on this one image was NOT the cost of PQ: both runs pay KeyGen,
+    since only the server's choice differed. Superseded by the next entry.)
+  - cost of PQ_HYBRID (v0.6.0 release review): classic image (same arguments, no
+    `PQ_HYBRID`) vs hybrid image, release arguments plus `HTTPS_SNI`, local
+    OpenSSL listener (hybrid group for the PQ image), SYS trigger to client
+    Finished, `PHASE_POLL=0.5`, n=3 each: onchip 52.4/52.1/52.6 s vs
+    55.2/54.8/54.6 s (+2.5 s), comb 41.0/41.3/40.6 s vs 43.9/43.1/43.4 s
+    (+2.5 s). The classic runs ended in a rig traceback after the fetch
+    (`rig_https_local.py`'s `PQ_DUMP` reads PQ-only labels); the CFIN marker and
+    the sentinel were already reached.
   - live (`tools/uci/rig_https_live.py`), comb image WITHOUT `HTTPS_SNI`, `make
     BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1 PQ_HYBRID=1`, sha256
     `b8677dd79968fb57e475baaa0995c8979d670b159ae753b207a947d5e8be8d61`:
