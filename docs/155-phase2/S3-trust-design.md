@@ -1,7 +1,7 @@
 # S3: in-C64 trust design for #155 phase 2 (UCI)
 
 2026-09-30, master `ac7099d`. Labels: **[M]** measured today, **[M-prior]** measured earlier (source named), **[I]** inferred. Everything here runs on the 6510. The ESP32 TLS offload is not used anywhere.
-Raw data is in this directory: `survey_2026-09-30.jsonl` (43 hosts), `ct_history.txt` (CT via certspotter), and `survey.py`.
+Raw data is in `data/`: `survey_2026-09-30.jsonl` (43 hosts), `ct_history.txt` (CT via certspotter), and `survey.py`.
 Vantage: this Mac, with Cloudflare WARP in full-tunnel mode (egress DFW). WARP is not intercepting TLS: all 39 chains that came back verify against the system store, each under its public CA **[M]**. Edge-dependent answers may differ from other locations.
 
 ## 1. What "MAC-based CA validation" can mean

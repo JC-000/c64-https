@@ -34,7 +34,7 @@ Free today (M, `measure_margins.py`, wiki-comb): 94+49+43+265+183 B tail + 101 B
 
 ## 2. Swap cost (M, U64E "Ultimate 64 Elite", REU 16 MB, DeviceLock)
 
-Probe: `s4/probe_reu_dma.py`; raw data: `s4/reu_dma.json`. Each timed DMA is followed by a
+The probe and its raw data (`probe_reu_dma.py`, `reu_dma.json`) were not kept; only the figures here survive. Each timed DMA is followed by a
 clone of `reu_execute`'s REU_CONFIRM_LONG confirm + settle, and CIA2 timer A is
 stopped before it is read. The setup was 3×3 at 48 MHz and 4×3 at 1 MHz. A CPU-loop
 control confirms turbo: 273 ticks at 48 MHz against 13,677 at 1 MHz. The confirm

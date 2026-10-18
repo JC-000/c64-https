@@ -10,11 +10,11 @@ These are binding for every lane. If the tree contradicts one, report it to the 
    - Signature: P-256 ECDSA-SHA256, verified on the C64 with the existing `ecdsa_verify_256`.
    - The public key and a generation floor (anti-replay) are compiled into the PRG.
    - The tree holds a test-only key, labelled as such. The production key is the user's call; do not generate one.
-5. **Comb memory:** take R1, R2, R3 and R4 from `s2/s2-reclaim.diff`. R3 does NOT help the Wikipedia demo build (`HTTPS_BODY_TO_REU=1` re-arms the viewer), so size against that build too.
+5. **Comb memory:** take R1, R2, R3 and R4 (the S2 reclaim patch, merged as #260). R3 does NOT help the Wikipedia demo build (`HTTPS_BODY_TO_REU=1` re-arms the viewer), so size against that build too.
 6. **Torn writes (S1 vs S3):** use S3's ping-pong `TRUST.A` / `TRUST.B` slots, plus S1's read-back verify after close.
    - Opening a file for write empties it, so a torn write only ever damages the older slot. No rename is needed.
    - L2 confirms this on hardware.
-7. **Semantics and record format:** exactly S3 §4 and §5 (`s3-trust/S3-trust-design.md`), except where 3 and 4 above override them.
+7. **Semantics and record format:** exactly S3 §4 and §5 (`S3-trust-design.md`), except where 3 and 4 above override them.
    - §4.4 (CA-assisted TOFU) is out of scope.
    - §4.6 is replaced by 4 above.
 8. **UPDATE 2026-09-30 (supervisor):** S4's trigger has fired. The Wikipedia demo build on comb does not fit the trust store even with L0: it needs about 1,300 B contiguous and the largest free block is 455 B. A lane after L0 and L2 merge builds a generic cold-code bank for comb:
@@ -34,7 +34,7 @@ These are binding for every lane. If the tree contradicts one, report it to the 
     - **Check order:** structure, then signature, then generation floor.
     - **Packaging guard (from adv-l4):** L3 must make `make package` fail if the bundle public key in a package build is the TEST-ONLY key, i.e. assert `TRUST_BUNDLE_KEY_IS_TEST_ONLY=0`.
     - **Generation floor:** enforced host-side only so far. Enforcing it on the C64 is L3's job.
-11. **L3 answers (user, 2026-10-01).** They answer the open questions in `l3/L3-design.md` §6.
+11. **L3 answers (user, 2026-10-01).** They answer the open questions in `L3-design.md` §6.
     - **Q1, packaging:** turn on `TRUST_STORE=1` in the uci-onchip and uci-comb packages. The bundle stays out of packages until the user creates a production key, so a release never blocks on it.
     - **Q2, build-time pin scope:** the pin applies ONLY when the typed host equals `HTTPS_HOST`. Other typed hosts go to the bundle, then trust-on-first-use.
     - **Q3, first-use bundle mismatch:** show `BUNDLE MISMATCH`, finish the fetch, and after close ask `RECORD KEY? A=YES`.
