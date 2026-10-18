@@ -5,8 +5,8 @@
 # Three variants, one per shipped product (PACKAGE_VARIANTS in _common.sh):
 #
 #   c64-https-ip65-onchip.prg  make BACKEND=ip65 USE_NISTCURVES_ONCHIP=1
-#   c64-https-uci-onchip.prg   make BACKEND=uci  USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1
-#   c64-https-uci-comb.prg     make BACKEND=uci  USE_NISTCURVES_ONCHIP_COMB=1 TRUST_STORE=1
+#   c64-https-uci-onchip.prg   make BACKEND=uci  USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1 PQ_HYBRID=1
+#   c64-https-uci-comb.prg     make BACKEND=uci  USE_NISTCURVES_ONCHIP_COMB=1 TRUST_STORE=1 PQ_HYBRID=1
 #
 # each with TRUST_RELEASE=1 appended (variant_make_args in _common.sh).
 #

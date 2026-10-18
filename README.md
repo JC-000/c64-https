@@ -19,7 +19,7 @@ An HTTPS client for the Commodore 64 in 6502 assembly. Implements TLS 1.3 over T
 ## I just want to run it
 
 Grab a release — latest is
-[**v0.5.1**](https://github.com/JC-000/c64-https/releases/tag/v0.5.1).
+[**v0.6.0**](https://github.com/JC-000/c64-https/releases/tag/v0.6.0).
 It replaces every earlier release; see its release notes for what changed.
 Every build is prebuilt, as a `.prg` and as a bootable `.d64`.
 No assembler, no cc65, no Python packages, no build step. `MANIFEST.txt` in
@@ -28,8 +28,8 @@ the release walks you through the choice:
 | image | for | note |
 |---|---|---|
 | `c64-https-ip65-onchip` | bone-stock C64 + RR-Net cartridge | maximum compatibility: no REU, no turbo, nothing optional. If you are not sure what you have, this is the one that runs. ~36 min per handshake at 1 MHz. |
-| `c64-https-uci-onchip` | Ultimate 64 / C64 Ultimate at turbo, REU off | boots straight to the menu |
-| `c64-https-uci-comb` | Ultimate 64 / C64 Ultimate at turbo, REU **on** | fastest — 1.73x quicker verify (16.4 s vs 28.4 s, U64E at 48 MHz). Builds a 16 KB table into REU bank 2 at each boot first: ~34 s at 64 MHz, ~45 s at 48 MHz. |
+| `c64-https-uci-onchip` | Ultimate 64 / C64 Ultimate at turbo, REU off | boots straight to the menu; offers the hybrid X25519MLKEM768 (post-quantum) key exchange |
+| `c64-https-uci-comb` | Ultimate 64 / C64 Ultimate at turbo, REU **on** | fastest — 1.73x quicker verify (16.4 s vs 28.4 s, U64E at 48 MHz). Builds a 16 KB table into REU bank 2 at each boot first: ~34 s at 64 MHz, ~45 s at 48 MHz. Also offers X25519MLKEM768 (+1.7 s, n=1). |
 | `c64-https-uci-m3-demo` | Ultimate 64 with the M3 (ESP32 TLS) firmware | a secondary variant: TLS runs on the Ultimate's ESP32, not the 6510; needs M3 firmware. Its own README is in the release. |
 
 Every image carries **one** default host, baked in at build time (`make
@@ -213,9 +213,9 @@ otherwise, and nothing here said it before:
   key change is not saved, so the old key still applies. To keep the
   store elsewhere, build with the product's own arguments from
   `tools/package/_common.sh` plus `TRUST_STORE_DIR=`, e.g. `make BACKEND=uci
-  USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1 TRUST_STORE_DIR=/SD` for
+  USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1 PQ_HYBRID=1 TRUST_STORE_DIR=/SD` for
   `uci-onchip`, or `make BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1
-  TRUST_STORE=1 TRUST_STORE_DIR=/SD` for `uci-comb`. The directory must
+  TRUST_STORE=1 PQ_HYBRID=1 TRUST_STORE_DIR=/SD` for `uci-comb`. The directory must
   already exist (the client never creates one) and be an absolute path of
   `A-Za-z0-9_.-` components, at most 41 characters.
 
@@ -305,8 +305,8 @@ section of `build/c64-https.map` for the **three shipped products**
 | product | make args | cfg |
 |---|---|---|
 | `ip65-onchip` | `BACKEND=ip65 USE_NISTCURVES_ONCHIP=1` | `cfg/c64-https-ip65.cfg` |
-| `uci-onchip` | `BACKEND=uci USE_NISTCURVES_ONCHIP=1` | `cfg/c64-https-uci.cfg` |
-| `uci-comb` | `BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1` | `cfg/c64-https-uci-onchip-cold.cfg` (`COLD_BANK=0`: `cfg/c64-https-uci-onchip.cfg`) |
+| `uci-onchip` | `BACKEND=uci USE_NISTCURVES_ONCHIP=1 PQ_HYBRID=1` | `cfg/c64-https-uci.cfg` |
+| `uci-comb` | `BACKEND=uci USE_NISTCURVES_ONCHIP_COMB=1 PQ_HYBRID=1` | `cfg/c64-https-uci-onchip-cold.cfg` (`COLD_BANK=0`: `cfg/c64-https-uci-onchip.cfg`) |
 
 Note the third row: the `-onchip*.cfg` swap is driven by
 `USE_NISTCURVES_ONCHIP_COMB`, **not** by `USE_NISTCURVES_ONCHIP` — plain

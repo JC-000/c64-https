@@ -87,14 +87,16 @@ echo "                   what you have, this is the one that will run."
 echo "                   ~36 min per handshake at 1 MHz."
 echo
 echo "     uci-onchip    Ultimate 64 / C64 Ultimate at turbo, REU off."
-echo "                   Boots straight to the menu."
+echo "                   Boots straight to the menu. Offers the hybrid"
+echo "                   X25519MLKEM768 (post-quantum) key exchange."
 echo
 echo "     uci-comb      Ultimate 64 / C64 Ultimate at turbo, REU ON."
 echo "                   The fastest image: ~1.7x quicker verify than"
 echo "                   uci-onchip. It builds a 16 KB table into REU"
 echo "                   bank 2 at every boot before the menu appears —"
 echo "                   ~34 s at 64 MHz, ~45 s at 48 MHz. That is the"
-echo "                   program working, not a hang."
+echo "                   program working, not a hang. Also offers the"
+echo "                   hybrid X25519MLKEM768 key exchange (+1.7 s, n=1)."
 echo
 echo "   Why the split: below about 5 MHz the extra table work costs more"
 echo "   than it saves, and below ~18 MHz the plain REU multiply path wins"
