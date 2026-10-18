@@ -120,7 +120,7 @@ a venv mismatch reproduces #90 exactly after an install that appeared to succeed
  │  ┌──────┴───────┐ ┌──────┴─────────┐    │
  │  │   AEAD       │ │  Key Schedule  │    │  (crypto modules)
  │  │ ChaCha20-    │ │  HKDF-SHA256   │    │  hkdf.s
- │  │ Poly1305     │ │ X25519+ML-KEM768│   │
+ │  │ Poly1305     │ │  ECDHE X25519  │    │
  │  └──────────────┘ └────────────────┘    │
  ├─────────────────────────────────────────┤
  │        Network backend boundary         │  net_init / net_poll / net_tcp_*
@@ -134,6 +134,10 @@ a venv mismatch reproduces #90 exactly after an install that appeared to succeed
  └──────────────────────┴──────────────────┘
    make BACKEND=ip65       make BACKEND=uci
 ```
+
+On the UCI images built `PQ_HYBRID=1` (both shipped ones) the key exchange
+is X25519 plus ML-KEM-768 (X25519MLKEM768); the box above shows the classic
+ECDHE only.
 
 The TLS, HTTP, and crypto layers are backend-agnostic: switching backend
 is a link-line change (different cfg + different `src/net/<backend>/*.o`),

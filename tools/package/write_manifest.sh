@@ -31,6 +31,10 @@ echo
 echo "TLS 1.3 / HTTPS client for the Commodore 64. Everything here is prebuilt:"
 echo "you need no assembler, no cc65, no Python packages and no build step."
 echo
+echo "DEMONSTRATION AND EDUCATIONAL USE ONLY. This client is not cryptographically"
+echo "secure (weak entropy, no certificate chain validation), including the"
+echo "post-quantum hybrid key exchange the UCI images offer."
+echo
 echo "generated : $(info generated)"
 echo "git HEAD  : $(info git_head)"
 if [ "$(info git_dirty)" = "yes" ]; then

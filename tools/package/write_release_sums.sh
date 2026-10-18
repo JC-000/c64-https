@@ -13,10 +13,11 @@
 #     c64-https-uci-m3-demo.{prg,d64}  c64-https-uci-m3-demo-README.txt
 #     c64-https-uci-m3-demo-SHA256SUMS
 #
-# The M3 demo's own README is attached under the name
-# c64-https-uci-m3-demo-README.txt and its checksum file under
-# c64-https-uci-m3-demo-SHA256SUMS; inside the demo package they are
-# README.txt and SHA256SUMS, so pass either spelling.
+# The M3 demo's own README and checksum file are attached under the names
+# c64-https-uci-m3-demo-README.txt and c64-https-uci-m3-demo-SHA256SUMS;
+# inside the demo package they are README.txt and SHA256SUMS. This script
+# expects the attached names (copy/rename them into <assets-dir> first) and
+# also checks the M3 PRG, .d64 and README against the M3 checksum file.
 #
 #   tools/package/write_release_sums.sh <assets-dir>
 #
@@ -47,6 +48,14 @@ for f in "${ASSETS[@]}"; do
     [ -f "$f" ] || { echo "write_release_sums: missing $f in $DIR" >&2; missing=1; }
 done
 [ "$missing" = 0 ] || exit 1
+
+# The M3 demo's own checksum file must agree with the files beside it. It names
+# its README README.txt, so check through a temporary copy under that name.
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+cp c64-https-uci-m3-demo.prg c64-https-uci-m3-demo.d64 "$tmp/"
+cp c64-https-uci-m3-demo-README.txt "$tmp/README.txt"
+( cd "$tmp" && shasum -a 256 -c "$OLDPWD/c64-https-uci-m3-demo-SHA256SUMS" >/dev/null ) \
+    || { echo "write_release_sums: the M3 files do not match their own checksum file" >&2; exit 1; }
 
 shasum -a 256 "${ASSETS[@]}" > SHA256SUMS
 shasum -a 256 -c SHA256SUMS >/dev/null

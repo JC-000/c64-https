@@ -8,7 +8,7 @@ Built from the commit tagged `v0.6.0`. Submodule pins (`tools/check_upstream_pin
 - `libs/x25519` v0.16.0 (unchanged);
 - ip65 `25a9c5a` (untagged, unchanged).
 
-This release covers the merged PRs since v0.5.1: #306-#308, #310, #311 (build and rig fixes), #312-#315 (the post-quantum hybrid key exchange, below) and this release's packaging change. The main change: **both UCI images now offer the hybrid key exchange X25519MLKEM768.** They have completed fetches of the Wikipedia Commodore 64 article over it on hardware. `ip65-onchip` stays classic and is **not** byte-identical to v0.5.1 (see below).
+This release covers the merged PRs since v0.5.1: #303, #306-#308, #310, #311 (build, rig and docs fixes), #312-#315 (the post-quantum hybrid key exchange, below) and this release's packaging change. The main change: **both UCI images now offer the hybrid key exchange X25519MLKEM768.** They have completed fetches of the Wikipedia Commodore 64 article over it on hardware. `ip65-onchip` stays classic and is **not** byte-identical to v0.5.1 (see below).
 
 **No classic UCI image ships any more.** `uci-onchip` and `uci-comb` are the same products as before with `PQ_HYBRID=1` added to their make arguments. To build the v0.5.1-style X25519-only UCI image, omit it: `make BACKEND=uci USE_NISTCURVES_ONCHIP=1 TRUST_STORE=1` (or `USE_NISTCURVES_ONCHIP_COMB=1`).
 
@@ -47,7 +47,7 @@ The 1541 filenames (`ip65-noreu`, `uci-noreu`, `uci-comb`) and the PRG sizes (47
 - The ClientHello offers `X25519MLKEM768` (0x11EC: ML-KEM-768 encapsulation key || X25519 share) first and `X25519` (0x001D) second; the server picks. A 0x11EC answer feeds `mlkem_ss || x25519_ss` into the handshake secret (draft-ietf-tls-ecdhe-mlkem, ML-KEM first). A 0x001D answer completes with X25519 alone, as before.
 - **A server that picks X25519 does not get the v0.5.1 client.** KeyGen still runs on every connection; the ClientHello is about 1.2 KB larger and is sent in several sections; and the ServerHello is read by a stricter streaming reader (an empty session-id echo, exactly the two extensions we asked for, a malformed or oversize record header while waiting for the ServerHello is now fatal).
 - ML-KEM-768 comes from `libs/mlkem` (c64-mlkem v0.6.0). Its code is staged in the PRG at `$A000` and copied to `$E000` at boot; the polynomial area is `$D000-$DFFF` (RAM under I/O) and the decapsulation-key scratch is the first 2,400 B of the TCP ring. Intermediates are scrubbed after KeyGen and after Decaps, and both shared secrets are zeroed once the handshake secret exists. `PQ_HYBRID` is refused on ip65, uci-m3 and the uci REU profile.
-- **Cost** (U64E at 48 MHz, local OpenSSL 3.6.5 listener, release arguments plus `HTTPS_SNI`, time from the SYS trigger to client Finished, 0.5 s poll, n=3 each; the classic image is the same arguments without `PQ_HYBRID`):
+- **Cost** (U64E at 48 MHz, local OpenSSL 3.6.5 listener started with `-groups X25519` for the classic image and `-groups X25519MLKEM768` for the PQ image (the group differs per column and cannot be avoided: the classic client offers no hybrid group), release arguments plus `HTTPS_SNI`, time from the SYS trigger to client Finished, 0.5 s poll, n=3 each; the classic image is the same arguments without `PQ_HYBRID`):
 
   | image | classic (PQ_HYBRID off) | hybrid | difference |
   |---|---|---|---|
@@ -61,7 +61,7 @@ The 1541 filenames (`ip65-noreu`, `uci-noreu`, `uci-comb`) and the PRG sizes (47
 ## Other changes since v0.5.1
 
 - PQ stages, in order: the sectioned ClientHello with 16-bit lengths and HelloRetryRequest refusal (#312); `libs/mlkem` pinned and placed behind `PQ_HYBRID=1`, link-only (#313); the streaming hybrid ServerHello, KeyGen in `tls_connect`, Decaps (#314); the hybrid key schedule (#315).
-- The linker output no longer depends on the build locale (#311), a linker-config edit relinks the PRG (#306), a bare pytest is green on a uci or an ip65 build (#308), and the rig trampolines set the trust-store mode (#307). Docs: #303, #310.
+- The linker output no longer depends on the build locale (#311), a linker-config edit relinks the PRG (#306), a bare pytest is green on a uci or an ip65 build (#308), and the rig trampolines set the trust-store mode (#307). Docs: #303 (where the UCI images keep the trust store), #310 (M3 demo provenance).
 - `tools/uci/rig_https_banner.py` prints `tls_kex_group`; `REQUIRE_KEX=EC` makes any other group part of the exit decision (`decide_exit`).
 
 ## `ip65-onchip` is not the v0.5.1 binary
@@ -106,7 +106,7 @@ All 8 runs completed; no truncation was seen. The silent-truncation defect #211 
 
 **Trust store on the PQ images** (the store stages in the TCP ring, which now also hosts the ML-KEM dk scratch). The rigs refuse any directory but `/<volume>/c64https-test`, so they ran on the release arguments plus `TRUST_STORE_DIR=/USB1/c64https-test HTTPS_PORT=24520` (`uci-onchip` `a0d26e3d…`, `uci-comb` `e8adb55d…`); the real `/USB1/TRUST.A|B` (80 B / 144 B) were unchanged afterwards:
 - `rig_trust_store.py` (disk I/O: empty, save, load, torn write, corruption, 32 records, missing directory): exit 0 on both, 24 and 25 checks, 0 failures; phase 13 runs only at 1 MHz and was not run.
-- `rig_trust_policy.py`, local mode, through the menu against a Python TLS 1.3 listener (it can only choose X25519, so these fetches took 0x001D): exit 0 on both, **30 passed, 0 failed each**: first use records the key (`KEY RECORDED`), a matching key is `KNOWN KEY` with the store untouched, a changed key shows `KEY CHANGED` and the full hash and sends no client Finished, accept-on-retry records `ACCEPTED/K2`, and `Y` at the prompt runs one `UNPINNED` fetch that records nothing. Live mode (`RIG_MODE=live`) needs the REU viewer demo, which does not link with PQ (below), so it was not run.
+- `rig_trust_policy.py`, local mode, through the menu against a Python TLS 1.3 listener (it can only choose X25519, so these fetches took 0x001D): exit 0 on both, **30 passed, 0 failed each**: first use records the key (`KEY RECORDED`), a matching key is `KNOWN KEY` with the store untouched, a changed key shows `KEY CHANGED` and the full hash and sends no client Finished, accept-on-retry records `ACCEPTED/K2`, and `Y` at the prompt runs one `UNPINNED` fetch that records nothing. Live mode (`RIG_MODE=live`) needs the REU viewer demo, which does not link with PQ (below), so it was not run. **Disclosure:** the first-use and changed-key trust paths were therefore exercised on the PQ images with X25519 fetches only (KeyGen and the dk scratch in the ring still ran on every connect); with an 11EC server only the known-key path has been run, in the Wikipedia runs above.
 
 **Memory** (`tools/measure_margins.py --build`, the exact release arguments, free bytes): `uci-onchip` LOADER 157, NET_CODE 105, CRYPTO_OVERLAY 372, CRYPTO_HOT 196; `uci-comb` LOADER 342, NET_CODE 134, **CRYPTO_OVERLAY 55**, CRYPTO_HOT 379, COLD_IMAGE 1,697, COLD_RUN_TRUST 75.
 

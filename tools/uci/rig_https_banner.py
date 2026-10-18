@@ -519,8 +519,8 @@ def main() -> int:
         # PQ_HYBRID builds: which group the server chose. Read after the close
         # wait, on the live transport (tls_kex_group sits just past the 'Q'
         # scrub span; nothing rewrites it until the next connect). Printed always
-        # when the label exists; REQUIRE_KEX=EC (hex) makes a different
-        # group a failure of an otherwise passing run.
+        # when the label exists. REQUIRE_KEX=EC (hex) is a verdict inside
+        # decide_exit (check_kex_group), not logic here: this block only reads.
         kex = None
         try:
             kex = bytes(client.read_mem(label_addr("tls_kex_group"), 1))[0]

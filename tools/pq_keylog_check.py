@@ -112,7 +112,9 @@ def check_state(state, keylog_text):
     IDLE again after tls_close."""
     h = lambda k: bytes.fromhex(state[k])          # noqa: E731
     if h("tls_kex_group") != b"\xec":
-        return "inconclusive", f"tls_kex_group=${state['tls_kex_group']}: the server did not choose 11EC, no hybrid run to check"
+        kg = state.get("tls_kex_group") or ""
+        return "inconclusive", (f"tls_kex_group={'$' + kg if kg else 'n/a (no PQ labels: a classic image)'}: "
+                                "the server did not choose 11EC, no hybrid run to check")
     if h("tls_sh_err") != b"\x00":
         return "inconclusive", f"tls_sh_err=${state['tls_sh_err']}: the ServerHello was refused"
     if h("tls_reached_connected") != b"\x07":

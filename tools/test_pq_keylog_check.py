@@ -102,6 +102,12 @@ def test_state_mode_red_on_either_secret():
                          _log3())[0] is False
 
 
+def test_a_classic_image_state_names_itself_not_a_dollar_sign():
+    classic = {k: "" for k in _state()}
+    r, msg = K.check_state(classic, _log3())
+    assert r == "inconclusive" and "n/a" in msg and "$:" not in msg, msg
+
+
 def test_state_mode_residue_is_a_failure_not_a_pass():
     for k, n in (("tls_pq_seed", 64), ("tls_mlkem_ss", 32), ("tls_shared_secret", 32)):
         r, msg = K.check_state(_state(**{k: "11" * n}), _log3())
