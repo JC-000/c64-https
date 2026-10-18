@@ -236,7 +236,14 @@ class Farm:
         self.dir = Path(tempfile.mkdtemp(prefix="c64-flags-stamp-"))
         for name in FARM_LINKS:
             target = REPO / name
-            if target.exists():
+            if not target.exists():
+                continue
+            if name == "ip65-build":
+                # A PRIVATE copy: the ip65 rules write and delete the blob
+                # and its stamps here, and a symlink made a Farm test running
+                # `make BACKEND=ip65 ...` delete the developer's real blob.
+                shutil.copytree(target, self.dir / name, symlinks=True)
+            else:
                 os.symlink(target, self.dir / name)
 
     def __enter__(self):
@@ -877,9 +884,8 @@ class Ip65Farm(Farm):
 
     def __init__(self):
         super().__init__()
-        for name in ("ip65", "ip65-build"):
-            os.unlink(self.dir / name)
-            shutil.copytree(REPO / name, self.dir / name, symlinks=True)
+        os.unlink(self.dir / "ip65")
+        shutil.copytree(REPO / "ip65", self.dir / "ip65", symlinks=True)
         if not all(self.exists(r) for r in IP65_LIBS):
             self.make("ip65-libs", check=False)
         assert all(self.exists(r) for r in IP65_LIBS), "ip65 libs would not build"
@@ -987,11 +993,172 @@ def test_uci_build_does_not_need_the_ip65_tree():
     """BACKEND=uci neither reads nor requires ip65/ or ip65-build/."""
     _require_toolchain()
     with Farm() as farm:
-        for name in ("ip65", "ip65-build"):
+        for name in ("ip65",):
             os.unlink(farm.dir / name)
+        shutil.rmtree(farm.dir / "ip65-build")
         farm.make(*UCI)
         assert farm.exists(PRG)
         assert not farm.exists("ip65-build")
+        # the ip65 block must not run for another backend at all: if it did,
+        # its stamp could never be written here and every build would
+        # invalidate the link outputs
+        proc = farm.make(*UCI)
+        assert "ld65 " not in proc.stdout, (
+            "a second UCI build relinked: the ip65 blob block ran:\n" + proc.stdout)
+
+
+def _write_text_keep_mtime(path, text):
+    ns = path.stat().st_mtime_ns
+    path.write_text(text)
+    os.utime(path, ns=(ns, ns))
+
+
+def test_ip65_blob_lib_content_change_with_restored_mtime_relinks():
+    """The content digest must cover the libs, not just their mtimes."""
+    _require_toolchain()
+    with Ip65Farm() as farm:
+        farm.blob_build()
+        lib = farm.path(IP65_LIBS[0])
+        ns = lib.stat().st_mtime_ns
+        with open(lib, "ab") as fh:
+            fh.write(b"\0")
+        os.utime(lib, ns=(ns, ns))
+        proc = farm.blob_build(check=False)
+        assert "ld65 " in proc.stdout, (
+            "a lib's content changed (mtime restored) and the blob did not "
+            "relink:\n" + proc.stdout)
+
+
+def test_ip65_blob_toolchain_change_relinks():
+    """TOOLCHAIN_ID is part of the blob digest (ca65 is not a prerequisite)."""
+    _require_toolchain()
+    with Ip65Farm() as farm:
+        farm.blob_build()
+        other = farm.dir / "ca65-other"
+        shutil.copy(shutil.which("ca65"), other)
+        proc = farm.make("BACKEND=ip65", "ip65-blob", f"CA65={other}")
+        assert "ld65 " in proc.stdout, (
+            "a different assembler left the blob alone:\n" + proc.stdout)
+        # ld65's search-path environment can swap c64.lib without moving
+        # TOOLCHAIN_ID; it rides in the digest
+        proc = farm.make("BACKEND=ip65", "ip65-blob", f"CA65={other}",
+                         env={"LD65_LIB": str(farm.dir / "nolib")})
+        assert "ld65 " in proc.stdout, (
+            "LD65_LIB changed and the blob was left alone:\n" + proc.stdout)
+
+
+def test_ip65_blob_content_change_moves_the_prg():
+    """A changed stub must reach the PRG even when the object looks fresh.
+
+    The object's mtime is pushed into the future, so only the parse-time
+    deletion of build/net/ip65/ip65_blob.o can make the PRG pick it up.
+    """
+    _require_toolchain()
+    with Ip65Farm() as farm:
+        farm.make(*IP65)
+        prg = farm.sha()
+        obj = farm.path("build/net/ip65/ip65_blob.o")
+        fut = obj.stat().st_mtime_ns + 60_000_000_000
+        os.utime(obj, ns=(fut, fut))
+        stub = farm.path("ip65-build/ip65_stub.s")
+        orig = stub.read_text()
+        assert orig.count("  rts     ; no standalone entry point") == 1
+        _write_text_keep_mtime(stub, orig.replace(
+            "  rts     ; no standalone entry point",
+            "  nop     ; no standalone entry point"))
+        farm.make(*IP65)
+        assert farm.sha() != prg, "a changed blob did not reach the PRG"
+        fut = farm.path("build/net/ip65/ip65_blob.o").stat().st_mtime_ns + 60_000_000_000
+        os.utime(farm.path("build/net/ip65/ip65_blob.o"), ns=(fut, fut))
+        _write_text_keep_mtime(stub, orig)
+        farm.make(*IP65)
+        assert farm.sha() == prg, "restoring the stub did not restore the PRG"
+
+
+def test_ip65_blob_byte_flip_reaches_the_prg():
+    """The documented provenance test: flip one byte of the blob, same second
+    (mtime restored). blob -> ip65_blob.o is an mtime edge; the blob's own
+    content stamp must close it."""
+    _require_toolchain()
+    with Ip65Farm() as farm:
+        farm.make(*IP65)
+        farm.make(*IP65)            # a parse with the blob present records it
+        prg = farm.sha()
+        blob = farm.path(BLOB)
+        data = blob.read_bytes()
+        ns = blob.stat().st_mtime_ns
+        for new in (bytes([data[100] ^ 0xFF]), bytes([data[100]])):
+            blob.write_bytes(data[:100] + new + data[101:])
+            os.utime(blob, ns=(ns, ns))
+            farm.make(*IP65)
+            if new == bytes([data[100]]):
+                assert farm.sha() == prg, "restoring the byte did not restore the PRG"
+            else:
+                assert farm.sha() != prg, "a flipped blob byte left a stale PRG"
+
+
+def test_ip65_maintenance_goal_keeps_the_prg():
+    """#220 for ip65: `make BACKEND=ip65 ip65-blob` after a blob-input change
+    rebuilds the blob and deletes only the blob and its object."""
+    _require_toolchain()
+    with Ip65Farm() as farm:
+        farm.make(*IP65)
+        farm.edit_same_second("ip65-build/ip65.cfg", "\n# maintenance\n")
+        farm.make("BACKEND=ip65", "ip65-blob")
+        gone = [o for o in LINK_OUTPUTS if not farm.exists(o)]
+        assert not gone, f"a maintenance goal deleted {gone}"
+
+
+def test_ip65_skip_goals_do_not_run_the_blob_block():
+    """`clean` and `ip65-libs` must not compare, write or delete (#220)."""
+    _require_toolchain()
+    for goal in ("clean", "ip65-libs"):
+        with Ip65Farm() as farm:
+            farm.blob_build()
+            farm.edit_same_second("ip65-build/ip65.cfg", "\n# skip\n")
+            stamps = {p: farm.path(p).read_bytes()
+                      for p in (BLOB_STAMP, "ip65-build/ip65-c64-bin.stamp")}
+            farm.make("BACKEND=ip65", goal)
+            assert farm.exists(BLOB), f"`make {goal}` deleted the blob"
+            for p, b in stamps.items():
+                assert farm.path(p).read_bytes() == b, f"`make {goal}` rewrote {p}"
+
+
+def test_ip65_blob_dry_run_message_matches_the_real_branch():
+    """The -n warning must say what the real branch would delete."""
+    _require_toolchain()
+    with Ip65Farm() as farm:
+        farm.make(*IP65)
+        farm.edit_same_second("ip65-build/ip65.cfg", "\n# dry\n")
+
+        def line(*goals):
+            out = farm.make(*goals, opts=("-n",)).stdout
+            return [l for l in out.splitlines()
+                    if "would delete ip65-build/ip65-c64.bin" in l]
+        maint = line("BACKEND=ip65", "ip65-blob")
+        assert maint and "ip65_blob.o" in maint[0] and PRG not in maint[0], maint
+        real = line(*IP65)
+        assert real and "ip65_blob.o" in real[0] and PRG in real[0], real
+
+
+def test_ip65_dry_run_t_on_a_libless_tree_creates_no_libs():
+    """`make -t` must not turn a missing lib into an empty file (a file
+    target with no recipe): it fails by name, creates nothing, and a later
+    `make ip65-libs` + build still works."""
+    _require_toolchain()
+    with Ip65Farm() as farm:
+        farm.blob_build()
+        for lib in IP65_LIBS:
+            farm.path(lib).unlink()
+        for goal in (("ip65-blob",), (BLOB,)):
+            proc = farm.make("BACKEND=ip65", *goal, opts=("-t",), check=False)
+            assert proc.returncode != 0, "`make -t` with missing libs succeeded"
+            assert "make ip65-libs" in proc.stdout
+            for lib in IP65_LIBS:
+                assert not farm.exists(lib), f"`make -t` created {lib}"
+        farm.make("ip65-libs")
+        farm.blob_build()
+        assert all(farm.exists(r) for r in IP65_LIBS)
 
 
 def test_unchanged_flags_rebuild_nothing():
@@ -1290,6 +1457,23 @@ def test_stale_link_order_is_rebuilt_to_the_clean_hash():
         assert farm.sha() == oracle, (
             "a changed object order did not invalidate the tree: PRG "
             f"{farm.sha()} != clean build {oracle}")
+
+
+def _ip65_build_snapshot():
+    d = REPO / "ip65-build"
+    return {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(d.iterdir()) if p.is_file()} if d.is_dir() else {}
+
+
+_REAL_IP65_BUILD_AT_IMPORT = _ip65_build_snapshot()
+
+
+def test_zz_real_ip65_build_is_untouched_by_the_suite():
+    """Every Farm owns a private ip65-build/; the checkout's must be exactly
+    as this module found it (the blob was once deleted by a Farm test).
+    Named zz so the standalone runner, which sorts, runs it last."""
+    assert _ip65_build_snapshot() == _REAL_IP65_BUILD_AT_IMPORT, (
+        "the suite changed the real ip65-build/")
 
 
 def main() -> int:

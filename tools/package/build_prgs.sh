@@ -58,9 +58,9 @@
 #      into every .o header — but ld65 does not propagate it, so the PRG is
 #      deterministic and comparable.
 #
-# Also bootstraps the ip65 blob (`ip65-build/ip65-c64.bin`), which is a
-# gitignored artifact a plain `make` will NOT build: a fresh clone dies in the
-# ca65 `.incbin` before any link.
+# Also bootstraps the ip65 libs and blob (`ip65-build/ip65-c64.bin`), a
+# gitignored artifact whose libs a plain `make` will NOT build: a fresh clone
+# dies in make, naming the missing ip65 .lib (#309).
 #
 # Writes dist/build-info.txt (git HEAD, submodule pins, per-variant args/size/
 # sha256). write_manifest.sh consumes it.
@@ -95,8 +95,8 @@ git diff --quiet HEAD -- 2>/dev/null || GIT_DIRTY=" (working tree DIRTY)"
 
 # --- ip65 blob bootstrap ------------------------------------------------------
 IP65_BIN="$PROJECT_ROOT/ip65-build/ip65-c64.bin"
-if [ ! -f "$IP65_BIN" ]; then
-    echo "[package] ip65 blob absent — bootstrapping (make ip65-libs && make ip65-blob)"
+if [ ! -f "$IP65_BIN" ] || [ ! -f "$PROJECT_ROOT/ip65/ip65/ip65_tcp.lib" ] || [ ! -f "$PROJECT_ROOT/ip65/drivers/ip65_c64.lib" ]; then
+    echo "[package] ip65 blob or libs absent — bootstrapping (make ip65-libs && make ip65-blob)"
     if [ ! -e "$PROJECT_ROOT/ip65/Makefile" ]; then
         echo "ERROR: ip65 submodule not checked out. Run:" >&2
         echo "         git submodule update --init --recursive" >&2
