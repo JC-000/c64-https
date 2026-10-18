@@ -32,8 +32,9 @@ Fresh clone (ip65 backend; UCI needs none of the ip65 steps):
     blob tracks stub, `ip65.cfg` and both libs by content
     (`ip65-build/ip65-c64.stamp`, #305 shape; `-n` writes nothing); `c64.lib`
     is covered only via the toolchain id and LD65_LIB/OBJ/CC65_HOME, not
-    hashed. The blob's own bytes are stamped too (`ip65-c64-bin.stamp`), so a
-    same-second byte flip reaches the PRG.
+    hashed. The blob's own bytes are stamped too (`ip65-c64-bin.stamp`, written
+    by the blob rule; a stampless tree records it at the next parse), so a
+    same-second byte flip reaches the PRG from the first parse after a build.
   - **A nested git worktree needs `git submodule update --init --recursive`
     before it can link ip65** — a fresh worktree has no submodule working
     trees, so the link dies by name. It fails LOUDLY; that is the whole

@@ -1080,7 +1080,7 @@ IP65_BLOB_OBJ     := build/net/ip65/ip65_blob.o
 # ld65's own search-path environment (LD65_LIB, LD65_OBJ, CC65_HOME) can
 # swap c64.lib without moving TOOLCHAIN_ID, so it rides in the digest too.
 IP65_BLOB_STAMP_BODY := { printf 'TOOLCHAIN=%s\n' '$(TOOLCHAIN_ID)'; \
-    printf 'LD65_ENV=%s|%s|%s\n' "$$LD65_LIB" "$$LD65_OBJ" "$$CC65_HOME"; \
+    printf 'LD65_ENV=%s|%s|%s\n' '$(LD65_LIB)' '$(LD65_OBJ)' '$(CC65_HOME)'; \
     for f in $(IP65_BUILD)/ip65_stub.s $(IP65_BUILD)/ip65.cfg $(IP65_LIBS); do \
         (sha256sum $$f 2>/dev/null || shasum -a 256 $$f 2>/dev/null || echo "$$f MISSING"); \
     done; }
@@ -1098,7 +1098,7 @@ _ := $(shell $(IP65_BLOB_STAMP_BODY) > $(IP65_BLOB_STAMP).tmp; \
                  rm -f $(IP65_BLOB_STAMP).tmp; \
              else \
                  mv $(IP65_BLOB_STAMP).tmp $(IP65_BLOB_STAMP); \
-                 rm -f $(IP65_BIN) $(IP65_BIN_STAMP) $(IP65_BLOB_OBJ) $(IP65_RM_LINK); \
+                 rm -f $(IP65_BIN) $(IP65_BLOB_OBJ) $(IP65_RM_LINK); \
              fi)
 # The blob's own bytes, by content, for a blob changed OUTSIDE this rule (a
 # byte flip, the documented provenance test): blob -> ip65_blob.o is an mtime
@@ -1135,6 +1135,7 @@ $(IP65_BIN): $(IP65_BUILD)/ip65_stub.s $(IP65_BUILD)/ip65.cfg $(IP65_LIBS)
 	cd $(IP65_BUILD) && $(LD65) -C ip65.cfg -o ip65-c64.bin -m ip65-c64.map \
 	    ip65_stub.o ../$(IP65_DIR)/ip65/ip65_tcp.lib \
 	    ../$(IP65_DIR)/drivers/ip65_c64.lib c64.lib
+	$(IP65_BIN_SHA) > $(IP65_BIN_STAMP)
 
 run: $(PRG)
 	$(VICE) -autostart $(PRG)

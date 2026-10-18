@@ -882,8 +882,17 @@ class Ip65Farm(Farm):
     Libs come from the checkout when built there, else from `make ip65-libs`
     run inside the copy."""
 
-    def __init__(self):
+    def __init__(self, state="as-is"):
+        """state: "as-is" keeps whatever the checkout's ip65-build/ holds;
+        "blob-no-stamps" and "no-blob-no-stamps" model a fresh clone and a
+        pre-#309 tree, so no case may depend on checkout state."""
         super().__init__()
+        d = self.dir / "ip65-build"
+        if state != "as-is":
+            for p in d.glob("*.stamp"):
+                p.unlink()
+        if state == "no-blob-no-stamps":
+            (d / "ip65-c64.bin").unlink(missing_ok=True)
         os.unlink(self.dir / "ip65")
         shutil.copytree(REPO / "ip65", self.dir / "ip65", symlinks=True)
         if not all(self.exists(r) for r in IP65_LIBS):
@@ -1039,6 +1048,12 @@ def test_ip65_blob_toolchain_change_relinks():
         proc = farm.make("BACKEND=ip65", "ip65-blob", f"CA65={other}")
         assert "ld65 " in proc.stdout, (
             "a different assembler left the blob alone:\n" + proc.stdout)
+        # the command-line form: 3.81's $(shell) does not see it in its
+        # environment, so the digest must read the make variable
+        proc = farm.make("BACKEND=ip65", "ip65-blob", f"CA65={other}",
+                         f"LD65_LIB={farm.dir / 'nolib2'}")
+        assert "ld65 " in proc.stdout, (
+            "a command-line LD65_LIB was not seen:\n" + proc.stdout)
         # ld65's search-path environment can swap c64.lib without moving
         # TOOLCHAIN_ID; it rides in the digest
         proc = farm.make("BACKEND=ip65", "ip65-blob", f"CA65={other}",
@@ -1075,26 +1090,66 @@ def test_ip65_blob_content_change_moves_the_prg():
         assert farm.sha() == prg, "restoring the stub did not restore the PRG"
 
 
+def _check_first_flip(farm):
+    """The FIRST same-second flip after a build must reach the PRG (no
+    warm-up parse), and restoring the byte must restore the PRG."""
+    farm.make(*IP65)
+    prg = farm.sha()
+    blob = farm.path(BLOB)
+    data = blob.read_bytes()
+    ns = blob.stat().st_mtime_ns
+    for new in (bytes([data[100] ^ 0xFF]), bytes([data[100]])):
+        blob.write_bytes(data[:100] + new + data[101:])
+        os.utime(blob, ns=(ns, ns))
+        farm.make(*IP65)
+        if new == bytes([data[100]]):
+            assert farm.sha() == prg, "restoring the byte did not restore the PRG"
+        else:
+            assert farm.sha() != prg, "a flipped blob byte left a stale PRG"
+
+
 def test_ip65_blob_byte_flip_reaches_the_prg():
     """The documented provenance test: flip one byte of the blob, same second
     (mtime restored). blob -> ip65_blob.o is an mtime edge; the blob's own
-    content stamp must close it."""
+    content stamp, written by the blob rule, must close it."""
     _require_toolchain()
-    with Ip65Farm() as farm:
-        farm.make(*IP65)
-        farm.make(*IP65)            # a parse with the blob present records it
-        prg = farm.sha()
-        blob = farm.path(BLOB)
-        data = blob.read_bytes()
-        ns = blob.stat().st_mtime_ns
-        for new in (bytes([data[100] ^ 0xFF]), bytes([data[100]])):
-            blob.write_bytes(data[:100] + new + data[101:])
-            os.utime(blob, ns=(ns, ns))
+    with Ip65Farm("no-blob-no-stamps") as farm:
+        _check_first_flip(farm)
+
+
+def test_ip65_cases_do_not_depend_on_checkout_state():
+    """A fresh clone (no blob, no stamps) and a pre-stamp tree (blob, no
+    stamps) must behave exactly like the checkout the suite runs in."""
+    _require_toolchain()
+    for state in ("no-blob-no-stamps", "blob-no-stamps"):
+        with Ip65Farm(state) as farm:
+            _check_first_flip(farm)
+        with Ip65Farm(state) as farm:
+            _check_skip_goals(farm)
+
+
+def test_ip65_parse_after_a_build_invalidates_nothing():
+    """Exactly one invalidation per input change: the parse right after a
+    build (input change, or a stampless tree) deletes nothing."""
+    _require_toolchain()
+    for state in ("as-is", "blob-no-stamps"):
+        with Ip65Farm(state) as farm:
             farm.make(*IP65)
-            if new == bytes([data[100]]):
-                assert farm.sha() == prg, "restoring the byte did not restore the PRG"
-            else:
-                assert farm.sha() != prg, "a flipped blob byte left a stale PRG"
+            farm.edit_same_second("ip65-build/ip65.cfg", "\n# once\n")
+            farm.make(*IP65)
+            before = {o: farm.path(o).stat().st_mtime_ns for o in LINK_OUTPUTS}
+            blob_ns = farm.blob_mtime()
+            proc = farm.make(*IP65)
+            assert "ld65 " not in proc.stdout and "ca65 " not in proc.stdout, (
+                f"{state}: a parse after a build invalidated again:\n" + proc.stdout)
+            assert farm.blob_mtime() == blob_ns
+            assert before == {o: farm.path(o).stat().st_mtime_ns for o in LINK_OUTPUTS}
+            # a stamp lost after a build is recorded, not treated as a change
+            farm.path("ip65-build/ip65-c64-bin.stamp").unlink()
+            proc = farm.make(*IP65)
+            assert "ld65 " not in proc.stdout and "ca65 " not in proc.stdout, (
+                f"{state}: an absent bin stamp invalidated:\n" + proc.stdout)
+            assert farm.exists("ip65-build/ip65-c64-bin.stamp")
 
 
 def test_ip65_maintenance_goal_keeps_the_prg():
@@ -1109,19 +1164,24 @@ def test_ip65_maintenance_goal_keeps_the_prg():
         assert not gone, f"a maintenance goal deleted {gone}"
 
 
+def _check_skip_goals(farm):
+    for goal in ("clean", "ip65-libs"):
+        farm.blob_build()
+        farm.edit_same_second("ip65-build/ip65.cfg", "\n# skip %s\n" % goal)
+        stamps = {p: farm.path(p).read_bytes()
+                  for p in (BLOB_STAMP, "ip65-build/ip65-c64-bin.stamp")}
+        farm.make("BACKEND=ip65", goal)
+        assert farm.exists(BLOB), f"`make {goal}` deleted the blob"
+        for p, b in stamps.items():
+            assert farm.path(p).read_bytes() == b, f"`make {goal}` rewrote {p}"
+
+
 def test_ip65_skip_goals_do_not_run_the_blob_block():
     """`clean` and `ip65-libs` must not compare, write or delete (#220)."""
     _require_toolchain()
-    for goal in ("clean", "ip65-libs"):
+    for _ in range(2):
         with Ip65Farm() as farm:
-            farm.blob_build()
-            farm.edit_same_second("ip65-build/ip65.cfg", "\n# skip\n")
-            stamps = {p: farm.path(p).read_bytes()
-                      for p in (BLOB_STAMP, "ip65-build/ip65-c64-bin.stamp")}
-            farm.make("BACKEND=ip65", goal)
-            assert farm.exists(BLOB), f"`make {goal}` deleted the blob"
-            for p, b in stamps.items():
-                assert farm.path(p).read_bytes() == b, f"`make {goal}` rewrote {p}"
+            _check_skip_goals(farm)
 
 
 def test_ip65_blob_dry_run_message_matches_the_real_branch():
@@ -1139,6 +1199,16 @@ def test_ip65_blob_dry_run_message_matches_the_real_branch():
         assert maint and "ip65_blob.o" in maint[0] and PRG not in maint[0], maint
         real = line(*IP65)
         assert real and "ip65_blob.o" in real[0] and PRG in real[0], real
+
+        # the blob-bytes stamp has its own warning
+        farm.blob_build()
+        farm.make(*IP65)
+        blob = farm.path(BLOB)
+        data, ns = blob.read_bytes(), blob.stat().st_mtime_ns
+        blob.write_bytes(data[:100] + bytes([data[100] ^ 0xFF]) + data[101:])
+        os.utime(blob, ns=(ns, ns))
+        out = farm.make(*IP65, opts=("-n",)).stdout
+        assert "differs from ip65-build/ip65-c64-bin.stamp" in out, out
 
 
 def test_ip65_dry_run_t_on_a_libless_tree_creates_no_libs():
