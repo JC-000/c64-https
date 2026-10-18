@@ -319,7 +319,12 @@ def main() -> int:
             print(f"[fatal] {exc}", file=sys.stderr)
             return 4
 
-        print(f"Waiting up to {INIT_WAIT:.0f}s for the menu (comb boot precompute)...")
+        try:
+            label_addr("ec_precompute_256")
+            boot_note = " (comb boot precompute)"
+        except KeyError:
+            boot_note = ""
+        print(f"Waiting up to {INIT_WAIT:.0f}s for the menu{boot_note}...")
         ok, lines = wait_for(client, "Q=QUIT", INIT_WAIT + 30, "boot")
         if not ok:
             dump(lines, "screen at boot timeout")

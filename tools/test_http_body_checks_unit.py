@@ -1071,6 +1071,13 @@ def test_the_banner_rig_delegates_its_exit_code() -> None:
         missing = {"banner_ok", "shadow", "settled", "status", "body",
                    "kex", "require_kex"} - given
         assert not missing, f"decide_exit is not given {sorted(missing)}"
+        # ...and the two REQUIRE_KEX inputs are exactly the group the rig
+        # read and the parsed requirement: passing kex=None (or a literal)
+        # would turn the check into a constant.
+        kws = {kw.arg: ast.unparse(kw.value) for kw in call.value.keywords}
+        assert kws["kex"] == "kex" and kws["require_kex"] == "REQUIRE_KEX", kws
+    assert "label_addr('tls_kex_group')" in ast.unparse(tree), (
+        "the rig no longer reads tls_kex_group")
 
 
 # ===========================================================================
