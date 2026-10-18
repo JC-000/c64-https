@@ -71,13 +71,17 @@ error above. The fix changes no output: the ip65 PRG hashes
 
 What plain `make` still cannot do for you is build the ip65 `.lib`
 archives — the submodule ships sources, not binaries. Skip
-`make ip65-libs` and the blob rule runs and dies at its link:
+`make ip65-libs` and (since #309) make dies before the link, naming the lib:
 
-    ld65: Error: Input file '../ip65/ip65/ip65_tcp.lib' not found
-    make: *** [ip65-build/ip65-c64.bin] Error 1
+    make: missing ip65/ip65/ip65_tcp.lib -- run 'make ip65-libs' first (once per clone).
+    make: *** [ip65/ip65/ip65_tcp.lib] Error 1
+
+(Before #309 the libs were not prerequisites, and the blob rule died inside
+its own ld65 line: `ld65: Error: Input file '../ip65/ip65/ip65_tcp.lib' not found`.)
 
 So: `make ip65-libs` once per clone, then plain `make`. `make ip65-blob`
-exists only to force a rebuild.
+builds the blob if stale (it does not force a rebuild; #309 made a rebuilt
+lib or a content edit of stub/cfg count as stale).
 
 **Worktree trap — RETIRED by #116; the rule that survives it is
 different.** Recorded in full because this section asserted the old rule
@@ -143,7 +147,7 @@ Targets:
   - `make ip65-blob`    — rebuild `ip65-build/ip65-c64.bin` from those
                           libraries. A plain `make` already builds the
                           blob on demand and then reuses it, so this
-                          target is only for forcing a rebuild.
+                          target only builds when stale (it does not force).
 
 **`make clean` after a flag change — RETIRED by #159. The measurements
 below are why it existed, and are kept for that reason.**

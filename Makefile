@@ -1057,11 +1057,94 @@ ip65-libs:
 # and then reuses it — `clean` only removes build/, so it survives.
 ip65-blob: $(IP65_BIN)
 
-$(IP65_BIN): $(IP65_BUILD)/ip65_stub.s $(IP65_BUILD)/ip65.cfg
+# #309: the blob's inputs are its stub, its cfg and BOTH ip65 archives. They
+# used to be only the first two, so a rebuilt lib or a same-second cfg edit
+# left the blob (and, through .incbin, the PRG) stale at "Nothing to be done".
+#   - Missing archive: the empty rule below fails the build naming it, with
+#     the fix, instead of ld65's "Input file ... not found" from inside a cd.
+#   - Archive newer than the blob: an ordinary prerequisite relinks it.
+#   - Content (same-second edits, a pin move that keeps mtimes): the digest
+#     below, in the #305 shape -- compared at PARSE time, and a change deletes
+#     the blob, its object and the link outputs. Absence, not an mtime.
+# c64.lib lives in the cc65 install and is deliberately NOT hashed: the digest
+# carries TOOLCHAIN_ID (ca65/ld65 resolved binary + sha256), which moves
+# whenever the install does; locating the file would need ld65's search path.
+# BACKEND=ip65 only: a UCI build never reads or requires the ip65 tree.
+# `clean` and `ip65-libs` skip it (#220: they must not mutate anything), the
+# dry-run flags compare and warn only (#174). A maintenance-only goal set
+# (`make ip65-blob`, possibly over a UCI tree) deletes just the blob and its
+# object, never the link outputs (#220). ip65-c64.stamp is gitignored.
+IP65_LIBS         := $(IP65_DIR)/ip65/ip65_tcp.lib $(IP65_DIR)/drivers/ip65_c64.lib
+IP65_BLOB_STAMP   := $(IP65_BUILD)/ip65-c64.stamp
+IP65_BLOB_OBJ     := build/net/ip65/ip65_blob.o
+# ld65's own search-path environment (LD65_LIB, LD65_OBJ, CC65_HOME) can
+# swap c64.lib without moving TOOLCHAIN_ID, so it rides in the digest too.
+IP65_BLOB_STAMP_BODY := { printf 'TOOLCHAIN=%s\n' '$(TOOLCHAIN_ID)'; \
+    printf 'LD65_ENV=%s|%s|%s\n' '$(LD65_LIB)' '$(LD65_OBJ)' '$(CC65_HOME)'; \
+    for f in $(IP65_BUILD)/ip65_stub.s $(IP65_BUILD)/ip65.cfg $(IP65_LIBS); do \
+        (sha256sum $$f 2>/dev/null || shasum -a 256 $$f 2>/dev/null || echo "$$f MISSING"); \
+    done; }
+IP65_BIN_STAMP    := $(IP65_BUILD)/ip65-c64-bin.stamp
+IP65_BIN_SHA      := (sha256sum $(IP65_BIN) 2>/dev/null || shasum -a 256 $(IP65_BIN))
+# Link outputs go only for a real goal; a maintenance-only goal (#220) keeps them.
+IP65_RM_LINK      = $(if $(STAMP_SKIP),,$(LINK_OUTPUTS))
+IP65_STAMP_SKIP   := $(if $(MAKECMDGOALS),$(if $(filter-out clean ip65-libs,$(MAKECMDGOALS)),,skip))
+
+ifeq ($(BACKEND),ip65)
+ifeq ($(IP65_STAMP_SKIP),)
+ifeq ($(MAKE_DRY_RUN),)
+_ := $(shell $(IP65_BLOB_STAMP_BODY) > $(IP65_BLOB_STAMP).tmp; \
+             if cmp -s $(IP65_BLOB_STAMP).tmp $(IP65_BLOB_STAMP); then \
+                 rm -f $(IP65_BLOB_STAMP).tmp; \
+             else \
+                 mv $(IP65_BLOB_STAMP).tmp $(IP65_BLOB_STAMP); \
+                 rm -f $(IP65_BIN) $(IP65_BLOB_OBJ) $(IP65_RM_LINK); \
+             fi)
+# The blob's own bytes, by content, for a blob changed OUTSIDE this rule (a
+# byte flip, the documented provenance test): blob -> ip65_blob.o is an mtime
+# edge, and a same-second flip left the object, and the PRG, stale. A change
+# deletes the object and link outputs. A present blob with no stamp is only
+# recorded (a pre-stamp tree). An ABSENT blob is rebuilt newer-or-equal to an
+# object that may have been assembled from a flipped one, and the rule's own
+# stamp then matches, so absence clears the object and link outputs too. An
+# EMPTY blob (`make -t` touches one into existence) counts as absent. Last,
+# a missing object always takes the link outputs with it: `make ip65-blob`
+# (a maintenance goal, which keeps the PRG per #220) deletes only the object,
+# and the PRG would otherwise outlive it; IP65_RM_LINK is empty for such goals.
+_ := $(shell [ -s $(IP65_BIN) ] || rm -f $(IP65_BIN); \
+             if [ -f $(IP65_BIN) ]; then \
+             $(IP65_BIN_SHA) > $(IP65_BIN_STAMP).tmp; \
+             if [ -f $(IP65_BIN_STAMP) ] && ! cmp -s $(IP65_BIN_STAMP).tmp $(IP65_BIN_STAMP); then \
+                 rm -f $(IP65_BLOB_OBJ) $(IP65_RM_LINK); \
+             fi; \
+             mv $(IP65_BIN_STAMP).tmp $(IP65_BIN_STAMP); \
+             else rm -f $(IP65_BLOB_OBJ) $(IP65_RM_LINK); \
+             fi; \
+             [ -f $(IP65_BLOB_OBJ) ] || rm -f $(IP65_RM_LINK))
+else
+ifneq ($(shell $(IP65_BLOB_STAMP_BODY) 2>/dev/null | cmp -s - $(IP65_BLOB_STAMP) >/dev/null 2>&1 || echo differs),)
+$(warning DRY RUN (-$(MAKE_OPT_LETTERS)): ip65 blob inputs differ from $(IP65_BLOB_STAMP).)
+$(warning   A real build would delete $(IP65_BIN) $(IP65_BLOB_OBJ) $(IP65_RM_LINK). NOTHING was deleted.)
+endif
+ifneq ($(shell if [ -f $(IP65_BIN) ] && [ -f $(IP65_BIN_STAMP) ]; then $(IP65_BIN_SHA) 2>/dev/null | cmp -s - $(IP65_BIN_STAMP) >/dev/null 2>&1 || echo differs; fi),)
+$(warning DRY RUN (-$(MAKE_OPT_LETTERS)): $(IP65_BIN) differs from $(IP65_BIN_STAMP).)
+$(warning   A real build would delete $(IP65_BLOB_OBJ) $(IP65_RM_LINK). NOTHING was deleted.)
+endif
+endif
+endif
+endif
+
+# `+`: runs under -t/-n/-q too, so `make -t` fails by name instead of
+# touching an empty file into existence where a lib should be.
+$(IP65_LIBS):
+	+@echo "make: missing $@ -- run 'make ip65-libs' first (once per clone)." >&2; false
+
+$(IP65_BIN): $(IP65_BUILD)/ip65_stub.s $(IP65_BUILD)/ip65.cfg $(IP65_LIBS)
 	cd $(IP65_BUILD) && $(CA65) -I ../$(IP65_DIR) ip65_stub.s -o ip65_stub.o
 	cd $(IP65_BUILD) && $(LD65) -C ip65.cfg -o ip65-c64.bin -m ip65-c64.map \
 	    ip65_stub.o ../$(IP65_DIR)/ip65/ip65_tcp.lib \
 	    ../$(IP65_DIR)/drivers/ip65_c64.lib c64.lib
+	$(IP65_BIN_SHA) > $(IP65_BIN_STAMP)
 
 run: $(PRG)
 	$(VICE) -autostart $(PRG)

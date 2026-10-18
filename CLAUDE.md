@@ -27,8 +27,14 @@ Fresh clone (ip65 backend; UCI needs none of the ip65 steps):
 
   - `ip65-build/ip65-c64.bin` is a **gitignored artifact** (6,951 B,
     sha256 `cf1a5ff7…`, deterministic). Plain `make` builds it, but it
-    cannot build the ip65 `.lib` archives — skip `make ip65-libs` and the
-    link dies with `ld65: Input file '../ip65/ip65/ip65_tcp.lib' not found`.
+    cannot build the ip65 `.lib` archives — skip `make ip65-libs` and make
+    dies `missing ip65/ip65/ip65_tcp.lib -- run 'make ip65-libs'` (#309). The
+    blob tracks stub, `ip65.cfg` and both libs by content
+    (`ip65-build/ip65-c64.stamp`, #305 shape; `-n` writes nothing); `c64.lib`
+    is covered only via the toolchain id and LD65_LIB/OBJ/CC65_HOME, not
+    hashed. The blob's own bytes are stamped too (`ip65-c64-bin.stamp`, written
+    by the blob rule; a stampless tree records it at the next parse), so a
+    same-second byte flip reaches the PRG from the first parse after a build.
   - **A nested git worktree needs `git submodule update --init --recursive`
     before it can link ip65** — a fresh worktree has no submodule working
     trees, so the link dies by name. It fails LOUDLY; that is the whole
@@ -112,7 +118,7 @@ like "overflows".
 
 Targets: `make` (PRG + `build/labels.txt` + `build/c64-https.dbg`),
 `make clean` (removes `build/` only; the blob survives), `make run`,
-`make ip65-libs`, `make ip65-blob` (force rebuild), `make package`,
+`make ip65-libs`, `make ip65-blob` (build if stale; does not force), `make package`,
 `make package-verify`.
 
 Variables:

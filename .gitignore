@@ -6,6 +6,7 @@ dist/
 ip65-build/*.o
 ip65-build/*.bin
 ip65-build/*.map
+ip65-build/*.stamp
 .claude/*
 !.claude/settings.json
 tools/https_e2e/certs/*

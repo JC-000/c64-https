@@ -542,7 +542,8 @@ with no intermediate step.
 
 What `make` cannot do for you is build the ip65 `.lib` archives the blob
 links against, so run `make ip65-libs` once per clone, as in "Before you
-build or test" above; `make ip65-blob` exists only to force a rebuild. The
+build or test" above; `make ip65-blob` builds it if stale (it does not force; flip a byte
+of the blob to test provenance). The
 build is deterministic: 6,951 B, sha256 `cf1a5ff7809af4e4655e385b378b936054f41046ff2b7604828af3240c2d90dd`.
 `make clean` does not remove it, which is why the step is normally
 invisible. The UCI backend does not use the blob at all.
