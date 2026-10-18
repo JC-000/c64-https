@@ -28,8 +28,8 @@ the release walks you through the choice:
 | image | for | note |
 |---|---|---|
 | `c64-https-ip65-onchip` | bone-stock C64 + RR-Net cartridge | maximum compatibility: no REU, no turbo, nothing optional. If you are not sure what you have, this is the one that runs. ~36 min per handshake at 1 MHz. |
-| `c64-https-uci-onchip` | Ultimate 64 / C64 Ultimate at turbo, REU off | boots straight to the menu; offers the hybrid X25519MLKEM768 (post-quantum) key exchange |
-| `c64-https-uci-comb` | Ultimate 64 / C64 Ultimate at turbo, REU **on** | fastest — 1.73x quicker verify (16.4 s vs 28.4 s, U64E at 48 MHz). Builds a 16 KB table into REU bank 2 at each boot first: ~34 s at 64 MHz, ~45 s at 48 MHz. Also offers X25519MLKEM768 (+1.7 s, n=1). |
+| `c64-https-uci-onchip` | Ultimate 64 / C64 Ultimate at turbo, REU off | boots straight to the menu; offers the hybrid X25519MLKEM768 (post-quantum) key exchange (about +2.5 s, n=3 to client Finished) |
+| `c64-https-uci-comb` | Ultimate 64 / C64 Ultimate at turbo, REU **on** | fastest — 1.73x quicker verify (16.4 s vs 28.4 s, U64E at 48 MHz). Builds a 16 KB table into REU bank 2 at each boot first: ~34 s at 64 MHz, ~45 s at 48 MHz. Also offers X25519MLKEM768 (about +2.5 s, n=3 to client Finished vs the same image without it). |
 | `c64-https-uci-m3-demo` | Ultimate 64 with the M3 (ESP32 TLS) firmware | a secondary variant: TLS runs on the Ultimate's ESP32, not the 6510; needs M3 firmware. Its own README is in the release. |
 
 Every image carries **one** default host, baked in at build time (`make
@@ -120,7 +120,7 @@ a venv mismatch reproduces #90 exactly after an install that appeared to succeed
  │  ┌──────┴───────┐ ┌──────┴─────────┐    │
  │  │   AEAD       │ │  Key Schedule  │    │  (crypto modules)
  │  │ ChaCha20-    │ │  HKDF-SHA256   │    │  hkdf.s
- │  │ Poly1305     │ │  ECDHE X25519  │    │
+ │  │ Poly1305     │ │ X25519+ML-KEM768│   │
  │  └──────────────┘ └────────────────┘    │
  ├─────────────────────────────────────────┤
  │        Network backend boundary         │  net_init / net_poll / net_tcp_*
@@ -166,7 +166,7 @@ anywhere in `src/crypto/`.
 
 - **AEAD:** ChaCha20-Poly1305 — in-tree `src/crypto/{chacha20,poly1305,aead}.s`, originally from [c64-wireguard](https://github.com/JC-000/c64-wireguard)
 - **Hash:** SHA-256 — in-tree `src/crypto/sha256.s`, originally from [c64-aes256-ecdsa](https://github.com/JC-000/c64-aes256-ecdsa)
-- **Key exchange:** ECDHE with X25519 only — `supported_groups` and `key_share` carry the single group 0x001D (`src/tls_handshake.s`, grep `group = x25519`); the vendored `libs/x25519` sibling, built on-chip (no REU) on every profile
+- **Key exchange:** `uci-onchip` and `uci-comb` (built `PQ_HYBRID=1`) offer X25519MLKEM768 (0x11EC: ML-KEM-768 encapsulation key || X25519 share) first and X25519 (0x001D) second, in `supported_groups` and `key_share`; the server picks. A 0x11EC answer feeds `mlkem_ss || x25519_ss` into the handshake secret (draft-ietf-tls-ecdhe-mlkem, ML-KEM first); a 0x001D answer uses X25519 alone. `ip65-onchip`, and any build without `PQ_HYBRID=1`, offers only 0x001D (`src/tls_handshake.s`, grep `group = x25519`). X25519 is the vendored `libs/x25519` sibling, built on-chip (no REU) on every profile; ML-KEM-768 is the vendored `libs/mlkem` (c64-mlkem), UCI only
 - **Certificate signatures:** ECDSA P-256 (`ecdsa_secp256r1_sha256`, 0x0403) from the [c64-nist-curves](https://github.com/JC-000/c64-nist-curves) submodule at `libs/nistcurves`, via the thin dispatcher `src/crypto/ecdsa_verify.s`. P-384 (0x0503) is **retired**: not advertised, and refused — see Known Issues.
 - **Key derivation:** HKDF-SHA256, built from HMAC-SHA256 (`src/hkdf.s`)
 - **PRNG:** HMAC-DRBG seeded from SID voice 3 noise + CIA timer entropy (`src/entropy.s`, `src/crypto/hmac_drbg.s`)
@@ -248,6 +248,19 @@ That is a deliberate scope decision for a 1 MHz machine — a chain walk means
 more ECDSA verifies at ~16-30 s each, and a root store means kilobytes of
 resident keys — not an oversight. Treat the transport as confidential against
 passive observers, not authenticated against active ones.
+
+**What the post-quantum hybrid protects, and what it does not.** `PQ_HYBRID=1`
+changes the key exchange only. A passive recorder who later has a quantum
+computer cannot recover a session's keys from the recorded handshake unless it
+can also break X25519 or ML-KEM-768 ("harvest now, decrypt later"). It changes
+nothing about authentication, which stays classical: the server's
+CertificateVerify is ECDSA P-256 and the UCI images' only pin is
+trust-on-first-use of that leaf key, so forged or stolen P-256 keys, or an
+attacker on the path at first use, are not stopped by it. And it is only as
+strong as its secrets: this client's DRBG is seeded from SID voice 3 and CIA
+timer noise (weak, as stated above), and both the ML-KEM seed and the X25519
+private key come from it. Read it as a demonstration of the protocol path, not
+as a claim of quantum safety.
 
 Confidentiality against passive observers is the property this client keeps
 after conceding authentication, so it is worth saying what upholds it. **As of
@@ -377,6 +390,25 @@ $C000-$CFFF  (no region)          the 4 KB TCP ring, by equate; not in
                                  image, which boot stashes to the REU
 $D000-$DFFF  I/O                 never in the PRG (#288)
 ```
+
+With `PQ_HYBRID=1` (both shipped UCI images) the same layout also carries:
+
+```
+$A000-$BFFF  (file bytes)        the staged ML-KEM image (7,490 B); boot copies
+                                 it to $E000 before zeroing the BSS
+$B100-$BBFF  ML-KEM rest BSS     shares the window with the X25519 tables;
+                                 scrubbed after KeyGen and after Decaps
+$C000-$C95F  TCP ring, first     the ML-KEM dk scratch (2,400 B), zeroed right
+             2,400 B             after KeyGen; the ring itself is unused then
+$D000-$DFFF  RAM under I/O       ML-KEM polynomial area (not in the PRG, the
+                                 CPU banks I/O out to reach it); scrubbed
+$E000-$FDFF  MLKEM_CODE_RAM      the ML-KEM code, copied there at boot
+NET_BSS_TAIL                     tls_pq_seed (64 B) + tls_mlkem_ss (32 B), below
+                                 $4200; the ek and the ct each share cert_buf
+```
+
+Exact extents: `tools/measure_margins.py` (the `*-pq` profiles) and
+`src/crypto/mlkem_link.s`.
 
 `CRYPTO_OVERLAY` is not empty in any shipped UCI image — it holds the
 resident tenants listed above. Free space per region is **measured, not
@@ -555,9 +587,9 @@ Progress:
 - [x] VIC-II blanking during the CPU-bound crypto — `src/vic.s`, scoped to the two X25519 scalar multiplies and the ECDSA verify so the on-screen handshake progress markers stay visible between phases. Worth **6.3-6.8%**, measured both in VICE at 1 MHz and on a U64E at 8/16/48 MHz; see the VIC-II blanking section of `CLAUDE.md`
 - [x] HKDF-SHA256 — Extract, Expand, Expand-Label, Derive-Secret (RFC 5869 + TLS 1.3)
 - [x] TLS 1.3 record layer — encrypt/decrypt with ChaCha20-Poly1305, nonce construction, sequence numbers
-- [x] TLS 1.3 handshake — ClientHello builder (x25519 key_share, SNI), ServerHello parser, streaming transcript hash
+- [x] TLS 1.3 handshake — ClientHello builder (x25519 key_share, SNI; with `PQ_HYBRID=1` also the ML-KEM-768 key share), ServerHello parser (a streaming reader under `PQ_HYBRID=1`), streaming transcript hash
 - [x] TLS 1.3 key schedule — early/handshake/master secrets, traffic key derivation, Finished MAC (RFC 8446 §7.1)
-- [x] ECDHE x25519 key exchange — generate keypair, compute shared secret
+- [x] ECDHE x25519 key exchange — generate keypair, compute shared secret; with `PQ_HYBRID=1` (UCI) also ML-KEM-768 KeyGen/Decaps and the hybrid key schedule (`libs/mlkem`)
 - [x] TLS 1.3 key schedule integration testing — all 9 HKDF steps verified against RFC 8448 + Finished MAC
 - [x] Entropy/DRBG initialization — SID voice 3 noise + CIA timer seeding at boot, DRBG fills for TLS random values
 - [x] X.509 certificate parsing — DER parser extracts TBS, public key, signature (r,s), curve ID (the live TLS path accepts P-256 only)
@@ -913,6 +945,7 @@ Environment variables honored by `rig_https_local.py`:
 Vendored as submodules and linked into the PRG:
 
 - [c64-nist-curves](https://github.com/JC-000/c64-nist-curves) — `libs/nistcurves`, the ECDSA P-256 verify used for CertificateVerify
+- [c64-mlkem](https://github.com/JC-000/c64-mlkem) — `libs/mlkem`, ML-KEM-768 for the X25519MLKEM768 hybrid; linked only under `PQ_HYBRID=1` (both shipped UCI images)
 - [c64-x25519](https://github.com/JC-000/c64-x25519) — `libs/x25519`, the X25519 in every build since #245 (on-chip profile, via `tools/integration/build_x25519.sh`; lookup tables generated at runtime by `src/crypto/x25519_tables.s`).
 - [ip65](https://github.com/cc65/ip65) — the TCP/IP stack behind the ip65 backend
 
@@ -921,7 +954,7 @@ Not vendored — origin of code that now lives in-tree, or tooling:
 - [c64-wireguard](https://github.com/JC-000/c64-wireguard) — ChaCha20, Poly1305, ChaCha20-Poly1305 AEAD
 - [c64-aes256-ecdsa](https://github.com/JC-000/c64-aes256-ecdsa) — AES-256, SHA-256, ECDSA P-256, HMAC-DRBG
 - [c64-test-harness](https://github.com/JC-000/c64-test-harness) — VICE test automation framework
-- [c64-lib-contract](https://github.com/JC-000/c64-lib-contract) — the segment-naming / manifest contract the two crypto submodules follow
+- [c64-lib-contract](https://github.com/JC-000/c64-lib-contract) — the segment-naming / manifest contract the crypto submodules follow
 
 ## License
 

@@ -93,7 +93,7 @@ from http_body_checks import (  # noqa: E402
     STALL_GRACE,
     OPTIONAL_SYMBOLS, SYMBOLS, StallTracker, check_body_complete, check_fetch_settled,
     check_http_status, close_confirmed, decide_exit, decode_body_state,
-    early_stop_step, poll_until, stall_config_error,
+    early_stop_step, parse_require_kex, poll_until, stall_config_error,
 )
 from ip65_hw_checks import check_shadow_ram_readable  # noqa: E402
 from _rig_lifecycle import guard_socket_teardown  # noqa: E402
@@ -109,6 +109,10 @@ LABELS_PATH = PRG_PATH.parent / "labels.txt"
 #: check all use -- an HTTP 200 with a complete body is the proof of all four.
 TYPED_HOST = os.environ.get("TYPED_HOST", "")
 TYPED_PATH = os.environ.get("TYPED_PATH", "")
+#: REQUIRE_KEX=EC: the run must end with tls_kex_group == $EC (decide_exit
+#: enforces it). Parsed and validated in main() before the device is touched.
+_REQUIRE_KEX_RAW = os.environ.get("REQUIRE_KEX", "")
+REQUIRE_KEX = None
 EXPECT_HOST = (TYPED_HOST
                or os.environ.get("HTTPS_HOST", "en.wikipedia.org")).upper()
 
@@ -200,6 +204,12 @@ def main() -> int:
     # sub-floor STALL_ABORT makes should_stop_early raise inside the poll
     # loop, skipping the 'Q' below with a live socket; a STALL_GRACE at or
     # above it would make an early stop and the deadline disagree.
+    global REQUIRE_KEX
+    try:
+        REQUIRE_KEX = parse_require_kex(_REQUIRE_KEX_RAW)
+    except ValueError as exc:
+        print(f"[fatal] {exc}", file=sys.stderr)
+        return 2
     bad_stall = stall_config_error(STALL_ABORT_S, STALL_GRACE_S)
     if bad_stall:
         print(f"[fatal] {bad_stall}", file=sys.stderr)
@@ -510,8 +520,9 @@ def main() -> int:
         try:
             kex = bytes(client.read_mem(label_addr("tls_kex_group"), 1))[0]
             print(f"  tls_kex_group=${kex:02X}")
-        except KeyError:
-            pass
+        except Exception as exc:        # KeyError (no label) or a failed read:
+            # never fatal here; REQUIRE_KEX turns it into a FAIL verdict
+            print(f"  tls_kex_group: not read ({exc!r})")
 
         if not ok:
             print("WARNING: never saw CONNECTION CLOSED — leaving the machine "
@@ -540,16 +551,12 @@ def main() -> int:
         # so the gate silently dies and the cry-wolf failure returns. A
         # plausible signature-refactor slip; keywords remove it.
         code, report = decide_exit(banner_ok=banner_ok, shadow=shadow,
-                                   settled=settled, status=status, body=body)
+                                   settled=settled, status=status, body=body,
+                                   kex=kex, require_kex=REQUIRE_KEX)
         print()
         for line in report[:-1]:
             print(line)
         print(report[-1], file=sys.stderr if code else sys.stdout)
-        want = os.environ.get("REQUIRE_KEX", "")
-        if want and code == 0 and kex != int(want, 16):
-            print(f"FAIL: REQUIRE_KEX=${int(want, 16):02X} but tls_kex_group is "
-                  f"{'absent' if kex is None else '$%02X' % kex}", file=sys.stderr)
-            return 1
         return code
     finally:
         # #234: before disable_uci — the C64 needs the command interface to

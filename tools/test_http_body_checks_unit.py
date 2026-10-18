@@ -34,6 +34,7 @@ RED_CASES = {
     "check_body_complete": "test_body_complete_red_green",
     "check_http_status": "test_http_status_red_green",
     "check_fetch_settled": "test_fetch_settled_red_green",
+    "check_kex_group": "test_kex_group_red_green",
 }
 
 #: `decide_exit` is not a `check_*` and so is outside RED_CASES, but it is
@@ -959,6 +960,42 @@ def test_decide_exit_red_green() -> None:
     assert rc == hbc.EXIT_FAIL and any("broken" in ln for ln in lines)
 
 
+def test_kex_group_red_green() -> None:
+    """REQUIRE_KEX is part of the exit decision (P5 release review): a run
+    that passes everything else but ends on the wrong group, or on a group
+    nobody could read, must not exit 0, and the report must say FAIL."""
+    ok = hbc.Verdict(True, "fine")
+    settled_ok = hbc.check_fetch_settled(False, 1.0, 300.0)
+    base = dict(banner_ok=True, shadow=ok, settled=settled_ok, status=ok, body=ok)
+
+    # not required: whatever was read (or not) changes nothing
+    assert hbc.decide_exit(**base)[0] == hbc.EXIT_PASS
+    assert hbc.decide_exit(**base, kex=0x1D)[0] == hbc.EXIT_PASS
+    # required and matching
+    assert hbc.decide_exit(**base, kex=0xEC, require_kex=0xEC)[0] == hbc.EXIT_PASS
+    # required, wrong group (the github $1D fallback case), neighbours, unread
+    for got in (0x1D, 0xEB, 0xED, 0x00, None):
+        rc, lines = hbc.decide_exit(**base, kex=got, require_kex=0xEC)
+        assert rc == hbc.EXIT_FAIL, got
+        assert lines[-1].startswith("FAIL"), (got, lines[-1])
+        assert any("REQUIRE_KEX" in ln and "FAIL" in ln for ln in lines), lines
+    # required group $00 is a real requirement, not "unset"
+    assert hbc.decide_exit(**base, kex=0xEC, require_kex=0x00)[0] == hbc.EXIT_FAIL
+    # a wrong group does not outrank the still-growing gate (78 stays 78)
+    growing = hbc.check_fetch_settled(True, 300.0, 300.0)
+    assert hbc.decide_exit(**dict(base, settled=growing), kex=0x1D,
+                           require_kex=0xEC)[0] == hbc.EXIT_INCONCLUSIVE
+    # parsing: validated up front
+    assert hbc.parse_require_kex("") is None
+    assert hbc.parse_require_kex("EC") == 0xEC and hbc.parse_require_kex("0xec") == 0xEC
+    for bad in ("zz", "1ff", "-1", "E C"):
+        try:
+            hbc.parse_require_kex(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"REQUIRE_KEX={bad!r} was accepted")
+
+
 def test_the_banner_rig_delegates_its_exit_code() -> None:
     """The rig must hold no exit-code logic of its own.
 
@@ -1031,7 +1068,8 @@ def test_the_banner_rig_delegates_its_exit_code() -> None:
             "verdict by keyword, or a transposition is invisible here and "
             "on the bench")
         given = {kw.arg for kw in call.value.keywords}
-        missing = {"banner_ok", "shadow", "settled", "status", "body"} - given
+        missing = {"banner_ok", "shadow", "settled", "status", "body",
+                   "kex", "require_kex"} - given
         assert not missing, f"decide_exit is not given {sorted(missing)}"
 
 
