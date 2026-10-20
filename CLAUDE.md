@@ -997,8 +997,12 @@ a release".
 against a host listener (`E2E_PROFILE=reu|onchip`, `E2E_NO_WARP=1`,
 `HTTPS_PORT`). Needs an ip65 PRG, a pcap-capable VICE
 (`~/opt/vice-eth/bin/x64sc`, patched 3.10 — stock macOS builds gate pcap on
-euid 0 and segfault), and `sudo bash tools/rig-up-macos.sh` (feth pair,
-10.0.65.1, `/dev/bpf*` perms — **reset every reboot** — dnsmasq). VICE
+euid 0 and segfault), BPF access via the `access_bpf` group (ChmodBPF;
+the rig test opens `/dev/bpf0` O_RDWR), and the feth pair + 10.0.65.1 +
+dnsmasq from the host helper `sudo -n /usr/local/libexec/c64-harness/c64-https-rig-up.sh`
+(not in this repo; pid `/var/run/c64-harness/dnsmasq.pid`). The rig runs
+it itself when the network half is down and runs `…-rig-down.sh` at exit
+only if it brought the rig up. VICE
 3.10 SDL2 warp caps at ~1.2x. macOS Local Network privacy can silently
 block the listener; the preflight probes for it.
 

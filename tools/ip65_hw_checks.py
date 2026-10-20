@@ -94,7 +94,7 @@ IP65_DEFAULT_CFG_MAC = (0x00, 0x80, 0x10, 0x00, 0x51, 0x00)
 
 # ---------------------------------------------------------------------------
 # The segment. 10.0.66.0/24 and deliberately NOT 10.0.65.0/24: the VICE feth
-# rig (tools/rig-up-macos.sh) owns 10.0.65.1 and both rigs must be able to run
+# rig (host helper c64-https-rig-up.sh) owns 10.0.65.1 and both rigs must be able to run
 # at once, because comparing real silicon against the emulated pair is the
 # point. These are DEFAULTS for the unit test's convenience; the rig reads the
 # live values out of tools/rig-up-rrnet-macos.sh so the two cannot drift (see

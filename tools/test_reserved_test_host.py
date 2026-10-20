@@ -120,9 +120,17 @@ E2E_DIR = REPO / "tools" / "https_e2e"
 
 # The bridge scripts that publish DNS overrides for the test cert's names.
 DNSMASQ_SCRIPTS = (
-    REPO / "tools" / "rig-up-macos.sh",          # macOS feth rig (VICE ip65)
     REPO / "scripts" / "setup-bridge-tap.sh",    # Linux br-c64 rig
 )
+
+# The macOS feth rig (VICE ip65) is no longer a repo script: its dnsmasq is
+# started by a root-owned, sudo-allowlisted host helper whose source lives in
+# new-computer-setup (privileged/helpers/). These are the overrides that
+# helper must publish. The cert-name pin below runs against this set always,
+# and against the installed helper too whenever it is present on this host.
+MACOS_RIG_OVERRIDES = frozenset({"www.foo.invalid", "foo.invalid",
+                                 "c64test.local"})
+MACOS_RIG_HELPER = Path("/usr/local/libexec/c64-harness/c64-https-rig-up.sh")
 
 # RFC 2606 §2 (.test/.example/.invalid/.localhost) and RFC 6761 §6.2-6.4.
 # Guaranteed never delegated; DNS is required not to resolve them. This is
@@ -509,15 +517,30 @@ def test_dnsmasq_overrides_cover_every_cert_name() -> None:
     stops resolving, minutes into a run, and reads as a C64-side TCP fault.
     """
     names = {n.lower() for n in next(iter(_all_minted_san_names().values()))}
-    for script in DNSMASQ_SCRIPTS:
-        assert script.is_file(), f"missing bridge script {script}"
-        overrides = dnsmasq_overrides(script)
+    sources = [(str(s.relative_to(REPO)), s) for s in DNSMASQ_SCRIPTS]
+    sources.append(("MACOS_RIG_OVERRIDES", None))
+    if MACOS_RIG_HELPER.is_file():
+        sources.append((str(MACOS_RIG_HELPER), MACOS_RIG_HELPER))
+    for label, script in sources:
+        if script is None:
+            overrides = set(MACOS_RIG_OVERRIDES)
+        else:
+            assert script.is_file(), f"missing bridge script {script}"
+            overrides = dnsmasq_overrides(script)
         missing = sorted(n for n in names if not covered_by(n, overrides))
         assert missing == [], (
-            f"{script.relative_to(REPO)} publishes dnsmasq --address= "
+            f"{label} publishes dnsmasq --address= "
             f"overrides for {sorted(overrides)} but the test certificate "
             f"carries {sorted(names)}; {missing} would not resolve on the "
             "rig. The cert names and the DNS overrides must move together."
+        )
+    if MACOS_RIG_HELPER.is_file():
+        installed = dnsmasq_overrides(MACOS_RIG_HELPER)
+        assert installed == set(MACOS_RIG_OVERRIDES), (
+            f"{MACOS_RIG_HELPER} publishes {sorted(installed)} but "
+            f"MACOS_RIG_OVERRIDES says {sorted(MACOS_RIG_OVERRIDES)}; change "
+            "the helper through new-computer-setup's REVIEW.md and this set "
+            "together."
         )
 
 

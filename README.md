@@ -789,7 +789,9 @@ honest 1 MHz, **2,159.7 s = 36.0 min** from `G` to `CONNECTION CLOSED`.
 Budget accordingly; do not assume the bridge rig matches it exactly.
 
 On macOS the equivalent rig uses a feth pair plus pcap instead of a
-Linux bridge — `sudo bash tools/rig-up-macos.sh`, and a VICE built with
+Linux bridge — brought up by a host-installed, sudo-allowlisted helper
+(`sudo -n /usr/local/libexec/c64-harness/c64-https-rig-up.sh`; `tests/rig_vice_https_macos.py`
+runs it itself when the rig is down), and a VICE built with
 the pcap driver's `geteuid()==0` gate patched out, because stock macOS
 VICE binaries reject unprivileged `-ethernetiodriver pcap`. See the
 "VICE ip65 rig" section of `CLAUDE.md`.

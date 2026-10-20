@@ -3408,6 +3408,11 @@ Three prerequisites that are easy to lose:
     dnsmasq. `/dev/bpf*` permissions **reset on every reboot** — a
     "pcap not valid for option" error means re-run the script, not a
     broken binary. The test's preflight checks all of this and says so.
+    *Superseded 2026-10-20:* the script is gone. The feth pair and
+    dnsmasq now come from the root-owned helper `sudo -n
+    /usr/local/libexec/c64-harness/c64-https-rig-up.sh` (dnsmasq as nobody, pid in
+    `/var/run/c64-harness/`), which the rig runs itself when needed; BPF
+    access is the `access_bpf` group, no `chmod o+rw /dev/bpf*`.
 
 Also worth knowing: macOS's Local Network privacy gate can silently
 block the listener's sockets until a one-time GUI prompt is approved;

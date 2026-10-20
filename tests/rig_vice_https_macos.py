@@ -2,15 +2,25 @@
 """macOS hardware-free HTTPS e2e: ip65 PRG in ethernet-VICE vs local TLS 1.3 listener.
 
 The macOS counterpart to tests/rig_phase3_https.py (which is Linux-only:
-sysfs TAP checks + sudo dnsmasq). This variant expects the feth/pcap rig
-from tools/rig-up-macos.sh to be up already (one sudo command per boot)
-and runs everything else unprivileged:
+sysfs TAP checks + sudo dnsmasq). The feth/pcap rig is brought up by the
+host's root-owned, sudo-allowlisted helper (installed by new-computer-setup,
+not part of this repo):
+
+    sudo -n /usr/local/libexec/c64-harness/c64-https-rig-up.sh
+    sudo -n /usr/local/libexec/c64-harness/c64-https-rig-down.sh
+
+If the rig's network half (feth1 at 10.0.65.1, the helper's dnsmasq) is
+missing, this script runs rig-up itself via `sudo -n`, and runs rig-down at
+exit ONLY when it was the one that brought the rig up -- a rig someone else
+raised (another lane, c64-test-harness's bridge tests on the same /24) is
+never torn down from here. Everything else runs unprivileged:
 
   - VICE: the ethernet-capable build at ~/opt/vice-eth/bin/x64sc (stock
     macOS VICE binaries gate the pcap rawnet driver on euid==0 — see
     c64-test-harness#144). Launched directly with pcap on feth0; the
     host owns 10.0.65.1 on feth1 (the feth peer IS the L2 link).
-  - DHCP/DNS: the rig's externally-managed dnsmasq (never touched here).
+  - DHCP/DNS: the helper's dnsmasq (pid in /var/run/c64-harness, runs as
+    nobody); this script only starts/stops it through the two helpers.
   - TLS listener: tools/https_e2e machinery bound to 10.0.65.1:4433
     (unprivileged port — the PRG must be built with HTTPS_PORT=4433).
 
@@ -43,7 +53,7 @@ Environment knobs:
   E2E_NO_WARP=1        keep 1x speed for the TLS phase
   VICE_ETH_BIN         override the ethernet-VICE binary path
 
-First-run rig prerequisite beyond tools/rig-up-macos.sh: macOS prompts
+First-run rig prerequisite beyond the rig-up helper: macOS prompts
 once for "Local Network" access for the python interpreter — until
 approved, the OS silently blocks the TLS listener from the feth network
 and the C64 dies at TCP CONNECT with nothing on the wire. The listener
@@ -60,8 +70,8 @@ Exit codes (tools/_skip_policy.py, issue #178):
 
 from __future__ import annotations
 
+import errno
 import os
-import stat
 import subprocess
 import sys
 import time
@@ -96,6 +106,18 @@ TLS_TIMEOUT = float(os.environ.get("E2E_TIMEOUT", "2400"))
 NO_WARP = os.environ.get("E2E_NO_WARP") == "1"
 MONITOR_PORT = int(os.environ.get("E2E_MONITOR_PORT", "6544"))
 
+# Root-owned helpers, sudo-allowlisted by exact path with no arguments
+# (sha256-pinned in sudoers). Their sources live in new-computer-setup's
+# privileged/helpers/, reviewed there -- not in this repo.
+HELPER_DIR = "/usr/local/libexec/c64-harness"
+RIG_UP = os.path.join(HELPER_DIR, "c64-https-rig-up.sh")
+RIG_DOWN = os.path.join(HELPER_DIR, "c64-https-rig-down.sh")
+DNSMASQ_PIDFILE = "/var/run/c64-harness/dnsmasq.pid"
+RIG_UP_HINT = f"sudo -n {RIG_UP}"
+
+# Set when THIS process ran rig-up; only then does it run rig-down.
+_brought_rig_up = False
+
 RESPONSE_BODY = "TLS13 OK FROM C64 TEST"
 MENU_NEEDLE = "Q=QUIT"
 DHCP_OK_NEEDLE = "DHCP OK"
@@ -128,8 +150,9 @@ def _rig_check() -> "tuple[list[str], list[str]]":
     Two lists because the remedies differ in kind, and issue #178's rule is
     that the remedy decides the verdict:
 
-      problems   -- something is not installed or not set up.  Remedy: run
-                    `sudo bash tools/rig-up-macos.sh`, build the VICE.  An
+      problems   -- something is not installed or not set up.  Remedy:
+                    `sudo -n .../c64-https-rig-up.sh` (main() tries it
+                    itself first), build the VICE.  An
                     involuntary skip, exit 2, opt-out-able by a lane that
                     knowingly has no rig.
       contention -- the rig exists but another process holds it.  Remedy:
@@ -144,21 +167,8 @@ def _rig_check() -> "tuple[list[str], list[str]]":
     non-Darwin host is a voluntary skip owned by tests/rig_phase3_https.py,
     not a problem with this rig.
     """
-    problems: list[str] = []
+    problems = _host_problems() + _net_problems()
     contention: list[str] = []
-    if not os.path.exists(VICE_BIN):
-        problems.append(
-            f"{VICE_BIN} missing — build it per c64-test-harness#144 "
-            "(stock VICE cannot do unprivileged ethernet on macOS)")
-    try:
-        mode = os.stat("/dev/bpf0").st_mode
-        if not (mode & stat.S_IROTH and mode & stat.S_IWOTH):
-            problems.append("/dev/bpf0 not world-rw (perms reset on reboot)")
-    except FileNotFoundError:
-        problems.append("/dev/bpf0 missing")
-    r = subprocess.run(["ifconfig", "feth1"], capture_output=True, text=True)
-    if r.returncode != 0 or f"inet {HOST_IP} " not in r.stdout:
-        problems.append(f"feth1 missing or not at {HOST_IP}")
     # Another VICE already attached to feth0 is a hard conflict: every
     # ip65 instance uses the same default MAC (00:0e:3a:64:64:64), so a
     # leftover instance is a live duplicate-MAC node on the same L2 that
@@ -190,14 +200,87 @@ def _rig_check() -> "tuple[list[str], list[str]]":
             "conflict):\n    " + "\n    ".join(attached)
             + "\n    kill YOUR stale instance (do not touch other projects' "
               "x64sc processes)")
+    return problems, contention
+
+
+def _host_problems() -> list[str]:
+    """What rig-up cannot fix: the VICE binary and this user's BPF access."""
+    problems: list[str] = []
+    if not os.path.exists(VICE_BIN):
+        problems.append(
+            f"{VICE_BIN} missing — build it per c64-test-harness#144 "
+            "(stock VICE cannot do unprivileged ethernet on macOS)")
+    # Ask the question VICE will ask: can THIS user open it read-write?  BPF
+    # access comes from the access_bpf group (ChmodBPF, root:access_bpf 0660),
+    # not from world-rw modes, so a mode-bit test is wrong in both directions.
+    # EBUSY means the device exists and is merely taken -- access is fine.
     try:
-        pid = int(open("/tmp/c64-rig-dnsmasq.pid").read().strip())
+        fd = os.open("/dev/bpf0", os.O_RDWR)
+        os.close(fd)
+    except FileNotFoundError:
+        problems.append("/dev/bpf0 missing")
+    except PermissionError:
+        problems.append(
+            "/dev/bpf0 not openable read-write by this user (needs the "
+            "access_bpf group / ChmodBPF; log out and in after joining it)")
+    except OSError as e:
+        if e.errno != errno.EBUSY:
+            problems.append(f"/dev/bpf0 cannot be opened: {e}")
+    return problems
+
+
+def _net_problems() -> list[str]:
+    """What rig-up fixes: feth1 at HOST_IP and the helper's dnsmasq."""
+    problems: list[str] = []
+    r = subprocess.run(["ifconfig", "feth1"], capture_output=True, text=True)
+    if r.returncode != 0 or f"inet {HOST_IP} " not in r.stdout:
+        problems.append(f"feth1 missing or not at {HOST_IP}")
+    try:
+        with open(DNSMASQ_PIDFILE) as fh:
+            pid = int(fh.read().strip())
         os.kill(pid, 0)
     except PermissionError:
-        pass  # EPERM = process exists (it's root-owned) — rig is up
+        pass  # EPERM = process exists (it runs as nobody) — rig is up
     except (OSError, ValueError):
-        problems.append("rig dnsmasq not running (pid file stale/absent)")
-    return problems, contention
+        problems.append(
+            f"rig dnsmasq not running ({DNSMASQ_PIDFILE} stale/absent)")
+    return problems
+
+
+def _run_helper(path: str) -> bool:
+    """`sudo -n <path>` -- never prompts; False (with the reason) if refused."""
+    if not os.access(path, os.X_OK):
+        print(f"  {path} not installed")
+        return False
+    r = subprocess.run(["sudo", "-n", path], capture_output=True, text=True)
+    for line in (r.stdout + r.stderr).splitlines():
+        print(f"    {line}")
+    if r.returncode != 0:
+        print(f"  sudo -n {path} exited {r.returncode}")
+        return False
+    return True
+
+
+def _try_rig_up() -> bool:
+    """Run rig-up iff only the network half is missing.  True = it ran.
+
+    A missing VICE or BPF access is not rig-up's to fix, so raising feth1
+    and dnsmasq only to tear them down again a second later is skipped.
+    """
+    global _brought_rig_up
+    if _host_problems() or not _net_problems():
+        return False
+    print(f"=== Rig not up -- running {RIG_UP_HINT} ===")
+    if not _run_helper(RIG_UP):
+        return False
+    _brought_rig_up = True
+    return True
+
+
+def _rig_down_if_ours() -> None:
+    if _brought_rig_up:
+        print("=== Tearing down the rig this run brought up ===")
+        _run_helper(RIG_DOWN)
 
 
 def _build_prg() -> None:
@@ -318,6 +401,8 @@ def main() -> int:
         )
 
     problems, contention = _rig_check()
+    if problems and _try_rig_up():
+        problems, contention = _rig_check()
 
     # PROBLEMS FIRST.  Contention on a rig that does not exist is a
     # meaningless statement: with no VICE binary, no feth1 and no dnsmasq,
@@ -330,7 +415,7 @@ def main() -> int:
     if problems:
         return cannot_run(
             "rig not ready:\n    - " + "\n    - ".join(problems)
-            + "\n    fix: (re)run `sudo bash tools/rig-up-macos.sh`",
+            + f"\n    fix: (re)run `{RIG_UP_HINT}`",
             executed=0,
             total=1,
             certifies=_CERTIFIES,
@@ -558,5 +643,14 @@ def main() -> int:
         stop_https_listener(listener)
 
 
+def _main_with_rig() -> int:
+    # rig-down in a finally so the SIGTERM -> SystemExit path main() installs
+    # releases the rig too; main()'s own finally has killed VICE by then.
+    try:
+        return main()
+    finally:
+        _rig_down_if_ours()
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_main_with_rig())

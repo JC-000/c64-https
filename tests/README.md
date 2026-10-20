@@ -42,7 +42,8 @@ listener with a self-signed leaf and asserts nothing about the name in it.
 Do not cite the rig as coverage of that gap — it is the gap.
 
 Setup lives in `scripts/setup-bridge-tap.sh` (Linux),
-`tools/rig-up-macos.sh` (macOS feth pair) and
+the host helper `/usr/local/libexec/c64-harness/c64-https-rig-up.sh` (macOS feth pair,
+installed outside this repo; the rig runs it via `sudo -n`) and
 `tools/rig-up-rrnet-macos.sh` (the physical RR-Net segment); the macOS
 VICE rig additionally needs a VICE built with the pcap driver's
 `geteuid()==0` gate patched out. See the
