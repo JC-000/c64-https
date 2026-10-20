@@ -108,7 +108,7 @@ def _https_e2e():
         _HTTPS_E2E is not None,
         f"tools/https_e2e could not be imported ({_HTTPS_E2E_ERROR!r}) -- it "
         "re-exports from .vice_on_bridge, which needs c64_test_harness from a "
-        "sibling checkout: pip install -e ../c64-test-harness",
+        "sibling checkout: tools/mkvenv.sh (installs ../c64-test-harness editable)",
         executed=0,
         total=_NEEDS_HTTPS_E2E,
         certifies="the rigs' platform-before-prerequisites gate order",

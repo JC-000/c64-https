@@ -1,0 +1,6 @@
+# Test environment, interpreter-agnostic: no Python pin, no lockfile, so it
+# follows whatever python3 the host ships (macOS's, Homebrew's latest, ...).
+# c64-test-harness is a sibling checkout, installed editable by
+# tools/mkvenv.sh when the interpreter meets the harness's own floor.
+-r requirements.txt
+pytest

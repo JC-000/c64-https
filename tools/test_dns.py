@@ -122,7 +122,7 @@ def main():
         # allowed, but must never be silent.
         sys.exit(cannot_run(
             "test_dns.py needs the TAP network rig "
-            "(tools/rig-up-macos.sh or the Linux tap-c64 setup)",
+            "(macOS: sudo -n /usr/local/libexec/c64-harness/c64-https-rig-up.sh; or the Linux tap-c64 setup)",
             executed=0, total=4, certifies="DNS resolution",
             opt_out_env="C64_NET_TESTS_OPTIONAL"))
 

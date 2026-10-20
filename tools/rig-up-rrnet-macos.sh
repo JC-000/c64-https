@@ -26,7 +26,7 @@
 # nothing.
 #
 # SUBNET CHOICE: 10.0.66.0/24, deliberately NOT 10.0.65.0/24. The VICE-side
-# feth rig (tools/rig-up-macos.sh, the emulated counterpart of this test)
+# feth rig (host helper c64-https-rig-up.sh, the emulated counterpart of this test)
 # already owns 10.0.65.1 on feth1. Sharing the subnet would put 10.0.65.1 on
 # two interfaces, make the route for 10.0.65.0/24 ambiguous, and have a second
 # dnsmasq fight for a listen-address the first already holds -- and we want

@@ -3403,11 +3403,19 @@ Three prerequisites that are easy to lose:
     This bench uses a patched 3.10 SDL2 build at
     `~/opt/vice-eth/bin/x64sc` (patch + rebuild script alongside it);
     see `vice_eth_build` in memory and c64-test-harness#144.
+    *Superseded 2026-10-20:* `~/opt/vice-eth` is retired; the patched
+    build is the keg-only `/opt/homebrew/opt/vice-eth/bin/x64sc` from
+    c64-test-harness `scripts/build-vice-eth.sh` (#547).
   - **The rig**: `sudo bash tools/rig-up-macos.sh` creates the feth
     pair, puts the host at 10.0.65.1, opens `/dev/bpf*`, and starts
     dnsmasq. `/dev/bpf*` permissions **reset on every reboot** — a
     "pcap not valid for option" error means re-run the script, not a
     broken binary. The test's preflight checks all of this and says so.
+    *Superseded 2026-10-20:* the script is gone. The feth pair and
+    dnsmasq now come from the root-owned helper `sudo -n
+    /usr/local/libexec/c64-harness/c64-https-rig-up.sh` (dnsmasq as nobody, pid in
+    `/var/run/c64-harness/`), which the rig runs itself when needed; BPF
+    access is the `access_bpf` group, no `chmod o+rw /dev/bpf*`.
 
 Also worth knowing: macOS's Local Network privacy gate can silently
 block the listener's sockets until a one-time GUI prompt is approved;

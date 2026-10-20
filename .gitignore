@@ -16,3 +16,4 @@ tools/diag_read_live.py
 .serena/
 .ca65-ls/
 .mcp.json
+.venv-*/

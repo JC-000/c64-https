@@ -558,7 +558,12 @@ def _call_named(tree, name):
 
 def _src(node) -> str:
     import ast
-    return ast.unparse(node)
+    import re
+    # Pinned to 3.10+'s unparse style. 3.9 (macOS's python3) writes a
+    # zero-arg lambda as "lambda :" and parenthesises a tuple assignment
+    # target; this runs under both it and Homebrew's latest.
+    out = ast.unparse(node).replace("lambda :", "lambda:")
+    return re.sub(r"(?m)^(\s*)\(([^()=]*)\) = ", r"\1\2 = ", out)
 
 
 def test_the_banner_rig_uses_the_early_stop_decision() -> None:

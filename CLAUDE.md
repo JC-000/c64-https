@@ -17,7 +17,10 @@ how it was learned belongs in the notes.
 
 Dependencies: `ca65`/`ld65` (cc65), GNU make, VICE `x64sc` only for
 `make run` / tests. The `c64-test-harness` Python package is a separate
-repo (`pip install -e ../c64-test-harness`), not vendored.
+repo, not vendored. No Python is pinned: `tools/mkvenv.sh [python]` makes
+`.venv-<ver>` (requirements-dev.txt + the harness editable, when the
+interpreter meets its floor); `tools/pytest_interpreters.py` runs pytest
+under macOS's and Homebrew's python3 alike.
 
 Fresh clone (ip65 backend; UCI needs none of the ip65 steps):
 
@@ -996,9 +999,14 @@ a release".
 `tests/rig_vice_https_macos.py`: full HTTPS over emulated RR-Net in VICE
 against a host listener (`E2E_PROFILE=reu|onchip`, `E2E_NO_WARP=1`,
 `HTTPS_PORT`). Needs an ip65 PRG, a pcap-capable VICE
-(`~/opt/vice-eth/bin/x64sc`, patched 3.10 — stock macOS builds gate pcap on
-euid 0 and segfault), and `sudo bash tools/rig-up-macos.sh` (feth pair,
-10.0.65.1, `/dev/bpf*` perms — **reset every reboot** — dnsmasq). VICE
+(`/opt/homebrew/opt/vice-eth/bin/x64sc`, keg-only patched build from
+c64-test-harness `scripts/build-vice-eth.sh`, `--check` = 0 current / 1 stale
+/ 2 not built — stock macOS builds gate pcap on euid 0 and segfault), BPF access via the `access_bpf` group (ChmodBPF;
+the rig test opens `/dev/bpf0` O_RDWR), and the feth pair + 10.0.65.1 +
+dnsmasq from the host helper `sudo -n /usr/local/libexec/c64-harness/c64-https-rig-up.sh`
+(not in this repo; pid `/var/run/c64-harness/dnsmasq.pid`). The rig runs
+it itself when the network half is down and runs `…-rig-down.sh` at exit
+only if it brought the rig up. VICE
 3.10 SDL2 warp caps at ~1.2x. macOS Local Network privacy can silently
 block the listener; the preflight probes for it.
 
