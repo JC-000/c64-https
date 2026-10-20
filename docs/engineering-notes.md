@@ -3403,6 +3403,9 @@ Three prerequisites that are easy to lose:
     This bench uses a patched 3.10 SDL2 build at
     `~/opt/vice-eth/bin/x64sc` (patch + rebuild script alongside it);
     see `vice_eth_build` in memory and c64-test-harness#144.
+    *Superseded 2026-10-20:* `~/opt/vice-eth` is retired; the patched
+    build is the keg-only `/opt/homebrew/opt/vice-eth/bin/x64sc` from
+    c64-test-harness `scripts/build-vice-eth.sh` (#547).
   - **The rig**: `sudo bash tools/rig-up-macos.sh` creates the feth
     pair, puts the host at 10.0.65.1, opens `/dev/bpf*`, and starts
     dnsmasq. `/dev/bpf*` permissions **reset on every reboot** — a

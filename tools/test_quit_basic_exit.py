@@ -408,7 +408,7 @@ def mint_d64(tmp):
     Returns (path, "") or (None, why)."""
     c1541 = shutil.which("c1541") or next(
         (p for p in ("/opt/homebrew/bin/c1541", "/usr/local/bin/c1541",
-                     os.path.expanduser("~/opt/vice-eth/bin/c1541"))
+                     "/opt/homebrew/opt/vice-eth/bin/c1541")
          if os.path.exists(p)), None)
     if c1541 is None:
         return None, "c1541 not found (VICE's disk tool); cannot mint the d64"

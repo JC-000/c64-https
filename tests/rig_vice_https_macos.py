@@ -15,9 +15,11 @@ exit ONLY when it was the one that brought the rig up -- a rig someone else
 raised (another lane, c64-test-harness's bridge tests on the same /24) is
 never torn down from here. Everything else runs unprivileged:
 
-  - VICE: the ethernet-capable build at ~/opt/vice-eth/bin/x64sc (stock
-    macOS VICE binaries gate the pcap rawnet driver on euid==0 — see
-    c64-test-harness#144). Launched directly with pcap on feth0; the
+  - VICE: the ethernet-capable keg-only build at
+    /opt/homebrew/opt/vice-eth/bin/x64sc, made by c64-test-harness's
+    scripts/build-vice-eth.sh (`--check`: 0 current, 1 stale, 2 not built;
+    #547). Stock macOS VICE binaries gate the pcap rawnet driver on
+    euid==0 — see c64-test-harness#144. Launched directly with pcap on feth0; the
     host owns 10.0.65.1 on feth1 (the feth peer IS the L2 link).
   - DHCP/DNS: the helper's dnsmasq (pid in /var/run/c64-harness, runs as
     nobody); this script only starts/stops it through the two helpers.
@@ -99,7 +101,7 @@ from https_e2e import (  # noqa: E402
 PRG_PATH = os.path.join(_REPO_ROOT, "build", "c64-https.prg")
 HOST_IP = "10.0.65.1"
 VICE_BIN = os.environ.get(
-    "VICE_ETH_BIN", os.path.expanduser("~/opt/vice-eth/bin/x64sc"))
+    "VICE_ETH_BIN", "/opt/homebrew/opt/vice-eth/bin/x64sc")
 HTTPS_PORT = int(os.environ.get("HTTPS_PORT", "4433"))
 PROFILE = os.environ.get("E2E_PROFILE", "onchip")
 TLS_TIMEOUT = float(os.environ.get("E2E_TIMEOUT", "2400"))
@@ -208,7 +210,8 @@ def _host_problems() -> list[str]:
     problems: list[str] = []
     if not os.path.exists(VICE_BIN):
         problems.append(
-            f"{VICE_BIN} missing — build it per c64-test-harness#144 "
+            f"{VICE_BIN} missing — build it with c64-test-harness's "
+            "scripts/build-vice-eth.sh (#547, #144) "
             "(stock VICE cannot do unprivileged ethernet on macOS)")
     # Ask the question VICE will ask: can THIS user open it read-write?  BPF
     # access comes from the access_bpf group (ChmodBPF, root:access_bpf 0660),
