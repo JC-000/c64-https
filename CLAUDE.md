@@ -17,7 +17,10 @@ how it was learned belongs in the notes.
 
 Dependencies: `ca65`/`ld65` (cc65), GNU make, VICE `x64sc` only for
 `make run` / tests. The `c64-test-harness` Python package is a separate
-repo (`pip install -e ../c64-test-harness`), not vendored.
+repo, not vendored. No Python is pinned: `tools/mkvenv.sh [python]` makes
+`.venv-<ver>` (requirements-dev.txt + the harness editable, when the
+interpreter meets its floor); `tools/pytest_interpreters.py` runs pytest
+under macOS's and Homebrew's python3 alike.
 
 Fresh clone (ip65 backend; UCI needs none of the ip65 steps):
 

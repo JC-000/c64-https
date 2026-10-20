@@ -92,8 +92,14 @@ make ip65-libs
 
 # any test script, VICE or hardware — separate public repo, not in requirements.txt
 git clone https://github.com/JC-000/c64-test-harness    # sibling of this repo
-python3 -m pip install -e ../c64-test-harness
+tools/mkvenv.sh [python]    # -> .venv-<ver>: requirements-dev.txt + the harness, editable
 ```
+
+No Python version is pinned: `tools/mkvenv.sh` builds one venv per
+interpreter (macOS's `python3`, Homebrew's latest, ...), and
+`python3 tools/pytest_interpreters.py` runs the pytest set under each.
+An interpreter below the harness's own `requires-python` gets everything
+but the harness, and those suites are reported HARNESS-UNSUPPORTED.
 
 Skipping the first gives `ld65: Error: Input file
 '../ip65/ip65/ip65_tcp.lib' not found`, from the blob link step that plain
@@ -664,7 +670,7 @@ sets the wall-clock floor for the whole run.
 | `hs_sequence` | needs `BACKEND=uci` |
 
 ```bash
-python3 -m pip install -e ../c64-test-harness
+tools/mkvenv.sh && . .venv-$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')/bin/activate
 
 # Run every dispatched suite in parallel (one VICE instance per suite)
 python3 tools/run_all_tests.py
@@ -865,7 +871,7 @@ C64_DEVICE_LOCK_TIMEOUT=7200 python3 tools/uci/rig_https_live.py   # queue for 2
 
 ```bash
 git clone https://github.com/JC-000/c64-test-harness    # sibling of this repo
-pip install -e ../c64-test-harness
+tools/mkvenv.sh             # venv with the harness installed editable
 ```
 
 Install it into the **same interpreter you run the scripts with** — if you use a virtualenv, `pip` and `python3` must both be that venv's, or the import fails despite the install appearing to succeed.

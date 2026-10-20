@@ -35,16 +35,23 @@ side can point `rig_const()` at the installed helper (the same pattern
 
 ## Interface selection
 
-The current script takes the NIC as `$1` (`en4` on this bench). The
-allowlist takes no arguments, and USB NIC names are not stable across
-adapters or ports. Pick one, in the review:
+The current script takes the NIC as `$1`. The allowlist takes no
+arguments, and BSD names are not stable: they differ between Macs and move
+when an adapter is re-plugged (on the current Mac `en4` is Thunderbolt 2,
+not an Ethernet adapter). So:
 
-- read the interface from a root-owned config file written at install time
-  (e.g. `/usr/local/etc/c64-harness/rrnet.conf`, `IFACE=en4`), validated
-  against `^en[0-9]+$`; or
-- hardcode `en4` and reinstall when it changes.
+- a root-owned config file written at install time (e.g.
+  `/usr/local/etc/c64-harness/rrnet.conf`) names the adapter by its **MAC
+  address**; the helpers resolve it to an `enX` at run time and refuse to
+  start when no interface or more than one carries it;
+- never accept it from the caller's environment (`env_reset` drops it
+  anyway).
 
-Do not accept it from the caller's environment (`env_reset` drops it anyway).
+**Which adapter, on the current Mac: not cabled yet (2026-10-20).** The
+candidates are the two "Ethernet Adapter" ports (en2, en3); en5 (Belkin
+USB-C LAN) is currently linked at 1000baseT, so it is not the RR-Net. Record the
+MAC when the RR-Net is connected (it will show `status: active` at
+`10baseT`).
 
 ## rig-up must
 
