@@ -4,6 +4,10 @@
 ; network target (target 3). Normative text: M3-SPEC v1 (= r7.7, sha256
 ; c265fdfc...) with errata v1.1 (f9a39ff3...) and v1.2 (a6802f40...); the
 ; errata win where they say so. "S:n" / "ER-n" below cite those files.
+; Upstream form: GideonZ/1541ultimate#997, doc/uci_tls.md at 6271e7e2 (the
+; spec this client is maintained against now). Checked against it: commands,
+; reply shapes, ready bits b0-b2, flags and READ results are unchanged; its
+; status 18 is handled in net.s; ready bit 3 (custom CA) is unused here.
 
 .ifndef M3_INC_INCLUDED
 M3_INC_INCLUDED = 1
@@ -35,8 +39,13 @@ M3_FLAG_TLS13_ONLY  = $01       ; REQUIRE_TLS13; bits 1-7 must be 0 (82)
 M3_HOST_MAX         = 253       ; host 1..253 bytes, no $00 (S 1.1 tail grammar)
 M3_WRITE_MAX        = 892       ; WRITE_SOCKET plaintext per command
 M3_READ_MAX         = 893       ; one response block: 2-byte header + 893
-M3_STATUS_MAX       = 40        ; every M3 status line is <= 40 B (ER-8)
-M3_SWEEP_HANDLES    = 16        ; this firmware's handle range 0..15 (ER-9)
+M3_STATUS_MAX       = 40        ; every M3 status line is <= 40 B (ER-8);
+                                ; still so at #997 6271e7e2 while errno has
+                                ; <= 3 digits (40 B: "13,...PEER RESET: <errno>",
+                                ; "94,...NAME MISMATCH: 0xFFFFFFFF"). The rest
+                                ; of a longer line is read out and dropped.
+M3_SWEEP_HANDLES    = 16        ; this firmware's handle range 0..15 (ER-9;
+                                ; MEMP_NUM_NETCONN 16 at #997 6271e7e2)
 
 ; --- The deadline clock (ER-1 "Clock") ------------------------------------
 ; CIA2 timer A divides PHI2 by M3_UNIT_CYCLES; timer B counts its underflows.
@@ -101,7 +110,7 @@ M3_EXEC_WEDGED      = 3         ; bit 2 still set at the post-ABORT deadline
 
 ; m3_open_hint: the client's own reading of a failed Open, for the UI.
 M3_HINT_NONE        = 0
-M3_HINT_NO_TLS13    = 1         ; 14 + alert 40/70/71 under REQUIRE_TLS13
+M3_HINT_NO_TLS13    = 1         ; 18, or 14 + alert 40/70/71, under REQUIRE_TLS13
 M3_HINT_NOT_TLS13   = 2         ; 00,OK but a version other than 1.3
 M3_HINT_MALFORMED   = 3         ; a reply that is not 8 bytes + 00, or
                                 ; reply bytes with a refusal

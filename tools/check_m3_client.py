@@ -1489,6 +1489,31 @@ def test_only_version_alerts_read_as_no_tls13(prg=None, labels=None):
                "1.3' shown=%s, expected %s" % (n, not want, want))
 
 
+def test_version_refused_reads_as_no_tls13(prg=None, labels=None):
+    """#997 (6271e7e2) status 18: under REQUIRE_TLS13 the ServerHello chose
+    a version that was not offered. That is the server not doing TLS 1.3,
+    the same verdict as alerts 40/70/71, and the user is told so."""
+    m = Machine(prg, labels)
+    line = b"18,TLS VERSION REFUSED: 0x0303"
+    text = _ui_open(m, ("refuse", line))
+    _check(line.decode().upper() in text, "the firmware line is missing:\n"
+           + text)                     # the screen folds the hex to upper case
+    _check("DOES NOT DO TLS 1.3" in text, "18 was not read as 'no TLS 1.3':"
+           "\n" + text)
+    _code(m, ERR_OPEN_REFUSED, "an Open refused with 18")
+    m.no_violations()
+    # Only 18 itself: the refusals on either side of it get no hint.
+    for line in (b"13,TLS HANDSHAKE FAILED: -0x7780",
+                 b"19,TLS DOWNGRADE DETECTED",
+                 b"94,CERTIFICATE NAME MISMATCH: 0x00002000",
+                 b"96,PINNED KEY MISMATCH"):
+        m = Machine(prg, labels)
+        text = _ui_open(m, ("refuse", line))
+        _check("DOES NOT DO TLS 1.3" not in text, "%s was read as 'no TLS "
+               "1.3':\n%s" % (line.decode(), text))
+        m.no_violations()
+
+
 def test_data_more_wedge_keeps_89(prg=None, labels=None):
     """A Data More block whose ABORT never lands is a wedge: $89 stays, it
     is not overwritten by the block's own reason."""
@@ -1782,6 +1807,7 @@ TESTS = (
     test_reply_version_major_checked,
     test_refusal_with_data_is_released,
     test_only_version_alerts_read_as_no_tls13,
+    test_version_refused_reads_as_no_tls13,
     test_data_more_wedge_keeps_89,
     test_held_session_message,
     test_boot_reu_dma_only_for_the_sink,

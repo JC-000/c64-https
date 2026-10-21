@@ -626,6 +626,16 @@ net_tcp_connect:
         ; protocol_version (S 1.7) and 71 insufficient_security. Any other
         ; alert (e.g. 112 unrecognized_name) is just that alert: the status
         ; line, "14,TLS ALERT RECEIVED: N", says so, with no hint.
+        ; #997 adds 18 "TLS VERSION REFUSED: 0xNNNN": the ServerHello chose a
+        ; version REQUIRE_TLS13 did not offer, the same verdict by another
+        ; route (a 1.2-only server that answers instead of alerting). Like a
+        ; forged 40/70, it can also be a downgrading middlebox in front of a
+        ; 1.3 server: under REQUIRE_TLS13 the engine reports 18 instead of
+        ; running its RFC 8446 sentinel check (19), and the line cannot tell
+        ; them apart.
+        ; Only 18 itself: 19 and the 9x refusals stay unhinted.
+        cmp #18
+        beq @tc_no13
         cmp #14
         bne @tc_refused_code
         jsr m3_status_number        ; A = N, $FF if none
