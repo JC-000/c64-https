@@ -95,7 +95,9 @@ git clone https://github.com/JC-000/c64-test-harness    # sibling of this repo
 tools/mkvenv.sh [python]    # -> .venv-<ver>: requirements-dev.txt + the harness, editable
 ```
 
-No Python version is pinned: `tools/mkvenv.sh` builds one venv per
+No Python version is pinned. Any interpreter with requirements-dev.txt
+and the harness installed will do (a machine-wide venv you already keep
+for c64-test-harness is fine); `tools/mkvenv.sh` builds one venv per
 interpreter (macOS's `python3`, Homebrew's latest, ...), and
 `python3 tools/pytest_interpreters.py` runs the pytest set under each.
 An interpreter below the harness's own `requires-python` gets everything

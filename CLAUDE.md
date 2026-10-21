@@ -17,10 +17,14 @@ how it was learned belongs in the notes.
 
 Dependencies: `ca65`/`ld65` (cc65), GNU make, VICE `x64sc` only for
 `make run` / tests. The `c64-test-harness` Python package is a separate
-repo, not vendored. No Python is pinned: `tools/mkvenv.sh [python]` makes
-`.venv-<ver>` (requirements-dev.txt + the harness editable, when the
-interpreter meets its floor); `tools/pytest_interpreters.py` runs pytest
-under macOS's and Homebrew's python3 alike.
+repo, not vendored. No Python is pinned. On the maintainer's Mac use the
+shared C64 venv first, `~/.local/share/c64-harness/venv/bin/python`
+(harness master + cryptography + pytest on Homebrew's python3; owned by
+new-computer-setup, which adds packages on request; never pip into it).
+Elsewhere, `tools/mkvenv.sh [python]` makes `.venv-<ver>`
+(requirements-dev.txt + the harness editable, when the interpreter meets
+its floor). `tools/pytest_interpreters.py` runs pytest under macOS's and
+Homebrew's python3 alike.
 
 Fresh clone (ip65 backend; UCI needs none of the ip65 steps):
 
@@ -420,8 +424,8 @@ TCP_CONNECT push → `NO_SOCKET`). 48 MHz (U64E) and 64 MHz (C64U) verified.
 
 ### C64 Ultimate notes
 
-Second device: C64 Ultimate "Starlight", `U64_HOST=10.53.21.158`, fw 1.1.0,
-64 MHz enum, WiFi. Handled differences:
+Second device: C64 Ultimate "Starlight", `U64_HOST=10.43.23.26` (Ethernet;
+10.43.23.158 on WiFi, one DeviceLock key), fw 1.1.0, 64 MHz enum. Handled differences:
   - **Set turbo BEFORE reset/run_prg** and settle ~3 s; a runtime speed
     switch (even a redundant config write) loses the next UCI command.
   - Boot must issue some REU DMA or the first TCP_CONNECT is dropped —
