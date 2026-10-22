@@ -1017,14 +1017,22 @@ block the listener; the preflight probes for it.
 ### Physical RR-Net rig (real CS8900a silicon)
 
 `tests/rig_ip65_rrnet_hw.py`: the same fetch over a REAL RR-Net cartridge
-in the U64E's cartridge port, cabled straight to the Mac's `en4`. The PRG
-is loaded over the U64's REST interface; nothing about the network path
-goes through the Ultimate. Segment is **10.0.66.0/24** (`sudo bash
-tools/rig-up-rrnet-macos.sh en4`), deliberately not the feth rig's
-10.0.65.0/24 so both can be up at once; dnsmasq pins
-`00:0e:3a:64:64:64 -> 10.0.66.200` and answers for `www.foo.invalid`
-only. The capture is hand-started (`sudo tcpdump -i en4 -n -s0 -U -w …` —
-both flags load-bearing). Stock 1 MHz, ~40-80 min.
+in the U64E's cartridge port, cabled straight to a USB-Ethernet NIC on the
+Mac. The PRG is loaded over the U64's REST interface; nothing about the
+network path goes through the Ultimate. Segment is **10.0.66.0/24**, from
+the host helper `sudo -n /usr/local/libexec/c64-harness/rrnet-rig-up.sh`
+(not in this repo, shared with c64-wireguard; it picks the NIC by MAC and
+writes its name to `/var/run/c64-harness/rrnet.iface`; every up restarts
+dnsmasq with empty leases and log). It is deliberately not the feth rig's
+10.0.65.0/24, so both can be up at once. dnsmasq pins
+`00:0e:3a:64:64:64 -> 10.0.66.200` and answers for `www.foo.invalid` only;
+the rig reads those values from the installed helper (`rig_const`). The
+rig runs the up helper when the segment is down and `rrnet-rig-down.sh`
+at exit only if it brought it up. It also runs its own capture on that
+NIC, `tcpdump -n -s0 -U -w /tmp/rrnet-https-<time>.pcap` (both flags
+load-bearing), with no sudo: BPF access is the `access_bpf` group
+(ChmodBPF). `RRNET_PCAP=<file>` uses a capture you started instead. So a
+run needs nothing by hand. Stock 1 MHz, ~40-80 min.
 
   - **Every wire and memory verdict is a pure function** in
     `tools/ip65_hw_checks.py`; `tools/test_ip65_hw_checks_unit.py`

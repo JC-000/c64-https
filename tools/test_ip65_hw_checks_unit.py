@@ -1381,24 +1381,47 @@ def test_resolve_symbols_red_green() -> None:
     assert v.ok and v.evidence["found"]["http_status"] == "$AB28"
 
 
+RRNET_RIG_UP = Path("/usr/local/libexec/c64-harness/rrnet-rig-up.sh")
+
+
 def test_rig_const_reads_the_script_and_refuses_a_missing_name() -> None:
     """The segment's addressing is READ from the rig script, never copied.
 
     c64-wireguard moved this segment from 10.0.65/24 to 10.0.66/24 mid-write;
     a suite carrying its own copy would have preflighted a subnet nobody
-    serves and sent someone to debug a cable.
+    serves and sent someone to debug a cable. Exercised on a stand-in
+    script, so it runs on any machine; the installed helper is checked
+    against the defaults below.
     """
-    script = REPO / "tools" / "rig-up-rrnet-macos.sh"
-    assert hw.rig_const("HOST_IP", script) == hw.RIG_HOST_IP
-    assert hw.rig_const("C64_IP", script) == hw.RIG_C64_IP
-    assert hw.parse_mac(hw.rig_const("C64_MAC", script)) == hw.RIG_C64_MAC
-    assert hw.rig_const("TEST_HOST", script)
-    try:
-        hw.rig_const("NO_SUCH_CONSTANT", script)
-    except KeyError:
-        return
-    raise AssertionError("rig_const invented a value for a name the script "
-                         "does not define")
+    tmp = tempfile.TemporaryDirectory()
+    script = Path(tmp.name) / "rig-up.sh"
+    script.write_text("#!/bin/bash\n# HOST_IP=10.9.9.9 in a comment\n"
+                      "HOST_IP=10.0.66.7\n  C64_IP=10.0.66.8\n"
+                      "TEST_HOST=x.invalid\n")
+    assert hw.rig_const("HOST_IP", script) == "10.0.66.7"
+    assert hw.rig_const("TEST_HOST", script) == "x.invalid"
+    for missing in ("C64_IP", "NO_SUCH_CONSTANT"):     # indented = not top level
+        try:
+            hw.rig_const(missing, script)
+        except KeyError:
+            continue
+        raise AssertionError(f"rig_const invented a value for {missing}, which "
+                             "the script does not define at top level")
+
+
+def test_installed_rrnet_helper_matches_the_defaults() -> None:
+    """The installed up helper (new-computer-setup, outside this repo) is
+    where the rig reads the segment from; the library's defaults must agree
+    with it, or a machine without the helper would test a different segment.
+    Compared whenever the helper is present on this host (as
+    test_reserved_test_host.py does for the feth helper); the rig itself
+    refuses to run without it."""
+    if RRNET_RIG_UP.is_file():
+        assert hw.rig_const("HOST_IP", RRNET_RIG_UP) == hw.RIG_HOST_IP
+        assert hw.rig_const("C64_IP", RRNET_RIG_UP) == hw.RIG_C64_IP
+        assert hw.parse_mac(hw.rig_const("C64_MAC", RRNET_RIG_UP)) \
+            == hw.RIG_C64_MAC
+        assert hw.rig_const("TEST_HOST", RRNET_RIG_UP) == hw.RIG_TEST_HOST
 
 
 def test_provenance_flags_a_modified_input() -> None:
