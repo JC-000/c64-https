@@ -45,8 +45,8 @@ ADDRESS, and a frame from a third MAC is a hard failure rather than an
 ignorable oddity — on a two-station cable it means the capture is not of
 the segment we think it is.
 
-The capture itself is started BY HAND (sudo prompts on this bench), so its
-adequacy is asserted rather than assumed: `parse_pcap` refuses a
+The capture is started outside these checks (by the rig, or by hand with
+RRNET_PCAP), so its adequacy is asserted rather than assumed: `parse_pcap` refuses a
 snaplen-clipped file, `check_capture_grew` refuses one that did not grow
 across the run, `check_capture_bracket` refuses one whose frames all
 predate the run, and `check_c64_originated` refuses one holding no frame
@@ -97,12 +97,14 @@ IP65_DEFAULT_CFG_MAC = (0x00, 0x80, 0x10, 0x00, 0x51, 0x00)
 # rig (host helper c64-https-rig-up.sh) owns 10.0.65.1 and both rigs must be able to run
 # at once, because comparing real silicon against the emulated pair is the
 # point. These are DEFAULTS for the unit test's convenience; the rig reads the
-# live values out of tools/rig-up-rrnet-macos.sh so the two cannot drift (see
-# rig_const()).
+# live values out of the installed host helper
+# /usr/local/libexec/c64-harness/rrnet-rig-up.sh so the two cannot drift (see
+# rig_const()), and the unit test checks that helper against them when present.
 # ---------------------------------------------------------------------------
 RIG_HOST_IP = "10.0.66.1"
 RIG_C64_IP = "10.0.66.200"
 RIG_C64_MAC = bytes.fromhex("000e3a646464")     # ip65's built-in cs8900a MAC
+RIG_TEST_HOST = "www.foo.invalid"
 
 ETHERTYPE_IPV4 = 0x0800
 ETHERTYPE_ARP = 0x0806
@@ -671,7 +673,8 @@ def check_capture_bracket(frames: Sequence[Frame], started_at: float,
                           min_inside: int = 1, slack_s: float = 2.0) -> Verdict:
     """Frames from THIS run exist in the capture.
 
-    The capture is hand-started, so nothing truncates the file and nothing
+    The capture may predate the run (one started by hand and named in
+    RRNET_PCAP), so nothing truncates the file and nothing
     asserts it was created by this run. Without this, a pcap from an earlier
     session parses fine and reports agreement about traffic that predates
     the build under test — including, in the worst case, an earlier run's
@@ -680,7 +683,7 @@ def check_capture_bracket(frames: Sequence[Frame], started_at: float,
     `evidence["diagnosis"]` is a stable machine-readable code the caller
     branches on: "inverted-window", "empty", "no-frame-inside-the-window",
     "too-few-frames-inside", "ok". Frames BEFORE the window are expected and
-    not an error — a hand-started tcpdump has legitimately been running for
+    not an error — a long-running tcpdump has legitimately been running for
     minutes — they are counted and excluded, which is what makes the run's
     corpus the run's.
     """

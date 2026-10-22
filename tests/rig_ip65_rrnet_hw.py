@@ -10,13 +10,13 @@ end-to-end in CLAUDE.md — came from `tests/rig_vice_https_macos.py`, which
 drives the same PRG inside a pcap-patched VICE against a feth pair. VICE's
 CS8900a is a model of the chip; this is the chip.
 
-    [ RR-Net in the U64E's cartridge port ] <--cable, no switch--> [ Mac en4 ]
+    [ RR-Net in the U64E's cartridge port ] <--cable, no switch--> [ Mac NIC ]
 
 The PRG is loaded over the U64's REST interface the usual way (DeviceLock,
 write + SYS), but NOTHING about the network path goes through the Ultimate:
 the C64 talks to the world through the cartridge, and the Mac is the only
 other station on the cable. It is DHCP server, DNS server and HTTPS origin
-at once (tools/rig-up-rrnet-macos.sh, tools/https_e2e).
+at once (host helper rrnet-rig-up.sh, tools/https_e2e).
 
 WHAT DECIDES, AND WHAT ONLY OBSERVES
 ====================================
@@ -146,17 +146,27 @@ instrument being broken rather than the client.
 
 USAGE
 =====
-    # once per session, by hand (both need sudo):
-    sudo bash tools/rig-up-rrnet-macos.sh en4
-    sudo tcpdump -i en4 -n -s0 -U -w /tmp/rrnet-https.pcap
-
-    # then:
     U64_HOST=10.43.23.81 python3 tests/rig_ip65_rrnet_hw.py
+
+Nothing to start by hand. The segment comes from the root-owned host
+helpers in /usr/local/libexec/c64-harness (NOPASSWD, no arguments; owned by
+new-computer-setup, not this repo). The helper picks the NIC by its MAC and
+writes the name to /var/run/c64-harness/rrnet.iface. If the segment is down,
+this rig runs `sudo -n rrnet-rig-up.sh` itself and, at exit,
+`rrnet-rig-down.sh` only if it brought the segment up.
+
+The capture needs no root: BPF access comes from the access_bpf group
+(Wireshark's ChmodBPF). The rig runs `tcpdump -i <NIC> -n -s0 -U -w` on a
+fresh file per run (kept afterwards, path printed) and stops it after the
+wire checks. To use a capture you started yourself instead, name its file
+in RRNET_PCAP; the rig then checks it and leaves it running.
 
 Environment:
     U64_HOST            the Ultimate (default 10.43.23.81)
-    RRNET_IFACE         the Mac's NIC on the segment (default en4)
-    RRNET_PCAP          capture path (default /tmp/rrnet-https.pcap)
+    RRNET_IFACE         the Mac's NIC on the segment (default: the name
+                        rrnet-rig-up.sh wrote to rrnet.iface)
+    RRNET_PCAP          a capture you started yourself (default: the rig
+                        captures to /tmp/rrnet-https-<time>.pcap)
     C64_SKIP_BUILD=1    reuse build/c64-https.prg instead of building
     E2E_TIMEOUT         fetch budget in seconds (default 4800)
     HTTPS_PORT          listener + PRG port (default 4433)
@@ -215,13 +225,21 @@ CERTIFIES = ("the TLS 1.3 handshake + GET carried over a PHYSICAL RR-Net "
              "Ethernet source address; NOT server-name validation, which the "
              "ip65 build does not perform")
 
-RIG_SCRIPT = PROJECT_ROOT / "tools" / "rig-up-rrnet-macos.sh"
+HELPER_DIR = Path("/usr/local/libexec/c64-harness")
+RIG_UP = HELPER_DIR / "rrnet-rig-up.sh"
+RIG_DOWN = HELPER_DIR / "rrnet-rig-down.sh"
+IFACE_FILE = Path("/var/run/c64-harness/rrnet.iface")
+_brought_rig_up = False
 PRG_PATH = PROJECT_ROOT / "build" / "c64-https.prg"
 LABELS_PATH = PROJECT_ROOT / "build" / "labels.txt"
 ERRORS_INC = PROJECT_ROOT / "src" / "net" / "ip65" / "ip65_errors.inc"
 
-IFACE = os.environ.get("RRNET_IFACE", "en4")
-PCAP_PATH = os.environ.get("RRNET_PCAP", "/tmp/rrnet-https.pcap")
+#: Set: a capture someone else started. Unset: the rig starts its own.
+PCAP_EXTERNAL = bool(os.environ.get("RRNET_PCAP"))
+PCAP_PATH = os.environ.get("RRNET_PCAP") or time.strftime(
+    "/tmp/rrnet-https-%Y%m%d-%H%M%S.pcap")
+TCPDUMP = "/usr/sbin/tcpdump"
+_capture = None
 U64_HOST = os.environ.get("U64_HOST", "10.43.23.81")
 HTTPS_PORT = int(os.environ.get("HTTPS_PORT", "4433"))
 FETCH_BUDGET_S = float(os.environ.get("E2E_TIMEOUT", "4800"))
@@ -248,11 +266,17 @@ PROGRESS_NEEDLES = ("HTTPS GET", "DNS OK", "TCP CONNECTED", "CH", "SH", "KEYS",
 
 EXIT_INCONCLUSIVE = 78
 
-# The segment's addressing is READ from the rig script, never copied here.
-HOST_IP = hw.rig_const("HOST_IP", RIG_SCRIPT)
-C64_IP = hw.rig_const("C64_IP", RIG_SCRIPT)
-C64_MAC = hw.parse_mac(hw.rig_const("C64_MAC", RIG_SCRIPT))
-TEST_HOST = hw.rig_const("TEST_HOST", RIG_SCRIPT)
+# The segment's addressing is READ from the installed up helper, never
+# copied here. Without the helper (another machine) the library's defaults
+# stand in so the module imports, and the preflight refuses to run.
+if RIG_UP.is_file():
+    HOST_IP = hw.rig_const("HOST_IP", RIG_UP)
+    C64_IP = hw.rig_const("C64_IP", RIG_UP)
+    C64_MAC = hw.parse_mac(hw.rig_const("C64_MAC", RIG_UP))
+    TEST_HOST = hw.rig_const("TEST_HOST", RIG_UP)
+else:
+    HOST_IP, C64_IP = hw.RIG_HOST_IP, hw.RIG_C64_IP
+    C64_MAC, TEST_HOST = hw.RIG_C64_MAC, hw.RIG_TEST_HOST
 SUBNET = HOST_IP.rsplit(".", 1)[0] + ".0"
 
 RUN: dict = {}
@@ -340,14 +364,33 @@ def selftest_library() -> bool:
 # ===========================================================================
 # 1. Preflight — the rig, before the device
 # ===========================================================================
-def rig_problems() -> list:
+def rig_iface():
+    """The segment's NIC: RRNET_IFACE, else what rrnet-rig-up.sh recorded."""
+    name = os.environ.get("RRNET_IFACE")
+    if name:
+        return name
+    try:
+        name = IFACE_FILE.read_text().split()[0]
+    except (OSError, IndexError):
+        return None
+    return name if name.isalnum() else None
+
+
+def _net_problems() -> list:
+    """The half the up helper fixes: the NIC at HOST_IP and DNS on it."""
     problems: list = []
-    r = subprocess.run(["ifconfig", IFACE], capture_output=True, text=True)
+    iface = rig_iface()
+    if iface is None:
+        problems.append(f"no segment NIC ({IFACE_FILE} missing) -- run "
+                        f"`sudo -n {RIG_UP}`")
+        return problems
+    r = subprocess.run(["ifconfig", iface], capture_output=True, text=True)
     if r.returncode != 0 or f"inet {HOST_IP} " not in r.stdout:
-        problems.append(f"{IFACE} missing or not at {HOST_IP} -- run "
-                        f"`sudo bash {RIG_SCRIPT.relative_to(PROJECT_ROOT)} {IFACE}`")
-    elif "status: active" not in r.stdout:
-        problems.append(f"{IFACE} link is down -- a CS8900a only lights the "
+        problems.append(f"{iface} missing or not at {HOST_IP} -- run "
+                        f"`sudo -n {RIG_UP}`")
+        return problems
+    if "status: active" not in r.stdout:
+        problems.append(f"{iface} link is down -- a CS8900a only lights the "
                         "link when the cartridge has power")
     # DNS. The client resolves HTTPS_HOST before it connects, so a DHCP-only
     # segment stops at DNS RESOLVE FAILED and every later check is about a
@@ -369,11 +412,60 @@ def rig_problems() -> list:
             RUN["dns_probe"] = "answered"
     except OSError as exc:
         problems.append(f"no DNS on {HOST_IP}:53 for {TEST_HOST} ({exc}) -- the "
-                        "segment needs a resolver, see the rig script")
+                        f"segment needs a resolver: `sudo -n {RIG_UP}`")
+    return problems
+
+
+def _run_helper(path: Path) -> bool:
+    r = subprocess.run(["sudo", "-n", str(path)], capture_output=True,
+                       text=True)
+    for line in (r.stdout + r.stderr).splitlines():
+        print(f"  [{path.name}] {line}")
+    return r.returncode == 0
+
+
+def _try_rig_up() -> bool:
+    """Bring the segment up when only its network half is missing.
+
+    Not when it is merely the link that is down (the helper would refuse the
+    same way), and never over a running segment: every up restarts dnsmasq
+    and empties its leases and log."""
+    global _brought_rig_up
+    problems = _net_problems()
+    if not problems or not RIG_UP.is_file() or \
+            any("link is down" in p for p in problems):
+        return False
+    print(f"  segment down; running sudo -n {RIG_UP}")
+    if _run_helper(RIG_UP):
+        _brought_rig_up = True
+        return True
+    return False
+
+
+def _rig_down_if_ours() -> None:
+    if _brought_rig_up:
+        print(f"  this run brought the segment up; running sudo -n {RIG_DOWN}")
+        _run_helper(RIG_DOWN)
+
+
+def rig_problems() -> list:
+    problems: list = []
+    if not RIG_UP.is_file():
+        problems.append(f"{RIG_UP} not installed (new-computer-setup's "
+                        "privileged helpers)")
+    problems += _net_problems()
     if not PRG_PATH.exists():
         problems.append(f"{PRG_PATH} missing")
     if not LABELS_PATH.exists():
         problems.append(f"{LABELS_PATH} missing")
+    if PCAP_EXTERNAL:
+        problems += pcap_problems()
+    return problems
+
+
+def pcap_problems() -> list:
+    """The capture file, sampled before the run (check_capture_grew)."""
+    problems: list = []
     try:
         st = os.stat(PCAP_PATH)
         with open(PCAP_PATH, "rb") as fh:
@@ -387,12 +479,59 @@ def rig_problems() -> list:
                                                  time.localtime(st.st_mtime))
     except OSError as exc:
         problems.append(
-            f"{PCAP_PATH} unreadable ({exc}). Start the capture first:\n"
-            f"        sudo tcpdump -i {IFACE} -n -s0 -U -w {PCAP_PATH}\n"
+            f"{PCAP_PATH} unreadable ({exc}). Start the capture first, or "
+            "unset RRNET_PCAP to let the rig capture:\n"
+            f"        tcpdump -i {rig_iface() or '<NIC>'} -n -s0 -U -w "
+            f"{PCAP_PATH}\n"
             "        (-s0 and -U are both load-bearing: a snaplen-clipped "
             "capture is refused, and without -U the file does not grow "
             "while the run is in flight)")
     return problems
+
+
+def start_capture() -> list:
+    """Start this run's own tcpdump on the segment's NIC; [] when it is
+    writing. No sudo: BPF access is the access_bpf group."""
+    global _capture
+    iface = rig_iface()
+    if iface is None:
+        return ["no segment NIC to capture on"]
+    err_path = PCAP_PATH + ".stderr"
+    with open(err_path, "w") as err:
+        _capture = subprocess.Popen(
+            [TCPDUMP, "-i", iface, "-n", "-s0", "-U", "-w", PCAP_PATH],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        if _capture.poll() is not None:
+            why = Path(err_path).read_text().strip()
+            _capture = None
+            return [f"tcpdump on {iface} exited at once: {why} -- BPF access "
+                    "needs the access_bpf group (Wireshark's ChmodBPF)"]
+        try:
+            if os.path.getsize(PCAP_PATH) >= 24:     # the pcap file header
+                print(f"  capturing on {iface} to {PCAP_PATH} "
+                      f"(tcpdump pid {_capture.pid})")
+                return pcap_problems()
+        except OSError:
+            pass
+        time.sleep(0.2)
+    stop_capture()
+    return [f"tcpdump on {iface} wrote no pcap header to {PCAP_PATH} in 10 s"]
+
+
+def stop_capture() -> None:
+    global _capture
+    if _capture is None:
+        return
+    _capture.terminate()
+    try:
+        _capture.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        _capture.kill()
+        _capture.wait()
+    print(f"  capture stopped; kept at {PCAP_PATH}")
+    _capture = None
 
 
 def build_prg() -> bool:
@@ -806,7 +945,7 @@ def main() -> int:
     if sys.platform != "darwin":
         return not_applicable(
             f"this rig is macOS-only (the segment is brought up by "
-            f"tools/rig-up-rrnet-macos.sh); this host is {sys.platform}",
+            f"{RIG_UP.name}); this host is {sys.platform}",
             certifies=CERTIFIES)
 
     for line in hw.format_provenance(hw.provenance(
@@ -832,6 +971,10 @@ def main() -> int:
         print(line)
 
     problems = rig_problems()
+    if problems and _try_rig_up():
+        problems = rig_problems()
+    if not problems and not PCAP_EXTERNAL:
+        problems = start_capture()
     if problems:
         return cannot_run("rig not ready:\n    - " + "\n    - ".join(problems),
                           executed=0, total=1, certifies=CERTIFIES,
@@ -992,5 +1135,13 @@ def main() -> int:
     return 0
 
 
+def _main_with_rig() -> int:
+    try:
+        return main()
+    finally:
+        stop_capture()
+        _rig_down_if_ours()
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_main_with_rig())

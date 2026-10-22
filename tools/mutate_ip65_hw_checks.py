@@ -451,7 +451,7 @@ def stage(root: Path, source: Path = REPO) -> None:
     # mirror's baseline dies at import and every mutation reads as "caught".
     for rel in ("tools/ip65_hw_checks.py", "tools/test_ip65_hw_checks_unit.py",
                 "tools/_skip_policy.py",
-                "tools/rig-up-rrnet-macos.sh", "src/net/ip65/ip65_errors.inc",
+                "src/net/ip65/ip65_errors.inc",
                 "src/net/ip65/ip65_symbols.inc", "ip65-build/ip65_stub.s"):
         if (source / rel).exists():
             shutil.copy(source / rel, root / rel)

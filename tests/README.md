@@ -44,7 +44,7 @@ Do not cite the rig as coverage of that gap — it is the gap.
 Setup lives in `scripts/setup-bridge-tap.sh` (Linux),
 the host helper `/usr/local/libexec/c64-harness/c64-https-rig-up.sh` (macOS feth pair,
 installed outside this repo; the rig runs it via `sudo -n`) and
-`tools/rig-up-rrnet-macos.sh` (the physical RR-Net segment); the macOS
+`rrnet-rig-up.sh` beside it (the physical RR-Net segment, likewise); the macOS
 VICE rig additionally needs a VICE built with the pcap driver's
 `geteuid()==0` gate patched out. See the
 "End-to-End Bridge Tests" and "VICE ip65 rig" sections of `README.md` and
@@ -58,9 +58,7 @@ sudo PYTHONPATH=tools python3 tests/rig_phase2_http.py
 sudo env VICE_HTTPS_OK_TO_RUN=1 PYTHONPATH=tools python3 tests/rig_phase3_https_1mhz.py
 python3 tests/rig_vice_https_macos.py
 
-# the physical RR-Net rig: two sudo commands by hand first, then no sudo
-sudo bash tools/rig-up-rrnet-macos.sh en4
-sudo tcpdump -i en4 -n -s0 -U -w /tmp/rrnet-https.pcap   # leave running
+# the physical RR-Net rig: raises the segment and captures by itself, no sudo
 U64_HOST=10.43.23.81 python3 tests/rig_ip65_rrnet_hw.py
 ```
 
