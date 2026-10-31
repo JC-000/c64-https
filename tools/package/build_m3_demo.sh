@@ -49,24 +49,31 @@ MAKE_ARGS=(BACKEND=uci-m3 "HTTPS_HOST=$DEMO_HOST" "HTTPS_PATH=$DEMO_PATH")
 
 # What the firmware side published; quoted in the README, checked nowhere
 # here (the device is not involved in a build).
-# FIRMWARE is the firmware side's one-line description, with the image
-# provenance phrased as they suggested on 2026-10-15 ("the
-# tls-preview-f3df8261 prerelease is built from f3df8261"); the image's
+# FIRMWARE is the firmware side's one-line description, in the wording
+# they gave on 2026-10-31 (no internal build numbers in public text: the
+# build this image was measured on is not public); the "try it" image's
 # source, the prebuilt image and its sha256 follow. The
 # image line is printed only when FIRMWARE_IMAGE_SHA is set. These and
 # UPSTREAM_PRS are plain constants, not env knobs, so the README is a
 # function of the commit: a later commit swaps them.
-FIRMWARE="TLS client sockets for the Ultimate 64 / U64 Elite, from
-      JC-000/1541ultimate; the prebuilt image, in prerelease
-      tls-preview-f3df8261, is built from f3df8261. Development continues
-      on branch pr/3-tls-r1, the head of draft PR GideonZ/1541ultimate#997.
-      Not upstream; proposed on GideonZ/1541ultimate#952."
-# The image's own source. The branch pr/3-tls-r1 has moved on since.
+FIRMWARE="TLS client sockets on the U64's ESP32: GideonZ/1541ultimate#997.
+      Tested on a work-in-progress build of that PR (U64E); to try it, use
+      the prerelease tls-preview-f3df8261 on JC-000/1541ultimate."
+# The prerelease image's own source (an earlier #997 head). The branch
+# pr/3-tls-r1 has moved on since.
 FIRMWARE_SOURCE="https://github.com/JC-000/1541ultimate/tree/f3df8261b59ea5883cc5b6d9bb1eb4c79f8f0fd4"
 FIRMWARE_PRERELEASE="https://github.com/JC-000/1541ultimate/releases/tag/tls-preview-f3df8261"
 FIRMWARE_IMAGE_SHA="15e9ff7cd8a11daf1f4698d574480381d475db7754e1d276d9aa95e8013ded3c"
-# The build the "Measured" figures were taken on (the image above).
-MEASURED_FW="firmware 3.15 git f3df8261 (the image above, ESP module 1.8)"
+# The build the "Measured" figures were taken on. Not the prerelease above,
+# and not public, so it is named only as what it is.
+MEASURED_FW="a work-in-progress build of GideonZ/1541ultimate#997"
+MEASURED_DATE="2026-10-31"
+# The measured image's relation to the prerelease the README offers. Printed
+# only when the PRG is the measured one (inside the hash gate below), so a
+# rebuild cannot inherit it either; update it with the MEASURED_* block.
+PRERELEASE_RUN="This image was not run on the prerelease above. The demo
+    image before it (PRG 916d4162, c64-https v0.5.1-v0.6.0) was run on it
+    on 2026-10-15 and passed the same four checks."
 # Change it when any of GideonZ/1541ultimate #994-#997 changes state
 # (merged, out of draft, closed, replaced).
 UPSTREAM_PRS="not upstream yet. GideonZ/1541ultimate#952 is the proposal issue;
@@ -87,10 +94,10 @@ EARLIER_RUNS="esp-tls/m3 f2e46946 and esp-tls/m3-master 3a1ff9ff"
 # MEASURED_COMMIT is a commit on master that reproduces that PRG (the
 # adapter diff below runs from it); MEASURED_BUILT is where the measured
 # image itself was built.
-MEASURED_PRG_SHA="916d41628a17b9436bbf58a71f7350c721a06e459cf5c33e5baeb1ad61af9a24"
-MEASURED_COMMIT="daaef3354ec443b0feb09dfa2900795f9fa265ce"
-MEASURED_COMMIT_NOTE="the merge of JC-000/c64-https#299"
-MEASURED_BUILT="daaef33 on 2026-10-14"
+MEASURED_PRG_SHA="f5c1e287bdf21d5bfa40d1240928be3e7fab2e7bbe130fdddf846c1789a31e2a"
+MEASURED_COMMIT="b2ee10929e98df58f020711ae628396266711b51"
+MEASURED_COMMIT_NOTE="the merge of JC-000/c64-https#322"
+MEASURED_BUILT="b2ee109 on 2026-10-31"
 SPEC="M3-SPEC v1 (= r7.7), sha256 c265fdfcfdd08dee989a96eee25fae66fb6650ee4be8bb24f8dd791d9ee3db9f, with errata v1.1 (f9a39ff334b34cb0e1a63d5d508675de552ac8eacb23ccd6095a7f4c72788f9a) and v1.2 (a6802f40db3229d53591ef6e0773641d723186e779dd8726abff5915cbe551a4)"
 
 die() { echo "[m3-demo] ERROR: $*" >&2; exit 1; }
@@ -182,7 +189,8 @@ while IFS= read -r f; do adapter_files+=("$f"); done < <(
 
 if [ "$prg_sha" = "$MEASURED_PRG_SHA" ]; then
     measured_with="Measured with THIS image (PRG sha256 above)"
-    this_run="The run recorded for this image is the one under \"Measured\" below."
+    this_run="The run recorded for this image is the one under \"Measured\" below.
+    $PRERELEASE_RUN"
 else
     # Whether the adapter's sources moved since the measured commit, from
     # git rather than from prose; "unknown" if that commit is not here.
@@ -243,7 +251,7 @@ What it needs
 -------------
   - An Ultimate 64 (Elite) running firmware with the M3 TLS sockets.
     Firmware: $FIRMWARE
-    Source:
+    Source (of the prerelease):
       $FIRMWARE_SOURCE
     Prebuilt image:
       $FIRMWARE_PRERELEASE
@@ -264,6 +272,8 @@ ${FIRMWARE_IMAGE_SHA:+    Image sha256:
     from G at 48 MHz (esp-tls/m3-master 3a1ff9ff, 2026-10-13). Large pages
     were not timed at 1 MHz.
   Interface implemented: $SPEC.
+  Maintained against GideonZ/1541ultimate#997's doc/uci_tls.md, whose
+  status 18 (TLS VERSION REFUSED) it also reads.
 
 How to run it
 -------------
@@ -297,11 +307,11 @@ Four URLs to try
 
 $measured_with, validated on an Ultimate 64
 Elite (U64E), $MEASURED_FW,
-48 MHz, REU disabled, 2026-10-15. URLs 1-3: the .d64 mounted on drive 8
+48 MHz, REU disabled, $MEASURED_DATE. URLs 1-3: the .d64 mounted on drive 8
 and loaded with LOAD"*",8,1 (tools/uci/rig_https_m3_demo.py):
-  1. HTTP 200, 759,171 B consumed == Content-Length, 20 s from G to
+  1. HTTP 200, 760,692 B consumed == Content-Length, 17 s from G to
      CONNECTION CLOSED (the page size changes as the article is edited).
-  2. HTTP 200, 16,739 B consumed == Content-Length, 5 s.
+  2. HTTP 200, 14,540 B consumed == Content-Length, 4 s.
   3. Refused: 94,CERTIFICATE NAME MISMATCH: 0x00000004.
 URL 4: the same PRG written into memory over the Ultimate's REST interface
 instead of loaded from the disk (tools/uci/rig_https_m3.py refuse):
