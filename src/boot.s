@@ -36,6 +36,22 @@ SINK_PROBE = 1
         .import cold_bank_init, cold_call, cold_err
         .export cold_target_prompt, cold_call_ui
 .endif
+.ifdef HANDOFF
+        ; HANDOFF=1: one GET for a host program (src/handoff.s)
+        .include "handoff.inc"
+        .import handoff_pre_probe, handoff_boot, handoff_run
+        .import ho_target, ho_hdr_reset, ho_recv_verdict
+        .import ho_result, ho_port
+        .export ascii_chrout
+; HO_STAGE n: the reply's result if the next step fails (src/handoff.inc).
+.macro HO_STAGE n
+        lda #n
+        sta ho_result
+.endmacro
+.else
+.macro HO_STAGE n
+.endmacro
+.endif
 .ifdef TRUST_STORE
         ; #155 phase 2 (L3): the trust policy, src/net/uci/trust_policy.s
         .import trust_pre, trust_post, trust_state_init
@@ -279,7 +295,13 @@ boot_zbss_first:
         ; The REU's size bounds the HTTP body sink's region (src/http.s).
         ; Probed before anything else writes the REU: it writes offset 0
         ; of banks 0, 1, 2, 4 ... 128, which boot rewrites afterwards.
+.ifdef HANDOFF
+        jsr handoff_pre_probe   ; the host's bytes under the probe's
+.endif
         jsr reu_probe_size
+.ifdef HANDOFF
+        jsr handoff_boot        ; ...back; save banks 0-2; read the request
+.endif
 .endif
 .ifdef COLD_BANK
         ; Before anything else can touch the image's copy at $C000 (the
@@ -427,6 +449,9 @@ boot_zbss_first:
         ; firmware's existing DHCP lease via GET_IPADDR. A failure here
         ; is non-fatal — the user can still retry from the menu.
         jsr do_net_init
+.ifdef HANDOFF
+        jmp handoff_run         ; the request, then back to the host
+.endif
 
         ; print menu
         lda #<menu_msg
@@ -698,7 +723,12 @@ do_https_get:
         ; below). It sets everything the ip65 arm sets inline, with the host
         ; in tls_hostname, so SNI, the Host header, the firmware's DNS and
         ; x509_verify_hostname all read the one typed, lowercased name.
+.ifdef HANDOFF
+        jsr ho_target           ; the host program's request
+        HO_STAGE HO_R_REFUSED
+.else
         jsr https_target_prompt
+.endif
 .ifdef TRUST_STORE
         ; L3: the trust policy decides what the hook enforces, before the
         ; dial. Its only keyboard reads are in trust_pre and trust_post.
@@ -716,6 +746,7 @@ do_https_get:
 @redial:                        ; trust_post's one-fetch UNPINNED retry
 .endif
         ; --- DNS resolve (UCI: stages the name for TCP_CONNECT) ---
+        HO_STAGE HO_R_DNS
         lda #<tls_hostname
         ldx #>tls_hostname
 .else
@@ -805,8 +836,14 @@ do_https_get:
         jsr print_string
 
         ; --- TCP connect on HTTPS_PORT (default 443) ---
+        HO_STAGE HO_R_TCP
+.ifdef HANDOFF
+        lda ho_port             ; the request's port
+        ldx ho_port+1
+.else
         lda #<HTTPS_PORT        ; port low byte
         ldx #>HTTPS_PORT        ; port high byte
+.endif
         jsr net_tcp_connect
         bcc @tcp_ok
 
@@ -825,6 +862,7 @@ do_https_get:
         jsr print_string
 
         ; --- TLS handshake ---
+        HO_STAGE HO_R_TLS
         jsr tls_connect
         bcc @tls_ok
 
@@ -856,6 +894,7 @@ do_https_get:
         lda http_req_len+1
         sta tls_app_len+1
 
+        HO_STAGE HO_R_SEND
         jsr tls_send
         bcc @send_ok
 
@@ -875,11 +914,18 @@ do_https_get:
         ; the BODY in http_resp_buf / http_resp_len. Replaces the old
         ; first-record-only copy loop that showed headers and lost the
         ; body whenever it arrived as a second TLS record.
-.ifdef HTTPS_BODY_TO_REU
+.if .defined(HTTPS_BODY_TO_REU) .or .defined(HANDOFF)
         lda #1                  ; W4: stream the body into the REU at
         sta http_body_sink      ;  http_reu_body_base (see src/http.s)
 .endif
+.ifdef HANDOFF
+        jsr ho_hdr_reset        ; the reply's copy of the response head
+.endif
+        HO_STAGE HO_R_RECV
         jsr http_recv_body
+.ifdef HANDOFF
+        jsr ho_recv_verdict     ; C: complete or not
+.endif
 
 .if .defined(BACKEND_UCI) .and .defined(VIEWER_LINKED)
         ; Lane G stretch-goal hook: when the body sink routed the
@@ -987,7 +1033,7 @@ ascii_chrout:
 @drop:
         rts
 
-.ifdef BACKEND_UCI
+.if .defined(BACKEND_UCI) .and (.not .defined(HANDOFF)) ; HANDOFF: src/handoff.s ho_target
 ; =============================================================================
 ; https_target_prompt - ask for the host and path to fetch (#155 phase 2, UCI)
 ;
@@ -1302,7 +1348,7 @@ tgt_bad:            .byte 0     ; bit 7: this line had a refused key
 tgt_fail:           .byte 0     ; bit 7: the host field was refused
 
         .segment "CODE"
-.endif ; BACKEND_UCI
+.endif ; BACKEND_UCI, not HANDOFF
 
 .ifndef BACKEND_UCI_M3                  ; no 6510 crypto, no REU tables
 ; =============================================================================

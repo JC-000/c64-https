@@ -168,6 +168,15 @@ Variables:
     BSS's file bytes) and `mlkem_boot_init` copies it to $E000 before boot's
     zeroing (#288 stays satisfied); a tail marker refuses a cut-short LOAD. The
     only entries are `pq_mlkem_keygen` / `pq_mlkem_decaps_seed` (`pq_mlkem_call`).
+  - `HANDOFF=1` — helper PRG for a host program (Commodore Desk 64's
+    browser): one GET from an REU mailbox request, reply + raw head + body
+    back into the REU, then LOADs the host back via a stub at `$C000`. No
+    menu, no typed-target prompt (compiled out). uci + `USE_NISTCURVES_ONCHIP=1`
+    only (comb `$(error)`s: its image covers CD64's `$C040` SYS parser);
+    needs a REU >= 1 MB; saves/restores REU banks 0-2 and the probe bytes.
+    Layout `src/handoff.inc` (normative), host contract `docs/handoff.md`,
+    VICE test `tools/test_handoff.py` (no network: mailbox, REU
+    preservation, return path). Unset = byte-identical PRG.
   - `USE_X25519_SIBLING` — **retired, `$(error)`-guarded (#245)**: every
     build links the `libs/x25519` sibling; any value is refused.
   - `ENABLE_P384_VERIFY`, `USE_OVERLAY_P384_EMBED`, `KEEP_CRYPTO_SWAP`,

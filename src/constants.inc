@@ -142,6 +142,9 @@ reu_addr_ctrl   = $df0a         ; address control
 ; bank 3 for a 512 KB VICE REU.  The runtime copy lives in src/http.s
 ; (`http_reu_body_base`, 3 bytes LE in RODATA — RAM at runtime), so
 ; tests and rigs can also retarget it by DMA without a rebuild.
+.ifdef HANDOFF
+HTTP_REU_BODY_BASE = $0C0000    ; src/handoff.inc HO_BODY (asserted there)
+.endif
 .ifndef HTTP_REU_BODY_BASE
 HTTP_REU_BODY_BASE = $100000
 .endif

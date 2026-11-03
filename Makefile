@@ -452,6 +452,30 @@ CRYPTO_SRCS_EFFECTIVE := $(CRYPTO_SRCS_ALL)
 # The placement, the asserts that pin it and the zero-page map are in
 # src/crypto/mlkem_link.s, cfg/c64-https-uci-onchip*.cfg (MLKEM_*_RAM) and
 # tools/integration/build_mlkem.sh.
+# HANDOFF=1 - run ONE HTTPS GET for a host program and load it back
+# (Commodore Desk 64's browser first). The request and the reply are an
+# REU mailbox: src/handoff.inc (normative), docs/handoff.md (host side).
+# The PRG is then a helper, not a product: it has no menu and never runs
+# without a request. uci + onchip only for now: the comb image covers
+# $C000-$CFFF, where CD64's launcher keeps the SYS parser it jumps through.
+HANDOFF ?=
+ifneq ($(filter-out 0 1,$(HANDOFF)),)
+$(error HANDOFF must be 1 (host-program helper) or 0/unset)
+endif
+ifeq ($(HANDOFF),1)
+ifneq ($(BACKEND),uci)
+$(error HANDOFF=1 needs BACKEND=uci (got BACKEND=$(BACKEND)))
+endif
+ifneq ($(USE_NISTCURVES_ONCHIP),1)
+$(error HANDOFF=1 needs USE_NISTCURVES_ONCHIP=1: it saves REU banks 0-2 around a run, which the REU row-fetch profile reads mid-handshake)
+endif
+ifeq ($(USE_NISTCURVES_ONCHIP_COMB),1)
+$(error HANDOFF=1 is not available with USE_NISTCURVES_ONCHIP_COMB=1 yet: the comb image loads over $$C000-$$CFFF, where the host's launcher keeps code it runs after the LOAD)
+endif
+$(foreach k,HTTPS_BODY_TO_REU HTTP_REU_BODY_BASE KEEP_VIEWER,$(if $(strip $($(k))),$(error $(k) does not combine with HANDOFF=1: the body goes to the mailbox's region, src/handoff.inc)))
+CA65FLAGS += -D HANDOFF=1
+endif
+
 PQ_HYBRID ?=
 ifneq ($(filter-out 0 1,$(PQ_HYBRID)),)
 $(error PQ_HYBRID must be 1 (link libs/mlkem) or 0/unset)

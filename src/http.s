@@ -67,6 +67,9 @@
         .import http_cl_valid
         .import http_body_total
         .import http_body_sink
+.ifdef HANDOFF
+        .import ho_hdr_byte
+.endif
         .import http_reu_cursor
         .import mul_dma_lo      ; REU-latch restore in http_body_finish
 
@@ -783,6 +786,9 @@ http_recv_response:
         bcc @status_have_data
         jmp @not_done           ; no data yet, try again later
 @status_have_data:
+.ifdef HANDOFF
+        jsr ho_hdr_byte         ; the host gets the head raw (A, X kept)
+.endif
         cmp #$0a                ; \n ?
         beq @parse_status_line
         ; accumulate into line buffer
@@ -883,6 +889,9 @@ http_recv_response:
         bcc @hdr_got_byte
         jmp @not_done
 @hdr_got_byte:
+.ifdef HANDOFF
+        jsr ho_hdr_byte
+.endif
         cmp #$0a                ; LF ends a line
         beq @hl_eol
         cmp #$0d                ; CR is discarded
