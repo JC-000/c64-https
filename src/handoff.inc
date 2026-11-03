@@ -29,17 +29,21 @@ HO_BODY         = $0C0000
 HO_MIN_TOP_BANK = $0F           ; reu_top_bank >= $0F: 1 MB or more
 
 ; ---- request (host writes, this PRG reads) ----
+; The fixed part ($00-$0D, plus the name) is one block a host can keep as
+; a template; the URL follows it.
 HO_O_MAGIC      = $00           ; 8 B "C64HTTPS" (ASCII)
 HO_O_VERSION    = $08           ; 1 B  = HO_VERSION
 HO_O_STATE      = $09           ; 1 B  HO_ST_*
 HO_O_RET_DEV    = $0A           ; 1 B  device to load the host from (8-30)
 HO_O_RET_NLEN   = $0B           ; 1 B  1..16
-HO_O_RET_NAME   = $0C           ; 16 B PETSCII file name of the host PRG
-HO_O_PORT       = $1C           ; 2 B  LE, TCP port (443)
-HO_O_RET_ENTRY  = $1E           ; 2 B  LE, where to jump after loading it
-HO_O_HOST       = $20           ; 64 B ASCII, NUL-terminated, 1..63 chars
-HO_O_PATH       = $60           ; 256 B ASCII, NUL-terminated; v1 takes
-                                ;  1..HTTPS_PATH_MAX (100) chars
+HO_O_RET_ENTRY  = $0C           ; 2 B  LE, where to jump after loading it
+HO_O_RET_NAME   = $0E           ; 16 B PETSCII file name of the host PRG
+HO_O_URL        = $20           ; 320 B ASCII, NUL-terminated:
+                                ;  https://host[:port][/path or ?query]
+                                ;  host 1..63 of [A-Za-z0-9.-]; port
+                                ;  1..65535 (none = 443); path 1..100
+                                ;  chars of '!'..'~' ('/' is prepended
+                                ;  to a bare '?query' or an empty path)
 HO_REQ_LEN      = $0160
 
 HO_VERSION      = 1

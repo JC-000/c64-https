@@ -30,7 +30,7 @@ import tempfile
 from _skip_policy import verdict  # tools/, beside this file
 
 from c64_test_harness import (
-    DiskImage, ViceConfig, ViceInstanceManager,
+    Labels, DiskImage, ViceConfig, ViceInstanceManager,
     jsr, read_bytes, send_key, wait_for_memory, wait_for_text, write_bytes,
 )
 
@@ -72,7 +72,7 @@ def pattern(size):
     return b
 
 
-def request(host=b"www.foo.invalid", path=b"/", port=443):
+def request(url=b"https://www.foo.invalid/"):
     r = bytearray(C["HO_REQ_LEN"])
     r[0:8] = b"C64HTTPS"
     r[C["HO_O_VERSION"]] = C["HO_VERSION"]
@@ -81,12 +81,10 @@ def request(host=b"www.foo.invalid", path=b"/", port=443):
     r[C["HO_O_RET_NLEN"]] = len(RET_NAME)
     o = C["HO_O_RET_NAME"]
     r[o:o + len(RET_NAME)] = RET_NAME
-    r[C["HO_O_PORT"]:C["HO_O_PORT"] + 2] = port.to_bytes(2, "little")
-    r[C["HO_O_RET_ENTRY"]:C["HO_O_RET_ENTRY"] + 2] = RET_ENTRY.to_bytes(2, "little")
-    o = C["HO_O_HOST"]
-    r[o:o + len(host)] = host
-    o = C["HO_O_PATH"]
-    r[o:o + len(path)] = path
+    o = C["HO_O_RET_ENTRY"]
+    r[o:o + 2] = RET_ENTRY.to_bytes(2, "little")
+    o = C["HO_O_URL"]
+    r[o:o + len(url)] = url
     return bytes(r)
 
 
@@ -198,6 +196,17 @@ def run_case(name, res, tmp, d64, reu_kb, mailbox, expect):
         if got != want:
             mgr.release(inst)
             return
+        # Before any read_reu(): its window ($4000-$7FFF) covers these.
+        if "parsed" in expect:
+            lb = Labels.from_file(os.path.join(ROOT, "build", "labels.txt"))
+            host, port, path = expect["parsed"]
+            hlen = read_bytes(t, lb["ho_host_len"], 1)[0]
+            plen = read_bytes(t, lb["ho_path_len"], 1)[0]
+            got = (bytes(read_bytes(t, lb["ho_host"], hlen)),
+                   int.from_bytes(read_bytes(t, lb["ho_port"], 2), "little"),
+                   bytes(read_bytes(t, lb["ho_path"], plen)))
+            res.check(got == expect["parsed"],
+                      f"parsed host/port/path {got!r}")
         hostlen = min(size, 8 * BANK)
         now = read_reu(t, 0, hostlen)
         res.check(now == before[:hostlen],
@@ -222,8 +231,8 @@ def run_case(name, res, tmp, d64, reu_kb, mailbox, expect):
                 r = mb[C["HO_O_RESULT"]]
                 res.check(r == expect["result"],
                           f"result {expect['result']} (got {r})")
-                res.check(mb[C["HO_O_HOST"]:C["HO_REQ_LEN"]]
-                          == mailbox[C["HO_O_HOST"]:C["HO_REQ_LEN"]],
+                res.check(mb[C["HO_O_URL"]:C["HO_REQ_LEN"]]
+                          == mailbox[C["HO_O_URL"]:C["HO_REQ_LEN"]],
                           "request fields left as the host wrote them")
                 hl = int.from_bytes(mb[C["HO_O_HDR_LEN"]:C["HO_O_HDR_LEN"] + 2], "little")
                 res.check(hl == 0, f"no response head (got {hl})")
@@ -244,12 +253,28 @@ def main():
     res = Result()
     with tempfile.TemporaryDirectory() as tmp:
         d64 = make_disk(tmp)
-        run_case("A valid", res, tmp, d64, 16384, request(),
-                 {"result": C["HO_R_NO_NET"]})
-        run_case("B bad host", res, tmp, d64, 16384, request(host=b"bad..host"),
-                 {"result": C["HO_R_BAD_REQ"]})
-        run_case("E bad path", res, tmp, d64, 16384, request(path=b"/a b"),
-                 {"result": C["HO_R_BAD_REQ"]})
+        ok, bad = C["HO_R_NO_NET"], C["HO_R_BAD_REQ"]
+        # Every accepted URL reaches the network step (NO_NET in VICE);
+        # every refused one is answered BAD_REQ before it.
+        for case in [
+                ("A valid", b"https://www.foo.invalid/x/y.html?a=1&b=2", ok,
+                 (b"www.foo.invalid", 443, b"/x/y.html?a=1&b=2")),
+                ("A2 caps, port, query", b"HTTPS://WWW.Foo.invalid:8443?q=1", ok,
+                 (b"www.foo.invalid", 8443, b"/?q=1")),
+                ("A3 no path, top port", b"https://a-b.c0:65535", ok,
+                 (b"a-b.c0", 65535, b"/")),
+                ("B bad host", b"https://bad..host/", bad),
+                ("E bad path", b"https://www.foo.invalid/a b", bad),
+                ("F http scheme", b"http://www.foo.invalid/", bad),
+                ("G port 0", b"https://www.foo.invalid:0/", bad),
+                ("H port 65536", b"https://www.foo.invalid:65536/", bad),
+                ("I empty port", b"https://www.foo.invalid:/", bad),
+                ("J path 101", b"https://h/" + b"p" * 100, bad)]:
+            name, url, want = case[:3]
+            exp = {"result": want}
+            if len(case) > 3:
+                exp["parsed"] = case[3]
+            run_case(name, res, tmp, d64, 16384, request(url), exp)
         run_case("C no request", res, tmp, d64, 16384, None,
                  {"key": "NO HTTPS REQUEST", "back": b"DFLT"})
         run_case("D 512 KB", res, tmp, d64, 512, request(),

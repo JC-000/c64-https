@@ -29,7 +29,7 @@ jumps through right after the LOAD.
 |---|---|---|
 | `$000000-$07FFFF` | host | Left as it was. The helper writes banks 0–2 and offset 0 of banks 4, 8, 16, …, 128 while it runs. It saves banks 0–2 first and restores them before it returns, and it puts the probe bytes back before anything else runs. |
 | `$080000-$0AFFFF` | helper | The saved copy of banks 0–2 while a request runs. |
-| `$0B0000-$0B015F` | host → helper | Request |
+| `$0B0000-$0B015F` | host → helper | Request (fixed fields and the URL) |
 | `$0B0180-$0B018F` | helper → host | Reply |
 | `$0B0200-$0B11FF` | helper → host | Response head, raw: status line and headers exactly as received, CR LF included, up to 4 KB |
 | `$0C0000-` end | helper → host | Response body, de-chunked |
@@ -43,11 +43,22 @@ jumps through right after the LOAD.
 | `$09` | 1 | state = `$01` REQUEST |
 | `$0A` | 1 | device to load the host back from (8–30) |
 | `$0B` | 1 | length of the host's file name (1–16) |
-| `$0C` | 16 | host file name, PETSCII |
-| `$1C` | 2 | TCP port, little-endian (443) |
-| `$1E` | 2 | address to JMP to after loading the host (CD64: `$0810`) |
-| `$20` | 64 | host name: ASCII, NUL-terminated, 1–63 characters of `[A-Za-z0-9.-]`, no empty label |
-| `$60` | 256 | path: ASCII, NUL-terminated, starts with `/`, 1–100 characters in `!`–`~` (no space or control characters; percent-encode them) |
+| `$0C` | 2 | address to JMP to after loading the host, little-endian (CD64: `$0810`) |
+| `$0E` | 16 | host file name, PETSCII |
+| `$20` | 320 | the URL: ASCII, NUL-terminated, `https://host[:port][/path or ?query]` |
+
+The first 14 bytes plus the name are fixed for a given host program, so a
+host can keep them as one template (CD64's is 18 bytes) and add only the
+URL.
+
+URL rules:
+- **Scheme:** `https://`, in any letter case.
+- **Host:** 1–63 characters of `[A-Za-z0-9.-]`, with no empty label. It is
+  lowercased.
+- **Port:** 1–65535. Without one, the helper uses 443.
+- **Path:** 1–100 characters in `!`–`~` (no spaces or control characters;
+  percent-encode them). A bare `?query`, or no path at all, gets a leading
+  `/`.
 
 A request that fails these rules is answered with result `2`, and nothing
 is dialled. Unusable return fields (device, name length, entry) fall back
@@ -129,8 +140,9 @@ cold-resets the machine.
 
 `tools/test_handoff.py` runs in VICE with no network. It starts the helper
 the way a host would, from a 16 MB REU image holding a known pattern and a
-request, with stand-in host programs on drive 8. For good, bad-host and
-bad-path requests, no request, and a 512 KB REU, it checks the reply, the
+request, with stand-in host programs on drive 8. For accepted URLs (checking
+the parsed host, port and path) and refused ones (scheme, host, path,
+port), no request, and a 512 KB REU, it checks the reply, the
 DONE state, a byte-for-byte untouched host REU (banks 0–7 and every probe
 bank), the saved copy in banks 8–10, and that the right program was
 entered at the right address. The fetch itself, a reply with a body,

@@ -241,75 +241,148 @@ handoff_boot:
         dey
         bpl @rn
 @ret_done:
-        lda cert_buf+HO_O_PORT
-        sta ho_port
-        ora cert_buf+HO_O_PORT+1
-        beq @bad_far            ; port 0
-        lda cert_buf+HO_O_PORT+1
-        sta ho_port+1
         lda cert_buf+HO_O_VERSION
         cmp #HO_VERSION
-        beq @ver_ok
-@bad_far:
-        jmp @bad
-@ver_ok:
+        bne @bad_far
+        ldx #7                  ; "https://", letters case-folded
+@sch:   lda cert_buf+HO_O_URL,x
+        ora #$20                ; (':' and '/' already have bit 5)
+        cmp ho_scheme,x
+        bne @bad_far
+        dex
+        bpl @sch
 
-        ; host: [a-z0-9.-] (A-Z folded), 1..63, no empty label
+        ; host: [a-z0-9.-] (A-Z folded), 1..63, no empty label; ends at
+        ; ':', '/', '?' or the NUL. X walks the URL, Y the host.
+        ldx #8
         ldy #0
         lda #'.'
         sta ho_prev
-@h:     lda cert_buf+HO_O_HOST,y
+@h:     lda cert_buf+HO_O_URL,x
+        beq @h_end
+        cmp #':'
+        beq @h_end
+        cmp #'/'
+        beq @h_end
+        cmp #'?'
         beq @h_end
         cpy #HOST_MAX
-        bcs @bad
+        bcs @bad_far
         cmp #'.'
         bne @h_nd
         cmp ho_prev
-        beq @bad                ; leading '.' or ".."
+        beq @bad_far            ; leading '.' or ".."
         bne @h_ok
 @h_nd:  cmp #'-'
         beq @h_ok
         cmp #'0'
-        bcc @bad
+        bcc @bad_far
         cmp #'9'+1
         bcc @h_ok
         ora #$20
         cmp #'a'
-        bcc @bad
+        bcc @bad_far
         cmp #'z'+1
-        bcs @bad
+        bcs @bad_far
 @h_ok:  sta ho_host,y
         sta ho_prev
+        inx
         iny
         bne @h                  ; always
-@h_end: lda ho_prev
+@bad_far:
+        jmp @bad
+@h_end: sta ho_term
+        lda ho_prev
         cmp #'.'
-        beq @bad                ; empty or trailing '.'
+        beq @bad_far            ; empty or trailing '.'
         lda #0
         sta ho_host,y
         sty ho_host_len
 
-        ; path: '/' then printable ASCII without space, 1..100. Anything
-        ; else (CR, LF, space) could end the request line early.
-        ldy #0
-@p:     lda cert_buf+HO_O_PATH,y
+        ; port: ":digits", 1..65535; none = 443
+        lda #<443
+        sta ho_port
+        lda #>443
+        sta ho_port+1
+        lda ho_term
+        cmp #':'
+        bne @path
+        lda #0
+        sta ho_port
+        sta ho_port+1
+        tay                     ; digits seen
+        inx
+@pd:    lda cert_buf+HO_O_URL,x
+        sec
+        sbc #'0'
+        cmp #10
+        bcs @pd_end
+        sta ho_term             ; the digit
+        lda ho_port             ; port = port * 10 + digit, refusing a carry
+        sta ho_c64              ;  (scratch: the DMA block is idle here)
+        lda ho_port+1
+        sta ho_c64+1
+        asl ho_port
+        rol ho_port+1
+        bcs @bad_far
+        asl ho_port
+        rol ho_port+1           ; * 4
+        bcs @bad_far
+        clc
+        lda ho_port
+        adc ho_c64
+        sta ho_port
+        lda ho_port+1
+        adc ho_c64+1
+        sta ho_port+1           ; * 5
+        bcs @bad_far
+        asl ho_port
+        rol ho_port+1           ; * 10
+        bcs @bad_far
+        clc
+        lda ho_port
+        adc ho_term
+        sta ho_port
+        bcc :+
+        inc ho_port+1
+        beq @bad_p
+:       inx
+        iny
+        cpy #6
+        bcc @pd
+        bcs @bad_p            ; six digits
+@pd_end:
+        tya
+        beq @bad_p            ; ":" with no digits
+        lda ho_port
+        ora ho_port+1
+        beq @bad_p            ; port 0
+
+        ; path: the rest, '/' prepended when it starts with '?' or is
+        ; empty; printable ASCII without space, 1..100. Anything else (CR,
+        ; LF, space) could end the request line early.
+@path:  ldy #0
+        lda cert_buf+HO_O_URL,x
+        cmp #'/'
+        beq @p
+        lda #'/'
+        sta ho_path
+        iny
+@p:     lda cert_buf+HO_O_URL,x
         beq @p_end
         cpy #PATH_MAX
-        bcs @bad
+        bcs @bad_p
         cmp #'!'
-        bcc @bad
+        bcc @bad_p
         cmp #$7f
-        bcs @bad
+        bcs @bad_p
         sta ho_path,y
+        inx
         iny
         bne @p                  ; always
+@bad_p: jmp @bad
 @p_end: sta ho_path,y
         sty ho_path_len
-        cpy #0
-        beq @bad
-        lda ho_path
-        cmp #'/'
-        bne @bad
         lda #1
         sta ho_active           ; (a bad request leaves it 0)
 @bad:
@@ -546,6 +619,7 @@ s_end:
 ho_stub_len = s_end - STUB
 .assert ho_stub_len <= 128, error, "handoff stub grew past $C07F"
 
+        .segment "HANDOFF_RODATA"       ; resident, jsr-only: room is here
 ; -----------------------------------------------------------------------------
 ; ho_target - do_https_get's target, from the request. C=0 always.
 ; -----------------------------------------------------------------------------
@@ -601,6 +675,8 @@ ho_recv_verdict:
         lda #HO_R_TOO_BIG
 @set:   sta ho_result
         rts
+
+        .segment "HANDOFF_CODE"
 
 ; -----------------------------------------------------------------------------
 ; Response head capture: every byte http.s reads before the body, raw, into
@@ -669,6 +745,7 @@ ho_rts: rts
 
         .segment "HANDOFF_RODATA"     ; CRYPTO_OVERLAY: NET_BSS_TAIL is full
 ho_magic:       .byte "C64HTTPS"
+ho_scheme:      .byte "https://"
 ho_def_name:    .byte "CD64"
 ho_def_name_len = * - ho_def_name
 msg_no_reu:     .byte $0d, "HTTPS NEEDS A REU OF 1 MB OR MORE.", $0d
@@ -693,6 +770,7 @@ ho_bank:        .res 1
 ho_bank2:       .res 1
 ho_state:       .res 1
 ho_prev:        .res 1
+ho_term:        .res 1
 ho_tmpx:        .res 1
 ho_hidx:        .res 1
 ho_hpage:       .res 1
