@@ -149,7 +149,7 @@ def _speed_enum(mhz):
 
 
 def _run(client, *, labels=LABELS_REU, turbo_mhz=48, env=None,
-         artifact_dir=None, reu_raises=None):
+         artifact_dir=None, reu_raises=None, require_reu=False):
     """Call prepare_device with fake writers. Returns (report, writers, output)."""
     writers = Writers(reu_raises=reu_raises)
     buf = io.StringIO()
@@ -179,6 +179,7 @@ def _run(client, *, labels=LABELS_REU, turbo_mhz=48, env=None,
                     set_reu=writers.set_reu,
                     speed_enum=_speed_enum,
                     artifact_dir=artifact_dir,
+                    require_reu=require_reu,
                 )
             except BaseException as exc:      # noqa: BLE001 — re-raised below
                 exc.captured = buf.getvalue()
@@ -361,6 +362,21 @@ def test_onchip_build_never_writes_the_reu() -> None:
     assert writers.reu == [], f"on-chip build had the REU configured:\n{out}"
     assert report["profile"] == "onchip"
     assert "no REU configuration needed" in out
+
+
+def test_require_reu_configures_it_for_an_onchip_build() -> None:
+    """HANDOFF=1: an on-chip build whose run needs a REU for its mailbox.
+
+    The crypto needs none, so the profile alone would leave the REU as the
+    previous lane did; require_reu makes the REU branch run exactly as it
+    does for a REU build (same size, same write).
+    """
+    report, writers, out = _run(FakeClient([DEFAULT_STATE]),
+                                labels=LABELS_ONCHIP, require_reu=True)
+    assert writers.reu, f"require_reu did not configure the REU:\n{out}"
+    assert writers.reu[0][0] is True, writers.reu
+    assert report["profile"] == "reu", report["profile"]
+    assert "require_reu" in report["profile_reason"], report["profile_reason"]
 
 
 def test_m3_build_switches_the_reu_off() -> None:
@@ -650,7 +666,7 @@ def test_the_discovery_rule_finds_the_known_rigs() -> None:
                 "rig_https_live.py", "rig_https_local.py",
                 "rig_https_wiki.py", "rig_https_banner.py",
                 "rig_close_retry.py", "rig_https_refetch.py",
-                "rig_trust_policy.py", "rig_https_m3.py",
+                "rig_trust_policy.py", "rig_https_m3.py", "rig_https_handoff.py",
                 "rig_mlkem_hw.py"}
     assert names == expected, (
         f"the discovery rule now selects {sorted(names)}, not "

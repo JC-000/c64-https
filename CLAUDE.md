@@ -495,6 +495,10 @@ stdout.
   rig_trust_store.py / rig_trust_policy.py  — TRUST.A/B on `/<vol>/c64https-test`
                                               via harness `storage_*`; no
                                               writable volume = exit 2
+  rig_https_handoff.py                      — HANDOFF=1 helper: page-3 stub +
+                                              stand-in HOST (`handoff_rig.s`),
+                                              `prepare_device(require_reu=True)`;
+                                              verdicts `tools/handoff_checks.py`
   rig_https_bad_finished.py                 — forged server Finished must abort
                                               (`FINISHED_MODE=good` control first)
   bench_ecdsa_u64e.py                       — verify wall-clock sweeps

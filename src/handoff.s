@@ -68,6 +68,7 @@ STUB     = $C000
 NDX      = $c6                  ; KERNAL keyboard buffer count
 NMINV    = $0318
 NMI_EXIT = $FEBC                ; KERNAL: pla/tay/pla/tax/pla/rti
+IOINIT   = $FF84                ; KERNAL: CIAs, IRQ timer, keyboard
 
         .segment "HANDOFF_CODE"
 
@@ -158,6 +159,15 @@ PROBE_N = * - probe_bank
 ; -----------------------------------------------------------------------------
 handoff_boot:
         jsr ho_probe_restore
+        ; A host may hand over with its own CIA setup: CD64 switches the
+        ; CIA1 timer IRQ off at boot and launches with it still off, so the
+        ; KERNAL would never scan the keyboard and every GETIN here and in
+        ; the trust policy would wait for ever. IOINIT (CIAs, timer A IRQ,
+        ; keyboard) puts the KERNAL's own state back; it also writes $01,
+        ; so BASIC goes back out (boot's $36) right after.
+        jsr IOINIT
+        lda #$36
+        sta $01
         lda #<NMI_EXIT          ; RESTORE must not reach the host's
         sta NMINV               ;  $C000 return stub: the TCP ring is
         lda #>NMI_EXIT          ;  there now

@@ -355,6 +355,7 @@ def prepare_device(
     *,
     turbo_mhz: int | None = None,
     reu_size: str = REQUIRED_REU_SIZE,
+    require_reu: bool = False,
     stream: Any = None,
     set_turbo: Callable[[Any, int], None] | None = None,
     set_reu: Callable[..., None] | None = None,
@@ -372,6 +373,9 @@ def prepare_device(
     :param turbo_mhz: CPU speed to boot at, or ``None`` to leave the clock
         alone entirely (no decision, so nothing to fail on).
     :param reu_size: ``REU Size`` enum to set when the REU is configured.
+    :param require_reu: configure the REU even for an on-chip build, whose
+        crypto needs none. For a run that needs a REU for something else:
+        a ``HANDOFF=1`` helper keeps its mailbox and the response there.
     :param stream: where progress goes (default ``sys.stdout``).
     :param set_turbo: injected for tests; defaults to the harness's
         ``set_turbo_mhz``.
@@ -391,6 +395,9 @@ def prepare_device(
     """
     out = stream if stream is not None else sys.stdout
     profile, reason = detect_crypto_profile(labels_path)
+    if require_reu and profile == "onchip":
+        profile = "reu"
+        reason += "; the caller requires a REU (require_reu=True)"
     report: dict[str, Any] = {
         "host": getattr(client, "host", None),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
